@@ -32,6 +32,7 @@ Dùng:
 """
 
 import itertools
+import json
 import logging
 import os
 import sys
@@ -302,6 +303,13 @@ def main(args):
             res.update(Trainer.test_with_TTA(cfg, model))
         if comm.is_main_process():
             verify_results(cfg, res)
+            if args.dump_results:
+                # Ghi kết quả ra json để script/notebook đọc bằng máy. Cần cho việc quét
+                # nhiều cấu hình (số box x số bước sampling): parse log thì dễ vỡ.
+                os.makedirs(os.path.dirname(os.path.abspath(args.dump_results)), exist_ok=True)
+                with open(args.dump_results, "w") as f:
+                    json.dump(res, f, indent=2, default=float)
+                logging.getLogger("detectron2").info(f"đã ghi kết quả -> {args.dump_results}")
         return res
 
     trainer = Trainer(cfg)
@@ -310,7 +318,10 @@ def main(args):
 
 
 if __name__ == "__main__":
-    args = default_argument_parser().parse_args()
+    parser = default_argument_parser()
+    parser.add_argument("--dump-results", default=None,
+                        help="ghi kết quả eval ra file json (chỉ dùng với --eval-only)")
+    args = parser.parse_args()
     print("Command Line Args:", args)
     launch(
         main,

@@ -34,9 +34,10 @@ SOLVER:
   BASE_LR: 0.0000125
   AMP:
     ENABLED: True
-  # Checkpoint dày để mất ít tiến độ khi session Kaggle bị cắt; chỉ giữ 3 bản gần nhất
-  # vì /kaggle/working giới hạn 20GB mà mỗi checkpoint DiffusionDet ~0,5GB.
-  CHECKPOINT_PERIOD: 2000
+  # Checkpoint dày để mất ít tiến độ khi session Kaggle bị cắt (mất tối đa 1000 iter
+  # ~15-20 phút); chỉ giữ 3 bản gần nhất vì /kaggle/working giới hạn 20GB mà mỗi
+  # checkpoint DiffusionDet ~0,5GB. Ghi 0,5GB mỗi 1000 iter là không đáng kể về thời gian.
+  CHECKPOINT_PERIOD: 1000
   CHECKPOINT_MAX_TO_KEEP: 3
 DATALOADER:
   # Kaggle chỉ có ~4 vCPU; nhiều worker hơn không giúp mà còn dễ hết RAM.
