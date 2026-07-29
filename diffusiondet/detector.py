@@ -100,25 +100,17 @@ class DiffusionDet(nn.Module):
         self.box_renewal = True
         self.use_ensemble = True
 
-        # Buffer đăng ký ở float32 (bản gốc để nguyên float64 vì
-        # `cosine_beta_schedule` tính bằng float64). Lý do đổi: buffer float64 làm mọi
-        # phép nhân với box bị upcast lên float64, mà float64 trên T4/P100 chậm khoảng
-        # 1/32 so với float32 và không dùng được tensor core khi bật AMP. Phần tính
-        # schedule vẫn giữ float64 cho chính xác, chỉ hạ độ chính xác khi lưu.
-        def reg(name, tensor):
-            self.register_buffer(name, tensor.float())
-
-        reg('betas', betas)
-        reg('alphas_cumprod', alphas_cumprod)
-        reg('alphas_cumprod_prev', alphas_cumprod_prev)
+        self.register_buffer('betas', betas)
+        self.register_buffer('alphas_cumprod', alphas_cumprod)
+        self.register_buffer('alphas_cumprod_prev', alphas_cumprod_prev)
 
         # calculations for diffusion q(x_t | x_{t-1}) and others
 
-        reg('sqrt_alphas_cumprod', torch.sqrt(alphas_cumprod))
-        reg('sqrt_one_minus_alphas_cumprod', torch.sqrt(1. - alphas_cumprod))
-        reg('log_one_minus_alphas_cumprod', torch.log(1. - alphas_cumprod))
-        reg('sqrt_recip_alphas_cumprod', torch.sqrt(1. / alphas_cumprod))
-        reg('sqrt_recipm1_alphas_cumprod', torch.sqrt(1. / alphas_cumprod - 1))
+        self.register_buffer('sqrt_alphas_cumprod', torch.sqrt(alphas_cumprod))
+        self.register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1. - alphas_cumprod))
+        self.register_buffer('log_one_minus_alphas_cumprod', torch.log(1. - alphas_cumprod))
+        self.register_buffer('sqrt_recip_alphas_cumprod', torch.sqrt(1. / alphas_cumprod))
+        self.register_buffer('sqrt_recipm1_alphas_cumprod', torch.sqrt(1. / alphas_cumprod - 1))
 
         # calculations for posterior q(x_{t-1} | x_t, x_0)
 

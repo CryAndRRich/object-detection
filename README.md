@@ -150,17 +150,30 @@ so sánh nên phải nói rõ khi báo cáo:
 
 ## Sửa gì so với repo gốc
 
-Code model (`diffusiondet/`) copy từ repo gốc, sửa 4 chỗ:
+Code model (`diffusiondet/`) copy từ repo gốc. **9/13 file y nguyên từng byte**, kể cả
+`detector.py`, `head.py`, `loss.py` — tức toàn bộ đường chạy R50-FPN không bị sửa gì.
 
-| Chỗ sửa | Vì sao |
-|---|---|
-| `swintransformer.py`: `timm.models.layers` → `timm.layers` (có fallback) | timm ≥ 0.9 đã đổi đường dẫn module |
-| `swintransformer.py`, `util/box_ops.py`: thêm `indexing="ij"` cho `torch.meshgrid` | hết warning, và không bị đổi hành vi ở torch mới |
-| `util/misc.py`: bỏ nhánh torchvision < 0.7 trong `interpolate` | điều kiện `float(torchvision.__version__[:3]) < 0.7` đọc `"0.21.0"` thành `0.2` nên **luôn true**, mà `torchvision.ops._new_empty_tensor` đã bị xoá từ torchvision 0.10 → sẽ crash nếu hàm đó được gọi |
-| `detector.py`: buffer diffusion đăng ký ở float32 thay vì float64 | buffer float64 làm mọi phép nhân với box bị upcast lên float64; float64 trên T4 chậm ~1/32 và không dùng được tensor core khi bật AMP. Phần tính schedule vẫn ở float64 |
-| `head.py`: `apply_deltas` luôn tính ở float32 (`autocast(enabled=False)`) | **bắt buộc để AMP chạy được.** `scale_clamp = log(100000/16) ≈ 8,74` nên `exp(dw)` tới 6250; box rộng 800px cho `0,5×6250×800 = 2,5e6`, tràn fp16 (max 65504) thành ±inf khi gán vào `pred_boxes = zeros_like(deltas)`. Head có 6 stage nối tiếp nên stage sau tính `ctr = -inf + inf = NaN` → `generalized_box_iou` assert `x2 >= x1` vỡ ngay iteration 0. Chỉ toán box chạy fp32, matmul/conv vẫn fp16 |
+Ba chỗ sửa, đều **không nằm trên đường chạy R50**:
+
+| Chỗ sửa | Vì sao | Có ảnh hưởng R50? |
+|---|---|---|
+| `swintransformer.py`: `timm.models.layers` → `timm.layers` (có fallback) | timm ≥ 0.9 đổi đường dẫn module | không — chỉ dùng cho backbone Swin |
+| `swintransformer.py`, `util/box_ops.py`: thêm `indexing="ij"` cho `torch.meshgrid` | hết warning, không bị đổi hành vi ở torch mới (`"ij"` đúng là mặc định cũ) | không — `box_ops.masks_to_boxes` không được gọi |
+| `util/misc.py`: bỏ nhánh torchvision < 0.7 trong `interpolate` | `float(torchvision.__version__[:3]) < 0.7` đọc `"0.21.0"` thành `0.2` nên **luôn true**, mà `torchvision.ops._new_empty_tensor` đã bị xoá từ torchvision 0.10 → crash nếu hàm đó được gọi | không — hàm `interpolate` không được gọi |
+
+Kiểm lại bất cứ lúc nào:
+
+```bash
+diff -r <repo-gốc>/diffusiondet ./diffusiondet
+```
 
 Phần thêm mới (`objdet/`, `tools/`, `configs/`) là code của repo này, không có trong bản gốc.
+
+### Đã thử và đã bỏ: AMP
+
+Từng có 2 chỗ sửa nữa (buffer diffusion float32, `apply_deltas` tính fp32) để bật được AMP.
+**Đã revert cả hai** vì AMP không dùng được với DiffusionDet — xem
+[§ Những chỗ dễ sai](#những-chỗ-dễ-sai).
 
 ## Cấu trúc repo
 
@@ -202,17 +215,29 @@ sai và AP tụt.
 box renewal (`outputs_class[-1][0]`, `torch.randn(1, ...)`). Đây là hành vi của repo gốc,
 không đổi. Đừng tăng batch size ở lúc test.
 
-**AMP mặc định TẮT, giống repo gốc.** Bật AMP nguyên bản làm train chết ngay iteration 0 với
-`AssertionError` ở `generalized_box_iou` — nguyên nhân là `exp(scale_clamp)` tràn fp16, chi
-tiết ở bảng trên. Đã vá trong `head.apply_deltas`, nên sau bản vá đó đáng thử bật lại để lấy
-~2x tốc độ trên T4:
+**ĐỪNG bật AMP.** `SOLVER.AMP.ENABLED` phải để `False` (mặc định của repo này và của repo
+gốc). Bật lên là train chết với `AssertionError` ở `generalized_box_iou`
+(`assert x2 >= x1`), và đây **không phải bug vá được** mà là bất tương thích cấu trúc:
 
-```bash
-python tools/train_net.py --num-gpus 2 --config-file configs/diffdet.minitrain.res50.yaml \
-    SOLVER.AMP.ENABLED True SOLVER.MAX_ITER 200 SOLVER.STEPS "(150,180)"
-```
+`RCNNHead` có `scale_clamp = log(100000/16) ≈ 8,74`, nên mỗi stage nhân kích thước box với
+tối đa `exp(8,74) = 6250`. Head lại có **6 stage nối tiếp** (`bboxes = pred_bboxes.detach()`).
+Trong giai đoạn đầu train, toạ độ box trung gian **hợp lệ về thuật toán** nhưng đạt cỡ:
 
-Chạy thử 200 iter trước; qua được thì mới bật cho lượt train thật.
+| stage | 1 | 2 | 3 | 4 |
+|---|---|---|---|---|
+| độ lớn box | 1e6 | 1e10 | 1e14 | 1e18 |
+
+fp32 chịu được (max 3,4e38), fp16 dừng ở **65504**. Tràn thành `±inf`, rồi stage sau tính
+`ctr = -inf + inf = NaN`, và `NaN >= NaN` là `False`.
+
+Đã thử vá bằng cách cho `apply_deltas` luôn tính fp32: kết quả là **đẩy lỗi từ iteration 0
+sang iteration 12**, chứ không hết — vì `deltas` do lớp Linear fp16 sinh ra đã có thể tràn
+từ trước khi vào `apply_deltas`. Cách duy nhất để nhét vào fp16 là hạ `scale_clamp`, mà làm
+vậy là đổi hành vi model và mất tính so sánh với paper. Nên bỏ AMP.
+
+Cách xác nhận AMP thực sự đã tắt: trong log **không được có** dòng nào của
+`detectron2/engine/train_loop.py:490 ... with autocast(dtype=self.precision)` — dòng đó
+thuộc `AMPTrainer.run_step`, nếu thấy nó nghĩa là AMP vẫn đang bật.
 
 **COCO-minitrain có nhiều bản khác nhau.** Chỉ có split gốc của
 [giddyyupp/coco-minitrain](https://github.com/giddyyupp/coco-minitrain) mới so được với

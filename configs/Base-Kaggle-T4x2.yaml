@@ -16,15 +16,15 @@ _BASE_: "Base-DiffusionDet.yaml"
 #    phổ biến hơn, và với schedule ngắn như ở đây thì LR quá nhỏ sẽ underfit nặng.
 #    Muốn bám quy ước linear thì đặt SOLVER.BASE_LR 0.00000625.
 #
-# 3. AMP TẮT (giống repo gốc). T4 có tensor core fp16 nên AMP là khoản tăng tốc lớn nhất
-#    có thể lấy, nhưng bật AMP nguyên bản thì train chết ngay iteration 0:
+# 3. AMP TẮT — và ĐỪNG bật lên. T4 có tensor core fp16 nên AMP đáng lẽ là khoản tăng tốc
+#    lớn nhất, nhưng DiffusionDet không chạy được với fp16:
 #      AssertionError ở generalized_box_iou (assert x2 >= x1)
-#    Nguyên nhân: scale_clamp = log(100000/16) ~ 8,74 nên exp(dw) tới 6250; box rộng 800px
-#    cho 0,5*6250*800 = 2,5e6, tràn fp16 (max 65504) thành ±inf; head có 6 stage nối tiếp
-#    nên stage sau tính ctr = -inf + inf = NaN, và NaN >= NaN là False.
-#    Đã vá trong head.apply_deltas (toán box luôn chạy fp32). Sau khi có bản vá đó, đáng
-#    thử bật lại để lấy ~2x tốc độ — nên test 200 iter trước:
-#      SOLVER.AMP.ENABLED True
+#    Lý do là cấu trúc, không vá được: scale_clamp = log(100000/16) ~ 8,74 nên mỗi stage
+#    nhân kích thước box với tối đa exp(8,74) = 6250, mà head có 6 stage nối tiếp. Toạ độ
+#    box trung gian lúc đầu train đạt 1e6 -> 1e10 -> 1e14 -> 1e18; fp32 chịu được (max
+#    3,4e38) còn fp16 dừng ở 65504 -> tràn thành ±inf -> stage sau ra NaN -> assert vỡ.
+#    Đã thử cho apply_deltas tính fp32: chỉ đẩy lỗi từ iteration 0 sang iteration 12.
+#    Hạ scale_clamp thì nhét được vào fp16 nhưng đổi hành vi model, mất tính so sánh.
 MODEL:
   RESNETS:
     DEPTH: 50

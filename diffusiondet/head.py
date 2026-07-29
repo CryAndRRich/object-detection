@@ -295,46 +295,33 @@ class RCNNHead(nn.Module):
                 box transformations for the single box boxes[i].
             boxes (Tensor): boxes to transform, of shape (N, 4)
         """
-        # Toàn bộ phép toán box làm ở float32, kể cả khi đang bật AMP.
-        #
-        # Vì sao: DiffusionDet đặt scale_clamp = log(100000/16) ~ 8,74 (detectron2 thường
-        # dùng log(1000/16) ~ 4,14), nên exp(dw) lên tới 6250. Với box rộng 800px thì
-        # 0,5 * 6250 * 800 = 2,5e6, vượt xa giới hạn fp16 (65504). Mà `pred_boxes` lại được
-        # cấp phát bằng `zeros_like(deltas)` — fp16 khi bật AMP — nên giá trị bị tràn thành
-        # ±inf lúc gán. Stage đó vẫn qua assert (+inf >= -inf), nhưng head có 6 stage nối
-        # tiếp: stage sau nhận box [-inf,-inf,inf,inf] -> widths = inf, ctr = -inf + inf =
-        # NaN -> `generalized_box_iou` assert `x2 >= x1` vỡ vì NaN >= NaN là False.
-        #
-        # Chỉ toán box chạy fp32, còn matmul/conv nặng vẫn fp16 nên gần như không mất tốc độ.
-        with torch.amp.autocast(device_type=deltas.device.type, enabled=False):
-            deltas = deltas.float()
-            boxes = boxes.float()
+        boxes = boxes.to(deltas.dtype)
 
-            widths = boxes[:, 2] - boxes[:, 0]
-            heights = boxes[:, 3] - boxes[:, 1]
-            ctr_x = boxes[:, 0] + 0.5 * widths
-            ctr_y = boxes[:, 1] + 0.5 * heights
+        widths = boxes[:, 2] - boxes[:, 0]
+        heights = boxes[:, 3] - boxes[:, 1]
+        ctr_x = boxes[:, 0] + 0.5 * widths
+        ctr_y = boxes[:, 1] + 0.5 * heights
 
-            wx, wy, ww, wh = self.bbox_weights
-            dx = deltas[:, 0::4] / wx
-            dy = deltas[:, 1::4] / wy
-            dw = deltas[:, 2::4] / ww
-            dh = deltas[:, 3::4] / wh
+        wx, wy, ww, wh = self.bbox_weights
+        dx = deltas[:, 0::4] / wx
+        dy = deltas[:, 1::4] / wy
+        dw = deltas[:, 2::4] / ww
+        dh = deltas[:, 3::4] / wh
 
-            # Prevent sending too large values into torch.exp()
-            dw = torch.clamp(dw, max=self.scale_clamp)
-            dh = torch.clamp(dh, max=self.scale_clamp)
+        # Prevent sending too large values into torch.exp()
+        dw = torch.clamp(dw, max=self.scale_clamp)
+        dh = torch.clamp(dh, max=self.scale_clamp)
 
-            pred_ctr_x = dx * widths[:, None] + ctr_x[:, None]
-            pred_ctr_y = dy * heights[:, None] + ctr_y[:, None]
-            pred_w = torch.exp(dw) * widths[:, None]
-            pred_h = torch.exp(dh) * heights[:, None]
+        pred_ctr_x = dx * widths[:, None] + ctr_x[:, None]
+        pred_ctr_y = dy * heights[:, None] + ctr_y[:, None]
+        pred_w = torch.exp(dw) * widths[:, None]
+        pred_h = torch.exp(dh) * heights[:, None]
 
-            pred_boxes = torch.zeros_like(deltas)
-            pred_boxes[:, 0::4] = pred_ctr_x - 0.5 * pred_w  # x1
-            pred_boxes[:, 1::4] = pred_ctr_y - 0.5 * pred_h  # y1
-            pred_boxes[:, 2::4] = pred_ctr_x + 0.5 * pred_w  # x2
-            pred_boxes[:, 3::4] = pred_ctr_y + 0.5 * pred_h  # y2
+        pred_boxes = torch.zeros_like(deltas)
+        pred_boxes[:, 0::4] = pred_ctr_x - 0.5 * pred_w  # x1
+        pred_boxes[:, 1::4] = pred_ctr_y - 0.5 * pred_h  # y1
+        pred_boxes[:, 2::4] = pred_ctr_x + 0.5 * pred_w  # x2
+        pred_boxes[:, 3::4] = pred_ctr_y + 0.5 * pred_h  # y2
 
         return pred_boxes
 
