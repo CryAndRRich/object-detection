@@ -158,6 +158,7 @@ Code model (`diffusiondet/`) copy từ repo gốc, sửa 4 chỗ:
 | `swintransformer.py`, `util/box_ops.py`: thêm `indexing="ij"` cho `torch.meshgrid` | hết warning, và không bị đổi hành vi ở torch mới |
 | `util/misc.py`: bỏ nhánh torchvision < 0.7 trong `interpolate` | điều kiện `float(torchvision.__version__[:3]) < 0.7` đọc `"0.21.0"` thành `0.2` nên **luôn true**, mà `torchvision.ops._new_empty_tensor` đã bị xoá từ torchvision 0.10 → sẽ crash nếu hàm đó được gọi |
 | `detector.py`: buffer diffusion đăng ký ở float32 thay vì float64 | buffer float64 làm mọi phép nhân với box bị upcast lên float64; float64 trên T4 chậm ~1/32 và không dùng được tensor core khi bật AMP. Phần tính schedule vẫn ở float64 |
+| `head.py`: `apply_deltas` luôn tính ở float32 (`autocast(enabled=False)`) | **bắt buộc để AMP chạy được.** `scale_clamp = log(100000/16) ≈ 8,74` nên `exp(dw)` tới 6250; box rộng 800px cho `0,5×6250×800 = 2,5e6`, tràn fp16 (max 65504) thành ±inf khi gán vào `pred_boxes = zeros_like(deltas)`. Head có 6 stage nối tiếp nên stage sau tính `ctr = -inf + inf = NaN` → `generalized_box_iou` assert `x2 >= x1` vỡ ngay iteration 0. Chỉ toán box chạy fp32, matmul/conv vẫn fp16 |
 
 Phần thêm mới (`objdet/`, `tools/`, `configs/`) là code của repo này, không có trong bản gốc.
 
@@ -201,9 +202,17 @@ sai và AP tụt.
 box renewal (`outputs_class[-1][0]`, `torch.randn(1, ...)`). Đây là hành vi của repo gốc,
 không đổi. Đừng tăng batch size ở lúc test.
 
-**AMP chưa được upstream kiểm chứng.** Repo gốc để `SOLVER.AMP.ENABLED` mặc định `False`.
-Ở đây bật vì T4 có tensor core fp16 và ngân sách GPU rất hẹp. Nếu loss ra NaN hoặc lỗi
-dtype thì tắt: thêm `SOLVER.AMP.ENABLED False` vào dòng lệnh.
+**AMP mặc định TẮT, giống repo gốc.** Bật AMP nguyên bản làm train chết ngay iteration 0 với
+`AssertionError` ở `generalized_box_iou` — nguyên nhân là `exp(scale_clamp)` tràn fp16, chi
+tiết ở bảng trên. Đã vá trong `head.apply_deltas`, nên sau bản vá đó đáng thử bật lại để lấy
+~2x tốc độ trên T4:
+
+```bash
+python tools/train_net.py --num-gpus 2 --config-file configs/diffdet.minitrain.res50.yaml \
+    SOLVER.AMP.ENABLED True SOLVER.MAX_ITER 200 SOLVER.STEPS "(150,180)"
+```
+
+Chạy thử 200 iter trước; qua được thì mới bật cho lượt train thật.
 
 **COCO-minitrain có nhiều bản khác nhau.** Chỉ có split gốc của
 [giddyyupp/coco-minitrain](https://github.com/giddyyupp/coco-minitrain) mới so được với

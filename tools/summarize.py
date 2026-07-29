@@ -34,7 +34,28 @@ def load_baselines():
 
 
 def read_metrics(output_dir):
-    """Lấy bản ghi metric cuối cùng có kết quả bbox."""
+    """Lấy kết quả bbox mới nhất, ưu tiên eval_results.json.
+
+    Hai nguồn khác nhau, phải xử lý cả hai:
+
+    - ``eval_results.json`` do ``train_net.py --eval-only --dump-results`` ghi. Đây là
+      nguồn đáng tin nhất khi vừa chạy eval xong. Dạng lồng: ``{"bbox": {"AP": ...}}``.
+    - ``metrics.json`` (JSONL) do writer của trainer ghi, tức **chỉ có trong lúc train**
+      (từ các lần eval định kỳ theo TEST.EVAL_PERIOD). Dạng phẳng: ``{"bbox/AP": ...}``.
+
+    Nếu chỉ đọc metrics.json thì sau khi chạy MODE="eval" bảng so sánh sẽ hiện số cũ của
+    lần eval giữa lúc train mà trông như số mới — nên ưu tiên eval_results.json.
+    """
+    dump = os.path.join(output_dir, "eval_results.json")
+    if os.path.isfile(dump):
+        with open(dump) as f:
+            res = json.load(f)
+        bbox = res.get("bbox", {})
+        if bbox:
+            out = {f"bbox/{k}": v for k, v in bbox.items()}
+            out["_source"] = "eval_results.json"
+            return out
+
     path = os.path.join(output_dir, "metrics.json")
     if not os.path.isfile(path):
         return {}
@@ -50,6 +71,8 @@ def read_metrics(output_dir):
                 continue
             if any(k.startswith("bbox/") for k in rec):
                 best = rec
+    if best:
+        best["_source"] = "metrics.json (eval định kỳ trong lúc train)"
     return best
 
 
@@ -82,6 +105,8 @@ def main():
     print(f"metric: {bl['metric']}")
     print("=" * 78)
 
+    if metrics.get("_source"):
+        print(f"nguồn kết quả: {metrics['_source']}")
     iters = metrics.get("iteration")
     if iters is not None:
         print(f"Kết quả của ta ở iteration {int(iters)}")
