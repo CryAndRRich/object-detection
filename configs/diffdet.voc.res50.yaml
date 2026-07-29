@@ -1,0 +1,31 @@
+_BASE_: "Base-Kaggle-T4x2.yaml"
+# DiffusionDet R50 trên PASCAL VOC 07+12 trainval (16.551 ảnh), eval VOC2007 test (4.952).
+#
+# Baseline (AP50 trên VOC2007 test, giao thức VOC07 11-point):
+#     Faster R-CNN VGG16      73,2
+#     Faster R-CNN R101       76,4
+#     SSD512                  76,8
+#     YOLOv2                  78,6
+#     R-FCN R101              80,5
+#     detectron2 R50-C4       80,3 AP50 / 51,9 AP
+#
+# Lịch train: 30.000 iter x batch 4 = 120.000 ảnh = 7,3 epoch của 16.551.
+#
+# Lưu ý: PascalVOCDetectionEvaluator của detectron2 trả về AP, AP50, AP75 tính theo
+# VOC-style (11-point khi year=2007) — cùng giao thức với các số trên.
+MODEL:
+  WEIGHTS: "detectron2://ImageNetPretrained/torchvision/R-50.pkl"
+  DiffusionDet:
+    NUM_CLASSES: 20
+  ROI_HEADS:
+    NUM_CLASSES: 20
+DATASETS:
+  # detectron2 nối hai dataset này thành tập train chung 5.011 + 11.540 = 16.551 ảnh
+  TRAIN: ("voc_2007_trainval", "voc_2012_trainval")
+  TEST: ("voc_2007_test",)
+SOLVER:
+  MAX_ITER: 30000
+  STEPS: (22000, 28000)
+TEST:
+  EVAL_PERIOD: 10000
+OUTPUT_DIR: "output/voc0712_res50"

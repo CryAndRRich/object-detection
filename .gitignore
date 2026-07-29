@@ -1,0 +1,23 @@
+# dữ liệu và kết quả không đưa vào git
+data/
+datasets/
+output/
+outputs/
+*.pth
+*.pkl
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# hệ điều hành / editor
+.DS_Store
+.idea/
+.vscode/
+
+# secret
+.env

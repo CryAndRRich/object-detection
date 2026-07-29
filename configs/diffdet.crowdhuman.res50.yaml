@@ -1,0 +1,40 @@
+_BASE_: "Base-Kaggle-T4x2.yaml"
+# DiffusionDet R50 trên CrowdHuman full-body, eval trên val (4.370 ảnh).
+#
+# Baseline lấy từ chính Table 7 của paper DiffusionDet (AP50 ↑ / mMR ↓ / Recall ↑):
+#     Faster R-CNN        85,0 / 50,4 / 90,2
+#     RetinaNet           81,7 / 57,6 / 88,6
+#     FCOS                86,1 / 55,2 / 94,3
+#     DETR                66,1 / 80,6 /  -
+#     Deformable DETR     86,7 / 54,0 / 92,5
+#     Sparse R-CNN (500)  89,2 / 48,3 / 95,9
+#     DiffusionDet 1@1000 90,1 / 46,5 / 96,2
+#     DiffusionDet 3@1000 91,4 / 45,7 / 98,4
+#
+# Vì sao dùng full body (fbox) chứ không phải visible: số Faster R-CNN 85,0/50,4/90,2 ở
+# trên khớp chính xác baseline FPN full-body của paper CrowdHuman gốc
+# (84,95 / 50,42 / 90,24). Table 1 (zero-shot COCO->CrowdHuman) mới là visible box.
+# Muốn chạy bản visible thì đổi sang crowdhuman_vbox_{train,val}.
+#
+# Cần chạy trước:  python tools/convert_crowdhuman.py --box-type fbox
+#
+# Lịch train: 25.000 iter x batch 4 = 100.000 ảnh = 6,7 epoch của 15.000.
+#
+# CrowdHuman rất đông (23,5 người/ảnh) nên số proposal ảnh hưởng mạnh. Train 300 rồi
+# eval với 1000 để dùng đúng tính chất dynamic boxes của DiffusionDet:
+#   --eval-only MODEL.DiffusionDet.NUM_PROPOSALS 1000 MODEL.DiffusionDet.SAMPLE_STEP 1
+MODEL:
+  WEIGHTS: "detectron2://ImageNetPretrained/torchvision/R-50.pkl"
+  DiffusionDet:
+    NUM_CLASSES: 1
+  ROI_HEADS:
+    NUM_CLASSES: 1
+DATASETS:
+  TRAIN: ("crowdhuman_fbox_train",)
+  TEST: ("crowdhuman_fbox_val",)
+SOLVER:
+  MAX_ITER: 25000
+  STEPS: (18000, 23000)
+TEST:
+  EVAL_PERIOD: 12500
+OUTPUT_DIR: "output/crowdhuman_fbox_res50"

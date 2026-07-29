@@ -1,0 +1,47 @@
+_BASE_: "Base-DiffusionDet.yaml"
+# Base cho Kaggle 2x Tesla T4 (16GB mỗi GPU, 30h GPU/tuần, ~9-12h mỗi session).
+#
+# Bản gốc của paper: batch 16 trên 8 GPU, 450K iteration (~61 epoch COCO) = ~7,2M ảnh.
+# Trên Kaggle ta chỉ có khoảng 1/45 lượng compute đó, nên KHÔNG kỳ vọng đạt số của paper.
+# Mọi kết quả phải báo cáo kèm số iteration để so sánh trung thực.
+#
+# Ba chỗ lệch so với config gốc, đều là cố ý:
+#
+# 1. IMS_PER_BATCH 4 (2 ảnh/GPU) thay vì 16. Đây là mức an toàn cho T4 16GB với ảnh
+#    800px + 300 proposal. Nếu đo thấy còn dư VRAM thì tăng lên 8 và nhân đôi BASE_LR:
+#      SOLVER.IMS_PER_BATCH 8 SOLVER.BASE_LR 0.000025
+#
+# 2. BASE_LR 1.25e-5 = 2.5e-5 * sqrt(4/16), tức scaling theo căn bậc hai chứ không phải
+#    linear. Linear scaling (6.25e-6) là quy ước cho SGD; với họ Adam thì sqrt scaling
+#    phổ biến hơn, và với schedule ngắn như ở đây thì LR quá nhỏ sẽ underfit nặng.
+#    Muốn bám quy ước linear thì đặt SOLVER.BASE_LR 0.00000625.
+#
+# 3. AMP bật. Lưu ý: repo DiffusionDet gốc KHÔNG bật AMP (mặc định False) nên đây là
+#    phần chưa được upstream kiểm chứng. T4 có tensor core fp16 nên AMP là khoản tăng
+#    tốc lớn nhất có thể lấy. Nếu thấy loss ra NaN hoặc lỗi dtype thì tắt:
+#      SOLVER.AMP.ENABLED False
+MODEL:
+  RESNETS:
+    DEPTH: 50
+    STRIDE_IN_1X1: False
+  DiffusionDet:
+    # 300 proposal khi train (đúng config ablation của paper, 45,7 AP so với 46,3 của
+    # 500 proposal trên COCO) — nhẹ hơn cho VRAM và nhanh hơn.
+    # Nhờ tính chất dynamic boxes, khi eval vẫn đổi được sang 500/1000/2000 tuỳ ý.
+    NUM_PROPOSALS: 300
+SOLVER:
+  IMS_PER_BATCH: 4
+  BASE_LR: 0.0000125
+  AMP:
+    ENABLED: True
+  # Checkpoint dày để mất ít tiến độ khi session Kaggle bị cắt; chỉ giữ 3 bản gần nhất
+  # vì /kaggle/working giới hạn 20GB mà mỗi checkpoint DiffusionDet ~0,5GB.
+  CHECKPOINT_PERIOD: 2000
+  CHECKPOINT_MAX_TO_KEEP: 3
+DATALOADER:
+  # Kaggle chỉ có ~4 vCPU; nhiều worker hơn không giúp mà còn dễ hết RAM.
+  NUM_WORKERS: 2
+INPUT:
+  CROP:
+    ENABLED: True
+  FORMAT: "RGB"

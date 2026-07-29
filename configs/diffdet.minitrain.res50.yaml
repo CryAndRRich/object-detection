@@ -1,0 +1,29 @@
+_BASE_: "Base-Kaggle-T4x2.yaml"
+# DiffusionDet R50 trên COCO-minitrain 25K, eval trên COCO val2017.
+#
+# Baseline cùng điều kiện dữ liệu (train trên đúng 25K ảnh này, eval val2017), nguồn
+# github.com/giddyyupp/coco-minitrain:
+#     Faster R-CNN R50-FPN   27,7 AP / 48,8 AP50
+#     Mask R-CNN   R50-FPN   28,5 AP / 49,5 AP50
+#     RetinaNet    R50-FPN   25,7 AP / 43,1 AP50
+# Các baseline đó dùng schedule đầy đủ của detectron2, dài hơn ta nhiều -> xem
+# baselines/baselines.yaml và README để biết cách báo cáo cho trung thực.
+#
+# Lịch train: 45.000 iter x batch 4 = 180.000 ảnh = 7,2 epoch của 25K.
+MODEL:
+  WEIGHTS: "detectron2://ImageNetPretrained/torchvision/R-50.pkl"
+  DiffusionDet:
+    NUM_CLASSES: 80
+  ROI_HEADS:
+    NUM_CLASSES: 80
+DATASETS:
+  TRAIN: ("coco_minitrain_train",)
+  TEST: ("coco_2017_val_local",)
+SOLVER:
+  MAX_ITER: 45000
+  STEPS: (35000, 42000)
+TEST:
+  # Eval 5.000 ảnh val2017 mất ~10 phút; 3 lần trong cả quá trình là đủ để thấy đường
+  # cong mà không đốt quota GPU.
+  EVAL_PERIOD: 15000
+OUTPUT_DIR: "output/minitrain_res50"

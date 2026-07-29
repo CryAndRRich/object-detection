@@ -1,0 +1,24 @@
+# detectron2 KHÔNG có trong file này vì phải build từ source cho khớp phiên bản
+# torch/CUDA của môi trường. Xem README, mục "Cài đặt".
+#
+# torch / torchvision cũng không ghim ở đây: trên Kaggle chúng đã có sẵn và khớp CUDA
+# của máy, cài lại chỉ gây lệch phiên bản.
+
+# detectron2 cần
+fvcore
+iopath
+pycocotools
+omegaconf
+hydra-core
+cloudpickle
+Pillow
+tabulate
+termcolor
+yacs
+tqdm
+
+# backbone Swin (chỉ cần nếu chạy config swinbase)
+timm>=0.9
+
+# tools/summarize.py
+PyYAML

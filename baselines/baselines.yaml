@@ -1,0 +1,72 @@
+# Baseline đã công bố, để đối chiếu với kết quả tự train.
+# tools/summarize.py đọc file này.
+#
+# QUAN TRỌNG khi đọc bảng so sánh: baseline dưới đây được train bằng schedule đầy đủ trên
+# 8 GPU, trong khi ta chạy trên 2x T4 với khoảng 1/45 lượng compute của paper. Vì vậy phải
+# luôn báo cáo kèm số iteration và batch size thật, và KHÔNG kết luận "DiffusionDet kém
+# hơn X" chỉ vì số của ta thấp hơn. Cột `comparable` dưới đây ghi mức độ so được.
+
+coco_minitrain:
+  eval_on: COCO val2017 (5.000 ảnh)
+  metric: COCO-style AP / AP50 / AP75
+  note: >
+    Train trên đúng 25.000 ảnh của COCO-minitrain, tức cùng điều kiện dữ liệu với ta.
+    Nguồn: github.com/giddyyupp/coco-minitrain, validate trong HoughNet (arXiv 2007.02355).
+  comparable: same-data-different-schedule
+  methods:
+    - {name: Faster R-CNN, backbone: R50-FPN, scale: 800, AP: 27.7, AP50: 48.8, AP75: 28.4}
+    - {name: Mask R-CNN,   backbone: R50-FPN, scale: 800, AP: 28.5, AP50: 49.5, AP75: 29.4}
+    - {name: RetinaNet,    backbone: R50-FPN, scale: 800, AP: 25.7, AP50: 43.1, AP75: 26.8}
+    - {name: CornerNet,    backbone: HG-104,  scale: 511, AP: 28.4, AP50: 41.8, AP75: 29.5}
+    - {name: ExtremeNet,   backbone: HG-104,  scale: 511, AP: 27.3, AP50: 39.4, AP75: 28.9}
+    - {name: HoughNet,     backbone: R101,    scale: 512, AP: 23.4, AP50: 40.1, AP75: 23.6}
+  reference_upper_bound:
+    note: DiffusionDet train full COCO train2017 (118K ảnh, 450K iter, batch 16, 8 GPU)
+    methods:
+      - {name: DiffusionDet (1 step), backbone: R50, AP: 45.5}
+      - {name: DiffusionDet (4 step), backbone: R50, AP: 46.1}
+
+voc0712:
+  eval_on: VOC2007 test (4.952 ảnh)
+  metric: VOC07 11-point AP50 (PascalVOCDetectionEvaluator cũng trả AP, AP75)
+  note: Train trên VOC07 trainval + VOC12 trainval = 16.551 ảnh.
+  comparable: same-data-different-schedule
+  methods:
+    - {name: Faster R-CNN, backbone: VGG16,   AP50: 73.2}
+    - {name: Faster R-CNN, backbone: R101,    AP50: 76.4}
+    - {name: SSD512,       backbone: VGG16,   AP50: 76.8}
+    - {name: YOLOv2,       backbone: DarkNet, AP50: 78.6}
+    - {name: R-FCN,        backbone: R101,    AP50: 80.5}
+    - {name: Faster R-CNN (detectron2), backbone: R50-C4, AP: 51.9, AP50: 80.3}
+
+crowdhuman:
+  eval_on: CrowdHuman val (4.370 ảnh), full body (fbox)
+  metric: AP50 ↑ / mMR ↓ / Recall ↑
+  note: >
+    Baseline lấy từ Table 7 của paper DiffusionDet. Đây là số full-body: Faster R-CNN
+    85,0 / 50,4 / 90,2 khớp chính xác baseline FPN full-body của paper CrowdHuman gốc
+    (84,95 / 50,42 / 90,24). Table 1 của paper mới là visible box (dùng crowdhuman_vbox_*).
+  comparable: same-data-different-schedule
+  methods:
+    - {name: Faster R-CNN,        AP50: 85.0, mMR: 50.4, Recall: 90.2}
+    - {name: RetinaNet,           AP50: 81.7, mMR: 57.6, Recall: 88.6}
+    - {name: FCOS,                AP50: 86.1, mMR: 55.2, Recall: 94.3}
+    - {name: DETR,                AP50: 66.1, mMR: 80.6}
+    - {name: Deformable DETR,     AP50: 86.7, mMR: 54.0, Recall: 92.5}
+    - {name: Sparse R-CNN (500),  AP50: 89.2, mMR: 48.3, Recall: 95.9}
+    - {name: Sparse R-CNN (1000), AP50: 89.7, mMR: 49.1, Recall: 97.5}
+    - {name: DiffusionDet (1@1000), AP50: 90.1, mMR: 46.5, Recall: 96.2}
+    - {name: DiffusionDet (1@3000), AP50: 91.2, mMR: 47.7, Recall: 98.4}
+    - {name: DiffusionDet (3@1000), AP50: 91.4, mMR: 45.7, Recall: 98.4}
+
+crowdhuman_zeroshot:
+  eval_on: CrowdHuman val, visible box (vbox), chỉ class person
+  metric: AP50
+  note: >
+    Table 1 của paper — zero-shot, model train trên COCO rồi eval trực tiếp trên
+    CrowdHuman, không fine-tune. Chỉ so được nếu dùng checkpoint COCO (không phải tự train).
+  comparable: requires-coco-checkpoint
+  methods:
+    - {name: DETR,          "AP50@300boxes": 61.3, "AP50@2000boxes": 61.3}
+    - {name: Sparse R-CNN,  "AP50@300boxes": 66.6, "AP50@2000boxes": 66.6}
+    - {name: DiffusionDet,  "AP50@300boxes": 66.6, "AP50@2000boxes": 71.9}
