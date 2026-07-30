@@ -109,8 +109,12 @@ def _register_voc(root):
     register_pascal_voc("voc_2007_trainval", os.path.join(devkit, "VOC2007"), "trainval", 2007)
     register_pascal_voc("voc_2007_test", os.path.join(devkit, "VOC2007"), "test", 2007)
     register_pascal_voc("voc_2012_trainval", os.path.join(devkit, "VOC2012"), "trainval", 2012)
+    # register_pascal_voc() KHÔNG tự set evaluator_type — detectron2 chỉ set cờ này
+    # ở builtin.py, một dòng riêng ngay sau lệnh gọi register_pascal_voc. Không set
+    # tay thì build_evaluator() vỡ AttributeError lúc eval (không vỡ lúc train nên
+    # dễ lọt qua smoke test ngắn không có eval).
     for name in ("voc_2007_trainval", "voc_2007_test", "voc_2012_trainval"):
-        MetadataCatalog.get(name).set(objdet_root=root)
+        MetadataCatalog.get(name).set(evaluator_type="pascal_voc", objdet_root=root)
 
 
 def _register_crowdhuman(root):
