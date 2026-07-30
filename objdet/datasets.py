@@ -93,10 +93,20 @@ def _register_voc(root):
     detectron2 dùng VOC07 11-point metric — đúng giao thức mà các baseline
     (Faster R-CNN 76,4 / detectron2 R50-C4 80,3 AP50) báo cáo.
     """
+    # import detectron2.data.datasets (ở đầu file) đã tự đăng ký sẵn 3 cái tên này,
+    # trỏ vào "datasets/VOC2007" mặc định (builtin.py) -> phải gỡ trước khi đăng ký
+    # đè lại bằng đường dẫn thật, nếu không register_pascal_voc bên dưới sẽ vỡ vì
+    # trùng tên (DatasetCatalog không cho đăng ký 2 lần).
+    for name in ("voc_2007_trainval", "voc_2007_test", "voc_2012_trainval"):
+        if name in DatasetCatalog.list():
+            DatasetCatalog.remove(name)
+
     devkit = os.path.join(root, "voc/VOCdevkit")
     register_pascal_voc("voc_2007_trainval", os.path.join(devkit, "VOC2007"), "trainval", 2007)
     register_pascal_voc("voc_2007_test", os.path.join(devkit, "VOC2007"), "test", 2007)
     register_pascal_voc("voc_2012_trainval", os.path.join(devkit, "VOC2012"), "trainval", 2012)
+    for name in ("voc_2007_trainval", "voc_2007_test", "voc_2012_trainval"):
+        MetadataCatalog.get(name).set(objdet_root=root)
 
 
 def _register_crowdhuman(root):
@@ -131,12 +141,17 @@ def register_all(root=None):
 
     Kiểm tra bằng ``DatasetCatalog`` chứ không phải ``MetadataCatalog``: ``MetadataCatalog.get``
     tự tạo entry rỗng cho tên chưa tồn tại, nên dùng nó để kiểm tra sẽ cho kết quả sai.
+
+    Riêng VOC là ngoại lệ: import detectron2.data.datasets tự đăng ký sẵn 3 cái tên
+    ``voc_2007_*``/``voc_2012_*`` (builtin.py, trỏ sai đường dẫn), nên kiểm tra bằng
+    ``DatasetCatalog`` luôn thấy "đã có" dù chưa phải bản của mình. Phải dùng marker
+    ``objdet_root`` riêng để phân biệt "đã có do detectron2" và "đã có do ta đăng ký".
     """
     root = root or DATA_ROOT
     already = set(DatasetCatalog.list())
     if "coco_minitrain_train" not in already:
         _register_coco_minitrain(root)
-    if "voc_2007_trainval" not in already:
+    if MetadataCatalog.get("voc_2007_trainval").get("objdet_root") != root:
         _register_voc(root)
     if "crowdhuman_fbox_train" not in already:
         _register_crowdhuman(root)
