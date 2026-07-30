@@ -95,11 +95,15 @@ def _register_voc(root):
     """
     # import detectron2.data.datasets (ở đầu file) đã tự đăng ký sẵn 3 cái tên này,
     # trỏ vào "datasets/VOC2007" mặc định (builtin.py) -> phải gỡ trước khi đăng ký
-    # đè lại bằng đường dẫn thật, nếu không register_pascal_voc bên dưới sẽ vỡ vì
-    # trùng tên (DatasetCatalog không cho đăng ký 2 lần).
+    # đè lại bằng đường dẫn thật. Phải gỡ CẢ HAI catalog: DatasetCatalog (loader) lẫn
+    # MetadataCatalog (dirname, thing_classes, ...) — Metadata.__setattr__ tự assert
+    # "không đổi giá trị attribute đã set", nên chỉ gỡ DatasetCatalog thôi vẫn vỡ khi
+    # register_pascal_voc cố set lại "dirname" khác giá trị cũ.
     for name in ("voc_2007_trainval", "voc_2007_test", "voc_2012_trainval"):
         if name in DatasetCatalog.list():
             DatasetCatalog.remove(name)
+        if name in MetadataCatalog.list():
+            MetadataCatalog.remove(name)
 
     devkit = os.path.join(root, "voc/VOCdevkit")
     register_pascal_voc("voc_2007_trainval", os.path.join(devkit, "VOC2007"), "trainval", 2007)
