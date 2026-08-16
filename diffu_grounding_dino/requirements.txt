@@ -1,0 +1,12 @@
+# Deliberately short. In particular there is no timm (DropPath is 6 lines, written
+# in models/backbone/swin.py), no mmcv/addict/yapf (util/config.py replaces them),
+# and no compiled CUDA extension for deformable attention (models/ops/ms_deform_attn.py
+# has a pure-PyTorch path, and uses the compiled kernel only if it happens to exist).
+
+torch>=2.0
+torchvision>=0.15
+transformers>=4.30,<5
+numpy>=1.23
+Pillow>=9.0
+scipy>=1.9          # linear_sum_assignment for the Hungarian matcher
+pycocotools>=2.0.6  # evaluation only

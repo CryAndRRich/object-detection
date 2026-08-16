@@ -1,4 +1,5 @@
-# dữ liệu và kết quả không đưa vào git
+# dữ liệu, weight, kết quả không đưa vào git (quá lớn, up thủ công lên server)
+weights/
 data/
 datasets/
 output/

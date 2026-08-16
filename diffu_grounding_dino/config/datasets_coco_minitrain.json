@@ -1,0 +1,23 @@
+{
+  "_comment": [
+    "Train on COCO-minitrain in ODVG form, evaluate on COCO val2017 in COCO form.",
+    "Generate the two train files first:",
+    "  python tools/coco2odvg.py --input ../../data/coco_minitrain/annotations/instances_minitrain2017.json --output-jsonl ../../data/coco_minitrain/annotations/minitrain_odvg.jsonl --output-label-map ../../data/coco_minitrain/annotations/label_map.json",
+    "Paths are relative to the project directory (diffu_grounding_dino/)."
+  ],
+  "train": [
+    {
+      "root": "../../data/coco_minitrain/images/train2017",
+      "anno": "../../data/coco_minitrain/annotations/minitrain_odvg.jsonl",
+      "label_map": "../../data/coco_minitrain/annotations/label_map.json",
+      "dataset_mode": "odvg"
+    }
+  ],
+  "val": [
+    {
+      "root": "../../data/coco/val2017",
+      "anno": "../../data/coco/annotations/instances_val2017.json",
+      "dataset_mode": "coco"
+    }
+  ]
+}
