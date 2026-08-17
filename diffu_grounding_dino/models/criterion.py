@@ -160,7 +160,11 @@ class SetCriterion(nn.Module):
             return None
         if batch_idx is None:
             return t_weight
-        return t_weight.to(batch_idx.device).index_select(0, batch_idx)
+        # index_select needs its index on the same device as the tensor being
+        # indexed -- move batch_idx there (it comes from the matcher, usually CPU),
+        # not the other way around, or the result ends up on the wrong device and
+        # mismatches loss_bbox/loss_giou (both computed on the model's device).
+        return t_weight.index_select(0, batch_idx.to(t_weight.device))
 
     @staticmethod
     def _get_src_permutation_idx(indices):

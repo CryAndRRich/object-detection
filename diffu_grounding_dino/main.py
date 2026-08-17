@@ -177,10 +177,25 @@ def main(args):
     model_without_ddp = model
 
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(
-            model, device_ids=[args.gpu], find_unused_parameters=args.find_unused_params
+        # The diffusion warm-up (apply_diffusion_warmup, called every training step)
+        # toggles requires_grad on backbone/bert mid-run: frozen for the first
+        # diff_warmup_iters steps, trainable after. static_graph=True tells DDP the
+        # set of parameters producing gradients never changes across iterations --
+        # exactly what this schedule violates, and would either error out or (worse)
+        # silently stop syncing backbone/bert gradients across ranks once they
+        # unfreeze. So skip static_graph and force find_unused_parameters whenever
+        # that schedule is active; a baseline (non-diffusion or warmup-less) run is
+        # unaffected and keeps the original static-graph fast path.
+        warmup_schedule_active = (
+            getattr(args, "use_diffusion", False) and int(getattr(args, "diff_warmup_iters", 0) or 0) > 0
         )
-        model._set_static_graph()
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[args.gpu],
+            find_unused_parameters=args.find_unused_params or warmup_schedule_active,
+        )
+        if not warmup_schedule_active:
+            model._set_static_graph()
         model_without_ddp = model.module
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
