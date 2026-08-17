@@ -55,6 +55,14 @@ def main():
     parser.add_argument(
         "--finetune-ignore", nargs="+", default=list(DIFFUSION_KEYWORDS), help="keys to skip when loading"
     )
+    parser.add_argument(
+        "--datasets",
+        default=None,
+        help="datasets json (same format as main.py --datasets); only needed to build the real "
+        "eval category list. Without it, use_coco_eval is forced off and a dummy 1-class prompt "
+        "is used instead -- fine here, since this script only checks checkpoint keys/shapes, "
+        "which PostProcess's category list has no effect on.",
+    )
     args = parser.parse_args()
 
     cfg = Config.fromfile(args.config_file)
@@ -62,6 +70,18 @@ def main():
         cfg.merge_from_dict(args.options)
     for key, value in cfg.to_dict().items():
         setattr(args, key, value)
+
+    if getattr(args, "use_coco_eval", False):
+        if args.datasets:
+            import json
+
+            with open(args.datasets, encoding="utf-8") as f:
+                dataset_meta = json.load(f)
+            args.coco_val_path = dataset_meta["val"][0]["anno"]
+        else:
+            print("no --datasets given: forcing use_coco_eval=False, using a dummy 1-class prompt")
+            args.use_coco_eval = False
+            args.label_list = list(getattr(args, "label_list", None) or ["object"])
 
     print(f"building model from {args.config_file} (use_diffusion={getattr(args, 'use_diffusion', False)})")
     model, _, _ = build_model(args)
