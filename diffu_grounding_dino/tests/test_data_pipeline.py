@@ -17,8 +17,8 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import datasets.transforms as T  # noqa: E402
-from datasets.odvg import ODVGDataset, make_coco_transforms  # noqa: E402
+import gdino_datasets.transforms as T  # noqa: E402
+from gdino_datasets.odvg import ODVGDataset, make_coco_transforms  # noqa: E402
 from tests.tiny import build_tiny_model  # noqa: E402
 from util.misc import collate_fn  # noqa: E402
 from util.param_dicts import get_param_dict  # noqa: E402

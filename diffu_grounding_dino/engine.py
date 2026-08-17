@@ -19,7 +19,7 @@ from typing import Iterable, Optional
 import torch
 
 import util.misc as utils
-from datasets.coco_eval import CocoEvaluator
+from gdino_datasets.coco_eval import CocoEvaluator
 from util.param_dicts import apply_diffusion_warmup
 from util.vl_utils import build_caption
 

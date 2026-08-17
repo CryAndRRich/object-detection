@@ -24,7 +24,7 @@ import torch
 from torch.utils.data import DataLoader, DistributedSampler
 
 import util.misc as utils
-from datasets import build_dataset, get_coco_api_from_dataset
+from gdino_datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch
 from models import build_model
 from util.config import Config, DictAction

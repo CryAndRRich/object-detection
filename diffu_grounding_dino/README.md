@@ -62,7 +62,7 @@ diffu_grounding_dino/
 │   ├── transformer.py                     # encoder/decoder, TÁCH encode()/decode()
 │   ├── diffu_groundingdino.py             # model chính + ddim_sample()
 │   ├── criterion.py, matcher.py, postprocess.py, layers.py, fusion.py
-├── datasets/{odvg,coco,coco_eval,transforms}.py
+├── gdino_datasets/{odvg,coco,coco_eval,transforms}.py
 ├── util/{config,misc,box_ops,param_dicts,vl_utils,logger}.py
 ├── config/{cfg_odvg,cfg_odvg_diffusion}.py + datasets_*.json
 ├── tools/{coco2odvg,download_weights,check_checkpoint,run_train}.py
@@ -279,6 +279,13 @@ cân classification/box và mất khả năng so với con số 57.3 mAP đã c�
 
 ## Những chỗ dễ sai
 
+- **Package dataset tên `gdino_datasets/`, không phải `datasets/`.** Từng đặt tên `datasets/`
+  và dính 2 lỗi cùng lúc: (1) `object-detection/.gitignore` có sẵn pattern `datasets/` (từ quy
+  ước detectron2 của `diffusiondet/` — symlink `datasets/VOC2007`), nên thư mục này **không bao
+  giờ được push lên git**, clone về server bị thiếu hẳn (`ModuleNotFoundError: No module named
+  'datasets'`); (2) kể cả khi có, tên `datasets` trùng thẳng với package `datasets` rất phổ biến
+  của HuggingFace, dễ bị import nhầm trong môi trường đã cài nó. Đổi tên là fix cả hai, không
+  chỉ workaround gitignore.
 - **Không bật `--amp`.** Mặc định tắt theo [CLAUDE.md](../../CLAUDE.md). Toán schedule đã bị
   ép fp32 bằng `force_fp32()` bất kể caller (buffer `sqrt_recipm1_alphas_cumprod` lên tới
   2e4 ở `t=999`, fp16 mất sạch đuôi), nhưng phần multi-stage box refinement thì chưa kiểm
