@@ -36,10 +36,12 @@ Ba dataset, tổng 17GB sau khi giải nén:
 | PASCAL VOC 07+12 | 16.551 ảnh (VOC07 5.011 + VOC12 11.540) | VOC2007 `test` (4.952 ảnh) | 20 |
 | CrowdHuman | 15.000 ảnh / 438.783 ann | `val` (4.370 ảnh / 127.710 ann) | 1 |
 
-Đặt gốc dữ liệu bằng biến môi trường (mặc định `./data`):
+Đặt gốc dữ liệu bằng biến môi trường (mặc định `./data`, tức tương đối với **thư mục đang
+đứng khi chạy lệnh**, không phải vị trí file code). Dữ liệu nằm ở
+[`../data/`](../data/README.md) — nếu chạy lệnh từ trong `diffusiondet/` thì:
 
 ```bash
-export OBJDET_DATA_ROOT=/đường/dẫn/tới/data
+export OBJDET_DATA_ROOT=../data
 ```
 
 Layout mong đợi:

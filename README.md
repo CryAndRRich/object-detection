@@ -7,11 +7,11 @@ việc nâng cấp phần CE-Loc của dự án `multi_condition` (xem
 | | Trạng thái | Chi tiết |
 |---|---|---|
 | [`diffusiondet/`](diffusiondet/README.md) | **Đã train/eval xong trên Kaggle, không chạy lại** — chỉ còn giữ để đối chiếu import khi cấu trúc thư mục đổi | Số liệu đầy đủ ở [`../RESULTS.md`](../RESULTS.md) |
-| [`diffu_grounding_dino/`](diffu_grounding_dino/README.md) | **Chưa train** — code đã verify đúng kiến trúc + checkpoint key-compat + 79 test, sắp finetune trên GPU server | GroundingDINO + diffusion process trên reference point của decoder |
+| [`diffu_grounding_dino/`](diffu_grounding_dino/README.md) | **Chưa train** — code đã verify đúng kiến trúc + checkpoint key-compat + 80 test (kể cả DDP 2-process), sắp finetune trên GPU server hoặc Kaggle 2×T4 | GroundingDINO + diffusion process trên reference point của decoder |
 
 Hai project **không phụ thuộc lẫn nhau** (không import chéo) — có thể đọc/sửa/chạy độc lập.
-Phần dùng chung: `LICENSE`, `.gitignore`, `weights/` (tách sub-thư mục riêng cho mỗi project,
-xem dưới).
+Phần dùng chung: `LICENSE`, `.gitignore`, `weights/` (tách sub-thư mục riêng cho mỗi project),
+`data/` (dùng chung, chủ yếu COCO-minitrain) — xem dưới.
 
 ## `weights/`
 
@@ -23,6 +23,14 @@ weights/
 
 Nằm trong `.gitignore` — không push git. Copy/zip thủ công lên máy chạy (Kaggle trước đây,
 GPU server bây giờ). Xem README của từng sub-project để biết checkpoint nào dùng cho việc gì.
+
+## `data/`
+
+3 dataset (COCO-minitrain 25K, VOC 07+12, CrowdHuman), 18GB — xem
+[`data/README.md`](data/README.md) (provenance/checksum, layout, script tải). Dùng chung: cả
+`diffusiondet/` lẫn `diffu_grounding_dino/` đều đọc COCO-minitrain từ đây; VOC/CrowdHuman hiện
+chỉ `diffusiondet/` dùng. Cũng nằm trong `.gitignore`, không push git — zip thủ công lên máy
+chạy giống `weights/`.
 
 ## Ghi công
 

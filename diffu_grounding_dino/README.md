@@ -18,7 +18,7 @@ Mục tiêu bài toán giữ nguyên **OD-style open-vocabulary**: cho ảnh + p
 | | |
 |---|---|
 | Code | **Đủ để train** — 9.100 dòng Python, không import gì từ `repos/` |
-| Test | **79/79 pass** trên CPU, không cần weights hay dataset (`python tests/run_all.py`) |
+| Test | **80/80 pass** trên CPU, không cần weights hay dataset (`python tests/run_all.py`) |
 | Kiến trúc | **Đã đối chiếu 2 lần** với Open-GroundingDino/GroundingDINO/DiffuDETR gốc (encoder/fusion/decoder/ContrastiveEmbed/matcher/criterion đúng tuyệt đối; 4 điểm lệch default đã sửa, xem [§ Audit kiến trúc](#audit-kiến-trúc-lần-2)) |
 | Checkpoint | **Đã tải + verify khớp key** — `tools/check_checkpoint.py` báo `RESULT: OK` (938/940 tensor load, phần còn lại là module diffusion mới) |
 | Train/eval thật | **Chưa chạy** — bước tiếp theo, trên GPU server (xem [§ Chạy](#chạy)) |
@@ -66,8 +66,9 @@ diffu_grounding_dino/
 ├── util/{config,misc,box_ops,param_dicts,vl_utils,logger}.py
 ├── config/{cfg_odvg,cfg_odvg_diffusion}.py + datasets_*.json
 ├── tools/{coco2odvg,download_weights,check_checkpoint,run_train}.py
-├── tests/                                 # 5 suite, chạy được offline
-└── engine.py, main.py
+├── tests/                                 # 6 suite, chạy được offline (bao gồm test_ddp.py)
+├── engine.py, main.py
+└── notebooks/diffu_gdino_kaggle.ipynb     # pipeline Kaggle 2×T4
 ```
 
 Vì sao tách `encode()` / `decode()`: DDIM cần chạy decoder nhiều lần cho **cùng một ảnh**.
@@ -106,9 +107,9 @@ Train đọc **ODVG jsonl**, eval đọc **COCO json**:
 
 ```bash
 python tools/coco2odvg.py \
-  --input ../../data/coco_minitrain/annotations/instances_minitrain2017.json \
-  --output-jsonl ../../data/coco_minitrain/annotations/minitrain_odvg.jsonl \
-  --output-label-map ../../data/coco_minitrain/annotations/label_map.json
+  --input ../data/coco_minitrain/annotations/instances_minitrain2017.json \
+  --output-jsonl ../data/coco_minitrain/annotations/minitrain_odvg.jsonl \
+  --output-label-map ../data/coco_minitrain/annotations/label_map.json
 ```
 
 `config/datasets_coco_minitrain.json` đã trỏ sẵn đúng đường dẫn. VOC và CrowdHuman: convert
@@ -118,10 +119,16 @@ rồi chạy cùng `coco2odvg.py` — nó đọc category id từ file chứ kh�
 
 ## Chạy
 
-Chạy trên GPU server riêng (không còn Kaggle) — **1 GPU mỗi lần** (server dùng chung với
-job khác, không có nhiều GPU rảnh cùng lúc như Kaggle 2×T4 trước đây).
-[`tools/run_train.py`](tools/run_train.py) tự chọn GPU trống nhất qua `nvidia-smi` (nhiều free
-memory nhất trong số GPU không bận tính toán) rồi gọi `main.py` với mọi tham số truyền vào:
+Code chạy được ở **cả hai nơi** không cần sửa gì — `main.py`/`engine.py` chỉ đọc GPU/distributed
+từ biến môi trường (`RANK`/`WORLD_SIZE`/`LOCAL_RANK`), không hardcode số GPU:
+
+| | GPU server riêng | Kaggle |
+|---|---|---|
+| Số GPU | 1 (server dùng chung, không có nhiều GPU rảnh cùng lúc) | 2×T4, dùng hết qua `torchrun` |
+| Cách chạy | [`tools/run_train.py`](tools/run_train.py) — tự chọn GPU trống nhất qua `nvidia-smi` | `torchrun --nproc_per_node=2` (notebook [`notebooks/diffu_gdino_kaggle.ipynb`](notebooks/diffu_gdino_kaggle.ipynb)) |
+| Weights/data | up thủ công (zip) vào `../weights/diffu_grounding_dino/`, `../data/` | Kaggle Dataset input, giải nén trong notebook |
+
+### GPU server riêng
 
 ```bash
 # nhánh diffusion
@@ -151,21 +158,41 @@ done
 `run_train.py`. Muốn gọi thẳng `main.py` không qua wrapper (ví dụ để debug) thì bỏ
 `tools/run_train.py` và tự `export CUDA_VISIBLE_DEVICES=<index>` trước.
 
-`--finetune_ignore time_ diffusion` là bắt buộc ở lần đầu: checkpoint pretrain không thể có
-module timestep. Có test khoá lại rằng 2 keyword đó phủ hết mọi key mới
+### Kaggle 2×T4
+
+Notebook [`notebooks/diffu_gdino_kaggle.ipynb`](notebooks/diffu_gdino_kaggle.ipynb) — clone code
+từ GitHub, giải nén weights/data từ 2 Kaggle Dataset đã chuẩn bị sẵn (zip từ
+`object-detection/weights/diffu_grounding_dino_weights.zip` và
+`object-detection/data/data_coco_for_diffu_gdino.zip`), rồi train qua:
+
+```bash
+torchrun --standalone --nproc_per_node=2 main.py \
+  -c config/cfg_odvg_diffusion.py --datasets ... --output_dir ... \
+  --pretrain_model_path ... --finetune_ignore time_ diffusion --options batch_size=4 ...
+```
+
+`batch_size` trong config là **mỗi GPU** — 2 tiến trình = tổng batch gấp đôi. Cơ chế DDP
+(gradient all-reduce qua `DistributedDataParallel`, `DistributedSampler` chia data theo rank) đã
+verify đúng bằng `tests/test_ddp.py` (giả lập 2 process trên CPU, backend `gloo` thay `nccl`) —
+xem [§ Verification](#verification).
+
+`--finetune_ignore time_ diffusion` là bắt buộc ở lần đầu (cả 2 nơi): checkpoint pretrain không
+thể có module timestep. Có test khoá lại rằng 2 keyword đó phủ hết mọi key mới
 (`test_diffusion_extra_keys_are_covered_by_finetune_ignore`).
 
 ## Verification
 
 ```bash
-python tests/run_all.py                       # 79 test, ~3 phút CPU, không cần weights
+python tests/run_all.py                       # 80 test, ~3-4 phút CPU, không cần weights
 python tools/check_checkpoint.py -c config/cfg_odvg_diffusion.py \
   --checkpoint ../weights/diffu_grounding_dino/groundingdino_swint_ogc.pth
 ```
 
-Ánh xạ sang 7 mục trong [plan](../../docs/diffu-grounding-dino-plan.md):
+Ánh xạ sang [plan](../../docs/diffu-grounding-dino-plan.md) + 1 mục mới (verify multi-GPU,
+không có trong plan gốc vì lúc đó chưa tính tới việc đổi qua lại giữa server 1-GPU và Kaggle
+2-GPU):
 
-| Mục plan | Ở đâu | Trạng thái |
+| Mục | Ở đâu | Trạng thái |
 |---|---|---|
 | 1. `betas`/`alphas_cumprod` khớp công thức cosine | `test_cosine_schedule_matches_reference` | ✅ khớp tuyệt đối (atol=0) |
 | 2. `prepare_diffusion_refpoints`, kể cả `num_gt=0` | `test_refpoints_*` (7 test) | ✅ |
@@ -174,13 +201,14 @@ python tools/check_checkpoint.py -c config/cfg_odvg_diffusion.py \
 | 5. Overfit + gradient của `time_embed` | `test_loss_decreases_when_overfitting_one_batch`, `test_time_embed_learns_after_the_first_step` | ✅ ở quy mô nhỏ; **overfit 20-50 ảnh COCO thật thì chưa chạy** |
 | 6. `use_diffusion=False` khớp baseline | `test_baseline_forward_matches_encode_decode_split`, `test_baseline_and_diffusion_share_head_weights` | ✅ |
 | 7. Load pretrain, kiểm `missing_keys` | `tools/check_checkpoint.py` | ✅ đã chạy với checkpoint thật — `RESULT: OK` |
+| 8. 2 GPU song song không làm sai kết quả (rank 0/1 phải khớp tuyệt đối sau 1 bước) | `test_ddp_training_step_keeps_ranks_in_sync` (`tests/test_ddp.py`) | ✅ phát hiện + sửa 2 chỗ hardcode `device="cuda"` trong `util/misc.py` (`SmoothedValue.synchronize_between_processes`, `all_gather`) chỉ vỡ khi chạy distributed trên CPU/gloo — không ảnh hưởng chạy thật trên GPU/nccl, nhưng chặn được việc debug offline |
 
 Mục 5 bản đầy đủ (sau khi có data) — sanity check chuẩn trước khi finetune thật: overfit một
 tập nhỏ 20-50 ảnh để bắt lỗi wiring (gradient không chảy, loss không giảm...) rẻ và nhanh hơn
 nhiều so với phát hiện ra sau một lần train đầy đủ:
 
 ```bash
-head -50 ../../data/coco_minitrain/annotations/minitrain_odvg.jsonl > /tmp/overfit50.jsonl
+head -50 ../data/coco_minitrain/annotations/minitrain_odvg.jsonl > /tmp/overfit50.jsonl
 # sửa "anno" trong datasets json trỏ vào /tmp/overfit50.jsonl, rồi:
 python tools/run_train.py -c config/cfg_odvg_diffusion.py --datasets config/datasets_overfit.json \
   --output_dir output/overfit --options epochs=20 batch_size=2 diff_warmup_iters=0 --save_log
@@ -203,7 +231,7 @@ gốc, đã sửa:
 | `diff_pad_mode` mặc định | `"normal"` (jitter kiểu DiffusionDet) | `"center"` (box hằng số `[0.5,0.5,0.5,0.5]`) | Đúng mặc định `noisy_gt=False` của DiffuDETR |
 | `inverse_sigmoid` eps | `1e-5` | `1e-3` | Không phải lựa chọn cố ý — khớp lại đúng convention GroundingDINO/Open-GroundingDino gốc |
 
-Cả 4 đều có test bao phủ (`tests/run_all.py`, 79/79 pass) và `tools/check_checkpoint.py` vẫn
+Cả 4 đều có test bao phủ (`tests/run_all.py`, 80/80 pass) và `tools/check_checkpoint.py` vẫn
 báo `RESULT: OK` sau khi sửa. Ba điểm còn **cố ý khác** DiffuDETR gốc (bảng dưới) không đổi.
 
 ## Khác biệt cố ý so với DiffuDINO gốc

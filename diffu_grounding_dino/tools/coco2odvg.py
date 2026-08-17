@@ -1,13 +1,13 @@
 """Convert a COCO ``instances_*.json`` into the ODVG jsonl the trainer reads.
 
 Works for any COCO-format detection json -- COCO-minitrain, and the CrowdHuman /
-VOC json produced by ``object-detection/tools/`` -- because the category ids are
-read from the file rather than assumed.
+VOC json produced by ``object-detection/diffusiondet/tools/`` -- because the category
+ids are read from the file rather than assumed.
 
     python tools/coco2odvg.py \
-        --input ../../data/coco_minitrain/annotations/instances_minitrain2017.json \
-        --output-jsonl ../../data/coco_minitrain/annotations/minitrain_odvg.jsonl \
-        --output-label-map ../../data/coco_minitrain/annotations/label_map.json
+        --input ../data/coco_minitrain/annotations/instances_minitrain2017.json \
+        --output-jsonl ../data/coco_minitrain/annotations/minitrain_odvg.jsonl \
+        --output-label-map ../data/coco_minitrain/annotations/label_map.json
 
 Two files come out:
 

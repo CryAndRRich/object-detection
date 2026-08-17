@@ -225,22 +225,36 @@ def _disable_print_on_non_master(is_master: bool):
     builtins.print = print_wrapper
 
 
+def _dist_device() -> str:
+    """Device the active process group's collectives must run on.
+
+    ``nccl`` (real multi-GPU training) only moves CUDA tensors; ``gloo`` (used
+    here for CPU-only DDP smoke tests, see ``tests/test_ddp.py``) only moves CPU
+    ones. Hardcoding ``"cuda"`` broke the moment anything ran distributed
+    collectives on gloo -- this keeps the real training path byte-for-byte the
+    same (still ``"cuda"`` whenever the backend is ``nccl``) while making the
+    CPU debug path actually work instead of crashing on every sync point.
+    """
+    return "cuda" if dist.get_backend() == "nccl" else "cpu"
+
+
 def all_gather(data):
     """All-gather arbitrary picklable objects across ranks."""
     world_size = get_world_size()
     if world_size == 1:
         return [data]
 
-    buffer = torch.ByteTensor(bytearray(pickle.dumps(data))).to("cuda")
-    local_size = torch.tensor([buffer.numel()], device="cuda")
+    device = _dist_device()
+    buffer = torch.ByteTensor(bytearray(pickle.dumps(data))).to(device)
+    local_size = torch.tensor([buffer.numel()], device=device)
     size_list = [torch.zeros_like(local_size) for _ in range(world_size)]
     dist.all_gather(size_list, local_size)
     size_list = [int(s.item()) for s in size_list]
     max_size = max(size_list)
 
-    tensor_list = [torch.empty((max_size,), dtype=torch.uint8, device="cuda") for _ in size_list]
+    tensor_list = [torch.empty((max_size,), dtype=torch.uint8, device=device) for _ in size_list]
     if local_size.item() != max_size:
-        padding = torch.empty((max_size - local_size.item(),), dtype=torch.uint8, device="cuda")
+        padding = torch.empty((max_size - local_size.item(),), dtype=torch.uint8, device=device)
         buffer = torch.cat((buffer, padding), dim=0)
     dist.all_gather(tensor_list, buffer)
 
@@ -309,7 +323,7 @@ class SmoothedValue:
     def synchronize_between_processes(self):
         if not is_dist_avail_and_initialized():
             return
-        t = torch.tensor([self.count, self.total], dtype=torch.float64, device="cuda")
+        t = torch.tensor([self.count, self.total], dtype=torch.float64, device=_dist_device())
         dist.barrier()
         dist.all_reduce(t)
         self.count = int(t[0].item())
