@@ -55,6 +55,20 @@ def get_args_parser():
         "(use 'time_ diffusion' when starting a diffusion run from a baseline checkpoint)",
     )
     parser.add_argument("--start_epoch", default=0, type=int)
+    parser.add_argument(
+        "--max_epochs_this_run",
+        type=int,
+        default=None,
+        help="exit cleanly after this many epochs in THIS process, regardless of --start_epoch "
+        "-- for splitting a run across several time-limited sessions (e.g. a Kaggle Save & Run "
+        "All that gets killed at its session cap). --epochs stays the real total for the LR "
+        "schedule; resuming from the checkpoint this leaves behind continues it correctly. "
+        "Counting from --start_epoch (rather than an absolute epoch number) means each "
+        "session's notebook cell can just say 'run 1 more epoch' without knowing which epoch a "
+        "resumed checkpoint left off at. Without this, a session that hits its time limit is "
+        "killed mid-epoch: no checkpoint for that epoch, and no cell after the training cell "
+        "(log read, final eval sweep) ever gets to run.",
+    )
     parser.add_argument("--eval", action="store_true")
     parser.add_argument("--num_workers", default=8, type=int)
     parser.add_argument("--fix_size", action="store_true")
@@ -286,6 +300,7 @@ def main(args):
     logger.info("start training")
     start_time = time.time()
     best_map_holder = BestMetricHolder()
+    epochs_run_this_session = 0
 
     for epoch in range(args.start_epoch, args.epochs):
         epoch_start = time.time()
@@ -344,6 +359,15 @@ def main(args):
             if coco_evaluator is not None:
                 (output_dir / "eval").mkdir(exist_ok=True)
                 torch.save(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval" / "latest.pth")
+
+        epochs_run_this_session += 1
+        if args.max_epochs_this_run is not None and epochs_run_this_session >= args.max_epochs_this_run:
+            logger.info(
+                f"stopping after epoch {epoch} ({epochs_run_this_session}/{args.max_epochs_this_run} "
+                f"epochs this session); resume with --resume {output_dir / 'checkpoint.pth'} to "
+                f"continue toward --epochs {args.epochs}"
+            )
+            break
 
     logger.info(f"training time {datetime.timedelta(seconds=int(time.time() - start_time))}")
 

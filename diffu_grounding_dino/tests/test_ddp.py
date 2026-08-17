@@ -18,6 +18,7 @@ any normal CPU-only PyTorch install.
 import os
 import socket
 import sys
+import tempfile
 from pathlib import Path
 
 import torch
@@ -48,7 +49,7 @@ class _Args:
     diff_warmup_freeze_keywords = []
 
 
-def _worker(rank: int, world_size: int, port: int, result_queue) -> None:
+def _worker(rank: int, world_size: int, port: int, result_queue, tmpdir: str) -> None:
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = str(port)
     dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
@@ -65,8 +66,16 @@ def _worker(rank: int, world_size: int, port: int, result_queue) -> None:
 
         train_one_epoch(ddp_model, criterion, loader, optimizer, torch.device("cpu"), epoch=0, args=_Args())
 
+        # Saved to a file and only the path put on the queue -- putting the state
+        # dict's tensors directly on a multiprocessing.Queue relies on torch's
+        # shared-memory file-descriptor IPC (resource_sharer), which some
+        # sandboxed/containerized hosts (observed on Kaggle) don't support,
+        # raising FileNotFoundError from rebuild_storage_fd. A plain file avoids
+        # that IPC path entirely and works the same everywhere.
         state = {k: v.clone() for k, v in ddp_model.module.state_dict().items()}
-        result_queue.put((rank, "ok", state))
+        state_path = os.path.join(tmpdir, f"rank{rank}.pt")
+        torch.save(state, state_path)
+        result_queue.put((rank, "ok", state_path))
     except Exception as exc:  # noqa: BLE001
         result_queue.put((rank, "error", repr(exc)))
     finally:
@@ -81,21 +90,25 @@ def test_ddp_training_step_keeps_ranks_in_sync():
     port = _free_port()
     ctx = mp.get_context("spawn")
     result_queue = ctx.Queue()
-    procs = [ctx.Process(target=_worker, args=(rank, WORLD_SIZE, port, result_queue)) for rank in range(WORLD_SIZE)]
-    for p in procs:
-        p.start()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        procs = [
+            ctx.Process(target=_worker, args=(rank, WORLD_SIZE, port, result_queue, tmpdir))
+            for rank in range(WORLD_SIZE)
+        ]
+        for p in procs:
+            p.start()
 
-    results = [result_queue.get(timeout=TIMEOUT_S) for _ in range(WORLD_SIZE)]
-    for p in procs:
-        p.join(timeout=TIMEOUT_S)
+        results = [result_queue.get(timeout=TIMEOUT_S) for _ in range(WORLD_SIZE)]
+        for p in procs:
+            p.join(timeout=TIMEOUT_S)
 
-    errors = [(rank, msg) for rank, status, msg in results if status == "error"]
-    if errors:
-        raise AssertionError(f"rank(s) raised during DDP training step: {errors}")
-    for p in procs:
-        assert p.exitcode == 0, f"rank process exited with code {p.exitcode}"
+        errors = [(rank, msg) for rank, status, msg in results if status == "error"]
+        if errors:
+            raise AssertionError(f"rank(s) raised during DDP training step: {errors}")
+        for p in procs:
+            assert p.exitcode == 0, f"rank process exited with code {p.exitcode}"
 
-    states = {rank: state for rank, _, state in results}
+        states = {rank: torch.load(path, map_location="cpu", weights_only=False) for rank, _, path in results}
     state0, state1 = states[0], states[1]
     assert state0.keys() == state1.keys(), "rank 0/1 ended up with different parameter sets"
     for key in state0:
