@@ -267,6 +267,15 @@ def main(args):
     else:
         lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
 
+    # best_map_holder must exist before the resume block below -- its state has to be
+    # restored FROM the checkpoint here, not recreated fresh after. Recreating it fresh
+    # (as this used to do, further down) meant every resumed session's first epoch was
+    # treated as a new best (0.0 initial "best" beats any real mAP), silently overwriting
+    # checkpoint_best_regular.pth with a possibly worse epoch than a prior session's true
+    # best -- exactly the failure mode a multi-session Kaggle resume plan depends on not
+    # having.
+    best_map_holder = BestMetricHolder()
+
     # ---------------- resume / pretrain ----------------
     auto_resume = output_dir / "checkpoint.pth"
     if not args.resume and auto_resume.exists():
@@ -281,6 +290,10 @@ def main(args):
             lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
             args.start_epoch = checkpoint["epoch"] + 1
             logger.info(f"resumed at epoch {args.start_epoch}")
+        if {"best", "best_epoch"} <= set(checkpoint):
+            best_map_holder.best = checkpoint["best"]
+            best_map_holder.best_epoch = checkpoint["best_epoch"]
+            logger.info(f"restored best-so-far: {best_map_holder}")
     elif args.pretrain_model_path:
         load_pretrained_weights(args, model_without_ddp, logger)
 
@@ -299,7 +312,6 @@ def main(args):
     # ---------------- train ----------------
     logger.info("start training")
     start_time = time.time()
-    best_map_holder = BestMetricHolder()
     epochs_run_this_session = 0
 
     for epoch in range(args.start_epoch, args.epochs):
@@ -329,6 +341,8 @@ def main(args):
                 "optimizer": optimizer.state_dict(),
                 "lr_scheduler": lr_scheduler.state_dict(),
                 "epoch": epoch,
+                "best": best_map_holder.best,
+                "best_epoch": best_map_holder.best_epoch,
                 "args": vars(args),
             }
 
