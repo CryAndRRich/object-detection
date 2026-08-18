@@ -107,3 +107,15 @@ debug_nan = False
 # Diffusion off. Kept here so both configs expose the same field set and code paths
 # never have to guess whether the key exists.
 use_diffusion = False
+
+# ---------------------------------------------------------------- lora
+# Off by default (full finetune, as above). When on: backbone.0 (Swin) and bert are
+# frozen and only get a trainable low-rank update instead -- see models/lora.py for
+# why the scope stops there. lora_lr is separate from lr_backbone (which is tuned
+# for full-finetuning a huge pretrained tower directly, not a freshly-init adapter).
+use_lora = False
+lora_rank = 8
+lora_alpha = 16
+lora_dropout = 0.0
+lora_target_prefixes = ["backbone.0", "bert"]
+lora_lr = 1e-4

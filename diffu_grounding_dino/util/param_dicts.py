@@ -42,18 +42,29 @@ def get_param_dict(args, model: nn.Module, include_frozen: bool = True):
     param_dict_type = getattr(args, "param_dict_type", "default")
     assert param_dict_type in ("default", "ddetr_in_mmdet", "large_wd"), param_dict_type
 
+    use_lora = getattr(args, "use_lora", False)
+
     def selected(predicate):
         return [
             p
             for n, p in model.named_parameters()
-            if predicate(n) and (include_frozen or p.requires_grad)
+            if predicate(n) and (not use_lora or "lora_" not in n) and (include_frozen or p.requires_grad)
         ]
+
+    # LoRA adapters get their own lr, independent of whichever tower (backbone/bert)
+    # they were injected into -- lr_backbone is tuned for full-finetuning a huge
+    # pretrained tower directly, not a freshly-initialised low-rank adapter.
+    lora_group = (
+        [{"params": [p for n, p in model.named_parameters() if "lora_" in n], "lr": args.lora_lr}]
+        if use_lora
+        else []
+    )
 
     if param_dict_type == "default":
         return [
             {"params": selected(lambda n: "backbone" not in n), "lr": args.lr},
             {"params": selected(lambda n: "backbone" in n), "lr": args.lr_backbone},
-        ]
+        ] + lora_group
 
     if param_dict_type == "ddetr_in_mmdet":
         backbone_names = args.lr_backbone_names
@@ -77,7 +88,7 @@ def get_param_dict(args, model: nn.Module, include_frozen: bool = True):
                 "params": selected(lambda n: match_name_keywords(n, proj_names)),
                 "lr": args.lr_linear_proj_mult,
             },
-        ]
+        ] + lora_group
 
     # large_wd: no weight decay on norms and biases
     def is_norm_or_bias(n):
@@ -104,7 +115,7 @@ def get_param_dict(args, model: nn.Module, include_frozen: bool = True):
             "lr": args.lr_backbone,
             "weight_decay": 0.0,
         },
-    ]
+    ] + lora_group
 
 
 def apply_freeze_keywords(model: nn.Module, keywords: List[str]):

@@ -27,6 +27,7 @@ import util.misc as utils
 from gdino_datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch
 from models import build_model
+from models.lora import inject_lora
 from util.config import Config, DictAction
 from util.logger import setup_logger
 from util.misc import BestMetricHolder, clean_state_dict
@@ -113,7 +114,11 @@ def build_optimizer_and_freeze(args, model_without_ddp, logger):
     """
     param_dicts = get_param_dict(args, model_without_ddp, include_frozen=True)
 
-    if getattr(args, "freeze_keywords", None):
+    # Under LoRA, inject_lora() already froze the base towers (and only the base --
+    # not the lora_A/B adapters sharing the same name prefix). Running the
+    # keyword-based freeze on top would be redundant at best; skip it so the two
+    # freezing mechanisms never have to be reconciled.
+    if getattr(args, "freeze_keywords", None) and not getattr(args, "use_lora", False):
         apply_freeze_keywords(model_without_ddp, args.freeze_keywords)
         logger.info(f"permanently frozen by keywords {args.freeze_keywords}")
 
@@ -190,6 +195,39 @@ def main(args):
     model.to(device)
     model_without_ddp = model
 
+    # ---------------- resume/pretrain decision + lora injection ----------------
+    # Decided here, before DDP wrap and before the optimizer exists, because both of
+    # those need to see the model's FINAL structure (lora_A/B in the right param
+    # groups, DDP tracking the right tensors). The actual checkpoint *tensor*
+    # loading (and the optimizer/lr_scheduler restore for --resume) still happens
+    # further down, once the optimizer exists to load state into -- this block only
+    # settles resume-vs-pretrain early enough to get LoRA injection ordering right:
+    #   - fresh pretrain start: the checkpoint has flat `...weight` keys, so load
+    #     it into the plain model first, THEN inject LoRA around the now-pretrained
+    #     values.
+    #   - resume: a checkpoint saved by a previous LoRA session already has
+    #     `...base.weight`/`...lora_A` keys, so LoRA must be injected first so the
+    #     structure matches before that load happens below.
+    auto_resume = output_dir / "checkpoint.pth"
+    if not args.resume and auto_resume.exists():
+        args.resume = str(auto_resume)
+        logger.info(f"auto-resuming from {auto_resume}")
+
+    use_lora = getattr(args, "use_lora", False)
+    if args.resume:
+        if use_lora:
+            n_wrapped = inject_lora(
+                model_without_ddp, args.lora_target_prefixes, args.lora_rank, args.lora_alpha, args.lora_dropout
+            )
+            logger.info(f"lora: injected into {n_wrapped} layers (before resume load)")
+    elif args.pretrain_model_path:
+        load_pretrained_weights(args, model_without_ddp, logger)
+        if use_lora:
+            n_wrapped = inject_lora(
+                model_without_ddp, args.lora_target_prefixes, args.lora_rank, args.lora_alpha, args.lora_dropout
+            )
+            logger.info(f"lora: injected into {n_wrapped} layers (after pretrain load)")
+
     if args.distributed:
         # The diffusion warm-up (apply_diffusion_warmup, called every training step)
         # toggles requires_grad on backbone/bert mid-run: frozen for the first
@@ -199,9 +237,14 @@ def main(args):
         # silently stop syncing backbone/bert gradients across ranks once they
         # unfreeze. So skip static_graph and force find_unused_parameters whenever
         # that schedule is active; a baseline (non-diffusion or warmup-less) run is
-        # unaffected and keeps the original static-graph fast path.
+        # unaffected and keeps the original static-graph fast path. Under LoRA the
+        # warmup schedule is skipped entirely (engine.py) and requires_grad on the
+        # base towers was already fixed permanently by inject_lora() above, before
+        # DDP ever sees the model -- no mid-run toggle, so the fast path is safe.
         warmup_schedule_active = (
-            getattr(args, "use_diffusion", False) and int(getattr(args, "diff_warmup_iters", 0) or 0) > 0
+            not use_lora
+            and getattr(args, "use_diffusion", False)
+            and int(getattr(args, "diff_warmup_iters", 0) or 0) > 0
         )
         model = torch.nn.parallel.DistributedDataParallel(
             model,
@@ -276,12 +319,9 @@ def main(args):
     # having.
     best_map_holder = BestMetricHolder()
 
-    # ---------------- resume / pretrain ----------------
-    auto_resume = output_dir / "checkpoint.pth"
-    if not args.resume and auto_resume.exists():
-        args.resume = str(auto_resume)
-        logger.info(f"auto-resuming from {auto_resume}")
-
+    # ---------------- resume: load tensors + optimizer/scheduler state ----------------
+    # (resume-vs-pretrain was already decided above, before DDP wrap/lora injection;
+    # this is just the tensor/optimizer-state load, which needs `optimizer` to exist.)
     if args.resume:
         checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
         model_without_ddp.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)
@@ -294,8 +334,6 @@ def main(args):
             best_map_holder.best = checkpoint["best"]
             best_map_holder.best_epoch = checkpoint["best_epoch"]
             logger.info(f"restored best-so-far: {best_map_holder}")
-    elif args.pretrain_model_path:
-        load_pretrained_weights(args, model_without_ddp, logger)
 
     # ---------------- eval only ----------------
     if args.eval:

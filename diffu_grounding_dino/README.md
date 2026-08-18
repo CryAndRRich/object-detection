@@ -127,6 +127,7 @@ từ biến môi trường (`RANK`/`WORLD_SIZE`/`LOCAL_RANK`), không hardcode s
 | Số GPU | 1 (server dùng chung, không có nhiều GPU rảnh cùng lúc) | 2×T4, dùng hết qua `torchrun` |
 | Cách chạy | [`tools/run_train.py`](tools/run_train.py) — tự chọn GPU trống nhất qua `nvidia-smi` | `torchrun --nproc_per_node=2` (notebook [`notebooks/diffu_gdino_kaggle.ipynb`](notebooks/diffu_gdino_kaggle.ipynb)) |
 | Weights/data | up thủ công (zip) vào `../weights/diffu_grounding_dino/`, `../data/` | Kaggle Dataset input, giải nén trong notebook |
+| Chế độ finetune | full-finetune (`use_lora=False`, mặc định) | LoRA (`use_lora=True`) — xem [§ LoRA](#lora-thay-cho-full-finetune-nhánh-kaggle) |
 
 ### GPU server riêng
 
@@ -180,6 +181,35 @@ xem [§ Verification](#verification).
 thể có module timestep. Có test khoá lại rằng 2 keyword đó phủ hết mọi key mới
 (`test_diffusion_extra_keys_are_covered_by_finetune_ignore`).
 
+### LoRA thay cho full-finetune (nhánh Kaggle)
+
+VRAM là nút thắt trên 2×T4 (đã OOM ở `batch_size=6`, xem [§ Những chỗ dễ
+sai](#những-chỗ-dễ-sai)) mà server riêng không gặp — nên **chỉ nhánh Kaggle** dùng LoRA thay
+full-finetune, bật qua config (`models/lora.py`):
+
+```bash
+--options use_lora=True lora_rank=8 lora_alpha=16
+```
+
+Đóng băng **backbone (Swin) + bert**, chỉ train 1 adapter rank-thấp (`LoRALinear`, `lora_B`
+zero-init nên là no-op tại thời điểm inject) cho `nn.Linear` của 2 tower này —
+`lora_target_prefixes = ["backbone.0", "bert"]`, tái dùng đúng ranh giới
+`diff_warmup_freeze_keywords`/`lr_backbone_names` đã có sẵn. Fusion layer, deformable
+transformer, và toàn bộ module diffusion vẫn full-train như server — phạm vi LoRA dừng ở
+đúng 2 tower vì đó là 2 khối tham số pretrained lớn nhất (Swin-T ~28M, BERT-base ~110M) và vì
+cả hai chỉ dùng `nn.Linear` thuần (không đụng `nn.MultiheadAttention` trong
+fusion/deformable-transformer, phức tạp hơn để LoRA-hoá).
+
+Lưu ý về thứ tự khi tự sửa `main.py`/viết script khác gọi `inject_lora`: phải inject **sau**
+khi load checkpoint pretrain phẳng (`load_pretrained_weights`, key `...weight`) nhưng **trước**
+khi load 1 checkpoint đã lưu bởi phiên LoRA trước đó (`--resume`, key đã là
+`...base.weight`/`...lora_A`) — sai thứ tự sẽ làm 1 trong 2 đường load key bị lệch, thấy chi
+tiết trong comment quanh lệnh gọi `inject_lora` ở `main.py`. `tests/test_lora.py` khoá lại đúng
+thứ tự này.
+
+`use_lora` phải giữ nguyên giá trị giữa các phiên Kaggle nối tiếp của cùng 1 lần train — đổi
+giữa chừng làm checkpoint không load được (cấu trúc key khác nhau).
+
 ## Verification
 
 ```bash
@@ -202,6 +232,7 @@ không có trong plan gốc vì lúc đó chưa tính tới việc đổi qua l�
 | 6. `use_diffusion=False` khớp baseline | `test_baseline_forward_matches_encode_decode_split`, `test_baseline_and_diffusion_share_head_weights` | ✅ |
 | 7. Load pretrain, kiểm `missing_keys` | `tools/check_checkpoint.py` | ✅ đã chạy với checkpoint thật — `RESULT: OK` |
 | 8. 2 GPU song song không làm sai kết quả (rank 0/1 phải khớp tuyệt đối sau 1 bước) | `test_ddp_training_step_keeps_ranks_in_sync` (`tests/test_ddp.py`) | ✅ phát hiện + sửa 2 chỗ hardcode `device="cuda"` trong `util/misc.py` (`SmoothedValue.synchronize_between_processes`, `all_gather`) chỉ vỡ khi chạy distributed trên CPU/gloo — không ảnh hưởng chạy thật trên GPU/nccl, nhưng chặn được việc debug offline |
+| 9. LoRA: no-op tại init, đóng băng đúng chỗ, không lệch khi resume | `tests/test_lora.py` (4 test) | ✅ CPU, chưa train LoRA thật trên GPU |
 
 Mục 5 bản đầy đủ (sau khi có data) — sanity check chuẩn trước khi finetune thật: overfit một
 tập nhỏ 20-50 ảnh để bắt lỗi wiring (gradient không chảy, loss không giảm...) rẻ và nhanh hơn
@@ -310,6 +341,9 @@ cân classification/box và mất khả năng so với con số 57.3 mAP đã c�
 ## Việc chưa làm
 
 - Train/eval thật — checkpoint đã sẵn sàng, chưa chạy finetune (bước tiếp theo trên GPU server).
+- LoRA (nhánh Kaggle, [§ LoRA](#lora-thay-cho-full-finetune-nhánh-kaggle)) — code xong, 4 test
+  CPU pass, **chưa train thật trên GPU**; chưa đo VRAM đỉnh thực tế để biết còn dư địa tăng
+  `batch_size` trên T4 hay không.
 - Overfit 20-50 ảnh COCO thật — mục 5 bản đầy đủ, nên chạy trước khi finetune full.
 - CDN denoising query (khác biệt lớn nhất còn lại so với DiffuDINO).
 - Box renewal + ensemble multi-step ở `ddim_sample` (xem [§ Khác biệt cố ý](#khác-biệt-cố-ý-so-với-diffudino-gốc)).

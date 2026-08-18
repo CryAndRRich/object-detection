@@ -37,7 +37,7 @@ def train_one_epoch(
     args=None,
     logger=None,
 ):
-    scaler = torch.cuda.amp.GradScaler(enabled=bool(getattr(args, "amp", False)))
+    scaler = torch.amp.GradScaler(device.type, enabled=bool(getattr(args, "amp", False)))
 
     model.train()
     criterion.train()
@@ -55,8 +55,20 @@ def train_one_epoch(
     for it, (samples, targets) in enumerate(metric_logger.log_every(data_loader, 10, header, logger=logger)):
         global_step = epoch * steps_per_epoch + it
 
-        warmup_active = apply_diffusion_warmup(args, model, global_step)
-        if warmup_active != warmup_active_last:
+        # Under LoRA, backbone/bert are frozen permanently by lora injection (main.py)
+        # and only ever receive gradient through the zero-init adapter -- the warmup
+        # schedule's temporary unfreeze would revive the frozen base weights and its
+        # temporary freeze would wrongly gate the (always-trainable) lora_A/B, since
+        # both share the same backbone.0/bert name prefix apply_diffusion_warmup
+        # matches on. Skip it entirely; LoRA's zero-init already serves the same
+        # "don't wreck pretrained features early" purpose warmup exists for.
+        use_lora = getattr(args, "use_lora", False)
+        warmup_active = False if use_lora else apply_diffusion_warmup(args, model, global_step)
+        if not use_lora and warmup_active != warmup_active_last:
+            # Skip this log under LoRA entirely -- "all towers trainable" would be
+            # actively wrong there (backbone/bert stay frozen forever; only their
+            # lora_A/B adapters train), and there is no real freeze/unfreeze
+            # transition happening for it to report in the first place.
             message = (
                 f"[step {global_step}] diffusion warm-up: freezing {args.diff_warmup_freeze_keywords}"
                 if warmup_active
@@ -70,7 +82,7 @@ def train_one_epoch(
         cap_list = [t["cap_list"] for t in targets]
         targets = [{k: v.to(device) for k, v in t.items() if torch.is_tensor(v)} for t in targets]
 
-        with torch.cuda.amp.autocast(enabled=bool(getattr(args, "amp", False))):
+        with torch.amp.autocast(device.type, enabled=bool(getattr(args, "amp", False))):
             outputs = model(samples, targets=targets, captions=captions)
             loss_dict = criterion(
                 outputs,
@@ -168,7 +180,7 @@ def evaluate(
         targets = [{k: utils.to_device(v, device) for k, v in t.items()} for t in targets]
 
         batch_size = samples.tensors.shape[0]
-        with torch.cuda.amp.autocast(enabled=bool(getattr(args, "amp", False))):
+        with torch.amp.autocast(device.type, enabled=bool(getattr(args, "amp", False))):
             outputs = model(samples, captions=[caption] * batch_size)
 
         orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)

@@ -22,6 +22,7 @@ SUITES = [
     ("test_model.py", "3-4, 6: forward pass, DDIM sampling, baseline parity"),
     ("test_data_pipeline.py", "5: transforms, ODVG dataset, training loop"),
     ("test_ddp.py", "8: 2-process DDP training step (gloo/CPU stand-in for real 2-GPU nccl)"),
+    ("test_lora.py", "LoRA injection: no-op at init, correct freeze, resume-ordering"),
 ]
 
 
