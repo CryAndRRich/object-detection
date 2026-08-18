@@ -12,12 +12,29 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import tests.tiny as tiny_module  # noqa: E402
 from engine import train_one_epoch  # noqa: E402
 from models.lora import LoRALinear, inject_lora  # noqa: E402
-from tests.tiny import build_tiny_model, fake_batch  # noqa: E402
+from tests.tiny import fake_batch  # noqa: E402
 from util.param_dicts import get_param_dict, match_name_keywords  # noqa: E402
 
 TARGETS = ["backbone.0", "bert"]
+
+
+def build_tiny_model(**kwargs):
+    """``tiny.build_tiny_model``, but with a guaranteed-fresh BERT/tokenizer.
+
+    ``tests/tiny.py`` caches the tokenizer/BertModel process-wide for speed, which
+    is fine for tests that only ever *read* the model -- but ``inject_lora``
+    replaces submodules in place, so a second call in the same process would get a
+    BERT already mutated by a previous test's injection (and
+    ``DiffuGroundingDINO.__init__`` unconditionally does
+    ``self.bert.pooler.dense.weight.requires_grad_(False)``, which crashes once
+    ``pooler.dense`` is no longer a plain ``nn.Linear``). Clearing the cache first
+    forces a genuinely independent build every time this file calls it.
+    """
+    tiny_module._CACHE.clear()
+    return tiny_module.build_tiny_model(**kwargs)
 
 
 class _Args:

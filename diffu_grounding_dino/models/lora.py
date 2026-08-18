@@ -81,10 +81,14 @@ def inject_lora(model: nn.Module, target_prefixes, rank: int, alpha: float, drop
     if not target_prefixes:
         return 0
 
+    # bert.pooler is already permanently frozen at construction time
+    # (DiffuGroundingDINO.__init__) and never used in the forward pass -- kept only
+    # so the pretrained checkpoint's bert.pooler.* keys still load. No point giving
+    # it a LoRA adapter it can never usefully train.
     targets = [
         (name, module)
         for name, module in model.named_modules()
-        if isinstance(module, nn.Linear) and match_name_keywords(name, target_prefixes)
+        if isinstance(module, nn.Linear) and match_name_keywords(name, target_prefixes) and "pooler" not in name
     ]
     for name, linear in targets:
         parent_name, _, attr = name.rpartition(".")
