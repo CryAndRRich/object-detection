@@ -1,0 +1,20 @@
+vision_encoder:
+  model_name: "vit_b32_clip"
+  pretrained: true
+  output_dim: 128
+
+text_encoder:
+  model_name: "openai/clip-vit-base-patch32"
+  output_dim: 128
+  freeze: true
+
+noise_net:
+  type: "cnn"
+  input_dim: 4
+  global_cond_dim: 256
+  down_dims: [64, 128, 256]
+  kernel_size: 3
+  n_groups: 8
+
+diffusion:
+  num_timesteps: 1000      # README official: giá trị đã train thật (yaml gốc để default 100)

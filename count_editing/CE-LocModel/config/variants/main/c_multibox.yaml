@@ -1,0 +1,46 @@
+# Variant (c) — sinh N box cùng lúc (cơ chế DiffusionDet: q_sample trên N proposal, Hungarian
+# matching, DDIM reverse có box_renewal tắt vì không có score head), giữ nguyên ResNet18 + Conv1D
+# U-Net như a_repro.yaml. Đúng nguyên tắc "mỗi variant sửa 1 thứ": so với a_repro.yaml, CHỈ có
+# `noise_net.num_proposals` (1 -> 100) và block `diffusion` (snr_scale, loss) là mới; toàn bộ
+# vision_encoder/text_encoder/noise_net.type/num_timesteps giữ nguyên y hệt.
+vision_encoder:
+  model_name: "resnet18"
+  pretrained: true
+  output_dim: 128
+
+text_encoder:
+  model_name: "openai/clip-vit-base-patch32"
+  output_dim: 128
+  freeze: true
+
+noise_net:
+  type: "cnn"
+  input_dim: 4
+  global_cond_dim: 256
+  down_dims: [64, 128, 256]
+  kernel_size: 3
+  n_groups: 8
+  # N box/lần. Phải chia hết cho 4 (ConditionalUnet1D downsample trục horizon 2 lần bằng
+  # Conv1d stride=2 rồi upsample lại 2 lần — N không chia hết 4 thì skip connection lệch chiều
+  # dài). 100 (không phải 300 như DiffusionDet gốc trên COCO): |all_bboxes| của all_phase2_V2 có
+  # median 26, mean 40,2 box/ảnh (đo trên toàn bộ 4.653+1.858+2.318 branch) — 300 proposal cho
+  # ~40 GT là quá thừa, tốn compute vô ích so với lợi ích biên.
+  num_proposals: 100
+
+diffusion:
+  num_timesteps: 1000
+  # DiffusionDet SNR_SCALE (detector.py: self.scale, mặc định 2.0) — scale x_start lên trước
+  # q_sample để toạ độ box lấn át noise schedule cố định. Không dùng khi num_proposals=1.
+  snr_scale: 2.0
+  # DDIM steps lúc test (test_mul_box.py, nhánh multi-box) — không phải num_timesteps lúc train.
+  # DiffusionDet mặc định 1 step (mode nhanh nhất); sweep giá trị lớn hơn sau khi có số liệu 1 step.
+  sampling_steps: 4
+  # "l1_giou" (mặc định): tiêu chí loss thật của DiffusionDet (loss_boxes, object-detection/
+  # diffusiondet/diffusiondet/loss.py:159-201) — L1 + GIoU trên x0 (box) đã match.
+  # "x0_mse": MSE trên x0 đã match — gần tiêu chí của (a)/(b) nhất mà vẫn nhất quán với matching.
+  #
+  # KHÔNG có lựa chọn loss trên epsilon: `noise[b,k]` là nhiễu thêm vào GT SLOT k, nên sau khi
+  # matcher gán prediction slot p sang GT g khác, không tồn tại epsilon nào vừa thuộc slot p vừa
+  # ứng với target g — ép về `noise[b,p]` là train theo nhiễu của một box PADDING trong khi khai
+  # là đang supervise GT g. DiffusionDet cùng cấu trúc này và cũng không hề dùng loss epsilon.
+  loss: "l1_giou"

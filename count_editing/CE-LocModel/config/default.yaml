@@ -1,0 +1,19 @@
+training:
+  batch_size: 32
+  learning_rate: 1e-4
+  num_epochs: 100
+  num_workers: 4
+  save_dir: "checkpoints/"
+  gradient_accumulation_steps: 1
+  seed: 42
+  data:
+    train_path: "../../data/samples/train/"
+    # val_path: "data/val/"
+    test_path: "../../data/samples/test/"
+
+diffusion:
+  num_timesteps: 100        # Total diffusion steps (Training)
+  beta_start: 0.0001
+  beta_end: 0.02
+  schedule: "linear"        # or "cosine"
+  prediction_type: "epsilon" # Predicting noise

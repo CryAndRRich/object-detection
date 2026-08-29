@@ -1,0 +1,24 @@
+vision_encoder:
+  model_name: "vit_b32_clip"
+  pretrained: true
+  output_dim: 128
+
+text_encoder:
+  model_name: "openai/clip-vit-base-patch32"
+  output_dim: 128
+  freeze: true
+
+noise_net:
+  type: "transformer"
+  input_dim: 4
+  global_cond_dim: 256
+  transformer:
+    n_layer: 8
+    n_head: 8
+    n_emb: 256
+    p_drop_emb: 0.1
+    p_drop_attn: 0.3
+    n_cond_layers: 0     # 0 = MLP cond encoder (Diffusion Policy default)
+
+diffusion:
+  num_timesteps: 1000      # README official: giá trị đã train thật (yaml gốc để default 100)

@@ -1,0 +1,92 @@
+{
+  "img": "568_b3",
+  "inpainted_bboxes": [
+    [
+      161,
+      117,
+      188,
+      191
+    ],
+    [
+      472,
+      130,
+      505,
+      205
+    ],
+    [
+      88,
+      121,
+      138,
+      191
+    ],
+    [
+      223,
+      120,
+      250,
+      198
+    ]
+  ],
+  "all_bboxes": [
+    [
+      88,
+      121,
+      138,
+      191
+    ],
+    [
+      161,
+      117,
+      188,
+      191
+    ],
+    [
+      223,
+      120,
+      250,
+      198
+    ],
+    [
+      287,
+      121,
+      328,
+      206
+    ],
+    [
+      336,
+      115,
+      378,
+      194
+    ],
+    [
+      371,
+      119,
+      409,
+      196
+    ],
+    [
+      398,
+      126,
+      448,
+      204
+    ],
+    [
+      438,
+      115,
+      470,
+      198
+    ],
+    [
+      472,
+      130,
+      505,
+      205
+    ]
+  ],
+  "class_based_caption": "flamingo",
+  "vlm_based_caption": [
+    "The flamingo is primarily white with long pink legs and a pink beak.",
+    "The flamingo is primarily white with a pink beak and legs. It has a long neck and is bending down, possibly to feed.",
+    "The flamingo is pink, has long thin legs, a long neck, and a curved beak.",
+    "The flamingo is pink, has long legs, a long neck, and is bending down near the water."
+  ]
+}

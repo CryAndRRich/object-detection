@@ -1,0 +1,116 @@
+{
+  "img": "562_b2",
+  "inpainted_bboxes": [
+    [
+      520,
+      231,
+      629,
+      265
+    ],
+    [
+      4,
+      40,
+      114,
+      81
+    ],
+    [
+      258,
+      233,
+      352,
+      282
+    ],
+    [
+      452,
+      185,
+      548,
+      240
+    ]
+  ],
+  "all_bboxes": [
+    [
+      4,
+      40,
+      114,
+      81
+    ],
+    [
+      77,
+      63,
+      187,
+      117
+    ],
+    [
+      105,
+      258,
+      216,
+      298
+    ],
+    [
+      173,
+      126,
+      278,
+      166
+    ],
+    [
+      271,
+      135,
+      373,
+      173
+    ],
+    [
+      238,
+      187,
+      358,
+      225
+    ],
+    [
+      281,
+      191,
+      379,
+      233
+    ],
+    [
+      258,
+      233,
+      352,
+      282
+    ],
+    [
+      396,
+      196,
+      477,
+      253
+    ],
+    [
+      452,
+      185,
+      548,
+      240
+    ],
+    [
+      415,
+      235,
+      508,
+      280
+    ],
+    [
+      520,
+      231,
+      629,
+      265
+    ],
+    [
+      560,
+      287,
+      669,
+      344
+    ]
+  ],
+  "class_based_caption": "flamingo",
+  "vlm_based_caption": [
+    "The flamingo has a long neck, pink and orange feathers, a long beak, and a long, thin leg.",
+    "The flamingo is pink, white, and black in color, with long legs and a long neck.",
+    "The flamingo has a long neck, pinkish-white body, orange wings, and black tail feathers.",
+    "The flamingo has a long neck, pink and white plumage, and black wings."
+  ]
+}

@@ -1,0 +1,86 @@
+{
+  "img": "2_b1",
+  "inpainted_bboxes": [
+    [
+      292,
+      236,
+      369,
+      310
+    ],
+    [
+      494,
+      227,
+      580,
+      313
+    ],
+    [
+      385,
+      226,
+      473,
+      312
+    ],
+    [
+      74,
+      208,
+      170,
+      284
+    ]
+  ],
+  "all_bboxes": [
+    [
+      31,
+      213,
+      79,
+      277
+    ],
+    [
+      74,
+      208,
+      170,
+      284
+    ],
+    [
+      183,
+      208,
+      274,
+      307
+    ],
+    [
+      292,
+      236,
+      369,
+      310
+    ],
+    [
+      385,
+      226,
+      473,
+      312
+    ],
+    [
+      494,
+      227,
+      580,
+      313
+    ],
+    [
+      114,
+      259,
+      203,
+      343
+    ],
+    [
+      31,
+      270,
+      109,
+      340
+    ]
+  ],
+  "class_based_caption": "sea shell",
+  "vlm_based_caption": [
+    "The sea shell is smooth, off-white, and has a ridged pattern.",
+    "The sea shell is oval-shaped, has a smooth texture, and exhibits a ribbed pattern.",
+    "The sea shell is smooth, oval-shaped, and has a pale color with subtle patterns.",
+    "The sea shell is smooth, off-white, and has a fan-like shape."
+  ]
+}

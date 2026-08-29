@@ -11,6 +11,12 @@ Mục tiêu bài toán giữ nguyên **OD-style open-vocabulary**: cho ảnh + p
 `"person . car . dog ."` → detect **tất cả** instance của các category đó (không phải chọn
 1 instance kiểu referring expression).
 
+Paper DiffuDETR thật ra release **3 biến thể** trong `repos/DiffuDETR/projects/`, không chỉ 2
+cái nêu trong abstract: `diffu_dino/` (DiffuDINO — cái ta ghép ở đây) và `diffu_align_detr/`
+(DiffuAlignDETR, dựa trên AlignDETR, dùng many-to-one matching thay Hungarian 1-1) — 2 project
+này **không share code diffusion**, mỗi cái tự viết lại `q_sample`/beta-schedule riêng, chỉ
+dùng chung phần tiêm timestep-embedding (`layers_diffu_detr/transformer.py`).
+
 Đây là bước khảo sát tiếp theo của dự án sau DiffusionDet (xem [`../../RESULTS.md`](../../RESULTS.md)).
 
 ## Trạng thái

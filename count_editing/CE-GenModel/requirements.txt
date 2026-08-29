@@ -1,0 +1,10 @@
+transformers
+diffusers
+datasets
+peft
+opencv-python
+ipdb
+optimum-quanto
+protobuf
+sentencepiece
+torchvision

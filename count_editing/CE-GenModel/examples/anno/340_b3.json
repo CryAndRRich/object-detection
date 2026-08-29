@@ -1,0 +1,122 @@
+{
+  "img": "340_b3",
+  "inpainted_bboxes": [
+    [
+      375,
+      6,
+      465,
+      114
+    ],
+    [
+      71,
+      119,
+      223,
+      242
+    ],
+    [
+      412,
+      39,
+      512,
+      165
+    ],
+    [
+      214,
+      156,
+      379,
+      290
+    ]
+  ],
+  "all_bboxes": [
+    [
+      71,
+      119,
+      223,
+      242
+    ],
+    [
+      15,
+      180,
+      147,
+      307
+    ],
+    [
+      149,
+      60,
+      326,
+      159
+    ],
+    [
+      214,
+      156,
+      379,
+      290
+    ],
+    [
+      335,
+      110,
+      455,
+      266
+    ],
+    [
+      412,
+      39,
+      512,
+      165
+    ],
+    [
+      375,
+      6,
+      465,
+      114
+    ],
+    [
+      244,
+      -1,
+      319,
+      70
+    ],
+    [
+      310,
+      -1,
+      410,
+      87
+    ],
+    [
+      185,
+      -1,
+      247,
+      68
+    ],
+    [
+      122,
+      -1,
+      187,
+      101
+    ],
+    [
+      28,
+      13,
+      127,
+      107
+    ],
+    [
+      -1,
+      68,
+      96,
+      142
+    ],
+    [
+      153,
+      256,
+      344,
+      360
+    ]
+  ],
+  "class_based_caption": "strawberry",
+  "vlm_based_caption": [
+    "The strawberry is red, juicy, and has a slightly rough texture with visible seeds.",
+    "The strawberry is red, has a slightly elongated shape, and is covered with small, raised seeds.",
+    "The strawberry is red, ripe, and has a slightly elongated shape with visible seeds.",
+    "The strawberry is red, ripe, and has a slightly elongated shape with visible seeds on its surface."
+  ]
+}

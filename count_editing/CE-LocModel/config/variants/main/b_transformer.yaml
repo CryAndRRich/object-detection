@@ -1,0 +1,30 @@
+# Variant (b) — đổi noise net CNN-based -> Transformer-based, mọi thứ khác giữ nguyên (a).
+#
+# Kiến trúc giống hệt `config/variants/resnet18_transformer.yaml` (1 trong 8 biến thể ablation
+# encoder) — không tạo model mới, chỉ đặt tên/save_dir riêng (`checkpoints/main/b_transformer/`).
+# Đúng nguyên tắc "mỗi variant sửa 1 thứ": so với a_repro.yaml, CHỈ có block `noise_net` đổi
+# (type: cnn -> transformer); vision_encoder/text_encoder/diffusion giữ nguyên y hệt.
+vision_encoder:
+  model_name: "resnet18"
+  pretrained: true
+  output_dim: 128
+
+text_encoder:
+  model_name: "openai/clip-vit-base-patch32"
+  output_dim: 128
+  freeze: true
+
+noise_net:
+  type: "transformer"
+  input_dim: 4
+  global_cond_dim: 256
+  transformer:
+    n_layer: 8
+    n_head: 8
+    n_emb: 256
+    p_drop_emb: 0.1
+    p_drop_attn: 0.3
+    n_cond_layers: 0     # 0 = MLP cond encoder (Diffusion Policy default, mọi config released)
+
+diffusion:
+  num_timesteps: 1000      # README official: giá trị đã train thật (yaml gốc để default 100)

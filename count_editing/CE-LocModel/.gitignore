@@ -1,0 +1,5 @@
+# Ignore the data folder
+samples/
+samples_test/
+samples_real/
+checkpoints/

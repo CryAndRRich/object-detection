@@ -1,0 +1,19 @@
+vision_encoder:
+  model_name: "resnet18"
+  pretrained: true
+  output_dim: 128           # Dimension of visual features
+
+text_encoder:
+  model_name: "openai/clip-vit-base-patch32"
+  output_dim: 128           # Dimension of text features
+  freeze: true
+
+noise_net:
+  input_dim: 4              # Bounding Box (x, y, w, h)
+  global_cond_dim: 256      # 128 (Vision) + 128 (Text)
+  down_dims: [64, 128, 256] # Channel sizes for U-Net
+  kernel_size: 3
+  n_groups: 8
+
+diffusion:
+  num_timesteps: 100 # Make sure this matches what you want!

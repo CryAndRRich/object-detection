@@ -263,6 +263,30 @@ baseline 27,7 AP. Bản trên HuggingFace `bryanbocao/coco_minitrain` là **tậ
 đối chiếu tên file thì chỉ 5.281/25.000 trùng. Đổi nguồn dữ liệu mà không kiểm là mất
 luôn tính so sánh được.
 
+**`z_T` là Gaussian, không phải uniform trong ảnh.** Cả lúc train (nhiễu cộng vào GT,
+`q_sample`) lẫn lúc infer (khởi tạo `img = torch.randn(...)`, `detector.py:197`) đều dùng
+N(0,1) — không có chỗ nào sample uniform trong không gian ảnh. Cảm giác "box phủ đều khắp
+ảnh" chỉ đến từ phép decode sau đó (`clamp` → `/scale+1)/2` → `box_cxcywh_to_xyxy` →
+`*images_whwh`), không phải vì nhiễu là uniform. Padding GT lúc train (`box_placeholder`,
+dòng 384) cũng là Gaussian (`N(0.5, 1/6²)`), không phải uniform — đã ablate cả 2 loại trong
+paper, Gaussian thắng.
+
+**Proposal có tự nhìn nhau, qua self-attention — không chỉ qua backbone chung.** `head.py:185`:
+`self.self_attn = nn.MultiheadAttention(...)` chạy trên `pro_features` (feature riêng mỗi
+proposal) theo chiều "N proposal", ở **mỗi trong 6 stage cascade** — y hệt self-attention giữa
+object query trong DETR. Nên 1 proposal "biết" proposal khác đang tập trung vùng nào, nhưng
+gián tiếp qua feature đã học, không phải qua so trực tiếp toạ độ `(x,y,w,h)`.
+
+**Với cấu hình nhiều bước (`SAMPLE_STEP>1`), bước cuối cùng bị loại khỏi kết quả cuối.**
+`ddim_sample` (dòng 220-246): ở cặp `(time, time_next)` cuối (`time_next<0`), code chạy
+`img = x_start; continue` **trước** khi tới đoạn `if self.use_ensemble: ensemble_coord.append(...)`
+— nghĩa là lần gọi head cuối cùng (dù vẫn tốn compute) **không được** gộp vào pool NMS cuối
+cùng. Với `SAMPLE_STEP=4`, kết quả hiển thị chỉ đến từ 3 bước đầu, không phải cả 4. Không ảnh
+hưởng tới các số đã đo trong `RESULTS.md` (đó là hành vi thật của model, đã đo đúng) — chỉ dễ
+gây hiểu lầm nếu tự viết code visualize/debug per-step mà không biết điều này (xem
+[`../../notebooks/README.md`](../../notebooks/README.md), mục
+`diffusiondet_diffusion_trace.ipynb`).
+
 ## Ghi công
 
 DiffusionDet: Shoufa Chen, Peize Sun, Yibing Song, Ping Luo — [arXiv 2211.09788](https://arxiv.org/abs/2211.09788).
