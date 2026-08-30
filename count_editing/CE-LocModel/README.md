@@ -227,6 +227,91 @@ every one of the N output boxes comes from the single final denoising step, unfi
 listed as still-missing work in [`../../CLAUDE.md`](../../CLAUDE.md) ("Còn thiếu để DiffuGroundingDINO
 dùng được cho CE-Loc" — a score head is needed there too, for the same underlying reason).
 
+## Hai bài toán, hai nhánh dữ liệu
+
+Cùng một model, hai bài toán khác nhau — chọn bằng `--task`:
+
+| | `--task add` (gốc) | `--task detect` (mới, 2026-08-30) |
+|---|---|---|
+| Input | ảnh đã xoá vật + **density** + text | `ground_truth.jpg` + text (**không density**) |
+| Target | 1 `target_bbox` (chỗ để thêm vật) | `all_bboxes` — mọi vật cùng class đang có |
+| Dữ liệu | `samples/` + lookup `all_phase2_V2` | `all_phase2_V2` trực tiếp |
+| Dataset | `data/dataset.py` | `data/ce130_detection_dataset.py` |
+| Config | `config/variants/main/` | `config/variants/detect/` |
+| Eval | `test_mul_box.py` (C-NLL, IoU@K) | `eval_detection.py` (Precision/Recall) |
+
+Nhánh **detect** là object detection **có điều kiện theo class**: text chỉ định class, model
+sinh box của riêng class đó. Không cần class head. Muốn detect cả ảnh thì lặp qua từng class.
+
+**Ba variant của nhánh detect** (mỗi cái đổi đúng 1 thứ so với cái trước):
+
+| | Config | Kiến trúc | Sinh box |
+|---|---|---|---|
+| (1) | `detect/a_cnn_1box` | ResNet18 + Conv1D U-Net | 1 box/lần, infer chạy K lần (`--k`, mặc định 30) |
+| (2) | `detect/b_transformer_1box` | ResNet18 + **Transformer** | 1 box/lần |
+| (3) | `detect/c_transformer_multibox` | ResNet18 + Transformer | **N=300 box/lần** (cơ chế DiffusionDet) |
+
+```bash
+python tools/run_on_free_gpu.py -- train_w_args.py --variant detect/a_cnn_1box \
+    --task detect --epochs 200 --batch_size 32 --lr 5e-5 --num_workers 8
+python tools/run_on_free_gpu.py -- eval_detection.py \
+    --checkpoint checkpoints/detect/a_cnn_1box/best_model.pth \
+    --variant detect/a_cnn_1box --split test
+```
+
+### Dữ liệu nhánh detect
+
+`all_phase2_V2` có sẵn split **train/val/test**, đã kiểm **overlap = 0**. Nhưng các branch
+`{img}_b1/_b2/_b3` **dùng chung một `ground_truth.jpg`** (chỉ khác thứ tự xoá vật, thứ không liên
+quan tới detection) — nên phải dedupe theo ảnh gốc, nếu không sẽ nhân đôi dữ liệu:
+
+| split | branch | **ảnh gốc thật** | box/ảnh (mean / median / max) |
+|---|---|---|---|
+| train | 4.653 | **1.911** | 37,6 / 20 / 501 |
+| val | 2.318 | **908** | 42,2 / 21 / 1229 |
+| test | 1.858 | **779** | 48,5 / 30 / 505 |
+
+Dày hơn COCO rất nhiều (COCO-minitrain chỉ 2,5 box mỗi cặp ảnh-class), nên đây mới là bộ dữ liệu
+mà variant (3) phát huy được — `num_proposals=300` phủ ~99% ảnh không bị cắt bớt box.
+
+**Vì sao bỏ density ở nhánh detect:** `all_phase2_V2` không kèm density cho `ground_truth.jpg`, và
+density trong `samples/` vốn được vẽ từ chính các vật đang có — tức chính `all_bboxes`, tức chính
+**target**. Đưa vào input là rò rỉ đáp án. Nên `vision_encoder.in_channels: 3` và `conv1` giữ
+nguyên weight ImageNet (không mở rộng kênh).
+
+**Kỳ vọng thực tế:** điều kiện hoá vẫn là **1 vector 256-d cho cả ảnh** (SpatialSoftmax giữ
+nguyên) — box không đọc được ảnh tại vị trí của chính nó, tức thiếu đúng năng lực nền tảng của
+mọi detector. P/R vì thế **sẽ thấp hơn nhiều so với DiffusionDet/GroundingDINO**, và đó là kết quả
+*đúng như dự đoán*, không phải lỗi implement. Giá trị của thí nghiệm là đo được cái giá của điều
+kiện hoá yếu trên một bài toán có baseline rõ, và tách bạch đóng góp của (2) noise net transformer
+với (3) sinh nhiều box cùng lúc.
+
+**Chưa có AP:** xếp hạng box theo độ tin cậy cần score head, thứ CE-Loc chưa có. P/R không cần
+score nên làm được ngay; AP để giai đoạn sau (xem `../../CLAUDE.md`).
+
+### FiLM: `cond_predict_scale` bật lên True (2026-08-30)
+
+`ConditionalResidualBlock1D` có 2 nhánh điều kiện hoá:
+
+```python
+if cond_predict_scale:  out = scale * out + bias   # FiLM đầy đủ
+else:                   out = out + embed          # chỉ cộng bias
+```
+
+Mặc định của class là `False`, và **CE-Loc gốc chưa bao giờ truyền key này** → luôn chạy nhánh
+chỉ-cộng-bias. Trong khi đó **mọi config released của Diffusion Policy đều đặt
+`cond_predict_scale: True`** (`refs/repos/diffusion_policy/diffusion_policy/config/*.yaml`) — tức
+bản CE-Loc gốc điều kiện hoá yếu hơn chính kiến trúc nó copy sang.
+
+Đã nối dây qua yaml và **bật `true` ở cả 6 config CNN** (4 ablation + `a_repro` + `c_multibox`).
+Chi phí: **+919K tham số** cho noise net (3,85M → 4,77M, +24%), shape đúng ở mọi horizon
+(N=1/32/64/100 đã kiểm). Công thức đối chiếu từng dòng với `conditional_unet1d.py` gốc — khớp
+tuyệt đối (reshape `[B,2,C,1]`, tách scale/bias, `scale*out + bias`).
+
+Hệ quả khi báo cáo: `a_repro` **không còn là reproduce thuần** bản CE-Loc gốc nữa ở điểm này —
+nó là "CE-Loc gốc + FiLM đúng như Diffusion Policy". Muốn có bản reproduce thuần để so thì đặt
+`cond_predict_scale: false` trong config, không cần sửa code.
+
 ### A coordinate-space trap worth knowing about
 
 CE-Loc normalizes **sizes with the same affine map as centers** (`data/dataset.py::_normalize_bbox`,
@@ -303,7 +388,7 @@ ObjectPlacementPolicy
 │                              → Linear + Mish → 128D
 └── noise_net                  type: "cnn" | "transformer"; horizon = num_proposals (1 for (a)/(b), 100 for (c))
     ├── ConditionalUnet1D      1D U-Net, input [B,N,4] (cx,cy,w,h) x N boxes
-    │                          conditioned on 256D by FiLM-style addition;
+    │                          conditioned on 256D by FiLM (scale*out + bias);
     │                          the box axis is halved twice and rebuilt through
     │                          skip connections, so valid N is 1, or >=8 and
     │                          divisible by 4 (N=4 is NOT valid; enforced in

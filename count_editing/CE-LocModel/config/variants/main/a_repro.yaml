@@ -21,6 +21,9 @@ noise_net:
   down_dims: [64, 128, 256] # Channel sizes for U-Net
   kernel_size: 3
   n_groups: 8
+  # FiLM đầy đủ: out = scale*out + bias. Diffusion Policy gốc đặt True ở MỌI config
+  # released; CE-Loc copy sang nhưng không truyền key này nên chạy ở nhánh chỉ-cộng-bias.
+  cond_predict_scale: true
 
 diffusion:
   num_timesteps: 1000      # README official: giá trị đã train thật (yaml gốc để default 100)

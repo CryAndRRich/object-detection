@@ -45,6 +45,8 @@ class ObjectPlacementPolicy(nn.Module):
             output_dim=vis_dim,
             model_name=cfg['vision_encoder'].get('model_name', 'resnet18'),
             pretrained=cfg['vision_encoder'].get('pretrained', True),
+            # 4 = RGB+density (bài add trên CE-130), 3 = chỉ RGB (bài detection).
+            in_channels=cfg['vision_encoder'].get('in_channels', 4),
         )
 
         self.text_encoder = CLIPTextEncoder(
@@ -60,7 +62,13 @@ class ObjectPlacementPolicy(nn.Module):
                 global_cond_dim=cond_dim,
                 down_dims=cfg['noise_net']['down_dims'],
                 kernel_size=cfg['noise_net']['kernel_size'],
-                n_groups=cfg['noise_net']['n_groups']
+                n_groups=cfg['noise_net']['n_groups'],
+                # FiLM đầy đủ (out = scale*out + bias) thay vì chỉ cộng bias.
+                # ConditionalResidualBlock1D mặc định False, và CE-Loc gốc chưa
+                # bao giờ truyền key này -> luôn chạy ở nhánh `out = out + embed`,
+                # tức YẾU HƠN chính Diffusion Policy mà nó copy sang (mọi config
+                # released của Diffusion Policy đều đặt cond_predict_scale: True).
+                cond_predict_scale=cfg['noise_net'].get('cond_predict_scale', True),
             )
         elif self.noise_net_type == 'transformer':
             t_cfg = cfg['noise_net'].get('transformer', {})
@@ -159,6 +167,7 @@ class ObjectPlacementPolicy(nn.Module):
         return noise_pred.squeeze(1) if squeeze_back else noise_pred
 
     def compute_loss(self, rgb, density, text, gt_bbox):
+        # density=None khi vision_encoder.in_channels == 3 (nhánh detection).
         # gt_bbox shape: [Batch, 4]
         
         # 1. Encode Conditions
@@ -184,6 +193,7 @@ class ObjectPlacementPolicy(nn.Module):
         return torch.nn.functional.mse_loss(noise_pred, noise)
 
     def compute_loss_multibox(self, rgb, density, text, gt_boxes, box_mask):
+        # density=None khi vision_encoder.in_channels == 3 (nhánh detection).
         """
         Variant (c) loss — N boxes denoised jointly per image, matched against
         that image's real (non-padding) boxes with Hungarian assignment before

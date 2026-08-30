@@ -1,7 +1,7 @@
 # Variant (c) — sinh N box cùng lúc (cơ chế DiffusionDet: q_sample trên N proposal, Hungarian
 # matching, DDIM reverse có box_renewal tắt vì không có score head), giữ nguyên ResNet18 + Conv1D
 # U-Net như a_repro.yaml. Đúng nguyên tắc "mỗi variant sửa 1 thứ": so với a_repro.yaml, CHỈ có
-# `noise_net.num_proposals` (1 -> 100) và block `diffusion` (snr_scale, loss) là mới; toàn bộ
+# `noise_net.num_proposals` (1 -> 300) và block `diffusion` (snr_scale, loss) là mới; toàn bộ
 # vision_encoder/text_encoder/noise_net.type/num_timesteps giữ nguyên y hệt.
 vision_encoder:
   model_name: "resnet18"
@@ -20,12 +20,16 @@ noise_net:
   down_dims: [64, 128, 256]
   kernel_size: 3
   n_groups: 8
-  # N box/lần. Phải chia hết cho 4 (ConditionalUnet1D downsample trục horizon 2 lần bằng
-  # Conv1d stride=2 rồi upsample lại 2 lần — N không chia hết 4 thì skip connection lệch chiều
-  # dài). 100 (không phải 300 như DiffusionDet gốc trên COCO): |all_bboxes| của all_phase2_V2 có
-  # median 26, mean 40,2 box/ảnh (đo trên toàn bộ 4.653+1.858+2.318 branch) — 300 proposal cho
-  # ~40 GT là quá thừa, tốn compute vô ích so với lợi ích biên.
-  num_proposals: 100
+  # FiLM đầy đủ: out = scale*out + bias. Diffusion Policy gốc đặt True ở MỌI config
+  # released; CE-Loc copy sang nhưng không truyền key này nên chạy ở nhánh chỉ-cộng-bias.
+  cond_predict_scale: true
+  # N box/lần. Hợp lệ: N=1, hoặc N>=8 và chia hết 4 (ConditionalUnet1D halve trục box 2 lần rồi
+  # dựng lại qua skip connection; N=4 KHÔNG hợp lệ dù chia hết 4 — xem guard trong
+  # models/diffusion_module.py, đã quét thực nghiệm N=1..140).
+  # 300 = đúng giá trị DiffusionDet gốc dùng trên COCO. Trên CE-130 detection: đo trên 3.598 ảnh
+  # (đã dedupe branch) thì all_bboxes có mean 41,1 / median 22 / max 1229 box, N=300 phủ 99,4% ảnh
+  # không bị cắt bớt box.
+  num_proposals: 300
 
 diffusion:
   num_timesteps: 1000

@@ -30,9 +30,22 @@ def _expand_conv2d_to_4ch(conv: nn.Conv2d) -> nn.Conv2d:
 
 
 class SpatialVisualEncoder(nn.Module):
-    def __init__(self, output_dim=64, model_name="resnet18", pretrained=True):
+    def __init__(self, output_dim=64, model_name="resnet18", pretrained=True, in_channels=4):
+        """
+        in_channels: 4 = RGB + density map (bài toán add gốc của CE-Loc, mọi
+            config CE-130 cũ). 3 = chỉ RGB, dùng cho bài toán DETECTION trên
+            CE-130: `all_phase2_V2` không có density cho `ground_truth.jpg`, và
+            density trong `samples/` vốn được vẽ từ chính các vật đang có —
+            tức là chính `all_bboxes`, tức là chính TARGET của bài detection.
+            Đưa nó vào input sẽ là rò rỉ đáp án, nên nhánh detection bỏ hẳn.
+            Với in_channels=3 thì conv1/patch_embedding giữ nguyên weight
+            ImageNet/CLIP, không phải mở rộng kênh.
+        """
         super().__init__()
         self.model_name = model_name
+        if in_channels not in (3, 4):
+            raise ValueError(f"in_channels must be 3 or 4, got {in_channels}")
+        self.in_channels = in_channels
 
         if model_name in RESNET_NAMES:
             self._build_resnet(model_name, pretrained)
@@ -60,7 +73,9 @@ class SpatialVisualEncoder(nn.Module):
 
         # MODIFY FIRST LAYER: Change input channels from 3 to 4 (RGB + Density).
         # We keep the original weights for RGB and initialize the Density weights.
-        resnet.conv1 = _expand_conv2d_to_4ch(resnet.conv1)
+        # Skipped for in_channels=3 (detection): conv1 keeps its ImageNet weights untouched.
+        if self.in_channels == 4:
+            resnet.conv1 = _expand_conv2d_to_4ch(resnet.conv1)
 
         # Remove the classification head (fc) and pooling to keep spatial features.
         self.backbone = nn.Sequential(*list(resnet.children())[:-2])
@@ -72,9 +87,10 @@ class SpatialVisualEncoder(nn.Module):
         else:
             from transformers import CLIPVisionConfig
             vit = CLIPVisionModel(CLIPVisionConfig.from_pretrained(VIT_PRETRAINED))
-        vit.vision_model.embeddings.patch_embedding = _expand_conv2d_to_4ch(
-            vit.vision_model.embeddings.patch_embedding
-        )
+        if self.in_channels == 4:
+            vit.vision_model.embeddings.patch_embedding = _expand_conv2d_to_4ch(
+                vit.vision_model.embeddings.patch_embedding
+            )
         # post_layernorm only ever applies to the pooled CLS output, which
         # _vit_forward drops — leaving it trainable puts two tensors in the
         # optimizer that can never receive a gradient.
@@ -103,9 +119,17 @@ class SpatialVisualEncoder(nn.Module):
         # [B, N, D] -> [B, D, H', W'] so SpatialSoftmax can pool over space.
         return tokens.transpose(1, 2).reshape(tokens.shape[0], -1, side, side)
 
-    def forward(self, rgb_image, density_map):
-        # rgb: [B, 3, H, W], density: [B, 1, H, W]
-        x = torch.cat([rgb_image, density_map], dim=1)
+    def forward(self, rgb_image, density_map=None):
+        # rgb: [B, 3, H, W], density: [B, 1, H, W] or None (in_channels=3)
+        if self.in_channels == 4:
+            if density_map is None:
+                raise ValueError(
+                    "in_channels=4 but density_map is None — pass a density map, "
+                    "or build the encoder with in_channels=3 (detection branch)."
+                )
+            x = torch.cat([rgb_image, density_map], dim=1)
+        else:
+            x = rgb_image
         if self.model_name == VIT_NAME:
             features = self._vit_forward(x)
         else:

@@ -1,6 +1,10 @@
 # dữ liệu, weight, kết quả không đưa vào git (quá lớn, up thủ công lên server)
 weights/
-data/
+# CHỈ thư mục data/ ở gốc repo (dataset thật), KHÔNG phải mọi thư mục tên data/.
+# Không có dấu / đầu dòng thì rule này nuốt luôn package code
+# count_editing/CE-LocModel/data/ (dataset.py, ce130_detection_dataset.py) ->
+# server pull về sẽ thiếu và crash ngay ở `from data.dataset import ...`.
+/data/
 datasets/
 output/
 outputs/

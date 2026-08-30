@@ -10,6 +10,7 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader
 
 from data.dataset import ObjectPlacementDataset
+from data.ce130_detection_dataset import CE130DetectionDataset
 from models.diffusion_module import ObjectPlacementPolicy
 from train import load_config, save_training_history
 
@@ -35,8 +36,18 @@ def get_args():
     )
     parser.add_argument(
         "--all_phase2_dir", type=str, default="../../data/all_phase2_V2",
-        help="only used when the variant config sets noise_net.num_proposals > 1 "
-             "(variant (c)) — source of the multi-box targets",
+        help="nguồn dữ liệu: multi-box target của bài add (--task add), hoặc toàn "
+             "bộ dữ liệu của bài detection (--task detect)",
+    )
+    parser.add_argument(
+        "--task", choices=["add", "detect"], default="add",
+        help="add = bài gốc CE-Loc (sinh box vào vùng trống, đọc samples/ + density). "
+             "detect = object detection có điều kiện theo class trên CE-130 "
+             "(ground_truth.jpg + all_bboxes, KHÔNG density).",
+    )
+    parser.add_argument(
+        "--max_boxes", type=int, default=None,
+        help="--task detect: bỏ ảnh có nhiều hơn ngần này box (CE-130 có ảnh tới 1229 box)",
     )
     return parser.parse_args()
 
@@ -67,12 +78,19 @@ def train():
     # target set (all_bboxes from all_phase2_V2) instead of one target_bbox.
     num_proposals = model_cfg["noise_net"].get("num_proposals", 1)
     multi_box = num_proposals > 1
-    data_root = train_cfg["training"]["data"]["train_path"]
-    dataset_kwargs = {"use_cache": args.use_cache}
-    if multi_box:
-        dataset_kwargs.update(multi_box=True, num_proposals=num_proposals,
-                              all_phase2_dir=args.all_phase2_dir)
-    train_dataset = ObjectPlacementDataset(data_root, **dataset_kwargs)
+    if args.task == "detect":
+        # Bài detection: ảnh gốc + toàn bộ box cùng class, không density.
+        train_dataset = CE130DetectionDataset(
+            args.all_phase2_dir, split="train",
+            num_proposals=num_proposals, max_boxes=args.max_boxes,
+        )
+    else:
+        data_root = train_cfg["training"]["data"]["train_path"]
+        dataset_kwargs = {"use_cache": args.use_cache}
+        if multi_box:
+            dataset_kwargs.update(multi_box=True, num_proposals=num_proposals,
+                                  all_phase2_dir=args.all_phase2_dir)
+        train_dataset = ObjectPlacementDataset(data_root, **dataset_kwargs)
     # train.py hardcoded num_workers=4 even though default.yaml carries the key.
     num_workers = args.num_workers
     if num_workers is None:
@@ -88,7 +106,8 @@ def train():
     )
     print(f"Found {len(train_dataset)} training samples "
           f"(cache={'on' if args.use_cache else 'off'}, num_workers={num_workers}, "
-          f"multi_box={'on (N=' + str(num_proposals) + ')' if multi_box else 'off'}).")
+          f"multi_box={'on (N=' + str(num_proposals) + ')' if multi_box else 'off'}, "
+          f"task={args.task}).")
 
     # Model
     model = ObjectPlacementPolicy(model_cfg)
@@ -110,7 +129,9 @@ def train():
 
         for batch in train_loader:
             rgb = batch["pixel_values"].to(device)
-            density = batch["density_map"].to(device)
+            # Nhánh detect không có density (in_channels=3) -> truyền None.
+            density = (batch["density_map"].to(device)
+                       if "density_map" in batch else None)
             text = batch["text"]
 
             optimizer.zero_grad()
@@ -147,7 +168,7 @@ def train():
         # test_mul_box.py expect (checkpoint['args']['num_steps']) — the original
         # train.py did not save this, which silently fell back to a default
         # num_timesteps=100 at eval time regardless of what the variant used.
-        ckpt_args = {"num_steps": num_steps, "variant": args.variant}
+        ckpt_args = {"num_steps": num_steps, "variant": args.variant, "task": args.task}
 
         if avg_loss < best_loss:
             best_loss = avg_loss

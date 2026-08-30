@@ -1,0 +1,37 @@
+# Variant (3) — Transformer + cơ chế sinh box/loss của DiffusionDet: sinh N box
+# CÙNG LÚC (q_sample trên N proposal, Hungarian matching, DDIM). So với
+# b_transformer_1box.yaml CHỈ đổi num_proposals (1 -> 300) + block diffusion
+# (snr_scale/sampling_steps/loss, vốn chỉ có tác dụng ở nhánh multi-box).
+vision_encoder:
+  model_name: "resnet18"
+  pretrained: true
+  output_dim: 128
+  in_channels: 3
+
+text_encoder:
+  model_name: "openai/clip-vit-base-patch32"
+  output_dim: 128
+  freeze: true
+
+noise_net:
+  type: "transformer"
+  input_dim: 4
+  global_cond_dim: 256
+  transformer:
+    n_layer: 8
+    n_head: 8
+    n_emb: 256
+    p_drop_emb: 0.1
+    p_drop_attn: 0.3
+    n_cond_layers: 0
+  # 300 = đúng giá trị DiffusionDet gốc. Nhánh transformer không bị ràng buộc
+  # "N chia hết 4" như ConditionalUnet1D (không có downsample trục box).
+  # Trên CE-130 detection: box/ảnh mean 37,6-48,5 tuỳ split, max 1229; N=300 phủ
+  # ~99% ảnh không bị cắt bớt box.
+  num_proposals: 300
+
+diffusion:
+  num_timesteps: 1000
+  snr_scale: 2.0        # DiffusionDet SNR_SCALE
+  sampling_steps: 4     # DDIM steps lúc test
+  loss: "l1_giou"       # L1 + GIoU trên x0 đã match, đúng loss_boxes của DiffusionDet

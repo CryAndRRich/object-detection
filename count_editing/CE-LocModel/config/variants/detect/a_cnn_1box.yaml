@@ -1,0 +1,31 @@
+# Variant (1) — CE-Loc gốc: ResNet18 + Conv1D U-Net, sinh 1 box/lần.
+# Bài toán: DETECTION có điều kiện theo class trên CE-130 (ảnh + tên class ->
+# box của riêng class đó), KHÔNG phải bài add vào vùng trống.
+# Lúc infer chạy K lần sampling để ra nhiều box (xem eval_detection.py --k).
+vision_encoder:
+  model_name: "resnet18"
+  pretrained: true
+  output_dim: 128
+  # 3 = chỉ RGB. Bài detection bỏ density: all_phase2_V2 không có density cho
+  # ground_truth.jpg, và density của samples/ vốn vẽ từ chính các vật đang có
+  # (= all_bboxes = target) nên đưa vào input là rò rỉ đáp án.
+  in_channels: 3
+
+text_encoder:
+  model_name: "openai/clip-vit-base-patch32"
+  output_dim: 128
+  freeze: true
+
+noise_net:
+  type: "cnn"
+  input_dim: 4
+  global_cond_dim: 256
+  down_dims: [64, 128, 256]
+  kernel_size: 3
+  n_groups: 8
+  # FiLM đầy đủ (out = scale*out + bias), khớp Diffusion Policy gốc.
+  cond_predict_scale: true
+  num_proposals: 1
+
+diffusion:
+  num_timesteps: 1000
