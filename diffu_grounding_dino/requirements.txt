@@ -3,8 +3,12 @@
 # and no compiled CUDA extension for deformable attention (models/ops/ms_deform_attn.py
 # has a pure-PyTorch path, and uses the compiled kernel only if it happens to exist).
 
-torch>=2.0
-torchvision>=0.15
+# Driver 535 supports CUDA 12.2 at most.  Keep the wheels on CUDA 12.1, which
+# is compatible with that driver, rather than allowing pip to select newer
+# CUDA builds (for example torch +cu130).
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.5.1+cu121
+torchvision==0.20.1+cu121
 transformers>=4.30,<5
 numpy>=1.23
 Pillow>=9.0
