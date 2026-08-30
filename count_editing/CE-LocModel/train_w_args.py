@@ -3,6 +3,13 @@ import datetime
 import os
 import shutil
 import time
+import warnings
+
+# cuDNN v8 heuristics đôi khi thử một execution plan không chạy được rồi TỰ
+# fallback sang plan khác — kết quả vẫn đúng, chỉ ồn log. Chỉ lọc đúng message
+# này, không đụng gì tới cách tính (không bật cudnn.benchmark), nên số liệu
+# không đổi. Warning cuDNN khác (nếu có) vẫn hiện bình thường.
+warnings.filterwarnings("ignore", message=".*Plan failed with a cudnnException.*")
 
 import torch
 import yaml
@@ -120,6 +127,8 @@ def train():
 
     best_loss = float("inf")
     loss_history = []
+    batches_per_epoch = len(train_loader)
+    batch_size = train_cfg["training"]["batch_size"]
     train_start = time.monotonic()
 
     for epoch in range(num_epochs):
@@ -155,11 +164,20 @@ def train():
         epochs_done = epoch + 1
         avg_epoch_time = elapsed / epochs_done
         eta = avg_epoch_time * (num_epochs - epochs_done)
+        is_best = avg_loss < best_loss
+        # flush=True: nohup buffer stdout theo block, không có nó thì file log
+        # đứng im hàng phút rồi mới xả ra một lúc -> tưởng job treo.
         print(
-            f"[{args.variant}] Epoch [{epochs_done}/{num_epochs}] Loss: {avg_loss:.4f} "
-            f"| epoch time: {_format_duration(epoch_time)} "
-            f"| elapsed: {_format_duration(elapsed)} "
-            f"| ETA: {_format_duration(eta)}"
+            f"[{args.variant}] Epoch [{epochs_done}/{num_epochs}] "
+            f"loss={avg_loss:.4f} best={min(avg_loss, best_loss):.4f}"
+            f"{' *' if is_best else '  '} "
+            f"| lr={optimizer.param_groups[0]['lr']:.2e} "
+            f"| {batches_per_epoch} batch x bs={batch_size} "
+            f"| epoch {_format_duration(epoch_time)} "
+            f"({epoch_time / max(batches_per_epoch, 1) * 1000:.0f} ms/batch) "
+            f"| elapsed {_format_duration(elapsed)} "
+            f"| ETA {_format_duration(eta)}",
+            flush=True,
         )
 
         save_training_history(save_dir, loss_history)
@@ -184,7 +202,9 @@ def train():
             )
             print(f"  -> Saved Best Model (Loss: {best_loss:.4f})")
 
-        if (epoch + 1) % 10 == 0:
+        # Bản gốc chỉ lưu mỗi 10 epoch -> chạy --epochs 205 thì trạng thái cuối
+        # (epoch 205) không bao giờ được ghi. Thêm điều kiện epoch cuối cùng.
+        if (epoch + 1) % 10 == 0 or epochs_done == num_epochs:
             torch.save(
                 {
                     "epoch": epoch,

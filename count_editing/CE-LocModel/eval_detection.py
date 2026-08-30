@@ -26,6 +26,10 @@ import datetime
 import json
 import os
 import time
+import warnings
+
+# Xem ghi chú trong train_w_args.py: cuDNN tự fallback, chỉ ồn log.
+warnings.filterwarnings("ignore", message=".*Plan failed with a cudnnException.*")
 
 import numpy as np
 import torch

@@ -17,9 +17,14 @@ class SpatialSoftmax(nn.Module):
         N, C, H, W = feature_map.shape
         
         # 1. Create coordinate grid
+        # indexing="ij" là ĐÚNG hành vi mặc định cũ (đã kiểm: không truyền
+        # indexing cho kết quả bằng bit với indexing="ij"; "xy" thì tráo trục,
+        # shape [W,H] thay vì [H,W]). Truyền tường minh chỉ để tắt UserWarning
+        # "torch.meshgrid: in an upcoming release..." — KHÔNG đổi một con số nào.
         pos_x, pos_y = torch.meshgrid(
             torch.linspace(-1, 1, H, device=feature_map.device),
-            torch.linspace(-1, 1, W, device=feature_map.device)
+            torch.linspace(-1, 1, W, device=feature_map.device),
+            indexing="ij",
         )
         pos_x = pos_x.reshape(H * W)
         pos_y = pos_y.reshape(H * W)
