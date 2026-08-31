@@ -19,6 +19,7 @@ from torch.utils.data import DataLoader
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data.ce130_detection_dataset import CE130DetectionDataset  # noqa: E402
+from data.coco_detection_dataset import CocoDetectionDataset  # noqa: E402
 from models.diffusion_module import ObjectPlacementPolicy  # noqa: E402
 from train import load_config  # noqa: E402
 
@@ -35,8 +36,14 @@ def measure(variant, args, train_cfg):
     multi_box = N > 1
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    ds = CE130DetectionDataset(args.all_phase2_dir, split="train",
-                               num_proposals=N, max_boxes=args.max_boxes)
+    if args.task == "coco":
+        ds = CocoDetectionDataset(
+            os.path.join(args.coco_root, "coco_minitrain/annotations/instances_minitrain2017.json"),
+            os.path.join(args.coco_root, "coco_minitrain/images/train2017"),
+            num_proposals=N, max_boxes=args.max_boxes)
+    else:
+        ds = CE130DetectionDataset(args.all_phase2_dir, split="train",
+                                   num_proposals=N, max_boxes=args.max_boxes)
     bs = args.batch_size or train_cfg["training"]["batch_size"]
     loader = DataLoader(ds, batch_size=bs, shuffle=True,
                         num_workers=args.num_workers, pin_memory=True,
@@ -55,9 +62,9 @@ def measure(variant, args, train_cfg):
         b = next(it)
         rgb = b["pixel_values"].to(device)
         if multi_box:
-            loss = model.compute_loss_multibox(rgb, None, b["text"],
-                                               b["boxes"].to(device),
-                                               b["box_mask"].to(device))
+            loss = model.compute_loss_multibox(
+                rgb, None, b["text"], b["boxes"].to(device), b["box_mask"].to(device),
+                gt_labels=b["labels"].to(device) if "labels" in b else None)
         else:
             loss = model.compute_loss(rgb, None, b["text"], b["bbox"].to(device))
         opt.zero_grad(); loss.backward(); opt.step()
@@ -84,7 +91,9 @@ def measure(variant, args, train_cfg):
 
         opt.zero_grad()
         if multi_box:
-            loss = model.compute_loss_multibox(rgb, None, b["text"], gt, mask)
+            loss = model.compute_loss_multibox(
+                rgb, None, b["text"], gt, mask,
+                gt_labels=b["labels"].to(device) if "labels" in b else None)
         else:
             loss = model.compute_loss(rgb, None, b["text"], gt)
         sync(); t3 = time.perf_counter(); t_fwd += t3 - t2
@@ -120,6 +129,9 @@ def main():
     p.add_argument("--variant", default=None,
                    help="mặc định: đo cả 3 variant detect")
     p.add_argument("--all_phase2_dir", default="../../data/all_phase2_V2")
+    p.add_argument("--task", choices=["detect", "coco"], default="detect",
+                   help="detect = CE-130 (variant a/b/c). coco = COCO-minitrain (variant d).")
+    p.add_argument("--coco_root", default="../../data")
     p.add_argument("--batches", type=int, default=25, help="số batch dùng để đo")
     p.add_argument("--warmup", type=int, default=3)
     p.add_argument("--batch_size", type=int, default=None)
@@ -129,16 +141,22 @@ def main():
                    help="chỉ để quy đổi ra tổng thời gian, không chạy thật")
     args = p.parse_args()
 
-    if not os.path.isdir(args.all_phase2_dir):
-        print(f"LỖI: không thấy {args.all_phase2_dir}\n"
+    need = (os.path.join(args.coco_root, "coco_minitrain/annotations/instances_minitrain2017.json")
+            if args.task == "coco" else args.all_phase2_dir)
+    if not os.path.exists(need):
+        print(f"LỖI: không thấy {need}\n"
               f"  Dữ liệu nằm trong data/ nên KHÔNG đi theo git pull — cần copy/giải nén "
-              f"lên server rồi trỏ --all_phase2_dir vào đúng chỗ.")
+              f"lên server rồi trỏ --all_phase2_dir / --coco_root vào đúng chỗ.")
         sys.exit(1)
 
     train_cfg = load_config("config/default.yaml")
-    variants = ([args.variant] if args.variant else
-                ["detect/a_cnn_1box", "detect/b_transformer_1box",
-                 "detect/c_transformer_multibox"])
+    if args.variant:
+        variants = [args.variant]
+    elif args.task == "coco":
+        variants = ["detect/d_coco_classhead"]
+    else:
+        variants = ["detect/a_cnn_1box", "detect/b_transformer_1box",
+                    "detect/c_transformer_multibox"]
     print(f"Thiết bị: {'cuda' if torch.cuda.is_available() else 'CPU (không có GPU!)'}")
     totals = {}
     for v in variants:
