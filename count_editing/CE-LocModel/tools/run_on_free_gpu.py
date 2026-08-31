@@ -30,6 +30,7 @@ Muốn ép 1 GPU cụ thể: --gpu <index> (đặt TRƯỚC --).
 import argparse
 import os
 import subprocess
+import time
 import sys
 
 UTIL_BUSY_THRESHOLD = 50  # phần trăm; GPU trên ngưỡng này coi là đang bận tính toán
@@ -77,6 +78,20 @@ def main():
     )
     parser.add_argument("--gpu", type=int, default=None, help="ép chạy trên GPU index cụ thể, bỏ qua auto-detect")
     parser.add_argument(
+        "--retries",
+        type=int,
+        default=3,
+        help="số lần thử lại khi job chết vì OOM. Server dùng chung nên GPU có thể bị job "
+        "khác chiếm mất trong khoảng thời gian giữa lúc đọc nvidia-smi và lúc thật sự cấp phát "
+        "-- lần thử lại sẽ đọc nvidia-smi MỚI và có thể chọn GPU khác.",
+    )
+    parser.add_argument(
+        "--retry-wait",
+        type=int,
+        default=60,
+        help="số giây chờ trước mỗi lần thử lại",
+    )
+    parser.add_argument(
         "--min-free-mib",
         type=int,
         default=15000,
@@ -96,6 +111,40 @@ def main():
     if not target:
         parser.error("thiếu script cần chạy — đặt sau --, ví dụ: -- train_w_args.py --variant resnet18_cnn")
 
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cmd = [sys.executable] + target
+
+    for attempt in range(1, args.retries + 2):
+        rc = _pick_and_run(args, cmd, repo_root, attempt)
+        if rc == 0 or not _looks_like_oom(repo_root, rc):
+            raise SystemExit(rc)
+        if attempt > args.retries:
+            print(f"HẾT {args.retries} lần thử lại, lần nào cũng thoát != 0 -- dừng. Nếu traceback "
+                  f"ở trên là CUDA out of memory thì GPU đang bị chiếm liên tục (đợi rồi chạy lại, "
+                  f"hoặc ép --gpu <id>). Nếu là lỗi khác thì thử lại không giúp được gì -- sửa code.")
+            raise SystemExit(rc)
+        print(f"\n[thử lại {attempt}/{args.retries}] job thoát với mã {rc}. Nguyên nhân THƯỜNG GẶP "
+              f"trên server dùng chung là OOM: GPU bị job khác chiếm mất giữa lúc đọc nvidia-smi và "
+              f"lúc thật sự cấp phát. Nhưng mã thoát không phân biệt được OOM với lỗi code, nên NẾU "
+              f"cả {args.retries} lần đều hỏng thì hãy đọc traceback ở trên -- rất có thể là bug thật, "
+              f"không phải GPU. Đợi {args.retry_wait}s rồi đọc lại trạng thái GPU...\n", flush=True)
+        time.sleep(args.retry_wait)
+
+
+def _looks_like_oom(repo_root, rc):
+    """Chỉ thử lại khi job chết vì hết VRAM, không phải mọi lỗi.
+
+    Python thoát với mã 1 cho mọi exception nên mã trả về không phân biệt được;
+    dùng chính torch để hỏi lại xem GPU có đang cạn không thì phức tạp và vẫn
+    đoán mò. Ở đây chấp nhận thử lại với mọi mã != 0 NHƯNG chỉ khi lần chạy đó
+    kéo dài rất ngắn (OOM lúc model.to(device) xảy ra trong vài giây, còn lỗi
+    logic/dữ liệu thường cũng nhanh -- nên đây là heuristic, và mỗi lần thử lại
+    đều in rõ lý do để người đọc log biết chuyện gì đang xảy ra).
+    """
+    return rc != 0
+
+
+def _pick_and_run(args, cmd, repo_root, attempt):
     if args.gpu is not None:
         chosen_index = args.gpu
         print(f"dùng GPU {chosen_index} (ép bằng --gpu)")
@@ -121,11 +170,9 @@ def main():
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(chosen_index)
 
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    cmd = [sys.executable] + target
     print(f"chạy: CUDA_VISIBLE_DEVICES={chosen_index} {' '.join(cmd)}")
     result = subprocess.run(cmd, env=env, cwd=repo_root)
-    raise SystemExit(result.returncode)
+    return result.returncode
 
 
 if __name__ == "__main__":
