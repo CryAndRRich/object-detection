@@ -30,6 +30,7 @@ class TransformerNoisePredNet(nn.Module):
         p_drop_emb=0.1,
         p_drop_attn=0.3,
         n_cond_layers=0,
+        num_classes=0,
     ):
         super().__init__()
         # box token stream: horizon=1 for variants (a)/(b) (a single
@@ -71,6 +72,16 @@ class TransformerNoisePredNet(nn.Module):
 
         self.ln_f = nn.LayerNorm(n_emb)
         self.head = nn.Linear(n_emb, input_dim)
+        # Nhánh đầu ra thứ 2: điểm cho mỗi box, song song với toạ độ.
+        #   num_classes == 0  -> KHÔNG có head này (hành vi cũ, bit-identical).
+        #   num_classes == 1  -> score head: "box này có phải vật thật không".
+        #                        Nhãn lấy từ Hungarian matching (matched=1, còn lại=0).
+        #                        Dùng cho CE-130, nơi mỗi ảnh chỉ có ĐÚNG 1 class
+        #                        (đã đo: 3598/3598 ảnh) nên phân loại class là vô nghĩa.
+        #   num_classes == C  -> class head đúng DiffusionDet: C logit/box, nền là
+        #                        "mọi logit đều thấp" (focal loss, không cần lớp nền riêng).
+        self.num_classes = num_classes
+        self.class_head = nn.Linear(n_emb, num_classes) if num_classes > 0 else None
 
         self.apply(self._init_weights)
 
@@ -113,7 +124,7 @@ class TransformerNoisePredNet(nn.Module):
                   in that image's `sample` (matches DiffusionDet: one t per
                   image, not per proposal)
         cond: (B, 1, cond_dim) — vision+text embedding, one token
-        output: (B, T, input_dim)
+        output: (B, T, input_dim), hoặc (boxes, logits) khi num_classes > 0
         """
         timesteps = timestep
         if not torch.is_tensor(timesteps):
@@ -133,4 +144,7 @@ class TransformerNoisePredNet(nn.Module):
         x = self.decoder(tgt=x, memory=memory)  # cross-attention: box query -> K/V from memory
 
         x = self.ln_f(x)
-        return self.head(x)  # (B,1,input_dim)
+        boxes = self.head(x)  # (B,T,input_dim)
+        if self.class_head is None:
+            return boxes
+        return boxes, self.class_head(x)  # (B,T,input_dim), (B,T,num_classes)

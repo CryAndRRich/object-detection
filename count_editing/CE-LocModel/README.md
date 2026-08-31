@@ -279,6 +279,25 @@ density trong `samples/` vốn được vẽ từ chính các vật đang có �
 **target**. Đưa vào input là rò rỉ đáp án. Nên `vision_encoder.in_channels: 3` và `conv1` giữ
 nguyên weight ImageNet (không mở rộng kênh).
 
+### Kết quả lần 1 (2026-08-31)
+
+Train 200 epoch, eval trên split `test` (779 ảnh / 37.812 GT box), P/R @ IoU 0.5:
+
+| | Precision | Recall | F1 | box sinh ra | train |
+|---|---|---|---|---|---|
+| (1) `detect/a_cnn_1box` | **2,74%** | 1,70% | **2,10%** | 23.370 (K=30) | 59 phút |
+| (2) `detect/b_transformer_1box` | 1,51% | 0,93% | 1,15% | 23.370 (K=30) | 58 phút |
+| (3) `detect/c_transformer_multibox` | 0,43% | **2,67%** | 0,74% | 233.700 (N=300) | 2g30 |
+
+Phân tích đầy đủ + cách đọc số + bước tiếp: [`../../../docs/ce-loc-detection-results.md`](../../../docs/ce-loc-detection-results.md).
+
+Ba điều dễ hiểu nhầm:
+- **Không so loss (3) với (1)/(2)** — (1)/(2) là MSE trên epsilon, (3) là L1+GIoU trên box, khác đơn vị.
+- **(1) hơn (2) vì `horizon=1`**, không phải vì Transformer kém: chỉ 1 box token thì self-attention
+  của decoder gần như vô dụng, trong khi Diffusion Policy gốc thắng nhờ `horizon=16`.
+- **So sánh chưa hoàn toàn công bằng**: (1)/(2) sinh 30 box còn (3) sinh 300; recall trần lý thuyết
+  của (1)/(2) chỉ ~62% (48,5 GT/ảnh). Chạy lại với `--k 300` mới công bằng tuyệt đối.
+
 **Kỳ vọng thực tế:** điều kiện hoá vẫn là **1 vector 256-d cho cả ảnh** (SpatialSoftmax giữ
 nguyên) — box không đọc được ảnh tại vị trí của chính nó, tức thiếu đúng năng lực nền tảng của
 mọi detector. P/R vì thế **sẽ thấp hơn nhiều so với DiffusionDet/GroundingDINO**, và đó là kết quả

@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader
 
 from data.dataset import ObjectPlacementDataset
 from data.ce130_detection_dataset import CE130DetectionDataset
+from data.coco_detection_dataset import CocoDetectionDataset
 from models.diffusion_module import ObjectPlacementPolicy
 from train import load_config, save_training_history
 
@@ -47,16 +48,53 @@ def get_args():
              "bộ dữ liệu của bài detection (--task detect)",
     )
     parser.add_argument(
-        "--task", choices=["add", "detect"], default="add",
+        "--task", choices=["add", "detect", "coco"], default="add",
         help="add = bài gốc CE-Loc (sinh box vào vùng trống, đọc samples/ + density). "
              "detect = object detection có điều kiện theo class trên CE-130 "
-             "(ground_truth.jpg + all_bboxes, KHÔNG density).",
+             "(ground_truth.jpg + all_bboxes, KHÔNG density). "
+             "coco = detection đa class trên COCO-minitrain (variant d, có class head).",
+    )
+    parser.add_argument(
+        "--coco_root", type=str, default="../../data",
+        help="--task coco: gốc thư mục data/ chứa coco_minitrain/ và coco/",
+    )
+    parser.add_argument(
+        "--no_val", action="store_true",
+        help="tắt eval trên split val mỗi epoch (chọn best model theo train loss như "
+             "repo gốc). Chỉ dùng khi muốn tái lập đúng hành vi cũ.",
     )
     parser.add_argument(
         "--max_boxes", type=int, default=None,
         help="--task detect: bỏ ảnh có nhiều hơn ngần này box (CE-130 có ảnh tới 1229 box)",
     )
     return parser.parse_args()
+
+
+@torch.no_grad()
+def evaluate_loss(model, loader, device, multi_box):
+    """Val loss dùng ĐÚNG hàm loss của train, chỉ khác model.eval() + no_grad.
+
+    Lưu ý: loss này vẫn ngẫu nhiên theo timestep t và noise được sample mỗi lần,
+    nên giữa 2 epoch nó dao động cả khi model không đổi. Đủ tốt để chọn best
+    model và để thấy khoảng cách train/val, nhưng ĐỪNG đọc dao động nhỏ giữa
+    các epoch như tín hiệu thật.
+    """
+    model.eval()
+    total, n = 0.0, 0
+    for batch in loader:
+        rgb = batch["pixel_values"].to(device)
+        density = (batch["density_map"].to(device) if "density_map" in batch else None)
+        text = batch["text"]
+        if multi_box:
+            loss = model.compute_loss_multibox(
+                rgb, density, text,
+                batch["boxes"].to(device), batch["box_mask"].to(device),
+                gt_labels=batch["labels"].to(device) if "labels" in batch else None)
+        else:
+            loss = model.compute_loss(rgb, density, text, batch["bbox"].to(device))
+        total += loss.item()
+        n += 1
+    return total / max(n, 1)
 
 
 def train():
@@ -85,7 +123,14 @@ def train():
     # target set (all_bboxes from all_phase2_V2) instead of one target_bbox.
     num_proposals = model_cfg["noise_net"].get("num_proposals", 1)
     multi_box = num_proposals > 1
-    if args.task == "detect":
+    if args.task == "coco":
+        # Variant (d): COCO-minitrain, đa class, có class head, không text.
+        train_dataset = CocoDetectionDataset(
+            os.path.join(args.coco_root, "coco_minitrain/annotations/instances_minitrain2017.json"),
+            os.path.join(args.coco_root, "coco_minitrain/images/train2017"),
+            num_proposals=num_proposals, max_boxes=args.max_boxes,
+        )
+    elif args.task == "detect":
         # Bài detection: ảnh gốc + toàn bộ box cùng class, không density.
         train_dataset = CE130DetectionDataset(
             args.all_phase2_dir, split="train",
@@ -98,6 +143,24 @@ def train():
             dataset_kwargs.update(multi_box=True, num_proposals=num_proposals,
                                   all_phase2_dir=args.all_phase2_dir)
         train_dataset = ObjectPlacementDataset(data_root, **dataset_kwargs)
+
+    # Split `val` để chọn best model. Repo gốc Count-Editing chỉ có train loss nên
+    # `best_model.pth` của nó thực chất là "epoch có train loss thấp nhất" — với
+    # dataset nhỏ (1.911 ảnh) thì train loss giảm đều tới cuối, nên "best" gần như
+    # luôn là epoch cuối, KHÔNG phải model tổng quát hoá tốt nhất. CE-130 detection
+    # có sẵn split val 908 ảnh (overlap với train = 0) nên dùng đúng nó.
+    val_dataset = None
+    if args.task == "coco" and not args.no_val:
+        val_dataset = CocoDetectionDataset(
+            os.path.join(args.coco_root, "coco/annotations/instances_val2017.json"),
+            os.path.join(args.coco_root, "coco/val2017"),
+            num_proposals=num_proposals, max_boxes=args.max_boxes,
+        )
+    elif args.task == "detect" and not args.no_val:
+        val_dataset = CE130DetectionDataset(
+            args.all_phase2_dir, split="val",
+            num_proposals=num_proposals, max_boxes=args.max_boxes,
+        )
     # train.py hardcoded num_workers=4 even though default.yaml carries the key.
     num_workers = args.num_workers
     if num_workers is None:
@@ -111,6 +174,17 @@ def train():
         persistent_workers=num_workers > 0,
         prefetch_factor=4 if num_workers > 0 else None,
     )
+    val_loader = None
+    if val_dataset is not None:
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=train_cfg["training"]["batch_size"],
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True,
+            persistent_workers=num_workers > 0,
+            prefetch_factor=4 if num_workers > 0 else None,
+        )
     print(f"Found {len(train_dataset)} training samples "
           f"(cache={'on' if args.use_cache else 'off'}, num_workers={num_workers}, "
           f"multi_box={'on (N=' + str(num_proposals) + ')' if multi_box else 'off'}, "
@@ -127,6 +201,7 @@ def train():
 
     best_loss = float("inf")
     loss_history = []
+    val_history = []
     batches_per_epoch = len(train_loader)
     batch_size = train_cfg["training"]["batch_size"]
     train_start = time.monotonic()
@@ -147,7 +222,9 @@ def train():
             if multi_box:
                 gt_boxes = batch["boxes"].to(device)
                 box_mask = batch["box_mask"].to(device)
-                loss = model.compute_loss_multibox(rgb, density, text, gt_boxes, box_mask)
+                gt_labels = batch["labels"].to(device) if "labels" in batch else None
+                loss = model.compute_loss_multibox(rgb, density, text, gt_boxes, box_mask,
+                                                   gt_labels=gt_labels)
             else:
                 gt_bbox = batch["bbox"].to(device)
                 loss = model.compute_loss(rgb, density, text, gt_bbox)
@@ -157,19 +234,30 @@ def train():
             total_loss += loss.item()
 
         avg_loss = total_loss / len(train_loader)
+        val_loss = evaluate_loss(model, val_loader, device, multi_box) if val_loader else None
         loss_history.append(avg_loss)
+        if val_loss is not None:
+            val_history.append(val_loss)
+
+        # Tiêu chí chọn best: VAL loss khi có val, train loss khi không.
+        # Đây là điểm khác repo gốc (nó chỉ có train loss) — với 1.911 ảnh train
+        # thì train loss giảm đều tới cuối nên "best" theo train loss gần như
+        # luôn là epoch cuối, không phản ánh khả năng tổng quát hoá.
+        score = val_loss if val_loss is not None else avg_loss
 
         epoch_time = time.monotonic() - epoch_start
         elapsed = time.monotonic() - train_start
         epochs_done = epoch + 1
         avg_epoch_time = elapsed / epochs_done
         eta = avg_epoch_time * (num_epochs - epochs_done)
-        is_best = avg_loss < best_loss
+        is_best = score < best_loss
         # flush=True: nohup buffer stdout theo block, không có nó thì file log
         # đứng im hàng phút rồi mới xả ra một lúc -> tưởng job treo.
         print(
             f"[{args.variant}] Epoch [{epochs_done}/{num_epochs}] "
-            f"loss={avg_loss:.4f} best={min(avg_loss, best_loss):.4f}"
+            f"loss={avg_loss:.4f}"
+            + (f" val={val_loss:.4f} gap={val_loss - avg_loss:+.4f}" if val_loss is not None else "")
+            + f" best={min(score, best_loss):.4f}"
             f"{' *' if is_best else '  '} "
             f"| lr={optimizer.param_groups[0]['lr']:.2e} "
             f"| {batches_per_epoch} batch x bs={batch_size} "
@@ -181,6 +269,10 @@ def train():
         )
 
         save_training_history(save_dir, loss_history)
+        if val_history:
+            import json as _json
+            with open(os.path.join(save_dir, "val_loss_history.json"), "w") as f:
+                _json.dump(val_history, f)
 
         # checkpoint payload always carries the args CE-Loc's own inference.py /
         # test_mul_box.py expect (checkpoint['args']['num_steps']) — the original
@@ -188,14 +280,16 @@ def train():
         # num_timesteps=100 at eval time regardless of what the variant used.
         ckpt_args = {"num_steps": num_steps, "variant": args.variant, "task": args.task}
 
-        if avg_loss < best_loss:
-            best_loss = avg_loss
+        if is_best:
+            best_loss = score
             torch.save(
                 {
                     "epoch": epoch,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "loss": best_loss,
+                    "train_loss": avg_loss,
+                    "val_loss": val_loss,
                     "args": ckpt_args,
                 },
                 os.path.join(save_dir, "best_model.pth"),

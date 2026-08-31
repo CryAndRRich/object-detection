@@ -1,0 +1,49 @@
+# Variant (d) — DiffusionDet đầy đủ nhất trong khuôn khổ CE-Loc, train trên COCO-minitrain.
+#
+# Khác (c) ở ĐÚNG hai chỗ:
+#   1. class head 80 class (thay vì score head 1 chiều) — COCO có nhãn class đầy
+#      đủ + background thật, nên học phân loại mới có nghĩa. CE-130 thì không
+#      (mỗi ảnh đúng 1 class, không có nhãn class khác, không có background).
+#   2. BỎ text encoder — có class head rồi thì 1 forward ra hết mọi class, không
+#      cần text chỉ định class nữa. Đây là cấu hình gần DiffusionDet nhất, để so
+#      AP công bằng nhất.
+#
+# VẪN THIẾU so với DiffusionDet thật: RoIAlign. Box ở đây không đọc được feature
+# tại vị trí của chính nó — điều kiện vẫn là 1 vector từ SpatialSoftmax cho cả
+# ảnh. Nên AP sẽ thấp hơn DiffusionDet nhiều; đó là điều đo được, không phải lỗi.
+vision_encoder:
+  model_name: "resnet18"
+  pretrained: true
+  output_dim: 256           # gánh toàn bộ điều kiện vì không còn nhánh text
+  in_channels: 3
+
+text_encoder:
+  model_name: "openai/clip-vit-base-patch32"
+  output_dim: 0             # 0 = TẮT nhánh text
+  freeze: true
+
+noise_net:
+  type: "transformer"
+  input_dim: 4
+  global_cond_dim: 256      # chỉ còn vision
+  transformer:
+    n_layer: 8
+    n_head: 8
+    n_emb: 256
+    p_drop_emb: 0.1
+    p_drop_attn: 0.3
+    n_cond_layers: 0
+  # COCO-minitrain: mean 7,3 box/ảnh, max 80 -> N=300 phủ 100% ảnh (đã đo).
+  num_proposals: 300
+  num_classes: 80           # 80 class COCO; nền = mọi logit thấp (focal loss)
+
+diffusion:
+  num_timesteps: 1000
+  snr_scale: 2.0
+  sampling_steps: 4
+  loss: "l1_giou"
+  l1_weight: 5.0
+  giou_weight: 2.0
+  cls_loss_weight: 2.0
+  focal_alpha: 0.25
+  focal_gamma: 2.0

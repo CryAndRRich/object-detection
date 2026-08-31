@@ -209,19 +209,24 @@ def sample_boxes(model, global_cond, device, inference_steps, n_samples=N_SAMPLE
 
 
 @torch.no_grad()
-def sample_boxes_multibox(model, global_cond, device, sampling_steps):
+def sample_boxes_multibox(model, global_cond, device, sampling_steps,
+                          box_renewal=False, renewal_threshold=0.5, use_ensemble=False):
     """DDIM reverse process for variant (c) — N boxes denoised JOINTLY in one
     chain (one [1, N, 4] latent), cross-checked against DiffusionDet's
     ddim_sample (object-detection/diffusiondet/diffusiondet/detector.py:185).
 
-    Deliberately NOT ported from ddim_sample: `box_renewal` (drops/replenishes
-    proposals by score > 0.5) and `use_ensemble` (accumulates+NMS across
-    steps) — both are gated on a classification score CE-Loc has no head for.
-    Skipping them means every one of the N output boxes always comes from the
-    single final step, unfiltered; see README's "Hạn chế đã biết" for what
-    this costs.
+    `box_renewal` và `use_ensemble` (detector.py:209-252) CẦN score head, nên
+    chỉ bật được khi model có `num_classes > 0`:
+      - box_renewal: giữa các bước DDIM, loại box có score < ngưỡng rồi bù lại
+        bằng nhiễu mới cho đủ N. Cho model "thử lại" ở những slot đang tệ.
+      - use_ensemble: gom box của MỌI bước DDIM (không chỉ bước cuối) rồi để
+        caller NMS. Chỉ có tác dụng khi sampling_steps > 1.
+    Model không có score head thì cả hai bị bỏ qua (như trước).
 
-    Returns: [N, 4] normalized [-1,1] cxcywh (SNR-descaled already).
+    Returns:
+      - box_renewal/use_ensemble tắt: [N, 4]
+      - use_ensemble bật: [M, 4] với M = tổng box gom qua các bước
+      kèm [M] score khi model có score head (None nếu không).
     """
     T = model.num_timesteps
     N = model.num_proposals
@@ -237,13 +242,23 @@ def sample_boxes_multibox(model, global_cond, device, sampling_steps):
     # scaled. DiffusionDet likewise inits with a plain randn (detector.py:197).
     img = torch.randn((1, N, 4), device=device)
 
+    has_score = getattr(model, "num_classes", 0) > 0
+    box_renewal = box_renewal and has_score
+    use_ensemble = use_ensemble and has_score and sampling_steps > 1
+    ens_boxes, ens_scores = [], []
+
     for time, time_next in time_pairs:
         # Clamp the latent before it reaches the network, as DiffusionDet does
         # at detector.py:171 (`x_boxes = torch.clamp(x, -scale, scale)`).
         img = torch.clamp(img, min=-model.snr_scale, max=model.snr_scale)
 
         t_batch = torch.full((1,), time, device=device, dtype=torch.long)
-        noise_pred = model.predict_noise(img, t_batch, global_cond)
+        out = model.predict_noise(img, t_batch, global_cond)
+        logits = None
+        if isinstance(out, tuple):
+            noise_pred, logits = out          # logits: [1, N, C]
+        else:
+            noise_pred = out
 
         alpha_bar_t = alphas_cumprod[time]
         pred_x_start = (img - torch.sqrt(1 - alpha_bar_t) * noise_pred) / torch.sqrt(alpha_bar_t)
@@ -255,6 +270,33 @@ def sample_boxes_multibox(model, global_cond, device, sampling_steps):
         # silently undoing most of the clamp above.
         noise_pred = (img - torch.sqrt(alpha_bar_t) * pred_x_start) / torch.sqrt(1 - alpha_bar_t)
 
+        step_scores = None
+        if logits is not None:
+            # DiffusionDet: `value, _ = torch.max(sigmoid(score), -1)` — điểm của
+            # một box là logit cao nhất qua các class (detector.py:213-214).
+            step_scores = torch.sigmoid(logits[0]).max(dim=-1).values   # [N]
+
+        if use_ensemble:
+            # Gom box của MỌI bước, không chỉ bước cuối (detector.py:239-246).
+            ens_boxes.append((pred_x_start[0] / model.snr_scale).clamp(-1.0, 1.0))
+            ens_scores.append(step_scores)
+
+        if box_renewal:
+            # Giữ box điểm cao, phần bị loại sẽ được bù bằng nhiễu mới sau bước
+            # cập nhật DDIM (detector.py:209-218 + 236-238).
+            keep = step_scores > renewal_threshold
+            n_remain = int(keep.sum())
+            if n_remain == 0:
+                keep = step_scores.argmax().view(1)          # luôn giữ ít nhất 1
+                n_remain = 1
+                pred_x_start = pred_x_start[:, keep]
+                noise_pred = noise_pred[:, keep]
+                img = img[:, keep]
+            else:
+                pred_x_start = pred_x_start[:, keep]
+                noise_pred = noise_pred[:, keep]
+                img = img[:, keep]
+
         if time_next < 0:
             img = pred_x_start
             break
@@ -265,7 +307,20 @@ def sample_boxes_multibox(model, global_cond, device, sampling_steps):
         c = torch.sqrt(1 - alpha_next)
         img = pred_x_start * torch.sqrt(alpha_next) + c * noise_pred
 
-    return (img.squeeze(0) / model.snr_scale).clamp(-1.0, 1.0)  # [N, 4]
+        if box_renewal and img.shape[1] < N:
+            # Bù lại cho đủ N bằng nhiễu thuần (detector.py:238).
+            img = torch.cat([img, torch.randn(1, N - img.shape[1], 4, device=device)], dim=1)
+
+    if use_ensemble and ens_boxes:
+        boxes = torch.cat(ens_boxes, dim=0)                               # [M, 4]
+        scores = torch.cat([s for s in ens_scores if s is not None], 0)   # [M]
+        return boxes, scores
+
+    final = (img.squeeze(0) / model.snr_scale).clamp(-1.0, 1.0)  # [N', 4]
+    if has_score:
+        # điểm của bước cuối, cắt cho khớp số box còn lại sau renewal
+        return final, (step_scores[: final.shape[0]] if step_scores is not None else None)
+    return final
 
 
 @torch.no_grad()

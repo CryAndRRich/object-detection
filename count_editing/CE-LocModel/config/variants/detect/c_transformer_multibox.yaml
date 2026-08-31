@@ -29,9 +29,21 @@ noise_net:
   # Trên CE-130 detection: box/ảnh mean 37,6-48,5 tuỳ split, max 1229; N=300 phủ
   # ~99% ảnh không bị cắt bớt box.
   num_proposals: 300
+  # 1 = SCORE head: "box này có phải vật thật không". Nhãn lấy từ chính Hungarian
+  # matching (matched=1, còn lại kể cả padding=0). CE-130 mỗi ảnh chỉ có ĐÚNG 1
+  # class (đo: 3598/3598 ảnh) nên phân loại class là vô nghĩa — score head là
+  # phần DÙNG ĐƯỢC của class head trên bộ này, và đúng thứ mà box_renewal /
+  # use_ensemble / AP cần.
+  num_classes: 1
 
 diffusion:
   num_timesteps: 1000
   snr_scale: 2.0        # DiffusionDet SNR_SCALE
   sampling_steps: 4     # DDIM steps lúc test
   loss: "l1_giou"       # L1 + GIoU trên x0 đã match, đúng loss_boxes của DiffusionDet
+  # Trọng số + focal đúng DiffusionDet (config.py:34-36, ALPHA=0.25, GAMMA=2.0).
+  l1_weight: 5.0
+  giou_weight: 2.0
+  cls_loss_weight: 2.0
+  focal_alpha: 0.25
+  focal_gamma: 2.0

@@ -22,6 +22,10 @@ class ObjectPlacementPolicy(nn.Module):
         # num_proposals=1 (default) reproduces every existing config's behavior
         # exactly (horizon=1, no matching, plain epsilon-MSE loss below).
         self.num_proposals = cfg['noise_net'].get('num_proposals', 1)
+        # 0 = không có head phụ (mọi config cũ, hành vi bit-identical).
+        # 1 = score head ("box có phải vật không") — CE-130, mỗi ảnh 1 class.
+        # C = class head đúng DiffusionDet — COCO, C=80.
+        self.num_classes = cfg['noise_net'].get('num_classes', 0)
         if self.noise_net_type == 'cnn' and not (
             self.num_proposals == 1 or (self.num_proposals >= 8 and self.num_proposals % 4 == 0)
         ):
@@ -40,6 +44,15 @@ class ObjectPlacementPolicy(nn.Module):
                 f"connections). Note N=4 is NOT valid despite being divisible by 4."
             )
 
+        if self.noise_net_type == 'cnn' and self.num_classes > 0:
+            # ConditionalUnet1D chỉ có 1 đầu ra (final_conv -> input_dim), không
+            # có chỗ gắn head phụ. Score/class head hiện chỉ làm cho nhánh
+            # transformer (variant c/d).
+            raise ValueError(
+                f"noise_net.num_classes={self.num_classes} chưa hỗ trợ cho noise_net.type='cnn' "
+                f"— ConditionalUnet1D chỉ có 1 đầu ra. Dùng type: transformer."
+            )
+
         # 1. Encoders
         self.vision_encoder = SpatialVisualEncoder(
             output_dim=vis_dim,
@@ -49,11 +62,15 @@ class ObjectPlacementPolicy(nn.Module):
             in_channels=cfg['vision_encoder'].get('in_channels', 4),
         )
 
+        # text_dim == 0 -> TẮT hẳn nhánh text (variant (d) trên COCO: đã có class
+        # head nên 1 forward ra hết mọi class, không cần text chỉ định class).
+        # Không khởi tạo CLIP luôn để khỏi tải ~600MB weight vô ích.
+        self.use_text = text_dim > 0
         self.text_encoder = CLIPTextEncoder(
             model_name=cfg['text_encoder']['model_name'],
             output_dim=text_dim,
             freeze_backbone=cfg['text_encoder']['freeze']
-        )
+        ) if self.use_text else None
 
         # 2. Noise prediction network
         if self.noise_net_type == 'cnn':
@@ -82,6 +99,7 @@ class ObjectPlacementPolicy(nn.Module):
                 p_drop_emb=t_cfg.get('p_drop_emb', 0.1),
                 p_drop_attn=t_cfg.get('p_drop_attn', 0.3),
                 n_cond_layers=t_cfg.get('n_cond_layers', 0),
+                num_classes=self.num_classes,
             )
         else:
             raise ValueError(f"Unknown noise_net.type={self.noise_net_type!r}; expected 'cnn' or 'transformer'")
@@ -103,6 +121,13 @@ class ObjectPlacementPolicy(nn.Module):
         # variants (a)/(b) are bit-for-bit unaffected by its value.
         self.snr_scale = float(diff_cfg.get('snr_scale', 2.0))
         self.box_loss_type = diff_cfg.get('loss', 'l1_giou')
+        # Focal loss cho head phụ — mặc định đúng giá trị DiffusionDet
+        # (MODEL.DiffusionDet.ALPHA=0.25, GAMMA=2.0).
+        self.focal_alpha = float(diff_cfg.get('focal_alpha', 0.25))
+        self.focal_gamma = float(diff_cfg.get('focal_gamma', 2.0))
+        self.cls_loss_weight = float(diff_cfg.get('cls_loss_weight', 2.0))
+        self.l1_weight = float(diff_cfg.get('l1_weight', 5.0))
+        self.giou_weight = float(diff_cfg.get('giou_weight', 2.0))
         self.setup_noise_schedule()
         print(
             f"Diffusion noise schedule set up with {self.num_timesteps} timesteps "
@@ -143,6 +168,13 @@ class ObjectPlacementPolicy(nn.Module):
         # Reshape to [B, 1] so we can multiply with BBox [B, 4]
         return acc_alpha.unsqueeze(-1)
 
+    def encode_condition(self, rgb, density, text):
+        """Gộp điều kiện thành 1 vector. Bỏ nhánh text khi text_encoder.output_dim=0."""
+        vis_emb = self.vision_encoder(rgb, density)
+        if not self.use_text:
+            return vis_emb
+        return torch.cat([vis_emb, self.text_encoder(text)], dim=-1)
+
     def predict_noise(self, noisy_bbox, t, global_cond):
         """
         Unified interface over both noise_net architectures, so callers
@@ -159,21 +191,29 @@ class ObjectPlacementPolicy(nn.Module):
         """
         squeeze_back = noisy_bbox.dim() == 2
         sample = noisy_bbox.unsqueeze(1) if squeeze_back else noisy_bbox  # [B, N, 4]
+        logits = None
         if self.noise_net_type == 'cnn':
             noise_pred = self.noise_net(sample=sample, timestep=t, global_cond=global_cond)
         else:  # 'transformer'
             cond = global_cond.unsqueeze(1)  # [B, 1, cond_dim], one token
-            noise_pred = self.noise_net(sample=sample, timestep=t, cond=cond)
-        return noise_pred.squeeze(1) if squeeze_back else noise_pred
+            out = self.noise_net(sample=sample, timestep=t, cond=cond)
+            if isinstance(out, tuple):
+                noise_pred, logits = out
+            else:
+                noise_pred = out
+        if squeeze_back:
+            noise_pred = noise_pred.squeeze(1)
+            logits = logits.squeeze(1) if logits is not None else None
+        # Trả tuple CHỈ khi có head phụ, để mọi caller cũ (inference.py,
+        # test_mul_box.py, nhánh add) không phải đổi gì.
+        return (noise_pred, logits) if logits is not None else noise_pred
 
     def compute_loss(self, rgb, density, text, gt_bbox):
         # density=None khi vision_encoder.in_channels == 3 (nhánh detection).
         # gt_bbox shape: [Batch, 4]
         
         # 1. Encode Conditions
-        vis_emb = self.vision_encoder(rgb, density) # [B, 128]
-        text_emb = self.text_encoder(text)          # [B, 128]
-        global_cond = torch.cat([vis_emb, text_emb], dim=-1) # [B, 256]
+        global_cond = self.encode_condition(rgb, density, text)  # [B, cond_dim]
         
         # 2. Sample Noise and Timestep
         B = rgb.shape[0]
@@ -192,7 +232,7 @@ class ObjectPlacementPolicy(nn.Module):
         # 5. Loss (MSE between predicted noise and actual noise)
         return torch.nn.functional.mse_loss(noise_pred, noise)
 
-    def compute_loss_multibox(self, rgb, density, text, gt_boxes, box_mask):
+    def compute_loss_multibox(self, rgb, density, text, gt_boxes, box_mask, gt_labels=None):
         # density=None khi vision_encoder.in_channels == 3 (nhánh detection).
         """
         Variant (c) loss — N boxes denoised jointly per image, matched against
@@ -210,9 +250,7 @@ class ObjectPlacementPolicy(nn.Module):
         device = rgb.device
 
         # 1. Encode Conditions (identical to compute_loss)
-        vis_emb = self.vision_encoder(rgb, density)
-        text_emb = self.text_encoder(text)
-        global_cond = torch.cat([vis_emb, text_emb], dim=-1)
+        global_cond = self.encode_condition(rgb, density, text)
 
         # 2. Forward diffusion — one t per IMAGE (DiffusionDet: `t = randint(0,
         # T, (1,))` per image, applied to all its proposals), SNR-scaled.
@@ -226,7 +264,12 @@ class ObjectPlacementPolicy(nn.Module):
         # the model's x0 estimate (needed for the L1/GIoU box loss and for
         # matching, since a random unmatched noise target has no geometric
         # meaning — DiffusionDet's own loss_boxes operates on x0, not epsilon).
-        noise_pred = self.predict_noise(noisy_boxes, t, global_cond)
+        out = self.predict_noise(noisy_boxes, t, global_cond)
+        logits = None
+        if isinstance(out, tuple):
+            noise_pred, logits = out          # logits: [B, N, num_classes]
+        else:
+            noise_pred = out
         pred_x_start = (noisy_boxes - torch.sqrt(1 - alpha_bar_t) * noise_pred) / torch.sqrt(alpha_bar_t)
         # Clamp exactly as DiffusionDet does at detector.py:181. Without it the
         # x0 reconstruction is numerically explosive at high t: the 1/sqrt(a_bar)
@@ -276,10 +319,35 @@ class ObjectPlacementPolicy(nn.Module):
                     _cxcywh_to_xyxy(matched_pred), _cxcywh_to_xyxy(matched_gt)
                 ))
                 loss_giou = (1.0 - giou).mean()
-                loss_b = loss_l1 + loss_giou
+                # Trọng số đúng DiffusionDet (config.py:34-36):
+                # L1_WEIGHT=5.0, GIOU_WEIGHT=2.0, CLASS_WEIGHT=2.0.
+                loss_b = self.l1_weight * loss_l1 + self.giou_weight * loss_giou
             else:
                 raise ValueError(f"Unknown diffusion.loss={self.box_loss_type!r}; "
                                   f"expected 'l1_giou' or 'x0_mse'")
+
+            if logits is not None:
+                # Nhãn phân loại lấy TỪ CHÍNH Hungarian matching: slot nào được
+                # gán cho một GT thật thì là positive, còn lại (kể cả slot padding)
+                # là background. Đây đúng cách DiffusionDet gán nhãn
+                # (loss.py::loss_labels), chỉ khác là ở đây target class lấy từ
+                # `labels` của GT khi có (num_classes>1), hoặc là lớp 0 duy nhất
+                # khi chạy chế độ score head (num_classes==1).
+                tgt = torch.zeros_like(logits[b])           # [N, C], mặc định nền
+                if self.num_classes == 1:
+                    tgt[pred_idx.to(device), 0] = 1.0
+                else:
+                    gt_lab = gt_labels[b][gt_idx.to(device)]  # [n_matched]
+                    tgt[pred_idx.to(device), gt_lab] = 1.0
+                # sigmoid focal loss (Lin et al. 2017), đúng công thức
+                # sigmoid_focal_loss_jit mà DiffusionDet dùng.
+                p = torch.sigmoid(logits[b])
+                ce = TF.binary_cross_entropy_with_logits(logits[b], tgt, reduction="none")
+                p_t = p * tgt + (1 - p) * (1 - tgt)
+                loss_cls = ce * ((1 - p_t) ** self.focal_gamma)
+                alpha_t = self.focal_alpha * tgt + (1 - self.focal_alpha) * (1 - tgt)
+                loss_cls = (alpha_t * loss_cls).sum() / max(pred_idx.numel(), 1)
+                loss_b = loss_b + self.cls_loss_weight * loss_cls
 
             total_loss = total_loss + loss_b
             n_valid_images += 1
