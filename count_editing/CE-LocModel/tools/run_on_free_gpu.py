@@ -35,6 +35,12 @@ import sys
 
 UTIL_BUSY_THRESHOLD = 50  # phần trăm; GPU trên ngưỡng này coi là đang bận tính toán
 
+# Mã trả về nội bộ của _pick_and_run khi KHÔNG chọn được GPU nào (khác hẳn "job
+# đã chạy rồi chết"): job chưa hề khởi động, nên đây luôn là tình trạng tạm thời
+# của server dùng chung -- phải chờ chứ không được coi là lỗi code. Giá trị âm
+# nên không đụng mã thoát nào của Python.
+NO_GPU = -1000
+
 
 def query_gpus():
     """``[(index, free_mib, total_mib, util_percent), ...]`` từ nvidia-smi."""
@@ -53,6 +59,74 @@ def query_gpus():
         idx, used, total, util = (int(x.strip()) for x in line.split(","))
         gpus.append((idx, total - used, total, util))
     return gpus
+
+
+# --- Suy ngưỡng free-memory từ chính lệnh sắp chạy -------------------------
+#
+# Ngưỡng cũ hard-code 15000 MiB cho MỌI job là số bịa, không đo từ đâu, và đã
+# gây hậu quả thật: 2026-08-31 variant (d) cùng cả 2 job eval bị bỏ qua trong
+# đúng 1 giây vì không GPU nào còn 15000 MiB, dù chúng cần ít hơn nhiều.
+#
+# Mô hình bộ nhớ dưới đây cố ý ĐƠN GIẢN và mọi hằng số đều đo được bằng
+# tools/measure_vram.py. Ba phần cộng lại:
+#
+#   1. CUDA_CONTEXT: context + cuDNN workspace, nvidia-smi thấy nhưng
+#      torch.cuda.max_memory_allocated KHÔNG thấy. Là hằng số, KHÔNG co giãn
+#      theo batch_size -- nên cộng vào chứ không nhân hệ số.
+#   2. MODEL_STATE: weight + gradient + 2 buffer AdamW. ResNet18 (11,7M) +
+#      transformer 8 layer d=256 (~6,3M) ~ 18M tham số x 4 byte x 4 bản = ~290 MiB.
+#      Eval không có gradient/optimizer nên chỉ ~1 bản.
+#   3. ACTIVATION: phần DUY NHẤT co giãn theo batch_size. Chi phối bởi feature
+#      map ResNet18 ở 512x512 (conv1 ra 64x256x256 = 16 MiB/ảnh fp32, cộng dồn
+#      qua các stage ~ 55 MiB/ảnh giữ lại cho backward).
+#
+# Nhân SAFETY vào phần co giãn để phủ dao động dữ liệu (ảnh nhiều box hơn
+# trung bình) và phân mảnh của caching allocator.
+CUDA_CONTEXT_MIB = 800
+SAFETY = 1.25
+ACT_MIB_PER_IMAGE_TRAIN = 55    # giữ lại cho backward
+ACT_MIB_PER_IMAGE_EVAL = 8      # no_grad: chỉ 1 layer sống tại một thời điểm
+MODEL_STATE_MIB_TRAIN = 290     # weight + grad + AdamW exp_avg/exp_avg_sq
+MODEL_STATE_MIB_EVAL = 80       # chỉ weight
+
+
+def infer_min_free_mib(target):
+    """Ngưỡng free-memory suy từ lệnh sắp chạy, thay cho hằng số 15000 cũ.
+
+    Đọc --batch_size (train) hoặc --k (eval) ngay trong argv của script con --
+    không import gì, không dựng model, nên không tốn VRAM để quyết định xem có
+    đủ VRAM không.
+
+    Cố tình ƯỚC LƯỢNG CAO khi không chắc: chọn nhầm GPU quá nhỏ thì OOM giữa
+    chừng (mất cả giờ train), chọn nhầm ngưỡng hơi cao thì chỉ phải chờ thêm.
+    """
+    script = os.path.basename(target[0]) if target else ""
+    is_eval = "eval" in script or "test_" in script
+
+    def flag(name, default):
+        for i, a in enumerate(target):
+            if a == name and i + 1 < len(target):
+                try:
+                    return int(target[i + 1])
+                except ValueError:
+                    return default
+            if a.startswith(name + "="):
+                try:
+                    return int(a.split("=", 1)[1])
+                except ValueError:
+                    return default
+        return default
+
+    if is_eval:
+        # eval chạy từng ảnh một; với nhánh 1-box thì K mẫu chạy SONG SONG trong
+        # cùng một batch, nên K mới là thứ quyết định, không phải batch_size.
+        n_parallel = flag("--k", 30)
+        base = MODEL_STATE_MIB_EVAL + ACT_MIB_PER_IMAGE_EVAL * n_parallel
+    else:
+        bs = flag("--batch_size", 32)
+        base = MODEL_STATE_MIB_TRAIN + ACT_MIB_PER_IMAGE_TRAIN * bs
+
+    return int(base * SAFETY + CUDA_CONTEXT_MIB)
 
 
 def pick_gpu(gpus, min_free_mib):
@@ -92,11 +166,27 @@ def main():
         help="số giây chờ trước mỗi lần thử lại",
     )
     parser.add_argument(
+        "--wait-for-gpu",
+        type=int,
+        default=0,
+        help="tổng số GIÂY sẵn sàng chờ khi KHÔNG GPU nào đủ free memory (mặc định 0 = thoát "
+        "ngay như cũ). Khác --retries: cái đó đếm số lần job chạy rồi chết, cái này là ngân sách "
+        "thời gian chờ trước khi job kịp khởi động. Dùng khi xếp hàng nhiều job tuần tự trên "
+        "server dùng chung, ví dụ --wait-for-gpu 21600 để chờ tối đa 6 giờ.",
+    )
+    parser.add_argument(
+        "--gpu-poll",
+        type=int,
+        default=300,
+        help="số giây giữa 2 lần đọc lại nvidia-smi trong lúc chờ GPU",
+    )
+    parser.add_argument(
         "--min-free-mib",
         type=int,
-        default=15000,
-        help="loại GPU có free memory dưới mức này trước khi xét utilization. Đổi giá trị này "
-        "theo batch_size/kiến trúc đang chạy — đừng để mặc định rồi hy vọng khớp.",
+        default=None,
+        help="loại GPU có free memory dưới mức này trước khi xét utilization. Bỏ trống = TỰ SUY "
+        "từ chính lệnh sắp chạy (xem infer_min_free_mib); truyền số để ép, ví dụ khi đã đo bằng "
+        "tools/measure_vram.py và biết chắc mức thực tế.",
     )
     parser.add_argument(
         "target", nargs=argparse.REMAINDER,
@@ -114,8 +204,36 @@ def main():
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     cmd = [sys.executable] + target
 
-    for attempt in range(1, args.retries + 2):
-        rc = _pick_and_run(args, cmd, repo_root, attempt)
+    if args.min_free_mib is None:
+        args.min_free_mib = infer_min_free_mib(target)
+        print(f"--min-free-mib tự suy: {args.min_free_mib} MiB (từ chính lệnh sắp chạy). "
+              f"Đo lại bằng: python tools/measure_vram.py --variant <v> --mode <train|eval>",
+              flush=True)
+    else:
+        print(f"--min-free-mib = {args.min_free_mib} MiB (ép bằng tham số)", flush=True)
+
+    deadline = time.time() + args.wait_for_gpu
+    attempt = 0
+    while True:
+        rc = _pick_and_run(args, cmd, repo_root, attempt + 1)
+
+        # KHÔNG chọn được GPU: job chưa hề chạy. Đây luôn là tình trạng tạm thời
+        # của server dùng chung (job của người khác vừa chiếm chỗ), nên chờ theo
+        # NGÂN SÁCH THỜI GIAN --wait-for-gpu chứ không tính vào --retries: đếm số
+        # lần vô nghĩa khi nguyên nhân là "đợi người khác chạy xong".
+        if rc == NO_GPU:
+            remain = deadline - time.time()
+            if remain <= 0:
+                print(f"Đã chờ hết {args.wait_for_gpu}s mà vẫn không GPU nào đủ "
+                      f"{args.min_free_mib} MiB free -- dừng. Tăng --wait-for-gpu, giảm "
+                      f"--batch_size, hoặc chạy lại lúc server rảnh.", flush=True)
+                raise SystemExit(1)
+            print(f"[chờ GPU] còn {remain/60:.0f} phút trong ngân sách chờ. "
+                  f"Đọc lại nvidia-smi sau {args.gpu_poll}s...\n", flush=True)
+            time.sleep(min(args.gpu_poll, max(remain, 1)))
+            continue
+
+        attempt += 1
         if rc == 0 or not _looks_like_oom(repo_root, rc):
             raise SystemExit(rc)
         if attempt > args.retries:
@@ -157,8 +275,8 @@ def _pick_and_run(args, cmd, repo_root, attempt):
         if picked is None:
             print(f"LỖI: không GPU nào còn >= {args.min_free_mib} MiB free -- không đủ cho batch_size "
                   f"hiện tại. Đợi rồi thử lại, giảm batch_size, hoặc chỉnh --min-free-mib nếu đã biết "
-                  f"chắc mức thực tế cần thấp hơn.")
-            raise SystemExit(1)
+                  f"chắc mức thực tế cần thấp hơn.", flush=True)
+            return NO_GPU
         chosen_index, free, total, util = picked
         if not had_idle:
             print(f"CẢNH BÁO: GPU {chosen_index} đủ free memory ({free} MiB) nhưng utilization {util}% "

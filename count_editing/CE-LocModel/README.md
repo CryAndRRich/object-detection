@@ -154,6 +154,54 @@ python tools/run_on_free_gpu.py -- train_w_args.py --variant resnet18_cnn --epoc
 server is shared with other jobs) and sets `CUDA_VISIBLE_DEVICES` accordingly instead of a
 hard-coded device index.
 
+Two independent failure modes on a shared server, handled by two different flags — don't confuse
+them:
+
+| flag | fires when | budget |
+|---|---|---|
+| `--wait-for-gpu <giây>` | **no GPU has enough free memory** — the job never started, someone else's job holds the cards. Always transient. | time budget; polls `nvidia-smi` every `--gpu-poll` (default 300 s) |
+| `--retries <n>` (default 3) | **the job started and then died** — usually OOM from a GPU snapshotted free but grabbed before allocation, but the exit code cannot tell that apart from a real code bug. | attempt count, so a genuine bug stops instead of retrying forever |
+
+`--wait-for-gpu` defaults to **0** (exit immediately, the original behaviour). Set it when queueing
+several jobs back-to-back — otherwise the second job dies at its GPU check the moment the first one
+is still releasing memory, which is exactly what happened on 2026-08-31 (variant (d) plus both
+evals were skipped in a single second).
+
+### How much free memory a job actually needs
+
+`--min-free-mib` used to be hard-coded at **15000 MiB for every job** — a number that was never
+measured. It was the direct cause of the 2026-08-31 skip: GPU 1 had 10,607 MiB free at that moment,
+plenty for all three jobs, but none of them cleared the invented bar.
+
+It now defaults to **inferring the threshold from the command being launched** (`infer_min_free_mib`),
+printed on every run so the number is never silent:
+
+| job | inferred | vs the old 15000 |
+|---|---|---|
+| train, `--batch_size 32` | 3,362 MiB | 4.5× lower |
+| train, `--batch_size 8` | 1,712 MiB | 8.8× lower |
+| eval, `--k 30` | 1,200 MiB | 12.5× lower |
+| eval, `--k 300` | 3,900 MiB | 3.8× lower |
+
+The model is `(model_state + per_image_activation × parallelism) × 1.25 + 800`. The 1.25 covers
+data-dependent variation and allocator fragmentation; the **+800 is added, not multiplied**, because
+the CUDA context and cuDNN workspace are a fixed cost that `nvidia-smi` sees but
+`torch.cuda.max_memory_allocated` does not — scaling it with batch size would be wrong. Eval is far
+cheaper than train because it keeps no activations for backward and has no optimizer state, and its
+driver is `--k` (the 1-box branch runs K samples in one parallel batch), not `--batch_size`.
+
+Confirm the estimate against a real GPU with **`tools/measure_vram.py`**, which reports peak
+allocated/reserved from an actual train or eval loop and prints the threshold it implies:
+
+```bash
+python tools/measure_vram.py --variant detect/d_coco_classhead --mode train --dataset coco --batch_size 32
+python tools/measure_vram.py --variant detect/c_transformer_multibox --mode eval --use_ensemble
+```
+
+Pass an explicit `--min-free-mib` to override the inference once you have measured.
+
+Tests: `python tests/test_run_on_free_gpu.py` (11 tests, no GPU needed — `nvidia-smi` is stubbed).
+
 Checkpoints are saved per-variant to `checkpoints/{variant}/` after each epoch. The best model
 (lowest training loss) is saved to `checkpoints/{variant}/best_model.pth`.
 
