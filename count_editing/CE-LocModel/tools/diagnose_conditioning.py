@@ -70,9 +70,24 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ckpt_dir = os.path.dirname(args.checkpoint)
     model_cfg = yaml.safe_load(open(os.path.join(ckpt_dir, "model_config_final.yaml")))
+    # train_w_args.py lưu checkpoint dạng DICT (epoch/model_state_dict/optimizer/...),
+    # không phải state_dict trần — giống eval_detection.py:206-215. Chấp nhận cả hai
+    # dạng để còn dùng được với checkpoint cũ nếu có.
+    ckpt = torch.load(args.checkpoint, map_location="cpu")
+    state = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
+    # num_timesteps phải lấy từ chính lần train đó, nếu không alphas_cumprod sẽ
+    # khác kích thước với lúc train (eval_detection.py:207-208 làm y hệt).
+    if isinstance(ckpt, dict) and ckpt.get("args", {}).get("num_steps"):
+        model_cfg.setdefault("diffusion", {})["num_timesteps"] = ckpt["args"]["num_steps"]
     model = ObjectPlacementPolicy(model_cfg).to(device)
-    model.load_state_dict(torch.load(args.checkpoint, map_location=device))
+    model.load_state_dict(state)
     model.eval()
+    if isinstance(ckpt, dict) and "epoch" in ckpt:
+        # val_loss là None khi train với --no_val, nên không format cứng bằng :.4f
+        vl = ckpt.get("val_loss")
+        print(f"checkpoint: epoch {ckpt['epoch']} | "
+              f"train_loss={ckpt.get('train_loss', ckpt.get('loss'))} | "
+              f"val_loss={vl if vl is not None else 'không có (--no_val)'}")
 
     N = model.num_proposals
     multi = N > 1

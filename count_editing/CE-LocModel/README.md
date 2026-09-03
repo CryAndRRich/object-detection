@@ -532,6 +532,9 @@ Bốn công cụ để xác nhận/sửa, xếp theo thời gian chạy:
 | 3 | `eval_detection.py --inference_steps` | ~30-90 phút | thêm bước DDIM có giúp không? (không cần train lại) |
 | 4 | `config/variants/detect/e_cosine_multibox.yaml` | ~3 giờ train | cosine schedule đáng giá bao nhiêu? |
 
+Cả hai công cụ đọc checkpoint dạng **dict** (`{epoch, model_state_dict, optimizer_state_dict,
+...}`) mà `train_w_args.py` ghi ra, không phải state_dict trần — giống `eval_detection.py:206-215`.
+
 Chạy 1 và 2 TRƯỚC — kết quả của chúng quyết định 3 và 4 có đáng làm không. Nếu công cụ 1 báo
 "MÙ VỚI ẢNH" thì cosine schedule cũng không cứu được, vì đường điều kiện hoá không mang thông tin.
 
