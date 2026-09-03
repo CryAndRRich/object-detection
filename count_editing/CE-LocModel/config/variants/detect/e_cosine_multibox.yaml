@@ -1,0 +1,46 @@
+# Variant (e) — GIỐNG HỆT (c), đổi ĐÚNG MỘT THỨ: linear -> cosine schedule.
+#
+# Mục đích: cô lập đóng góp của noise schedule. §15.1-15.2 của
+# docs/ce-loc-detection-results.md đo được rằng với linear thì chỉ 1 trong 4
+# bước DDIM có tín hiệu đáng kể, 33% timestep lúc train dưới 10% tín hiệu, và
+# Hungarian ghép đúng cặp chỉ 11,5% (cosine: 22,7%).
+#
+# MỌI THỨ KHÁC phải giữ y hệt c_transformer_multibox.yaml, nếu không thì không
+# tách được đóng góp -- đây chính là sai lầm của lần 2, khi (c) đổi 4 thứ cùng lúc.
+vision_encoder:
+  model_name: "resnet18"
+  pretrained: true
+  output_dim: 128
+  in_channels: 3
+
+text_encoder:
+  model_name: "openai/clip-vit-base-patch32"
+  output_dim: 128
+  freeze: true
+
+noise_net:
+  type: "transformer"
+  input_dim: 4
+  global_cond_dim: 256
+  transformer:
+    n_layer: 8
+    n_head: 8
+    n_emb: 256
+    p_drop_emb: 0.1
+    p_drop_attn: 0.3
+    n_cond_layers: 0
+  num_proposals: 300
+  num_classes: 1              # score head, y hệt (c)
+
+diffusion:
+  num_timesteps: 1000
+  beta_schedule: "cosine"     # <<< KHÁC BIỆT DUY NHẤT so với (c)
+  cosine_s: 0.008             # DiffusionDet dùng s=0.008
+  snr_scale: 2.0
+  sampling_steps: 4
+  loss: "l1_giou"
+  l1_weight: 5.0
+  giou_weight: 2.0
+  cls_loss_weight: 2.0
+  focal_alpha: 0.25
+  focal_gamma: 2.0

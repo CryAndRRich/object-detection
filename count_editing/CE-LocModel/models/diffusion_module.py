@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as TF
@@ -113,6 +114,10 @@ class ObjectPlacementPolicy(nn.Module):
         # setup_noise_schedule ignored them, so editing the yaml silently did nothing.
         self.beta_start = float(diff_cfg.get('beta_start', 0.0001))
         self.beta_end = float(diff_cfg.get('beta_end', 0.02))
+        # 'linear' (CE-Loc gốc, mặc định) hoặc 'cosine' (DiffusionDet) — xem
+        # setup_noise_schedule để biết vì sao lựa chọn này ảnh hưởng lớn.
+        self.beta_schedule = diff_cfg.get('beta_schedule', 'linear')
+        self.cosine_s = float(diff_cfg.get('cosine_s', 0.008))  # DiffusionDet dùng s=0.008
         # Variant (c) only: DiffusionDet's SNR_SCALE — x_start is scaled up
         # before q_sample so the box coordinates dominate the fixed noise
         # schedule (detector.py: `x_start = (x_start * 2 - 1) * self.scale`,
@@ -130,21 +135,56 @@ class ObjectPlacementPolicy(nn.Module):
         self.giou_weight = float(diff_cfg.get('giou_weight', 2.0))
         self.setup_noise_schedule()
         print(
-            f"Diffusion noise schedule set up with {self.num_timesteps} timesteps "
-            f"(beta {self.beta_start} -> {self.beta_end}, "
-            f"alpha_bar[-1]={self.alphas_cumprod[-1]:.6f})."
+            f"Diffusion noise schedule: {self.beta_schedule.upper()}, "
+            f"{self.num_timesteps} timesteps, alpha_bar[-1]={self.alphas_cumprod[-1]:.6f}, "
+            f"tín hiệu còn lại tại t=T/2: {self.alphas_cumprod[self.num_timesteps // 2].sqrt():.1%}"
         )
 
     def setup_noise_schedule(self):
-        """
-        Defines the linear beta schedule and pre-calculates alpha_bar.
-        """
-        beta_start = self.beta_start
-        beta_end = self.beta_end
+        """Dựng beta schedule rồi tính sẵn alpha_bar.
 
-        # 1. Betas (Linear Schedule)
-        betas = torch.linspace(beta_start, beta_end, self.num_timesteps)
-        
+        HAI schedule, chọn bằng `diffusion.beta_schedule`:
+
+        - `linear` (MẶC ĐỊNH, giữ nguyên hành vi cũ): kế thừa từ CE-Loc gốc.
+        - `cosine`: đúng `cosine_beta_schedule` của DiffusionDet
+          (detector.py:49-60, theo Nichol & Dhariwal 2021 "Improved DDPM" Eq. 17).
+
+        VÌ SAO QUAN TRỌNG (đo được, xem §15.1 của docs/ce-loc-detection-results.md):
+        `sqrt(alpha_bar[t])` là phần tín hiệu box thật còn lại ở bước t. Trên 4
+        bước DDIM mà eval đang dùng (t = 999, 749, 499, 249):
+
+            t=749: linear giữ  5,8% tín hiệu | cosine giữ 38,0%
+            t=499: linear giữ 28,0%          | cosine giữ 70,3%
+            t=249: linear giữ 72,4%          | cosine giữ 92,0%
+
+        Tức với linear chỉ 1 trong 4 bước DDIM có tín hiệu đáng kể. Phía train
+        còn nặng hơn: 33% số timestep có dưới 10% tín hiệu (cosine chỉ 6%).
+
+        Và ở nhánh multi-box thì hậu quả không dừng ở "gradient ồn": matcher chạy
+        TRÊN pred_x_start, nên tín hiệu thấp làm Hungarian ghép SAI CẶP -> loss
+        dạy sai mục tiêu. Mô phỏng: linear ghép đúng 11,5%, cosine 22,7%.
+
+        MẶC ĐỊNH VẪN LÀ `linear` để mọi checkpoint/config cũ tái lập bit-identical;
+        các config mới phải khai báo `beta_schedule: cosine` một cách tường minh.
+        """
+        if self.beta_schedule == 'cosine':
+            # Nichol & Dhariwal Eq. 17: alpha_bar(t) = cos²((t/T + s)/(1+s) · π/2),
+            # chuẩn hoá cho alpha_bar(0) = 1, rồi suy ngược ra beta.
+            s = self.cosine_s
+            steps = self.num_timesteps + 1
+            x = torch.linspace(0, self.num_timesteps, steps, dtype=torch.float64)
+            ac = torch.cos(((x / self.num_timesteps) + s) / (1 + s) * math.pi * 0.5) ** 2
+            ac = ac / ac[0]
+            betas = torch.clip(1 - (ac[1:] / ac[:-1]), 0, 0.999).float()
+        elif self.beta_schedule == 'linear':
+            betas = torch.linspace(self.beta_start, self.beta_end, self.num_timesteps)
+        else:
+            raise ValueError(
+                f"Unknown diffusion.beta_schedule={self.beta_schedule!r}; "
+                f"expected 'linear' (mặc định, như CE-Loc gốc) hoặc 'cosine' "
+                f"(như DiffusionDet)."
+            )
+
         # 2. Alphas = 1 - Betas
         alphas = 1.0 - betas
         

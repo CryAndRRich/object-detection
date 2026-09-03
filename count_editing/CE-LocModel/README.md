@@ -511,3 +511,29 @@ out (`prepare_cnll` + `compute_cnll_prepared`) is **63× faster with bit-identic
 (max difference exactly 0.0 over 100 candidates × 40 exemplars). This mattered most for (c),
 which scores `num_proposals=100` candidates instead of 30, but it speeds up the 8-variant
 ablation eval too. `compute_cnll` is kept as a wrapper so no existing caller changes behavior.
+
+## Chẩn đoán vì sao AP thấp (2026-09-03)
+
+Kết quả lần 2 cho AP ~1e-4, thấp hơn DiffusionDet ~260.000 lần. §15 của
+`docs/ce-loc-detection-results.md` truy ra hai nguyên nhân nặng hơn "thiếu RoIAlign":
+
+1. **Loss hội tụ đúng mức của một model đoán hằng số** — (c) dừng ở 3,91, mốc tính được cho
+   model bỏ qua hoàn toàn ảnh đầu vào là 3,86.
+2. **Linear beta schedule** trong khi DiffusionDet dùng cosine. Với 4 bước DDIM, linear chỉ cho
+   1 bước có tín hiệu đáng kể; và vì matcher chạy trên `pred_x_start`, tín hiệu thấp làm Hungarian
+   **ghép sai cặp** — loss dạy sai mục tiêu, không chỉ là gradient ồn.
+
+Bốn công cụ để xác nhận/sửa, xếp theo thời gian chạy:
+
+| | công cụ | thời gian | trả lời câu hỏi |
+|---|---|---|---|
+| 1 | `tools/diagnose_conditioning.py` | ~2 phút | model có nhìn ảnh không, hay chỉ tái tạo thống kê của tập? |
+| 2 | `tools/overfit_one_image.py` | ~5 phút | vòng train có lỗi, hay chỉ là không tổng quát hoá? |
+| 3 | `eval_detection.py --inference_steps` | ~30-90 phút | thêm bước DDIM có giúp không? (không cần train lại) |
+| 4 | `config/variants/detect/e_cosine_multibox.yaml` | ~3 giờ train | cosine schedule đáng giá bao nhiêu? |
+
+Chạy 1 và 2 TRƯỚC — kết quả của chúng quyết định 3 và 4 có đáng làm không. Nếu công cụ 1 báo
+"MÙ VỚI ẢNH" thì cosine schedule cũng không cứu được, vì đường điều kiện hoá không mang thông tin.
+
+`(e)` khác `(c)` **đúng một thứ** (`beta_schedule: cosine`), đã verify bằng so sánh giá trị đã
+parse — chính là điều lần 2 đã không làm được khi (c) đổi 4 thứ cùng lúc.
