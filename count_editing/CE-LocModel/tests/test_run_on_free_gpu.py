@@ -1,14 +1,18 @@
-"""Test cho tools/run_on_free_gpu.py — chọn GPU, chờ GPU, suy ngưỡng bộ nhớ.
+"""Test cho tools/run_on_free_gpu.py — chọn GPU và thử lại khi job chết.
 
-Chạy: python tests/test_run_on_free_gpu.py   (không cần GPU, nvidia-smi được giả lập)
+Chạy: python tests/test_run_on_free_gpu.py   (không cần GPU, nvidia-smi giả lập)
 
-Hai lỗi thật mà bộ test này chốt lại để không tái diễn:
-  1. (2026-08-31) Không chọn được GPU thì script THOÁT NGAY thay vì chờ, nên
-     variant (d) và cả 2 job eval bị bỏ qua trong đúng 1 giây khi job trước vừa
-     nhả GPU chưa kịp.
-  2. Ngưỡng --min-free-mib hard-code 15000 MiB cho MỌI job, không đo từ đâu.
-     Thực tế (d) chỉ cần ~3400 MiB, eval ~1200 MiB — thừa hơn 4x, và chính nó
-     là nguyên nhân trực tiếp của (1) trong lần chạy đó.
+Lịch sử để không lặp lại: script này từng có ngưỡng free-memory tối thiểu, và
+ngưỡng đó hỏng HAI lần theo hai cách khác nhau:
+
+  1. Hard-code 15000 MiB cho mọi job (2026-08-31): variant (d) và cả 2 job eval
+     bị bỏ qua trong 1 giây, dù GPU còn 10.607 MiB thừa sức chạy.
+  2. Suy ngưỡng từ tên script + tham số (2026-09-04):
+     tools/visualize_predictions.py bị đoán nhầm thành job train (10.580 MiB)
+     chỉ vì tên không chứa "eval", rồi chờ GPU vô ích 2 tiếng.
+
+Giờ KHÔNG còn ngưỡng: cứ chọn GPU trống nhất rồi chạy. `test_never_refuses_to_run`
+là chốt chặn cho cả hai kiểu hỏng trên.
 """
 import importlib.util
 import os
@@ -20,13 +24,13 @@ _SRC = os.path.join(os.path.dirname(_HERE), "tools", "run_on_free_gpu.py")
 
 
 def load():
-    """Nạp lại module sạch mỗi test (các test có monkeypatch query_gpus/subprocess)."""
+    """Nạp lại module sạch mỗi test (các test monkeypatch query_gpus/subprocess)."""
     spec = importlib.util.spec_from_file_location("rofg", _SRC)
     m = importlib.util.module_from_spec(spec)
-    old_argv = sys.argv
+    old = sys.argv
     sys.argv = ["run_on_free_gpu.py"]
     spec.loader.exec_module(m)
-    sys.argv = old_argv
+    sys.argv = old
     return m
 
 
@@ -39,74 +43,65 @@ def run_main(m, argv):
     return None
 
 
-# --- 1. Chờ GPU -----------------------------------------------------------
-
-def test_waits_then_runs():
-    m = load()
-    calls = {"smi": 0, "run": 0, "dev": None}
-
-    def q():
-        calls["smi"] += 1
-        if calls["smi"] <= 3:
-            return [(0, 2000, 24576, 100), (1, 1000, 24576, 99)]
-        return [(0, 2000, 24576, 100), (1, 21000, 24576, 0)]
-    m.query_gpus = q
-
+def stub_run(m, rc=0, record=None):
     class R:
-        returncode = 0
+        returncode = rc
 
     def run(cmd, env=None, cwd=None):
-        calls["run"] += 1
-        calls["dev"] = env["CUDA_VISIBLE_DEVICES"]
+        if record is not None:
+            record.append(env["CUDA_VISIBLE_DEVICES"])
         return R()
     m.subprocess.run = run
-    m.time.sleep = lambda s: None
-
-    rc = run_main(m, ["--wait-for-gpu", "3600", "--gpu-poll", "1", "--", "train_w_args.py"])
-    assert rc == 0, rc
-    assert calls["smi"] == 4 and calls["run"] == 1 and calls["dev"] == "1", calls
-    print(f"OK chờ qua {calls['smi'] - 1} lần GPU đầy rồi chạy trên GPU {calls['dev']}")
 
 
-def test_wait_budget_is_finite():
+# --- Chọn GPU -------------------------------------------------------------
+
+def test_picks_most_free_among_idle():
     m = load()
-    n = {"smi": 0}
-
-    def q():
-        n["smi"] += 1
-        if n["smi"] > 500:
-            raise RuntimeError("LẶP VÔ HẠN")
-        return [(0, 100, 24576, 100)]
-    m.query_gpus = q
-    t = [0.0]
-    m.time.time = lambda: t[0]
-    m.time.sleep = lambda s: t.__setitem__(0, t[0] + s)
-
-    rc = run_main(m, ["--wait-for-gpu", "600", "--gpu-poll", "100", "--", "train_w_args.py"])
-    assert rc == 1, rc
-    assert n["smi"] == 7, n["smi"]  # t = 0,100,...,600
-    print(f"OK dừng sau {n['smi']} lần thử, hết đúng ngân sách 600s (không lặp vô hạn)")
+    m.query_gpus = lambda: [(0, 5000, 24576, 0), (1, 20000, 24576, 3), (2, 24000, 24576, 99)]
+    (idx, free, _, _), had_idle = m.pick_gpu(m.query_gpus())
+    assert idx == 1 and had_idle is True, (idx, had_idle)
+    print("OK chọn GPU rảnh compute có nhiều free memory nhất (bỏ qua GPU 2 dù trống hơn)")
 
 
-def test_default_no_wait():
-    """Mặc định --wait-for-gpu 0 giữ nguyên hành vi cũ: thoát ngay."""
+def test_falls_back_when_all_busy():
     m = load()
-    n = {"smi": 0}
-
-    def q():
-        n["smi"] += 1
-        return [(0, 100, 24576, 100)]
-    m.query_gpus = q
-    m.time.sleep = lambda s: None
-
-    rc = run_main(m, ["--", "train_w_args.py"])
-    assert rc == 1 and n["smi"] == 1, (rc, n)
-    print("OK mặc định vẫn thoát ngay sau 1 lần đọc (không hồi quy)")
+    m.query_gpus = lambda: [(0, 3000, 24576, 95), (1, 9000, 24576, 99)]
+    (idx, _, _, _), had_idle = m.pick_gpu(m.query_gpus())
+    assert idx == 1 and had_idle is False, (idx, had_idle)
+    print("OK mọi GPU đều bận -> vẫn chọn cái trống nhất, không từ chối chạy")
 
 
-def test_dead_job_uses_retries_not_wait():
-    """Job CHẾT là chuyện khác hẳn thiếu GPU: phải giới hạn theo --retries,
-    nếu không một bug code thật sẽ chạy lại vô tận."""
+def test_never_refuses_to_run():
+    """HỒI QUY cho cả hai lần hỏng của cơ chế ngưỡng: dù GPU trống rất ít, job
+    vẫn PHẢI được chạy. Nếu thiếu VRAM thật thì torch báo OOM rõ ràng trong vài
+    giây, tốt hơn hẳn việc ngồi chờ hàng giờ rồi bỏ cuộc."""
+    m = load()
+    m.query_gpus = lambda: [(0, 700, 24576, 0), (1, 300, 24576, 100)]
+    seen = []
+    stub_run(m, 0, seen)
+    rc = run_main(m, ["--", "tools/visualize_predictions.py", "--checkpoint", "a.pth"])
+    assert rc == 0 and seen == ["0"], (rc, seen)
+    print("OK GPU chỉ còn 700 MiB -> VẪN chạy (không có ngưỡng nào chặn)")
+
+
+def test_forced_gpu_skips_detection():
+    m = load()
+    def boom():
+        raise AssertionError("không được gọi nvidia-smi khi đã ép --gpu")
+    m.query_gpus = boom
+    seen = []
+    stub_run(m, 0, seen)
+    rc = run_main(m, ["--gpu", "2", "--", "train_w_args.py"])
+    assert rc == 0 and seen == ["2"], (rc, seen)
+    print("OK --gpu ép được, bỏ qua auto-detect hoàn toàn")
+
+
+# --- Thử lại --------------------------------------------------------------
+
+def test_retries_then_gives_up():
+    """Job chết phải thử lại đúng --retries lần rồi dừng, không lặp vô hạn:
+    một bug code thật sẽ hỏng mọi lần."""
     m = load()
     m.query_gpus = lambda: [(1, 21000, 24576, 0)]
     n = {"run": 0}
@@ -120,151 +115,72 @@ def test_dead_job_uses_retries_not_wait():
     m.subprocess.run = run
     m.time.sleep = lambda s: None
 
-    rc = run_main(m, ["--retries", "2", "--wait-for-gpu", "3600", "--", "train_w_args.py"])
+    rc = run_main(m, ["--retries", "2", "--", "train_w_args.py"])
     assert rc == 1 and n["run"] == 3, (rc, n)
-    print(f"OK job chết -> chạy {n['run']} lần (1 + 2 retry) rồi dừng, không chờ vô hạn")
+    print(f"OK job chết -> chạy {n['run']} lần (1 + 2 retry) rồi dừng")
 
 
-# --- 2. Chọn GPU ----------------------------------------------------------
-
-def test_memory_is_hard_filter():
-    """GPU rảnh compute nhưng thiếu memory KHÔNG bao giờ được chọn — đó đúng là
-    thứ gây OOM."""
+def test_rereads_nvidia_smi_each_retry():
+    """Mỗi lần thử lại phải đọc nvidia-smi MỚI, để có thể chuyển sang GPU khác
+    khi GPU cũ vừa bị job khác chiếm."""
     m = load()
-    gpus = [(0, 1000, 24576, 0), (1, 20000, 24576, 95)]
-    picked, had_idle = m.pick_gpu(gpus, 15000)
-    assert picked[0] == 1 and had_idle is False, (picked, had_idle)
-    print("OK bỏ qua GPU rảnh-nhưng-thiếu-memory, chọn GPU đủ memory dù đang bận")
+    calls = {"smi": 0}
+
+    def q():
+        calls["smi"] += 1
+        return ([(0, 20000, 24576, 0)] if calls["smi"] == 1
+                else [(0, 500, 24576, 99), (1, 22000, 24576, 0)])
+    m.query_gpus = q
+    seen = []
+    n = {"run": 0}
+
+    class R:
+        returncode = 0
+
+    class RBad:
+        returncode = 1
+
+    def run(cmd, env=None, cwd=None):
+        n["run"] += 1
+        seen.append(env["CUDA_VISIBLE_DEVICES"])
+        return RBad() if n["run"] == 1 else R()
+    m.subprocess.run = run
+    m.time.sleep = lambda s: None
+
+    rc = run_main(m, ["--retries", "2", "--", "train_w_args.py"])
+    assert rc == 0 and seen == ["0", "1"], (rc, seen)
+    print(f"OK lần 1 GPU {seen[0]} chết -> đọc lại nvidia-smi -> lần 2 đổi sang GPU {seen[1]}")
 
 
-def test_prefers_idle_among_fitting():
+def test_success_runs_once():
     m = load()
-    gpus = [(0, 24000, 24576, 99), (1, 16000, 24576, 5)]
-    picked, had_idle = m.pick_gpu(gpus, 15000)
-    assert picked[0] == 1 and had_idle is True, picked
-    print("OK trong số GPU đủ memory, ưu tiên cái rảnh compute dù ít memory hơn")
+    m.query_gpus = lambda: [(0, 20000, 24576, 0)]
+    n = {"run": 0}
+
+    class R:
+        returncode = 0
+
+    def run(cmd, env=None, cwd=None):
+        n["run"] += 1
+        return R()
+    m.subprocess.run = run
+    rc = run_main(m, ["--", "train_w_args.py"])
+    assert rc == 0 and n["run"] == 1, (rc, n)
+    print("OK job chạy ngon -> đúng 1 lần, không thử lại thừa")
 
 
-# --- 3. Suy ngưỡng bộ nhớ -------------------------------------------------
-
-def test_threshold_scales_with_batch_size():
+def test_no_threshold_flags_left():
+    """Cờ --min-free-mib / --wait-for-gpu đã bị xoá hẳn; lệnh cũ dùng chúng
+    phải báo lỗi rõ ràng thay vì âm thầm bỏ qua."""
     m = load()
-    vals = [m.infer_min_free_mib(f"train_w_args.py --batch_size {b}".split())
-            for b in (1, 2, 4, 8, 16, 32, 64, 128)]
-    assert vals == sorted(vals) and len(set(vals)) == len(vals), vals
-    print(f"OK ngưỡng tăng đơn điệu theo batch_size: {vals}")
-
-
-def test_eval_cheaper_than_train():
-    """Eval không giữ activation cho backward, không có optimizer state -> phải
-    rẻ hơn train ở cùng quy mô."""
-    m = load()
-    tr = m.infer_min_free_mib("train_w_args.py --batch_size 32".split())
-    ev = m.infer_min_free_mib("eval_detection.py --variant x --k 30".split())
-    assert ev < tr, (ev, tr)
-    print(f"OK train({tr}) > eval({ev})")
-
-
-def test_eval_scales_with_k():
-    """Nhánh 1-box chạy K mẫu SONG SONG trong 1 batch nên K mới là thứ quyết
-    định bộ nhớ của eval, không phải batch_size. Nhánh multibox thì không dùng
-    --k, nên ngưỡng phải là MỨC CAO HƠN của hai khả năng."""
-    m = load()
-    a = m.infer_min_free_mib("eval_detection.py --k 30".split())
-    b = m.infer_min_free_mib("eval_detection.py --k 300".split())
-    assert b > a, (a, b)
-    print(f"OK eval k=30 -> {a} MiB, k=300 -> {b} MiB")
-
-
-def test_covers_real_measurements():
-    """HỒI QUY cho lần sai thứ hai (2026-09-04): công thức trước ước lượng THẤP
-    hơn thực tế 2,0-4,2 lần, tức có thể chọn GPU không đủ rồi OOM giữa chừng.
-
-    Ngưỡng suy ra phải >= mức ĐO THẬT trên server, không được thấp hơn."""
-    m = load()
-    measured = [
-        ("train (d) COCO bs=32", 9200,
-         "train_w_args.py --variant detect/d_coco_classhead --task coco --batch_size 32"),
-        ("train (e) CE130 bs=32", 6862,
-         "train_w_args.py --variant detect/e_cosine_multibox --task detect --batch_size 32"),
-        ("eval multibox", 5000,
-         "eval_detection.py --checkpoint a.pth --variant detect/c_transformer_multibox "
-         "--split test --nms 0.5 --box_renewal --use_ensemble"),
-    ]
-    for name, real, cmd in measured:
-        got = m.infer_min_free_mib(cmd.split())
-        assert got >= real, f"{name}: ngưỡng {got} THẤP HƠN mức đo thật {real} -> nguy cơ OOM"
-        print(f"OK {name:22} ngưỡng {got:5d} >= đo thật {real:5d} "
-              f"(+{(got / real - 1) * 100:.0f}% đệm)")
-
-
-def test_threshold_capped_at_gpu_capacity():
-    """Ngưỡng vượt dung lượng GPU thì KHÔNG GPU nào qua nổi -> job chờ vô ích
-    tới hết --wait-for-gpu rồi chết. Phải hạ xuống để job ít nhất được thử."""
-    m = load()
-    got = m.infer_min_free_mib("eval_detection.py --k 300".split(), gpu_capacity_mib=24576)
-    assert got <= 24576, got
-    assert got == int(24576 * 0.9), got
-    print(f"OK eval --k 300 (suy ra >24GB) bị hạ xuống {got} MiB = 90% dung lượng GPU")
-
-
-def test_cap_does_not_lower_normal_thresholds():
-    m = load()
-    got = m.infer_min_free_mib("train_w_args.py --batch_size 32".split(), gpu_capacity_mib=24576)
-    assert got == 10580, got
-    print(f"OK ngưỡng bình thường KHÔNG bị chặn trần đụng vào ({got} MiB)")
-
-
-def test_not_absurdly_high():
-    """Đệm phải vừa phải: quá cao thì lặp lại lỗi 15000 cũ (job bị bỏ qua dù
-    GPU thừa sức chạy)."""
-    m = load()
-    for real, cmd in [(9200, "train_w_args.py --batch_size 32"),
-                      (5000, "eval_detection.py --variant x")]:
-        got = m.infer_min_free_mib(cmd.split())
-        assert got <= real * 1.5, f"{cmd}: {got} quá cao so với {real}"
-    print("OK đệm <= 50%, không lặp lại lỗi ngưỡng 15000 bịa ra")
-
-
-def test_diagnostic_tools_get_sane_threshold():
-    """diagnose_conditioning / overfit_one_image dựng cả model + optimizer nên
-    không được coi là job rẻ tiền."""
-    m = load()
-    for cmd in ["tools/diagnose_conditioning.py --checkpoint a.pth --variant x",
-                "tools/overfit_one_image.py --variant x --steps 2000"]:
-        got = m.infer_min_free_mib(cmd.split())
-        assert 3000 <= got <= 9000, (cmd, got)
-        print(f"OK {os.path.basename(cmd.split()[0]):28} -> {got} MiB")
-
-
-def test_bad_flag_values_dont_crash():
-    m = load()
-    base = m.infer_min_free_mib("train_w_args.py".split())
-    assert m.infer_min_free_mib("train_w_args.py --batch_size abc".split()) == base
-    assert m.infer_min_free_mib("train_w_args.py --batch_size".split()) > 0
-    assert m.infer_min_free_mib("train_w_args.py --batch_size=32".split()) == \
-        m.infer_min_free_mib("train_w_args.py --batch_size 32".split())
-    print("OK giá trị flag rác/thiếu -> rơi về mặc định; parse được cả dạng --flag=giá_trị")
-
-
-def test_real_commands_fit_yesterdays_gpu():
-    """Hồi quy trực tiếp cho sự cố 2026-08-31: GPU 1 khi đó còn 10607 MiB free
-    và cả 3 job đều bị bỏ qua. Với ngưỡng suy ra, cả 3 đều phải chạy được."""
-    m = load()
-    free_that_night = 10607
-    cmds = {
-        "(d) train": "train_w_args.py --variant detect/d_coco_classhead --task coco "
-                     "--epochs 60 --batch_size 32 --lr 5e-5 --num_workers 8",
-        "eval (c)": "eval_detection.py --checkpoint a.pth --variant detect/c_transformer_multibox "
-                    "--split test --nms 0.5 --box_renewal --use_ensemble",
-        "eval (d)": "eval_detection.py --checkpoint a.pth --variant detect/d_coco_classhead "
-                    "--dataset coco --nms 0.5 --box_renewal --use_ensemble",
-    }
-    for name, c in cmds.items():
-        v = m.infer_min_free_mib(c.split())
-        assert v <= free_that_night, f"{name}: {v} > {free_that_night}"
-        print(f"OK {name:<10} cần {v:5d} MiB <= {free_that_night} MiB mà GPU 1 đang có tối hôm đó")
-    print("   (vẫn đúng sau khi hiệu chỉnh theo số đo thật 2026-09-04)")
+    m.query_gpus = lambda: [(0, 20000, 24576, 0)]
+    stub_run(m, 0)
+    try:
+        rc = run_main(m, ["--min-free-mib", "5000", "--", "train_w_args.py"])
+    except SystemExit as e:
+        rc = e.code
+    assert rc == 2, f"argparse phải từ chối cờ đã xoá, nhận rc={rc}"
+    print("OK --min-free-mib đã xoá hẳn, lệnh cũ báo lỗi thay vì im lặng")
 
 
 if __name__ == "__main__":

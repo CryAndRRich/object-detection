@@ -154,62 +154,23 @@ python tools/run_on_free_gpu.py -- train_w_args.py --variant resnet18_cnn --epoc
 server is shared with other jobs) and sets `CUDA_VISIBLE_DEVICES` accordingly instead of a
 hard-coded device index.
 
-Two independent failure modes on a shared server, handled by two different flags — don't confuse
-them:
+It picks the **emptiest GPU** — preferring one that is idle on compute
+(`utilization < 50 %`), and among those the one with the most free memory — then runs. There is
+**no minimum-free-memory threshold**, deliberately.
 
-| flag | fires when | budget |
+That threshold existed and broke twice, in opposite ways:
+
+| | what it did | what happened |
 |---|---|---|
-| `--wait-for-gpu <giây>` | **no GPU has enough free memory** — the job never started, someone else's job holds the cards. Always transient. | time budget; polls `nvidia-smi` every `--gpu-poll` (default 300 s) |
-| `--retries <n>` (default 3) | **the job started and then died** — usually OOM from a GPU snapshotted free but grabbed before allocation, but the exit code cannot tell that apart from a real code bug. | attempt count, so a genuine bug stops instead of retrying forever |
+| hard-coded 15000 MiB | same bar for every job | 2026-08-31: variant (d) and both eval jobs skipped in one second, while GPU 1 sat with 10,607 MiB free — plenty for all three |
+| inferred from the command | parsed the script name and flags | 2026-09-04: `tools/visualize_predictions.py` was guessed to be a *training* job (10,580 MiB) purely because its name lacks "eval", then waited two hours for a GPU it never needed |
 
-`--wait-for-gpu` defaults to **0** (exit immediately, the original behaviour). Set it when queueing
-several jobs back-to-back — otherwise the second job dies at its GPU check the moment the first one
-is still releasing memory, which is exactly what happened on 2026-08-31 (variant (d) plus both
-evals were skipped in a single second).
+Guessing memory needs from a command line is wrong somewhere, and when it is wrong the failure
+(job never runs) is worse than what it guards against — an OOM, which torch reports clearly within
+seconds. `--retries` (default 3) covers the real case: each retry re-reads `nvidia-smi`, so a job
+that lost its GPU to someone else can land on a different one.
 
-### How much free memory a job actually needs
-
-This number has been **wrong twice, in opposite directions** — worth reading before trusting it.
-
-1. Originally hard-coded at **15000 MiB for every job**, never measured. On 2026-08-31 it silently
-   skipped variant (d) and both eval jobs: GPU 1 had 10,607 MiB free, plenty for all three.
-2. Replaced with a memory model derived from tensor sizes. That model came out **2.0–4.2× too low**
-   (measured on the server, 2026-09-04):
-
-   | job | old formula | **measured** |
-   |---|---|---|
-   | train (d) COCO, bs=32 | 3,362 MiB | **9,200 MiB** |
-   | train (e) CE-130, bs=32 | 3,362 MiB | **6,862 MiB** |
-   | eval, multibox | 1,200 MiB | **~5,000 MiB** |
-
-   Underestimating is the dangerous direction: pick a GPU that cannot hold the job and it OOMs
-   partway through, losing hours of training. Those three happened to fit anyway.
-
-The current version is **calibrated from those measurements**, not from tensor arithmetic:
-
-```
-train:  2000 + 225 × batch_size          eval:  max(5000, 2000 + 100 × k)
-```
-all × 1.15, then **capped at 90 % of the largest GPU's capacity** — a threshold above what any GPU
-has means the job waits out the whole `--wait-for-gpu` budget and then dies, which is strictly worse
-than letting it try and OOM with a traceback.
-
-| job | threshold | measured | headroom |
-|---|---|---|---|
-| train (d), bs=32 | 10,580 MiB | 9,200 | +15 % |
-| train (e), bs=32 | 10,580 MiB | 6,862 | +54 % |
-| eval, multibox | 5,750 MiB | 5,000 | +15 % |
-| train, bs=8 | 4,370 MiB | — | — |
-
-Constants are anchored to the **highest** figure observed per mode, never the average: waiting a bit
-longer for a GPU costs minutes, OOMing mid-run costs hours.
-
-**Unexplained:** (d) needs 9,200 MiB while (e) needs 6,862 at the same batch size and same N=300.
-The 80-way class head accounts for only ~17 MiB of that 2,338 MiB gap. Rather than guess further,
-the higher figure is used for both — run `tools/measure_vram.py` when an exact number matters for a
-specific config.
-
-Tests: `python tests/test_run_on_free_gpu.py` (11 tests, no GPU needed — `nvidia-smi` is stubbed).
+Tests: `python tests/test_run_on_free_gpu.py` (8 tests, no GPU needed — `nvidia-smi` is stubbed).
 
 Checkpoints are saved per-variant to `checkpoints/{variant}/` after each epoch. The best model
 (lowest training loss) is saved to `checkpoints/{variant}/best_model.pth`.
