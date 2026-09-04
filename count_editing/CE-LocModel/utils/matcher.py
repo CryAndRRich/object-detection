@@ -54,8 +54,21 @@ def _cxcywh_to_xyxy(boxes):
     # goes negative). DiffusionDet asserts against degenerate boxes instead
     # (util/box_ops.py:51-52); clamping is the non-fatal equivalent, since
     # here the offending boxes come from an untrained network, not from data.
-    true_w = ((w + 1.0) / 2.0).clamp(min=0.0)
-    true_h = ((h + 1.0) / 2.0).clamp(min=0.0)
+    # `true_w` ở đây là PHÂN SỐ của chiều rộng ảnh (hệ [0,1]), trong khi `cx`
+    # nằm trong hệ [-1,1] — tức MỘT ĐƠN VỊ của cx chỉ bằng NỬA ảnh, còn một đơn
+    # vị của true_w bằng CẢ ảnh. Trộn hai thang này khi dựng góc làm box hẹp đi
+    # đúng 2 lần so với khoảng cách giữa các tâm.
+    #
+    # LỖI NÀY ĐÃ TỪNG TỒN TẠI (phát hiện 2026-09-04 qua visualize: box GT vẽ ra
+    # không bao nổi vật thể, chỉ rộng bằng nửa). Hệ quả: IoU đúng khi hai box
+    # CÙNG TÂM, nhưng sai — luôn thấp hơn thật — ngay khi tâm lệch nhau, vì độ
+    # lệch tâm bị đo ở thang gấp đôi extent. Đo được: hai box lệch nhau chút ít
+    # cho IoU 0,309 thay vì 0,553 thật.
+    #
+    # Sửa: nhân extent lên 2 để đưa về CÙNG hệ [-1,1] với tâm. Kiểm bằng
+    # round-trip pixel (tests/test_matcher_coords.py).
+    true_w = ((w + 1.0)).clamp(min=0.0)   # (w+1)/2 phân số ảnh, x2 để vào hệ [-1,1]
+    true_h = ((h + 1.0)).clamp(min=0.0)
     return torch.stack([cx - true_w / 2, cy - true_h / 2,
                         cx + true_w / 2, cy + true_h / 2], dim=-1)
 

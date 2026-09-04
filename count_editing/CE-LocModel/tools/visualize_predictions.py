@@ -38,7 +38,13 @@ from eval_detection import nms_class_agnostic, greedy_match  # noqa: E402
 
 
 def to_pixels(boxes_xyxy, W, H):
-    """[-1,1] xyxy -> pixel của canvas đã resize+pad (đúng khung ảnh đang vẽ)."""
+    """[-1,1] xyxy -> pixel của canvas đã resize+pad (đúng khung ảnh đang vẽ).
+
+    Sau khi `_cxcywh_to_xyxy` được sửa (2026-09-04), CẢ BỐN số đều nằm trong
+    cùng hệ [-1,1], nên phép đổi là như nhau cho mọi thành phần. Chính việc
+    trộn hai hệ trước đây (tâm [-1,1], extent [0,1]) là thứ làm box GT vẽ ra chỉ
+    rộng bằng nửa vật thể.
+    """
     b = (boxes_xyxy + 1.0) / 2.0
     return torch.stack([b[:, 0] * W, b[:, 1] * H, b[:, 2] * W, b[:, 3] * H], dim=-1)
 
