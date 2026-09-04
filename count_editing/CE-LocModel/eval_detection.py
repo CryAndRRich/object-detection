@@ -207,10 +207,19 @@ def main():
     ckpt = torch.load(args.checkpoint, map_location="cpu")
     if "args" in ckpt and ckpt["args"].get("num_steps"):
         model_cfg.setdefault("diffusion", {})["num_timesteps"] = ckpt["args"]["num_steps"]
+    # Cảnh báo khi checkpoint được train trên BÀI TOÁN KHÁC với bài đang eval.
+    # Trước đây chỉ so với 'detect', nên checkpoint (d)/(f) train hợp lệ bằng
+    # --task coco vẫn bị báo "số đo sẽ không có ý nghĩa" — dương tính giả, và
+    # nguy hiểm ở chỗ nó dạy người đọc log bỏ qua cảnh báo. Cặp hợp lệ:
+    #   --task detect  <-> --dataset ce130
+    #   --task coco    <-> --dataset coco
+    # 'add' là bài toán gốc (sinh box vào vùng trống), khác hẳn detection.
     trained_task = ckpt.get("args", {}).get("task")
-    if trained_task and trained_task != "detect":
-        print(f"CẢNH BÁO: checkpoint này train với --task {trained_task!r}, "
-              f"không phải 'detect'. Số đo sẽ không có ý nghĩa.")
+    expected_task = "coco" if args.dataset == "coco" else "detect"
+    if trained_task and trained_task != expected_task:
+        print(f"CẢNH BÁO: checkpoint train với --task {trained_task!r} nhưng đang eval trên "
+              f"--dataset {args.dataset!r} (cần --task {expected_task!r}). Số đo sẽ không có "
+              f"ý nghĩa.")
 
     model = ObjectPlacementPolicy(model_cfg)
     model.load_state_dict(ckpt["model_state_dict"])

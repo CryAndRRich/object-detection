@@ -46,6 +46,19 @@ import torchvision.transforms.functional as F
 SOURCE_IMAGE = "ground_truth.jpg"
 
 
+def _iou_xyxy(a, b):
+    """IoU giữa hai box [x1,y1,x2,y2] pixel. Dùng để nhận diện box của vật đã
+    inpaint — không so bằng đúng vì toạ độ lệch vài pixel giữa hai lần chạy
+    detector."""
+    x1, y1 = max(a[0], b[0]), max(a[1], b[1])
+    x2, y2 = min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0, x2 - x1) * max(0, y2 - y1)
+    if inter <= 0:
+        return 0.0
+    union = ((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter)
+    return inter / union if union > 0 else 0.0
+
+
 class CE130DetectionDataset(Dataset):
     def __init__(self, root_dir, split, target_size=(512, 512),
                  num_proposals=1, max_boxes=None):
@@ -72,6 +85,7 @@ class CE130DetectionDataset(Dataset):
             raise FileNotFoundError(f"không thấy split {split!r} trong {root_dir}")
 
         # --- gom branch theo ảnh gốc, mỗi ảnh giữ đúng 1 bản ghi ---
+        self._n_dropped_inpainted = 0
         by_image = {}
         for branch in sorted(glob.glob(os.path.join(split_dir, "*"))):
             if not os.path.isdir(branch):
@@ -95,6 +109,36 @@ class CE130DetectionDataset(Dataset):
             cls = data.get("class_based_caption")
             if not boxes or not cls:
                 continue
+
+            # BỎ các vật ĐƯỢC THÊM VÀO bằng inpainting.
+            #
+            # Bộ dữ liệu này sinh ra cho bài toán ADD của CE-Loc gốc:
+            #   ground_truth.jpg      = ảnh ban đầu (ví dụ 115 con cừu)
+            #   inpainted_turn_3.png  = ảnh sau khi thêm 3 con  -> 118 con
+            #   inpainted_bboxes      = vị trí 3 con MỚI thêm
+            #   all_bboxes            = 118 box, annotation của ảnh ĐÃ THÊM
+            #
+            # Nhánh detection đưa vào model `ground_truth.jpg` (115 con) nhưng
+            # `all_bboxes` mô tả 118 con -> 3 box thừa nằm ở chỗ ảnh đầu vào
+            # TRỐNG. Model bị dạy "có vật ở đây" trong khi không có gì -> nó học
+            # sinh box vào vùng trống, đúng bài toán add chứ không phải detect.
+            #
+            # Đo được (2026-09-04): 98,7% box trong inpainted_bboxes có IoU>0,5
+            # với một box của all_bboxes, và vùng đó chênh 40-62/255 pixel giữa
+            # hai ảnh (vùng ngẫu nhiên: 5,4) -> chúng thật sự bị sửa. Trên toàn
+            # bộ dataset, 7,5% target là vật không tồn tại trong ảnh đầu vào.
+            #
+            # Khớp bằng IoU chứ không so bằng đúng: detector chạy lại trên ảnh
+            # inpainted cho toạ độ lệch vài pixel (đo được một cặp IoU 0,825).
+            added = data.get("inpainted_bboxes", [])
+            if added:
+                keep = [b for b in boxes
+                        if max((_iou_xyxy(b, a) for a in added), default=0.0) <= 0.5]
+                n_drop = len(boxes) - len(keep)
+                self._n_dropped_inpainted += n_drop
+                boxes = keep
+                if not boxes:
+                    continue
             by_image[img_id] = {
                 "img_path": img_path,
                 "boxes_xyxy": boxes,
@@ -130,6 +174,8 @@ class CE130DetectionDataset(Dataset):
             f"box/ảnh: mean={np.mean(n_box):.1f} median={int(np.median(n_box))} "
             f"max={max(n_box)} | num_proposals={num_proposals}"
             + (f" | bỏ {self.n_skipped_too_many} ảnh >{max_boxes} box" if max_boxes else "")
+            + (f" | BỎ {self._n_dropped_inpainted} box của vật đã inpaint "
+               f"(không có trong ground_truth.jpg)" if self._n_dropped_inpainted else "")
             + (f" | bỏ {self.n_skipped_degenerate} box suy biến"
                if self.n_skipped_degenerate else "")
         )
@@ -174,19 +220,59 @@ class CE130DetectionDataset(Dataset):
         x1, y1, x2, y2 = b
         return ((x1 + x2) / 2.0, (y1 + y2) / 2.0, x2 - x1, y2 - y1)
 
-    def _pad_to_proposals(self, gt_norm):
+    def _pad_to_proposals(self, gt_norm, valid_wh=None):
         """Pad/crop tập box về đúng num_proposals, theo công thức
         prepare_diffusion_concat của DiffusionDet (detector.py:370) đã chuyển
-        sang không gian [-1,1] của CE-Loc."""
+        sang không gian [-1,1] của CE-Loc.
+
+        valid_wh: (fw, fh) — phần canvas thật sự là ẢNH, tính theo phân số. Ảnh
+        được resize giữ tỉ lệ rồi pad vào góc trên-trái, nên phần còn lại của
+        canvas là ĐEN (đo được: ảnh 469x384 -> 93px dưới cùng, 18% chiều cao).
+        Placeholder rải theo randn có thể rơi hẳn vào vùng đen đó, dạy model
+        rằng "vật có thể ở chỗ không có ảnh". Truyền valid_wh để giới hạn tâm
+        placeholder trong vùng ảnh thật.
+        """
         N = self.num_proposals
         num_gt = gt_norm.shape[0]
         if num_gt < N:
-            # DiffusionDet: randn/6 + 0.5 trong [0,1]; ánh xạ qua v*2-1 thành
-            # randn/3 quanh 0 trong [-1,1] (đã kiểm trùng phân phối).
-            placeholder = torch.randn(N - num_gt, 4) / 3.0
-            # Sàn w/h: box suy biến trong [-1,1] là -1 (không phải 0), nên
-            # tương đương của DiffusionDet min=1e-4 là 1e-4*2-1.
-            placeholder[:, 2:] = torch.clamp(placeholder[:, 2:], min=1e-4 * 2 - 1)
+            n_ph = N - num_gt
+            # TÂM: giữ nguyên DiffusionDet (randn/6 + 0.5 trong [0,1], tức
+            # randn/3 quanh 0 trong [-1,1]) — rải đều khắp ảnh là hợp lý.
+            placeholder = torch.randn(n_ph, 4) / 3.0
+
+            # KÍCH THƯỚC: KHÔNG dùng công thức DiffusionDet ở đây.
+            #
+            # `randn/6 + 0.5` cho w/h trung bình 0,5 — tức box rộng NỬA ẢNH. Trên
+            # COCO thì hợp lý (vật chiếm ~0,3-0,5 ảnh), nhưng CE-130 có vật rất
+            # nhỏ: trung vị 0,098 x 0,120 (đo trên 7.054 box thật). Placeholder
+            # to gấp ~5x vật thật.
+            #
+            # Hậu quả đo được (2026-09-04): với 48,5 GT trên N=300 slot, 84% slot
+            # là placeholder. Chúng KHÔNG vào loss (Hungarian chỉ match GT thật),
+            # nhưng CÓ vào x_start của q_sample, nên model nhận đầu vào mà 84% là
+            # box to bằng nửa ảnh và phải khử nhiễu tất cả -> học prior "box điển
+            # hình thì to và ở giữa". Nhìn thấy rõ trên ảnh visualize: box dồn vào
+            # vùng trống, không bám vật.
+            #
+            # Thay bằng phân phối lấy từ chính thống kê vật thật của ảnh này. Dùng
+            # log-normal quanh trung vị của các box thật (kích thước vật luôn
+            # dương và lệch phải), để placeholder nằm TRONG phân phối target.
+            if num_gt > 0:
+                # gt_norm ở hệ [-1,1] với size mã hoá (2f-1) -> phân số ảnh = (v+1)/2
+                real_wh = (gt_norm[:, 2:] + 1.0) / 2.0
+                med = real_wh.median(dim=0).values.clamp(min=1e-3)
+            else:
+                med = torch.tensor([0.098, 0.120])  # trung vị toàn CE-130
+            # sigma 0,5 trong không gian log ~ nhân/chia 1,65 quanh trung vị
+            frac_wh = (med.log() + torch.randn(n_ph, 2) * 0.5).exp().clamp(1e-4, 1.0)
+            placeholder[:, 2:] = frac_wh * 2.0 - 1.0   # về hệ [-1,1]
+
+            # Giữ TÂM placeholder trong vùng ảnh thật, không cho rơi vào dải pad đen.
+            if valid_wh is not None:
+                fw, fh = valid_wh
+                # tâm ở hệ [-1,1]: phân số 0..fw ứng với -1 .. (2*fw-1)
+                placeholder[:, 0] = placeholder[:, 0].clamp(-1.0, 2.0 * fw - 1.0)
+                placeholder[:, 1] = placeholder[:, 1].clamp(-1.0, 2.0 * fh - 1.0)
             boxes = torch.cat([gt_norm, placeholder], dim=0)
             mask = torch.cat([torch.ones(num_gt, dtype=torch.bool),
                               torch.zeros(N - num_gt, dtype=torch.bool)])
@@ -219,7 +305,10 @@ class CE130DetectionDataset(Dataset):
             "num_boxes": len(gt_norm),
         }
         if self.num_proposals > 1:
-            boxes, mask = self._pad_to_proposals(gt_norm)
+            # phần canvas thật sự là ảnh (phần còn lại là pad đen)
+            valid_wh = (original_size[0] * scale / self.target_size[0],
+                        original_size[1] * scale / self.target_size[1])
+            boxes, mask = self._pad_to_proposals(gt_norm, valid_wh=valid_wh)
             sample["boxes"] = boxes
             sample["box_mask"] = mask
         return sample
