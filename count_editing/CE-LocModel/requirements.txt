@@ -4,7 +4,6 @@ transformers==4.42.0
 einops==0.8.2
 Pillow==12.1.1
 PyYAML==6.0.3
-tqdm==4.67.3
 matplotlib==3.10.9
 numpy==1.26.4
 scipy==1.13.1              # linear_sum_assignment, Hungarian matching for variant (c) multi-box

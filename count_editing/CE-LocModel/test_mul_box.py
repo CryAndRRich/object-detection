@@ -6,7 +6,6 @@ import torch
 import numpy as np
 import argparse
 from torch.utils.data import DataLoader
-from tqdm import tqdm
 import json
 
 from models.diffusion_module import ObjectPlacementPolicy
@@ -104,6 +103,8 @@ def get_args():
     parser.add_argument("--variant", type=str, required=True, help="variant name, e.g. resnet34_transformer")
     # Optional override for data path
     parser.add_argument("--test_data", type=str, default=None, help="Override path to test data")
+    parser.add_argument("--log_every", type=int, default=50,
+                        help="in tiến trình mỗi N ảnh (thay cho thanh tqdm cũ)")
     parser.add_argument(
         "--all_phase2_dir", type=str, default="../../data/all_phase2_V2",
         help="path to the original CE-130 dump (all_bboxes/inpainted_bboxes) used for C-NLL",
@@ -162,6 +163,11 @@ def match_boxes_for_pr(pred_boxes, gt_boxes, iou_threshold):
 
 
 @torch.no_grad()
+def _fmt(seconds):
+    """Giây -> H:MM:SS. Giống hệt eval_detection._fmt để hai log đọc như nhau."""
+    return str(datetime.timedelta(seconds=int(seconds)))
+
+
 def sample_boxes(model, global_cond, device, inference_steps, n_samples=N_SAMPLES):
     """DDPM/DDIM reverse process (Ho et al. 2020 Eq. 11; Song et al. 2021 Eq. 12)
     — replaces the previous 'mock update' (box -= noise/inference_steps) that
@@ -395,7 +401,12 @@ def test():
     pr_matched, pr_n_pred, pr_n_gt = 0, 0, 0  # variant (c) only
     eval_start = time.monotonic()
 
-    for i, batch in tqdm(enumerate(dataloader), total=len(dataloader), desc=f"eval[{args.variant}]"):
+    n_total = len(dataloader)
+    # In tiến trình bằng print thay vì tqdm: tqdm dùng \r để vẽ lại thanh, thứ
+    # chỉ có nghĩa trên terminal. Ghi vào file log qua nohup thì \r nằm nguyên
+    # trong file và mọi lần vẽ chồng lên cùng một dòng vật lý -- đọc lại thấy số
+    # nhảy lộn xộn, rất dễ tưởng có nhiều tiến trình chạy song song.
+    for i, batch in enumerate(dataloader):
         rgb = batch["pixel_values"].to(device)
         density = batch["density_map"].to(device)
         gt_box = batch["bbox"].numpy()[0]
@@ -464,6 +475,18 @@ def test():
 
         save_path = os.path.join(output_dir, f"{filename.split('.')[0]}.json")
         save_pred_box(pred_boxes, scale, save_path)
+
+        done = i + 1
+        if done % args.log_every == 0 or done == n_total:
+            el = time.monotonic() - eval_start
+            rate = done / el
+            eta = (n_total - done) / rate if rate > 0 else 0
+            msg = f"[test_mul_box {args.variant}] {done}/{n_total} ảnh"
+            if ious_k30:
+                msg += f" | IoU@30={np.mean(ious_k30):.4f}"
+            if cnlls:
+                msg += f" C-NLL={np.mean(cnlls):.4f}"
+            print(f"{msg} | {rate:.2f} ảnh/s | elapsed {_fmt(el)} | ETA {_fmt(eta)}", flush=True)
 
     total_time = time.monotonic() - eval_start
     results = {

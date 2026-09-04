@@ -35,7 +35,6 @@ import numpy as np
 import torch
 import yaml
 from torch.utils.data import DataLoader
-from tqdm import tqdm
 
 from data.ce130_detection_dataset import CE130DetectionDataset
 from data.coco_detection_dataset import CocoDetectionDataset
@@ -80,6 +79,8 @@ def get_args():
                         "hoặc diffusion.sampling_steps (multi-box)")
     p.add_argument("--max_boxes", type=int, default=None,
                    help="bỏ ảnh có nhiều hơn ngần này box GT")
+    p.add_argument("--log_every", type=int, default=50,
+                   help="in tiến trình mỗi N ảnh (thay cho thanh tqdm cũ)")
     p.add_argument("--limit", type=int, default=None,
                    help="chỉ eval N ảnh đầu (để chạy thử nhanh)")
     return p.parse_args()
@@ -239,7 +240,14 @@ def main():
     t0 = time.monotonic()
     n_done = 0
 
-    for i, batch in tqdm(enumerate(loader), total=len(loader), desc=f"eval[{args.variant}]"):
+    n_total = len(loader) if args.limit is None else min(args.limit, len(loader))
+    # In mỗi --log_every ảnh thay vì dùng tqdm. Lý do: tqdm vẽ lại thanh tiến
+    # trình bằng ký tự \r, thứ chỉ có nghĩa trên terminal -- ghi vào file log
+    # (nohup) thì \r nằm nguyên trong file, làm mọi lần vẽ chồng lên cùng MỘT
+    # dòng vật lý. Đọc log kiểu đó thấy số nhảy lộn xộn (166/779 rồi 97/779) và
+    # rất dễ tưởng là nhiều tiến trình chạy song song. flush=True vì nohup buffer
+    # stdout theo block.
+    for i, batch in enumerate(loader):
         if args.limit is not None and i >= args.limit:
             break
         rgb = batch["pixel_values"].to(device)
@@ -315,6 +323,16 @@ def main():
             "n_matched": int(n_match),
         })
         n_done += 1
+
+        if n_done % args.log_every == 0 or n_done == n_total:
+            el = time.monotonic() - t0
+            rate = n_done / el
+            eta = (n_total - n_done) / rate if rate > 0 else 0
+            print(f"[eval {args.variant}] {n_done}/{n_total} ảnh"
+                  f" | P={n_matched_total / max(n_pred_total, 1) * 100:.4f}%"
+                  f" R={n_matched_total / max(n_gt_total, 1) * 100:.2f}%"
+                  f" | {rate:.2f} ảnh/s | elapsed {_fmt(el)} | ETA {_fmt(eta)}",
+                  flush=True)
 
     total_time = time.monotonic() - t0
     precision = n_matched_total / n_pred_total if n_pred_total else 0.0
