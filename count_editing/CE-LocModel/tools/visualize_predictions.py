@@ -15,6 +15,7 @@ lựa chọn để NHÌN, không phải để đo: P/R in kèm vẫn tính trên
 eval_detection.py, nên đừng nhầm hai con số.
 """
 import argparse
+import csv
 import os
 import sys
 
@@ -79,6 +80,8 @@ def main():
                    help="mặc định: <thư mục checkpoint>/viz/")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--start", type=int, default=0, help="bỏ qua N ảnh đầu")
+    p.add_argument("--log_every", type=int, default=25,
+                   help="in tiến trình mỗi N ảnh (khi vẽ nhiều ảnh)")
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -110,10 +113,12 @@ def main():
     torch.manual_seed(args.seed)
     print(f"\n{args.variant} | {args.dataset}/{args.split} | N={N} | steps={steps} "
           f"| vẽ top-{args.topk} box\n")
-    print(f"{'#':>4} {'ảnh':<24}{'GT':>5}{'pred':>7}{'khớp':>6}{'P':>9}{'R':>9}")
+    print(f"{'#':>4} {'ảnh':<24}{'GT':>5}{'pred':>7}{'khớp':>6}{'P':>9}{'R':>9}"
+          f"   (P/R là thập phân 0-1, đúng quy ước COCO)")
     print("-" * 66)
 
     done = 0
+    rows = []
     for i, batch in enumerate(loader):
         if i < args.start:
             continue
@@ -179,21 +184,54 @@ def main():
         axes[2].axis("off")
 
         cls = batch["text"][0] if batch["text"][0] else "(không text)"
-        fig.suptitle(f"{args.variant}  |  {cls}  |  P={P*100:.2f}%  R={R*100:.2f}%  "
+        fig.suptitle(f"{args.variant}  |  {cls}  |  P={P:.4f}  R={R:.4f}  "
                      f"(trên TOÀN BỘ {pred.shape[0]} box, không chỉ top-{args.topk})",
                      fontsize=10)
         fig.tight_layout()
         iid = rec.get("img_id", i)
-        fp = os.path.join(out_dir, f"{done:02d}_{iid}.png")
+        # Tên file bắt đầu bằng recall nên `ls` tự sắp theo chất lượng: r000_* là
+        # ảnh model trượt hoàn toàn, r999_* là ảnh nó làm tốt nhất. Với vài trăm
+        # ảnh thì đây là cách rẻ nhất để tìm ngay ví dụ tốt/xấu.
+        #
+        # min(...,999) để luôn đúng 3 chữ số: R=1.0 mà thành "r1000" sẽ phá thứ tự
+        # sắp xếp CHUỖI của `ls` ("r1000" < "r363"), tức ảnh hoàn hảo lại nằm gần
+        # đầu danh sách cùng với ảnh tệ nhất.
+        fp = os.path.join(out_dir, f"r{min(int(R * 1000), 999):03d}_{str(iid)[:20]}.png")
         fig.savefig(fp, dpi=110, bbox_inches="tight")
         plt.close(fig)
 
-        print(f"{done:>4} {str(iid)[:23]:<24}{gt.shape[0]:>5}{pred.shape[0]:>7}"
-              f"{n_match:>6}{P*100:>8.2f}%{R*100:>8.2f}%")
+        rows.append({"img_id": str(iid), "file": os.path.basename(fp), "class": cls,
+                     "n_gt": int(gt.shape[0]), "n_pred": int(pred.shape[0]),
+                     "n_matched": int(n_match), "precision": round(P, 6),
+                     "recall": round(R, 6)})
+        if done % args.log_every == 0 or done + 1 == args.n_images:
+            print(f"{done:>4} {str(iid)[:23]:<24}{gt.shape[0]:>5}{pred.shape[0]:>7}"
+                  f"{n_match:>6}{P:>9.4f}{R:>9.4f}", flush=True)
         done += 1
 
-    print(f"\nĐã lưu {done} ảnh vào {out_dir}/")
-    print("Lấy về máy: scp -r <user>@<host>:" + os.path.abspath(out_dir) + " .")
+    # index.csv: sắp theo recall giảm dần, để mở thẳng ảnh cần xem thay vì lục thư mục
+    idx_path = os.path.join(out_dir, "index.csv")
+    rows.sort(key=lambda r: -r["recall"])
+    with open(idx_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else
+                           ["img_id", "file", "class", "n_gt", "n_pred",
+                            "n_matched", "precision", "recall"])
+        w.writeheader()
+        w.writerows(rows)
+
+    print(f"\nĐã lưu {done} ảnh vào {out_dir}/  (+ index.csv sắp theo recall)")
+    if rows:
+        print(f"\nTốt nhất : {rows[0]['file']}  (R={rows[0]['recall']:.4f}, "
+              f"{rows[0]['n_matched']}/{rows[0]['n_gt']} box)")
+        print(f"Kém nhất : {rows[-1]['file']}  (R={rows[-1]['recall']:.4f}, "
+              f"{rows[-1]['n_matched']}/{rows[-1]['n_gt']} box)")
+        import statistics
+        print(f"Recall trung vị trên {len(rows)} ảnh: "
+              f"{statistics.median(r['recall'] for r in rows):.4f}")
+    print("\nLấy về máy — CHỈ 20 ảnh tốt nhất + 20 kém nhất cho nhẹ:")
+    print(f"  ssh <user>@<host> \"cd {os.path.abspath(out_dir)} && ls r*.png | tail -20; "
+          f"ls r*.png | head -20\"")
+    print(f"Hoặc lấy hết: scp -r <user>@<host>:{os.path.abspath(out_dir)} .")
 
 
 if __name__ == "__main__":
