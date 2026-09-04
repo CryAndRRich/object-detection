@@ -170,6 +170,20 @@ Guessing memory needs from a command line is wrong somewhere, and when it is wro
 seconds. `--retries` (default 3) covers the real case: each retry re-reads `nvidia-smi`, so a job
 that lost its GPU to someone else can land on a different one.
 
+**Killing a job**: `kill <PID of the python job>` is enough — a negative return code (a signal)
+is treated as a deliberate stop, so the wrapper exits instead of retrying. This was a real bug on
+2026-09-04: killing the job made the wrapper restart it, producing a process that appeared to come
+back from the dead and could not be stopped by killing the same PID again. To take down a whole
+`nohup bash -c '...'` block including its wrapper, kill the process group:
+
+```bash
+kill -- -$(ps -o pgid= -p <PID> | tr -d ' ')   # whole block
+pkill -f visualize_predictions.py               # or by script name
+```
+
+`ps -o pid,ppid,pgid,lstart,etime,cmd -p <PIDs>` tells you which is which before you kill anything:
+processes sharing a PGID belong to the same block.
+
 Tests: `python tests/test_run_on_free_gpu.py` (8 tests, no GPU needed — `nvidia-smi` is stubbed).
 
 Checkpoints are saved per-variant to `checkpoints/{variant}/` after each epoch. The best model

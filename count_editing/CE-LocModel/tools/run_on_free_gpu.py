@@ -114,6 +114,23 @@ def main():
         rc = _pick_and_run(args, cmd, repo_root)
         if rc == 0:
             raise SystemExit(0)
+        # rc ÂM = job con bị giết bằng tín hiệu (-15 SIGTERM từ `kill`, -9 SIGKILL,
+        # -2 SIGINT từ Ctrl+C). Đó là NGƯỜI DÙNG CỐ Ý DỪNG, không phải job hỏng --
+        # thử lại lúc này là làm ngược ý họ.
+        #
+        # Lỗi thật đã xảy ra (2026-09-04): người dùng `kill` PID của job viz, wrapper
+        # này thấy rc=-15, tưởng OOM, và khởi động LẠI job vừa bị giết. Kết quả là
+        # một tiến trình "sống lại" mà họ không hiểu từ đâu ra, chạy code cũ đã nạp
+        # sẵn, và không dừng được bằng cách kill lại chính PID đó.
+        if rc < 0:
+            import signal
+            try:
+                name = signal.Signals(-rc).name
+            except ValueError:
+                name = f"tín hiệu {-rc}"
+            print(f"\nJob bị dừng bằng {name} (rc={rc}) -- đây là dừng CÓ CHỦ Ý, "
+                  f"không phải job hỏng, nên KHÔNG thử lại.", flush=True)
+            raise SystemExit(128 + (-rc))
         if attempt > args.retries:
             print(f"HẾT {args.retries} lần thử lại, lần nào cũng thoát != 0 -- dừng. Nếu traceback "
                   f"ở trên là CUDA out of memory thì GPU đang bị chiếm liên tục (đợi rồi chạy lại, "

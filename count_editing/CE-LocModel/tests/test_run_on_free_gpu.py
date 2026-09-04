@@ -99,6 +99,32 @@ def test_forced_gpu_skips_detection():
 
 # --- Thử lại --------------------------------------------------------------
 
+def test_killed_job_is_not_restarted():
+    """HỒI QUY cho sự cố 2026-09-04: người dùng `kill` job con, wrapper thấy
+    rc=-15 (SIGTERM), tưởng OOM và KHỞI ĐỘNG LẠI job vừa bị giết -- tạo ra một
+    tiến trình "sống lại" không dừng được bằng cách kill lại cùng PID.
+
+    rc âm = bị tín hiệu giết = người dùng cố ý dừng => KHÔNG thử lại."""
+    for sig, name in ((-15, "SIGTERM"), (-9, "SIGKILL"), (-2, "SIGINT")):
+        m = load()
+        m.query_gpus = lambda: [(0, 20000, 24576, 0)]
+        n = {"run": 0}
+
+        class R:
+            returncode = sig
+
+        def run(cmd, env=None, cwd=None):
+            n["run"] += 1
+            return R()
+        m.subprocess.run = run
+        m.time.sleep = lambda s: None
+
+        rc = run_main(m, ["--retries", "3", "--", "tools/visualize_predictions.py"])
+        assert n["run"] == 1, f"{name}: chạy {n['run']} lần, phải đúng 1 (không thử lại)"
+        assert rc == 128 + (-sig), (name, rc)
+        print(f"OK {name} (rc={sig}) -> chạy đúng 1 lần, thoát {rc}, KHÔNG khởi động lại")
+
+
 def test_retries_then_gives_up():
     """Job chết phải thử lại đúng --retries lần rồi dừng, không lặp vô hạn:
     một bug code thật sẽ hỏng mọi lần."""
