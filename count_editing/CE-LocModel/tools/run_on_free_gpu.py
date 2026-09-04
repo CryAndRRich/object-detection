@@ -63,45 +63,56 @@ def query_gpus():
 
 # --- Suy ngưỡng free-memory từ chính lệnh sắp chạy -------------------------
 #
-# Ngưỡng cũ hard-code 15000 MiB cho MỌI job là số bịa, không đo từ đâu, và đã
-# gây hậu quả thật: 2026-08-31 variant (d) cùng cả 2 job eval bị bỏ qua trong
-# đúng 1 giây vì không GPU nào còn 15000 MiB, dù chúng cần ít hơn nhiều.
+# Lịch sử của con số này, vì nó đã sai HAI lần theo hai hướng ngược nhau:
 #
-# Mô hình bộ nhớ dưới đây cố ý ĐƠN GIẢN và mọi hằng số đều đo được bằng
-# tools/measure_vram.py. Ba phần cộng lại:
+#   1. Ban đầu hard-code 15000 MiB cho MỌI job -- số bịa, không đo. Hậu quả
+#      (2026-08-31): variant (d) và cả 2 job eval bị bỏ qua trong đúng 1 giây
+#      vì không GPU nào còn 15000 MiB, dù chúng cần ít hơn.
+#   2. Rồi thay bằng một mô hình bộ nhớ suy từ kích thước tensor. Mô hình đó
+#      ước lượng THẤP hơn thực tế 2,0-4,2 lần (đo 2026-09-04):
 #
-#   1. CUDA_CONTEXT: context + cuDNN workspace, nvidia-smi thấy nhưng
-#      torch.cuda.max_memory_allocated KHÔNG thấy. Là hằng số, KHÔNG co giãn
-#      theo batch_size -- nên cộng vào chứ không nhân hệ số.
-#   2. MODEL_STATE: weight + gradient + 2 buffer AdamW. ResNet18 (11,7M) +
-#      transformer 8 layer d=256 (~6,3M) ~ 18M tham số x 4 byte x 4 bản = ~290 MiB.
-#      Eval không có gradient/optimizer nên chỉ ~1 bản.
-#   3. ACTIVATION: phần DUY NHẤT co giãn theo batch_size. Chi phối bởi feature
-#      map ResNet18 ở 512x512 (conv1 ra 64x256x256 = 16 MiB/ảnh fp32, cộng dồn
-#      qua các stage ~ 55 MiB/ảnh giữ lại cho backward).
+#         job                     công thức cũ    ĐO THẬT
+#         train (d) bs=32            3362 MiB     9200 MiB
+#         train (e) bs=32            3362 MiB     6862 MiB
+#         eval multibox              1200 MiB    ~5000 MiB
 #
-# Nhân SAFETY vào phần co giãn để phủ dao động dữ liệu (ảnh nhiều box hơn
-# trung bình) và phân mảnh của caching allocator.
-CUDA_CONTEXT_MIB = 800
-SAFETY = 1.25
-ACT_MIB_PER_IMAGE_TRAIN = 55    # giữ lại cho backward
-ACT_MIB_PER_IMAGE_EVAL = 8      # no_grad: chỉ 1 layer sống tại một thời điểm
-MODEL_STATE_MIB_TRAIN = 290     # weight + grad + AdamW exp_avg/exp_avg_sq
-MODEL_STATE_MIB_EVAL = 80       # chỉ weight
+#      Sai theo hướng NGUY HIỂM: ước lượng thấp -> chọn GPU không đủ -> OOM
+#      giữa chừng, mất cả giờ train. May là 3 job trên vẫn chạy được.
+#
+# Bản hiện tại HIỆU CHỈNH TỪ SỐ ĐO THẬT ở trên, không suy từ kích thước tensor
+# nữa. Nguyên tắc: neo vào giá trị CAO NHẤT quan sát được cho mỗi chế độ, không
+# lấy trung bình -- vì hậu quả của ước lượng thấp (OOM, mất giờ train) nặng hơn
+# nhiều so với ước lượng cao (chỉ phải chờ GPU thêm một lúc).
+#
+# Vì sao (d) 9200 mà (e) 6862 dù cùng bs=32, cùng N=300: CHƯA GIẢI THÍCH ĐƯỢC.
+# Class head 80 chiều chỉ chiếm ~17 MiB trong 2338 MiB chênh lệch. Không suy
+# đoán tiếp -- dùng mức cao hơn cho an toàn, và đo lại bằng tools/measure_vram.py
+# khi cần con số chính xác cho một cấu hình cụ thể.
+TRAIN_FIXED_MIB = 2000      # model state + CUDA context + cuDNN workspace
+TRAIN_PER_IMAGE_MIB = 225   # hiệu chỉnh từ (9200 - 2000) / 32, dùng mức CAO nhất
+EVAL_MULTIBOX_MIB = 5000    # ĐO THẬT: eval (c)/(e), 1 chain [1,300,4], không dùng --k
+EVAL_1BOX_FIXED_MIB = 2000  # ƯỚC LƯỢNG -- chưa có số đo cho nhánh 1-box
+EVAL_1BOX_PER_K_MIB = 100   # ƯỚC LƯỢNG -- K chain chạy song song trong 1 batch
+SAFETY = 1.15               # đệm nhỏ, vì các số trên đã là số đo thật chứ không phải mô hình
 
 
-def infer_min_free_mib(target):
-    """Ngưỡng free-memory suy từ lệnh sắp chạy, thay cho hằng số 15000 cũ.
+def infer_min_free_mib(target, gpu_capacity_mib=None):
+    """Ngưỡng free-memory suy từ lệnh sắp chạy, hiệu chỉnh từ số đo thật.
 
-    Đọc --batch_size (train) hoặc --k (eval) ngay trong argv của script con --
-    không import gì, không dựng model, nên không tốn VRAM để quyết định xem có
-    đủ VRAM không.
+    Đọc --batch_size (train) hoặc --k (eval 1-box) ngay trong argv của script
+    con -- không import gì, không dựng model, nên không tốn VRAM để quyết định
+    xem có đủ VRAM không.
 
     Cố tình ƯỚC LƯỢNG CAO khi không chắc: chọn nhầm GPU quá nhỏ thì OOM giữa
     chừng (mất cả giờ train), chọn nhầm ngưỡng hơi cao thì chỉ phải chờ thêm.
+
+    `gpu_capacity_mib`: dung lượng GPU lớn nhất trên máy, dùng để chặn trần.
+    Truyền vào từ ngoài (caller đã đọc nvidia-smi rồi) thay vì tự query, để hàm
+    này thuần tuý và không tốn thêm một lần gọi nvidia-smi.
     """
     script = os.path.basename(target[0]) if target else ""
     is_eval = "eval" in script or "test_" in script
+    is_diag = "diagnose" in script or "overfit" in script or "measure_vram" in script
 
     def flag(name, default):
         for i, a in enumerate(target):
@@ -118,15 +129,39 @@ def infer_min_free_mib(target):
         return default
 
     if is_eval:
-        # eval chạy từng ảnh một; với nhánh 1-box thì K mẫu chạy SONG SONG trong
-        # cùng một batch, nên K mới là thứ quyết định, không phải batch_size.
-        n_parallel = flag("--k", 30)
-        base = MODEL_STATE_MIB_EVAL + ACT_MIB_PER_IMAGE_EVAL * n_parallel
+        # Nhánh multibox (variant c/d/e) không dùng --k: nó chạy 1 chain [1,N,4],
+        # nên chi phí gần như hoàn toàn cố định. Nhánh 1-box (a/b) thì K chain
+        # chạy SONG SONG trong cùng một batch, nên K mới là thứ quyết định.
+        # Không đọc được config từ đây, nên lấy MỨC CAO HƠN của hai khả năng.
+        k = flag("--k", 30)
+        base = max(EVAL_MULTIBOX_MIB, EVAL_1BOX_FIXED_MIB + EVAL_1BOX_PER_K_MIB * k)
+    elif is_diag:
+        # overfit_one_image.py train thật nhưng chỉ 1 ảnh; diagnose/measure_vram
+        # chạy forward. Đều rẻ hơn train đầy đủ, nhưng vẫn dựng cả model +
+        # optimizer -> lấy bằng mức eval cho an toàn.
+        base = EVAL_MULTIBOX_MIB
     else:
         bs = flag("--batch_size", 32)
-        base = MODEL_STATE_MIB_TRAIN + ACT_MIB_PER_IMAGE_TRAIN * bs
+        base = TRAIN_FIXED_MIB + TRAIN_PER_IMAGE_MIB * bs
 
-    return int(base * SAFETY + CUDA_CONTEXT_MIB)
+    threshold = int(base * SAFETY)
+
+    # Chặn trần: một ngưỡng vượt dung lượng GPU lớn nhất trên máy thì KHÔNG GPU
+    # nào qua nổi, và job sẽ chờ vô ích cho tới hết --wait-for-gpu rồi chết --
+    # tệ hơn hẳn việc cứ thử chạy. Ví dụ: eval 1-box với --k 300 suy ra 36.800
+    # MiB trong khi A30 chỉ có 24.576. Trong tình huống đó, hạ xuống 90% dung
+    # lượng GPU và để job tự OOM nếu thật sự không đủ -- ít nhất nó được thử,
+    # và traceback OOM nói rõ hơn "chờ 6 tiếng rồi bỏ cuộc".
+    if gpu_capacity_mib is not None:
+        cap = gpu_capacity_mib
+        if threshold > cap:
+            print(f"CẢNH BÁO: ngưỡng suy ra {threshold} MiB vượt dung lượng GPU lớn nhất "
+                  f"({cap} MiB) -- không GPU nào qua được, job sẽ chờ vô ích. Hạ xuống "
+                  f"{int(cap * 0.9)} MiB và để job tự chạy; nếu OOM thật thì giảm "
+                  f"--batch_size / --k.", flush=True)
+            threshold = int(cap * 0.9)
+
+    return threshold
 
 
 def pick_gpu(gpus, min_free_mib):
@@ -204,13 +239,10 @@ def main():
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     cmd = [sys.executable] + target
 
-    if args.min_free_mib is None:
-        args.min_free_mib = infer_min_free_mib(target)
-        print(f"--min-free-mib tự suy: {args.min_free_mib} MiB (từ chính lệnh sắp chạy). "
-              f"Đo lại bằng: python tools/measure_vram.py --variant <v> --mode <train|eval>",
-              flush=True)
-    else:
+    if args.min_free_mib is not None:
         print(f"--min-free-mib = {args.min_free_mib} MiB (ép bằng tham số)", flush=True)
+    # Nếu để trống thì ngưỡng được suy trong _pick_and_run, nơi đã có sẵn snapshot
+    # nvidia-smi -- tránh đọc nvidia-smi thêm một lần chỉ để biết dung lượng GPU.
 
     deadline = time.time() + args.wait_for_gpu
     attempt = 0
@@ -271,6 +303,12 @@ def _pick_and_run(args, cmd, repo_root, attempt):
         print("trạng thái GPU hiện tại:")
         for idx, free, total, util in gpus:
             print(f"  GPU {idx}: free {free:6d} MiB / {total} MiB, utilization {util:3d}%")
+        if args.min_free_mib is None:
+            args.min_free_mib = infer_min_free_mib(
+                cmd[1:], gpu_capacity_mib=max(g[2] for g in gpus))
+            print(f"--min-free-mib tự suy: {args.min_free_mib} MiB (từ chính lệnh sắp chạy, "
+                  f"hiệu chỉnh theo số đo thật). Đo lại bằng: "
+                  f"python tools/measure_vram.py --variant <v> --mode <train|eval>", flush=True)
         picked, had_idle = pick_gpu(gpus, args.min_free_mib)
         if picked is None:
             print(f"LỖI: không GPU nào còn >= {args.min_free_mib} MiB free -- không đủ cho batch_size "

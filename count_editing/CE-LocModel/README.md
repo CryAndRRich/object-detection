@@ -169,36 +169,45 @@ evals were skipped in a single second).
 
 ### How much free memory a job actually needs
 
-`--min-free-mib` used to be hard-coded at **15000 MiB for every job** — a number that was never
-measured. It was the direct cause of the 2026-08-31 skip: GPU 1 had 10,607 MiB free at that moment,
-plenty for all three jobs, but none of them cleared the invented bar.
+This number has been **wrong twice, in opposite directions** — worth reading before trusting it.
 
-It now defaults to **inferring the threshold from the command being launched** (`infer_min_free_mib`),
-printed on every run so the number is never silent:
+1. Originally hard-coded at **15000 MiB for every job**, never measured. On 2026-08-31 it silently
+   skipped variant (d) and both eval jobs: GPU 1 had 10,607 MiB free, plenty for all three.
+2. Replaced with a memory model derived from tensor sizes. That model came out **2.0–4.2× too low**
+   (measured on the server, 2026-09-04):
 
-| job | inferred | vs the old 15000 |
-|---|---|---|
-| train, `--batch_size 32` | 3,362 MiB | 4.5× lower |
-| train, `--batch_size 8` | 1,712 MiB | 8.8× lower |
-| eval, `--k 30` | 1,200 MiB | 12.5× lower |
-| eval, `--k 300` | 3,900 MiB | 3.8× lower |
+   | job | old formula | **measured** |
+   |---|---|---|
+   | train (d) COCO, bs=32 | 3,362 MiB | **9,200 MiB** |
+   | train (e) CE-130, bs=32 | 3,362 MiB | **6,862 MiB** |
+   | eval, multibox | 1,200 MiB | **~5,000 MiB** |
 
-The model is `(model_state + per_image_activation × parallelism) × 1.25 + 800`. The 1.25 covers
-data-dependent variation and allocator fragmentation; the **+800 is added, not multiplied**, because
-the CUDA context and cuDNN workspace are a fixed cost that `nvidia-smi` sees but
-`torch.cuda.max_memory_allocated` does not — scaling it with batch size would be wrong. Eval is far
-cheaper than train because it keeps no activations for backward and has no optimizer state, and its
-driver is `--k` (the 1-box branch runs K samples in one parallel batch), not `--batch_size`.
+   Underestimating is the dangerous direction: pick a GPU that cannot hold the job and it OOMs
+   partway through, losing hours of training. Those three happened to fit anyway.
 
-Confirm the estimate against a real GPU with **`tools/measure_vram.py`**, which reports peak
-allocated/reserved from an actual train or eval loop and prints the threshold it implies:
+The current version is **calibrated from those measurements**, not from tensor arithmetic:
 
-```bash
-python tools/measure_vram.py --variant detect/d_coco_classhead --mode train --dataset coco --batch_size 32
-python tools/measure_vram.py --variant detect/c_transformer_multibox --mode eval --use_ensemble
 ```
+train:  2000 + 225 × batch_size          eval:  max(5000, 2000 + 100 × k)
+```
+all × 1.15, then **capped at 90 % of the largest GPU's capacity** — a threshold above what any GPU
+has means the job waits out the whole `--wait-for-gpu` budget and then dies, which is strictly worse
+than letting it try and OOM with a traceback.
 
-Pass an explicit `--min-free-mib` to override the inference once you have measured.
+| job | threshold | measured | headroom |
+|---|---|---|---|
+| train (d), bs=32 | 10,580 MiB | 9,200 | +15 % |
+| train (e), bs=32 | 10,580 MiB | 6,862 | +54 % |
+| eval, multibox | 5,750 MiB | 5,000 | +15 % |
+| train, bs=8 | 4,370 MiB | — | — |
+
+Constants are anchored to the **highest** figure observed per mode, never the average: waiting a bit
+longer for a GPU costs minutes, OOMing mid-run costs hours.
+
+**Unexplained:** (d) needs 9,200 MiB while (e) needs 6,862 at the same batch size and same N=300.
+The 80-way class head accounts for only ~17 MiB of that 2,338 MiB gap. Rather than guess further,
+the higher figure is used for both — run `tools/measure_vram.py` when an exact number matters for a
+specific config.
 
 Tests: `python tests/test_run_on_free_gpu.py` (11 tests, no GPU needed — `nvidia-smi` is stubbed).
 
@@ -540,3 +549,33 @@ Chạy 1 và 2 TRƯỚC — kết quả của chúng quyết định 3 và 4 có
 
 `(e)` khác `(c)` **đúng một thứ** (`beta_schedule: cosine`), đã verify bằng so sánh giá trị đã
 parse — chính là điều lần 2 đã không làm được khi (c) đổi 4 thứ cùng lúc.
+
+## Visualize dự đoán
+
+Mọi số trong `docs/ce-loc-detection-results.md` đều là tổng hợp trên hàng trăm ảnh. Chúng nói được
+"tốt hơn 1,89×" nhưng không nói được model **sai kiểu gì** — box lệch chỗ, hay đúng chỗ mà sai kích
+thước, hay tụ hết vào giữa ảnh? Ba khả năng đó dẫn tới ba hướng sửa khác nhau.
+
+```bash
+python tools/run_on_free_gpu.py -- tools/visualize_predictions.py \
+  --checkpoint checkpoints/detect/e_cosine_multibox/best_model.pth \
+  --variant detect/e_cosine_multibox --split test \
+  --n_images 8 --topk 30 --nms 0.5 --use_ensemble
+```
+
+Mỗi ảnh ra 3 panel: **GT | dự đoán | chồng lên nhau**, lưu vào `<thư mục checkpoint>/viz/`.
+
+**`--topk` chỉ ảnh hưởng việc VẼ, không ảnh hưởng số đo.** Model sinh 300 box (×4 bước nếu
+ensemble); vẽ hết thì ảnh đen kịt. P/R in kèm vẫn tính trên **toàn bộ** box đúng như
+`eval_detection.py`, nên đừng nhầm hai con số.
+
+## Eval trên COCO
+
+Variant **(d)** đã eval trên COCO val2017 (4.952 ảnh) từ 2026-08-31 — kết quả ở §9 của
+`docs/ce-loc-detection-results.md`: P 0,165 %, R 14,90 %, AP 9,64e-05.
+
+Nhưng **(d) vẫn đang chạy linear schedule**, tức dính đúng lỗi mà §17 chứng minh làm mất 3,6× AP
+trên CE-130. `config/variants/detect/f_coco_cosine.yaml` là (d) + cosine, khác **đúng một dòng** —
+chạy nó để biết lợi ích của cosine có lặp lại trên bộ dữ liệu khác và cấu hình khác (class head
+80 chiều, không text) hay chỉ là hiện tượng riêng của CE-130.
+

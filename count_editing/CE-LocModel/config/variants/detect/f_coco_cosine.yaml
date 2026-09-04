@@ -1,0 +1,47 @@
+# Variant (f) — GIỐNG HỆT (d), đổi ĐÚNG MỘT THỨ: linear -> cosine schedule.
+#
+# Lý do: (e) đã chứng minh trên CE-130 rằng cosine cho AP 3,70x, AP50 3,58x,
+# F1 1,87x so với linear, chỉ đổi một dòng config (§17). (d) vẫn đang chạy
+# linear nên dính đúng lỗi đó. Đây là xác nhận ĐỘC LẬP trên bộ dữ liệu khác
+# (COCO thay vì CE-130) và cấu hình khác (class head 80 chiều, không text).
+#
+# Nếu lợi ích ~3,6x lặp lại trên COCO thì kết luận của §17 không phải hiện
+# tượng riêng của CE-130.
+vision_encoder:
+  model_name: "resnet18"
+  pretrained: true
+  output_dim: 256           # gánh toàn bộ điều kiện vì không còn nhánh text
+  in_channels: 3
+
+text_encoder:
+  model_name: "openai/clip-vit-base-patch32"
+  output_dim: 0             # 0 = TẮT nhánh text
+  freeze: true
+
+noise_net:
+  type: "transformer"
+  input_dim: 4
+  global_cond_dim: 256      # chỉ còn vision
+  transformer:
+    n_layer: 8
+    n_head: 8
+    n_emb: 256
+    p_drop_emb: 0.1
+    p_drop_attn: 0.3
+    n_cond_layers: 0
+  # COCO-minitrain: mean 7,3 box/ảnh, max 80 -> N=300 phủ 100% ảnh (đã đo).
+  num_proposals: 300
+  num_classes: 80           # 80 class COCO; nền = mọi logit thấp (focal loss)
+
+diffusion:
+  num_timesteps: 1000
+  beta_schedule: "cosine"     # <<< KHÁC BIỆT DUY NHẤT so với (d)
+  cosine_s: 0.008             # DiffusionDet dùng s=0.008
+  snr_scale: 2.0
+  sampling_steps: 4
+  loss: "l1_giou"
+  l1_weight: 5.0
+  giou_weight: 2.0
+  cls_loss_weight: 2.0
+  focal_alpha: 0.25
+  focal_gamma: 2.0

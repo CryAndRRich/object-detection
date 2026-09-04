@@ -157,23 +157,84 @@ def test_threshold_scales_with_batch_size():
 
 def test_eval_cheaper_than_train():
     """Eval không giữ activation cho backward, không có optimizer state -> phải
-    rẻ hơn hẳn train. Ngưỡng cũ 15000 áp chung cho cả hai là sai bản chất."""
+    rẻ hơn train ở cùng quy mô."""
     m = load()
     tr = m.infer_min_free_mib("train_w_args.py --batch_size 32".split())
     ev = m.infer_min_free_mib("eval_detection.py --variant x --k 30".split())
     assert ev < tr, (ev, tr)
-    assert tr < 15000 and ev < 15000, (tr, ev)
-    print(f"OK train({tr}) > eval({ev}), cả hai đều < 15000 cũ")
+    print(f"OK train({tr}) > eval({ev})")
 
 
 def test_eval_scales_with_k():
     """Nhánh 1-box chạy K mẫu SONG SONG trong 1 batch nên K mới là thứ quyết
-    định bộ nhớ của eval, không phải batch_size."""
+    định bộ nhớ của eval, không phải batch_size. Nhánh multibox thì không dùng
+    --k, nên ngưỡng phải là MỨC CAO HƠN của hai khả năng."""
     m = load()
     a = m.infer_min_free_mib("eval_detection.py --k 30".split())
     b = m.infer_min_free_mib("eval_detection.py --k 300".split())
     assert b > a, (a, b)
     print(f"OK eval k=30 -> {a} MiB, k=300 -> {b} MiB")
+
+
+def test_covers_real_measurements():
+    """HỒI QUY cho lần sai thứ hai (2026-09-04): công thức trước ước lượng THẤP
+    hơn thực tế 2,0-4,2 lần, tức có thể chọn GPU không đủ rồi OOM giữa chừng.
+
+    Ngưỡng suy ra phải >= mức ĐO THẬT trên server, không được thấp hơn."""
+    m = load()
+    measured = [
+        ("train (d) COCO bs=32", 9200,
+         "train_w_args.py --variant detect/d_coco_classhead --task coco --batch_size 32"),
+        ("train (e) CE130 bs=32", 6862,
+         "train_w_args.py --variant detect/e_cosine_multibox --task detect --batch_size 32"),
+        ("eval multibox", 5000,
+         "eval_detection.py --checkpoint a.pth --variant detect/c_transformer_multibox "
+         "--split test --nms 0.5 --box_renewal --use_ensemble"),
+    ]
+    for name, real, cmd in measured:
+        got = m.infer_min_free_mib(cmd.split())
+        assert got >= real, f"{name}: ngưỡng {got} THẤP HƠN mức đo thật {real} -> nguy cơ OOM"
+        print(f"OK {name:22} ngưỡng {got:5d} >= đo thật {real:5d} "
+              f"(+{(got / real - 1) * 100:.0f}% đệm)")
+
+
+def test_threshold_capped_at_gpu_capacity():
+    """Ngưỡng vượt dung lượng GPU thì KHÔNG GPU nào qua nổi -> job chờ vô ích
+    tới hết --wait-for-gpu rồi chết. Phải hạ xuống để job ít nhất được thử."""
+    m = load()
+    got = m.infer_min_free_mib("eval_detection.py --k 300".split(), gpu_capacity_mib=24576)
+    assert got <= 24576, got
+    assert got == int(24576 * 0.9), got
+    print(f"OK eval --k 300 (suy ra >24GB) bị hạ xuống {got} MiB = 90% dung lượng GPU")
+
+
+def test_cap_does_not_lower_normal_thresholds():
+    m = load()
+    got = m.infer_min_free_mib("train_w_args.py --batch_size 32".split(), gpu_capacity_mib=24576)
+    assert got == 10580, got
+    print(f"OK ngưỡng bình thường KHÔNG bị chặn trần đụng vào ({got} MiB)")
+
+
+def test_not_absurdly_high():
+    """Đệm phải vừa phải: quá cao thì lặp lại lỗi 15000 cũ (job bị bỏ qua dù
+    GPU thừa sức chạy)."""
+    m = load()
+    for real, cmd in [(9200, "train_w_args.py --batch_size 32"),
+                      (5000, "eval_detection.py --variant x")]:
+        got = m.infer_min_free_mib(cmd.split())
+        assert got <= real * 1.5, f"{cmd}: {got} quá cao so với {real}"
+    print("OK đệm <= 50%, không lặp lại lỗi ngưỡng 15000 bịa ra")
+
+
+def test_diagnostic_tools_get_sane_threshold():
+    """diagnose_conditioning / overfit_one_image dựng cả model + optimizer nên
+    không được coi là job rẻ tiền."""
+    m = load()
+    for cmd in ["tools/diagnose_conditioning.py --checkpoint a.pth --variant x",
+                "tools/overfit_one_image.py --variant x --steps 2000"]:
+        got = m.infer_min_free_mib(cmd.split())
+        assert 3000 <= got <= 9000, (cmd, got)
+        print(f"OK {os.path.basename(cmd.split()[0]):28} -> {got} MiB")
 
 
 def test_bad_flag_values_dont_crash():
@@ -203,6 +264,7 @@ def test_real_commands_fit_yesterdays_gpu():
         v = m.infer_min_free_mib(c.split())
         assert v <= free_that_night, f"{name}: {v} > {free_that_night}"
         print(f"OK {name:<10} cần {v:5d} MiB <= {free_that_night} MiB mà GPU 1 đang có tối hôm đó")
+    print("   (vẫn đúng sau khi hiệu chỉnh theo số đo thật 2026-09-04)")
 
 
 if __name__ == "__main__":
