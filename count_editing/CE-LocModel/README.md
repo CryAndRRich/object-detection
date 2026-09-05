@@ -141,6 +141,9 @@ số box sau top-k và sau NMS, score min/max, thời gian) để tìm ảnh nà
 
 ## Ghi chú
 
+- **CLIP attention**: code tự dò SDPA, lùi về `eager` nếu transformers < 4.45 (server đang 4.42).
+  Với `eager` thì attention matrix được materialize, nhưng vì CLIP chạy trong `no_grad` nên chỉ
+  giữ ~2 tensor cùng lúc chứ không phải 12 → batch 8 tốn ~0,8 GB, không đáng lo trên A30 24GB.
 - **`.venv-cpu/`** là venv Python 3.11 để test ở local (máy dev không có torch cho Python 3.14).
   Đã `.gitignore`. Trên server dùng env riêng.
 - **Loss dùng GIoU** (trọng số 2,0, giống DiffusionDet); **metric báo cáo dùng IoU** — GIoU âm được

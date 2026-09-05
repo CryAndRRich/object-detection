@@ -38,7 +38,17 @@ class CLIPConditionEncoder(nn.Module):
         from transformers import CLIPModel, CLIPTokenizer
 
         self.tokenizer = CLIPTokenizer.from_pretrained(model_name)
-        clip = CLIPModel.from_pretrained(model_name, attn_implementation="sdpa")
+        # SDPA cho CLIP chỉ có từ transformers >= 4.45; server đang chạy 4.42 nên
+        # phải tự dò rồi lùi về "eager" thay vì hard-code. Với "eager" thì attention
+        # matrix ĐƯỢC materialize (~0,8 GB/layer ở 512px batch 32) nên nếu memory
+        # căng thì giảm batch_size hoặc nâng transformers.
+        try:
+            clip = CLIPModel.from_pretrained(model_name, attn_implementation="sdpa")
+        except (ValueError, TypeError):
+            clip = CLIPModel.from_pretrained(model_name, attn_implementation="eager")
+            print("[clip_encoder] transformers chưa hỗ trợ SDPA cho CLIP -> dùng eager. "
+                  "Attention matrix sẽ được materialize; nếu OOM thì giảm batch_size "
+                  "hoặc nâng transformers >= 4.45.", flush=True)
 
         self.vision = clip.vision_model
         self.text = clip.text_model
