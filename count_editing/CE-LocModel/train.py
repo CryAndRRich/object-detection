@@ -350,6 +350,11 @@ def main():
                     labels_now[(iid, p)] = g
 
         tr = {k: v / max(nb, 1) for k, v in total.items()}
+        # n_matched is summed over the whole batch (so is the loss denominator —
+        # that part is correct and matches DiffusionDet). For the log it has to be
+        # divided by batch size, otherwise it reads as "258/100 (258 %)", which is
+        # impossible and looks like a bug.
+        bs = cfg["training"]["batch_size"]
         stability = label_stability(prev_labels, labels_now)
         prev_labels = labels_now
         score_stats = array_stats(np.concatenate(scores)) if scores else {}
@@ -369,7 +374,8 @@ def main():
               f"(l1 {val['loss_l1']:.4f} giou {val['loss_giou']:.4f} ce {val['loss_ce']:.4f})",
               flush=True)
         print(f"           IoU train {tr['iou_matched']:.4f} / val {val['iou_matched']:.4f} | "
-              f"matched {tr['n_matched']:.1f}/{N} ({100*tr['n_matched']/N:.0f}%) | "
+              f"matched {tr['n_matched']/bs:.1f}/{N} per img "
+              f"({100*tr['n_matched']/(bs*N):.0f}% of slots) | "
               f"GT/img {np.mean(n_gt):.1f} | label_stability {stability:.3f} | "
               f"lr {opt.param_groups[0]['lr']:.2e} | grad {np.mean(grad_norms):.3f}",
               flush=True)
@@ -383,8 +389,19 @@ def main():
         warnings = []
         if std_score < 0.05:
             warnings.append("std_score < 0.05 — the score head may be stuck at a constant")
-        if not np.isnan(stability) and stability < 0.4:
-            warnings.append(f"label_stability {stability:.2f} < 0.40 — labels change too much per epoch")
+        # The 0.40 threshold came from round 1, whose architecture kept `t` far more
+        # stable. Here `t ~ U(0, num_timesteps)` is redrawn every batch, so slot i in
+        # epoch n and epoch n+1 hold genuinely different boxes and there is no reason
+        # for them to match the same GT. Simulated with a PERFECT (oracle) model:
+        #   same t        -> 100 %      t=50 vs 60   -> 50 %
+        #   t=50 vs 300   ->  20 %      t=50 vs 900  ->  6 %
+        # With t uniform, even a flawless model lands near 1/mean_GT (~2.7 %). So a
+        # low value here measures the timestep schedule, not model quality — warn
+        # only if it is far below even that floor, which would mean the matching is
+        # actively anti-correlated.
+        if not np.isnan(stability) and stability < 0.005:
+            warnings.append(f"label_stability {stability:.3f} below the random floor "
+                            f"(~1/GT_per_image) — matching may be broken")
         if np.mean(grad_norms) > 100:
             warnings.append(f"grad norm {np.mean(grad_norms):.1f} is very large")
         for w in warnings:

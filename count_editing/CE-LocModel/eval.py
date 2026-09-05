@@ -194,9 +194,26 @@ def main():
 
     # AP at several IoU thresholds (AP50/AP75 + the COCO-style average)
     res = evaluate(predictions, 0.5)
-    ap_by_thr = {f"AP{int(100*t)}": evaluate(predictions, t)["AP"]
-                 for t in [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]}
+    COCO_THR = [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]
+    ap_by_thr = {f"AP{int(100*t)}": evaluate(predictions, t)["AP"] for t in COCO_THR}
     ap_coco = float(np.mean(list(ap_by_thr.values())))
+
+    # LOW thresholds, reported separately and NEVER folded into ap_coco (COCO is
+    # defined as .50:.95; mixing these in would make the headline number
+    # incomparable to any published result).
+    #
+    # They answer one diagnostic question that .50+ cannot: does the model bound
+    # most objects loosely, or nail a few and miss the rest? Those two failures
+    # give the same AP50 but need opposite fixes. If recall climbs steeply as the
+    # threshold drops, boxes are on the objects but not tight -- a regression
+    # problem. If it stays flat, the model is missing the objects outright -- a
+    # detection problem.
+    low = {}
+    for t in [0.1, 0.2, 0.3, 0.4]:
+        r = evaluate(predictions, t)
+        low[f"AP{int(100*t)}"] = r["AP"]
+        low[f"recall{int(100*t)}"] = r["recall"]
+        low[f"precision{int(100*t)}"] = r["precision"]
 
     ceiling = float(np.mean([min(len(g), len(b)) / max(len(b), 1) for b, _, g in predictions]))
     scores = np.concatenate(all_scores)
@@ -215,6 +232,26 @@ def main():
     print("-" * 78, flush=True)
     print(f"  AP by threshold: " + "  ".join(
         f"{k} {v:.4f}" for k, v in ap_by_thr.items()), flush=True)
+    print("-" * 78, flush=True)
+    print("  DIAGNOSTIC — low IoU thresholds (NOT part of COCO AP):", flush=True)
+    print(f"  {'IoU':>6s} {'recall':>9s} {'precision':>10s} {'AP':>9s}", flush=True)
+    for t in [0.1, 0.2, 0.3, 0.4, 0.5]:
+        k = int(100 * t)
+        rr = low.get(f"recall{k}", res["recall"])
+        pp = low.get(f"precision{k}", res["precision"])
+        aa = low.get(f"AP{k}", ap_by_thr["AP50"])
+        print(f"  {t:6.2f} {rr:9.4f} {pp:10.4f} {aa:9.4f}", flush=True)
+    r10, r50 = low.get("recall10", 0.0), res["recall"]
+    ratio = r10 / max(r50, 1e-9)
+    print(f"\n  recall@0.10 / recall@0.50 = {ratio:.1f}x", flush=True)
+    if ratio > 3.0:
+        print("  -> boxes ARE on the objects but not tight enough: a REGRESSION problem.", flush=True)
+        print("     Push coordinate accuracy (GIoU weight, sampling_steps, box_renewal).", flush=True)
+    elif ratio < 1.5:
+        print("  -> loosening the threshold barely helps: the model MISSES objects outright,", flush=True)
+        print("     a DETECTION problem. Coordinate refinement will not fix it.", flush=True)
+    else:
+        print("  -> mixed: some objects bounded loosely, many missed entirely.", flush=True)
     print("-" * 78, flush=True)
     print(f"  predicted boxes  {res['n_pred']} ({np.mean(n_box):.1f}/img, "
           f"before NMS {np.mean([x['n_after_topk'] for x in per_image]):.1f})", flush=True)
@@ -249,6 +286,7 @@ def main():
                         "precision_over_ceiling": res["precision"] / max(ceiling, 1e-9),
                         "warnings": warnings},
             "ap_by_threshold": ap_by_thr,
+            "low_threshold_diagnostic": low,
             "score": {"mean": float(scores.mean()), "std": float(scores.std()),
                       "min": float(scores.min()), "max": float(scores.max()),
                       **{f"p{q}": float(np.percentile(scores, q))
