@@ -29,40 +29,54 @@ from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from data.ce130_dataset import CE130Detection, normalize_for_clip  # noqa: E402
+from data.ce130_dataset import CE130Detection, PatchCache, normalize_for_clip  # noqa: E402
 from models.detector import CELocDetector  # noqa: E402
 from models.criterion import SetCriterion  # noqa: E402
 
 
 class TorchWrap(Dataset):
-    """Bọc CE130Detection (numpy) thành torch Dataset."""
+    """Bọc CE130Detection (numpy) thành torch Dataset.
 
-    def __init__(self, ds):
+    Có `cache` thì trả patch/text token đã tính sẵn và BỎ HẲN ảnh — đo trên A30:
+    CLIP chiếm 76,8 % thời gian mỗi batch, cache cho ~4,3x tốc độ.
+    """
+
+    def __init__(self, ds, cache=None):
         self.ds = ds
+        self.cache = cache
 
     def __len__(self):
         return len(self.ds)
 
     def __getitem__(self, i):
         m = self.ds[i]
-        return {
-            "pixel_values": torch.from_numpy(normalize_for_clip(m["image"])),
+        ra = {
             "boxes": torch.from_numpy(m["boxes"]).float(),
             "text": m["text"],
             "valid_h": m["valid_h"],
             "image_id": m["image_id"],
         }
+        if self.cache is None:
+            ra["pixel_values"] = torch.from_numpy(normalize_for_clip(m["image"]))
+        else:
+            patch, text = self.cache.lay(m["image_id"], m["text"], m["flipped"])
+            ra["patch_raw"] = torch.from_numpy(patch)
+            ra["text_raw"] = torch.from_numpy(text)
+        return ra
 
 
 def collate(batch):
     """Số box khác nhau mỗi ảnh -> giữ dạng list, không pad ở đây."""
-    return {
-        "pixel_values": torch.stack([b["pixel_values"] for b in batch]),
+    ra = {
         "boxes": [b["boxes"] for b in batch],
         "text": [b["text"] for b in batch],
         "valid_h": [b["valid_h"] for b in batch],
         "image_id": [b["image_id"] for b in batch],
     }
+    for k in ("pixel_values", "patch_raw", "text_raw"):
+        if k in batch[0]:
+            ra[k] = torch.stack([b[k] for b in batch])
+    return ra
 
 
 def dinh_dang_tg(giay):
@@ -128,6 +142,14 @@ def ghi_json(save_dir, moi_truong, cfg, lich_su, best, ds_train, ds_val):
         }, f, indent=2, ensure_ascii=False)
 
 
+def dau_vao_model(batch, dev):
+    """Trả kwargs cho model: ảnh thô, hoặc token đã cache."""
+    if "patch_raw" in batch:
+        return {"patch_raw": batch["patch_raw"].to(dev),
+                "text_raw": batch["text_raw"].to(dev)}
+    return {"pixel_values": batch["pixel_values"].to(dev), "texts": batch["text"]}
+
+
 @torch.no_grad()
 def chay_val(model, loader, crit, N, dev):
     """Val loss — với 1.911 ảnh và class 3 split RỜI NHAU, không có val thì không
@@ -139,10 +161,9 @@ def chay_val(model, loader, crit, N, dev):
     t0 = time.time()
     g = torch.Generator().manual_seed(1234)
     for batch in loader:
-        px = batch["pixel_values"].to(dev)
         tg = [b.to(dev) for b in batch["boxes"]]
         x_t, tt, _ = model.build_inputs(tg, N, batch["valid_h"], generator=g)
-        pb, lg = model(x_t, tt, pixel_values=px, texts=batch["text"])
+        pb, lg = model(x_t, tt, **dau_vao_model(batch, dev))
         _, st, _ = crit(pb, lg, tg)
         for k in khoa:
             tong[k] += st[k]
@@ -162,6 +183,9 @@ def main():
     ap.add_argument("--batch-size", type=int, default=None)
     ap.add_argument("--limit", type=int, default=None, help="cắt nhỏ dataset để thử")
     ap.add_argument("--device", default=None)
+    ap.add_argument("--cache", default=None,
+                    help="thư mục cache patch token (tools/build_cache.py). Bật thì "
+                         "bỏ hẳn CLIP forward lúc train — đo được ~4,3x nhanh hơn.")
     ap.add_argument("--log-moi-n-batch", type=int, default=None,
                     help="in tiến độ mỗi N batch; mặc định tự chia 5 lần/epoch")
     a = ap.parse_args()
@@ -208,7 +232,14 @@ def main():
         ds.items = ds.items[: a.limit]
     print(f"[data] {ds.thong_ke()}", flush=True)
 
-    loader = DataLoader(TorchWrap(ds), batch_size=cfg["training"]["batch_size"],
+    cache_tr = cache_va = None
+    if a.cache:
+        cache_tr = PatchCache(a.cache, "train")
+        cache_va = PatchCache(a.cache, "val")
+        print(f"[cache] dùng {a.cache} — bỏ CLIP forward lúc train "
+              f"({cache_tr.n_ver} bản/ảnh)", flush=True)
+
+    loader = DataLoader(TorchWrap(ds, cache_tr), batch_size=cfg["training"]["batch_size"],
                         shuffle=True, num_workers=cfg["data"]["num_workers"],
                         collate_fn=collate, drop_last=False)
 
@@ -216,7 +247,7 @@ def main():
     ds_val = CE130Detection(cfg["data"]["root"], "val", cfg["data"]["image_size"])
     if a.limit:
         ds_val.items = ds_val.items[: max(a.limit // 2, 1)]
-    val_loader = DataLoader(TorchWrap(ds_val), batch_size=cfg["training"]["batch_size"],
+    val_loader = DataLoader(TorchWrap(ds_val, cache_va), batch_size=cfg["training"]["batch_size"],
                             shuffle=False, num_workers=cfg["data"]["num_workers"],
                             collate_fn=collate)
     print(f"[val ] {ds_val.thong_ke()}", flush=True)
@@ -258,11 +289,10 @@ def main():
 
         for batch in loader:
             t_b = time.time()
-            px = batch["pixel_values"].to(dev)
             tg = [b.to(dev) for b in batch["boxes"]]
 
             x_t, tt, _ = model.build_inputs(tg, N, batch["valid_h"])
-            pb, lg = model(x_t, tt, pixel_values=px, texts=batch["text"])
+            pb, lg = model(x_t, tt, **dau_vao_model(batch, dev))
             loss, st, idx = crit(pb, lg, tg)
 
             opt.zero_grad(set_to_none=True)

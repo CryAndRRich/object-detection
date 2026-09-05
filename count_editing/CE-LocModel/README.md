@@ -60,7 +60,12 @@ python3 tools/visualize_data.py --n 20 --out /tmp/viz
 python3 tools/visualize_data.py --n 8 --out /tmp/viz_ph --placeholder --t 50
 
 # 3. Đo memory + có cần cache không (trên server)
-python3 tools/profile_and_memory.py --batch-size 8 --steps 10
+python3 tools/run_on_free_gpu.py -- tools/profile_and_memory.py --batch-size 8 --steps 10
+#    ĐO ĐƯỢC trên A30: CLIP chiếm 76,8 % thời gian (252/328 ms) -> NÊN cache.
+#    Build (~20s, 6,0 GB cho train), rồi train thêm --cache:
+python3 tools/run_on_free_gpu.py -- tools/build_cache.py --split train --out ../../data/cache_clip
+python3 tools/run_on_free_gpu.py -- tools/build_cache.py --split val   --out ../../data/cache_clip
+#    -> train nhanh ~4,3x (328 -> 76 ms/batch): 300 epoch từ 6,5h xuống 1,5h
 
 # 4. CỬA CHẶN: overfit 1 ảnh. Không đạt thì DỪNG, đừng train dài.
 python3 tools/overfit_one.py --steps 300

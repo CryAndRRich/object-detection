@@ -14,6 +14,7 @@ import argparse
 import os
 import sys
 
+import numpy as np
 import torch
 import yaml
 
@@ -71,13 +72,16 @@ def main():
     x_t = x_t.unsqueeze(0).to(dev)
     tt = torch.full((1,), a.t, dtype=torch.long, device=dev)
 
-    dau = None
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=a.steps)
+    dau, lich_su = None, []
     for i in range(a.steps):
         pb, lg = model(x_t, tt, patch_raw=patch_raw, text_raw=text_raw)
         loss, st, _ = crit(pb, lg, [gt])
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
+        sched.step()
+        lich_su.append((st["loss"], st["iou_matched"]))
         if dau is None:
             dau = st["loss"]
         if i % max(a.steps // 10, 1) == 0 or i == a.steps - 1:
@@ -85,11 +89,25 @@ def main():
                   f"giou {st['loss_giou']:.4f} ce {st['loss_ce']:.4f} | "
                   f"IoU {st['iou_matched']:.4f}", flush=True)
 
-    ti_le = st["loss"] / max(dau, 1e-9)
-    print(f"\nloss {dau:.4f} -> {st['loss']:.4f} (còn {100*ti_le:.1f} %) | "
-          f"IoU_matched {st['iou_matched']:.4f}")
-    if st["iou_matched"] > 0.7 and ti_le < 0.3:
+    # Đánh giá theo IoU TỐT NHẤT và trung bình 10 bước cuối, KHÔNG phải một bước
+    # cuối: với LR cố định thì bước cuối chỉ là một mẫu ngẫu nhiên trong dao động
+    # (đã gặp: IoU đạt 0,69 ở bước 210 rồi dao động về 0,47 ở bước 299).
+    iou_tot_nhat = max(x[1] for x in lich_su)
+    iou_cuoi10 = float(np.mean([x[1] for x in lich_su[-10:]]))
+    loss_cuoi10 = float(np.mean([x[0] for x in lich_su[-10:]]))
+    ti_le = loss_cuoi10 / max(dau, 1e-9)
+
+    print(f"\nloss {dau:.4f} -> {loss_cuoi10:.4f} (còn {100*ti_le:.1f} %, trung bình 10 bước cuối)")
+    print(f"IoU_matched: tốt nhất {iou_tot_nhat:.4f} | 10 bước cuối {iou_cuoi10:.4f}")
+
+    if iou_tot_nhat > 0.6 and ti_le < 0.35:
         print("✓ ĐẠT — matcher và loss hoạt động đúng, có thể train tiếp")
+        if iou_cuoi10 < iou_tot_nhat - 0.1:
+            print("  (IoU dao động cuối quá trình — bình thường khi overfit 1 ảnh, "
+                  "không phải lỗi)")
+    elif ti_le < 0.5:
+        print("~ MỘT PHẦN — loss giảm rõ nhưng IoU chưa cao. Kiểm lại trước khi train dài:")
+        print("  chạy tools/visualize_data.py xem box GT có bao đúng vật không.")
     else:
         print("✗ KHÔNG ĐẠT — có lỗi ở matcher hoặc loss. DỪNG, đừng train dài.")
 

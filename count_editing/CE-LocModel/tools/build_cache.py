@@ -34,6 +34,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--no-flip", action="store_true", help="chỉ cache ảnh gốc")
+    ap.add_argument("--limit", type=int, default=None, help="cắt nhỏ để thử")
     ap.add_argument("--device", default=None)
     a = ap.parse_args()
 
@@ -43,6 +44,8 @@ def main():
     os.makedirs(a.out, exist_ok=True)
 
     ds = CE130Detection(cfg["data"]["root"], a.split, cfg["data"]["image_size"])
+    if a.limit:
+        ds.items = ds.items[: a.limit]
     enc = CLIPConditionEncoder(cfg["model"]["clip_name"], cfg["model"]["d_model"],
                                cfg["data"]["image_size"], freeze=True).to(dev).eval()
 
@@ -56,6 +59,13 @@ def main():
 
     mm = np.memmap(path, dtype=np.float16, mode="w+", shape=(n_img, n_ver, n_tok, d))
     ids = []
+
+    # Text embedding: mỗi CLASS chỉ một vector (input là 1 từ), nên cache theo class
+    # thay vì theo ảnh — vài chục vector, bỏ luôn chi phí tokenize mỗi batch.
+    lop = sorted({it["text"] for it in ds.items})
+    txt = enc.encode_text_raw(lop, dev).cpu().numpy().astype(np.float16)  # [C,1,d_txt]
+    np.save(os.path.join(a.out, f"{a.split}_text.npy"), txt)
+    print(f"[cache] {len(lop)} class -> text embedding {txt.shape}", flush=True)
 
     for i0 in range(0, n_img, a.batch_size):
         idx = range(i0, min(i0 + a.batch_size, n_img))
@@ -74,7 +84,8 @@ def main():
     with open(os.path.join(a.out, f"{a.split}_meta.json"), "w") as f:
         json.dump({"image_ids": ids, "shape": [n_img, n_ver, n_tok, d],
                    "dtype": "float16", "image_size": cfg["data"]["image_size"],
-                   "clip": cfg["model"]["clip_name"]}, f)
+                   "clip": cfg["model"]["clip_name"], "classes": lop,
+                   "n_ver": n_ver}, f)
     print(f"[cache] xong: {path}", flush=True)
 
 
