@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Overfit MỘT ảnh — cửa chặn trước khi train dài.
+"""Overfit ONE image — the gate before any long training run.
 
-Nếu loss không về gần 0 thì có lỗi ở matcher hoặc loss, DỪNG SỬA NGAY, đừng train
-tiếp. Vòng 1 train 5 lần liên tiếp trên code có lỗi vì thiếu đúng bước này.
+If the loss does not approach zero, the matcher or the loss is broken: STOP AND
+FIX, do not keep training. Round 1 trained 5 times in a row on broken code purely
+because this step was missing.
 
-Dùng t nhỏ cố định để tách bạch: ở t lớn box đầu vào gần như thuần nhiễu nên
-không overfit được, và đó KHÔNG phải lỗi.
+Use a small fixed t to isolate the question: at large t the input boxes are almost
+pure noise, so overfitting is impossible, and that is NOT a bug.
 
   python3 tools/overfit_one.py --steps 300 --device cpu
 """
@@ -31,7 +32,7 @@ def main():
     ap.add_argument("--config", default="config/experiment_a.yaml")
     ap.add_argument("--index", type=int, default=0)
     ap.add_argument("--steps", type=int, default=300)
-    ap.add_argument("--t", type=int, default=50, help="timestep cố định (nhỏ)")
+    ap.add_argument("--t", type=int, default=50, help="fixed (small) timestep")
     ap.add_argument("--num-proposals", type=int, default=32)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--device", default=None)
@@ -46,7 +47,7 @@ def main():
     m = ds[a.index]
     px = torch.from_numpy(normalize_for_clip(m["image"])).unsqueeze(0).to(dev)
     gt = torch.from_numpy(m["boxes"]).float().to(dev)
-    print(f"[ảnh] {m['image_id']} '{m['text']}' | {len(gt)} GT | N={a.num_proposals} "
+    print(f"[image] {m['image_id']} '{m['text']}' | {len(gt)} GT | N={a.num_proposals} "
           f"| t={a.t}", flush=True)
 
     model = CELocDetector(
@@ -57,10 +58,10 @@ def main():
     ).to(dev)
     model.train()
     crit = SetCriterion(cfg["matcher"]["method"])
-    hoc = [p for p in model.parameters() if p.requires_grad]
-    opt = torch.optim.AdamW(hoc, lr=a.lr)
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    opt = torch.optim.AdamW(trainable, lr=a.lr)
 
-    with torch.no_grad():                          # CLIP frozen -> encode 1 lần
+    with torch.no_grad():                          # CLIP frozen -> encode once
         patch_raw = model.encoder.encode_image_raw(px)
         text_raw = model.encoder.encode_text_raw([m["text"]], dev)
 
@@ -73,7 +74,7 @@ def main():
     tt = torch.full((1,), a.t, dtype=torch.long, device=dev)
 
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=a.steps)
-    dau, lich_su = None, []
+    first_loss, history = None, []
     for i in range(a.steps):
         pb, lg = model(x_t, tt, patch_raw=patch_raw, text_raw=text_raw)
         loss, st, _ = crit(pb, lg, [gt])
@@ -81,35 +82,37 @@ def main():
         loss.backward()
         opt.step()
         sched.step()
-        lich_su.append((st["loss"], st["iou_matched"]))
-        if dau is None:
-            dau = st["loss"]
+        history.append((st["loss"], st["iou_matched"]))
+        if first_loss is None:
+            first_loss = st["loss"]
         if i % max(a.steps // 10, 1) == 0 or i == a.steps - 1:
             print(f"  [{i:4d}] loss {st['loss']:7.4f} | l1 {st['loss_l1']:.4f} "
                   f"giou {st['loss_giou']:.4f} ce {st['loss_ce']:.4f} | "
                   f"IoU {st['iou_matched']:.4f}", flush=True)
 
-    # Đánh giá theo IoU TỐT NHẤT và trung bình 10 bước cuối, KHÔNG phải một bước
-    # cuối: với LR cố định thì bước cuối chỉ là một mẫu ngẫu nhiên trong dao động
-    # (đã gặp: IoU đạt 0,69 ở bước 210 rồi dao động về 0,47 ở bước 299).
-    iou_tot_nhat = max(x[1] for x in lich_su)
-    iou_cuoi10 = float(np.mean([x[1] for x in lich_su[-10:]]))
-    loss_cuoi10 = float(np.mean([x[0] for x in lich_su[-10:]]))
-    ti_le = loss_cuoi10 / max(dau, 1e-9)
+    # Judge by the BEST IoU and the mean of the last 10 steps, NOT by the single
+    # final step: with a fixed LR the final step is just a random sample of the
+    # oscillation (seen in practice: IoU reached 0.69 at step 210 then swung back
+    # to 0.47 at step 299).
+    best_iou = max(x[1] for x in history)
+    iou_last10 = float(np.mean([x[1] for x in history[-10:]]))
+    loss_last10 = float(np.mean([x[0] for x in history[-10:]]))
+    ratio = loss_last10 / max(first_loss, 1e-9)
 
-    print(f"\nloss {dau:.4f} -> {loss_cuoi10:.4f} (còn {100*ti_le:.1f} %, trung bình 10 bước cuối)")
-    print(f"IoU_matched: tốt nhất {iou_tot_nhat:.4f} | 10 bước cuối {iou_cuoi10:.4f}")
+    print(f"\nloss {first_loss:.4f} -> {loss_last10:.4f} "
+          f"({100*ratio:.1f} % remaining, mean of last 10 steps)")
+    print(f"IoU_matched: best {best_iou:.4f} | last 10 steps {iou_last10:.4f}")
 
-    if iou_tot_nhat > 0.6 and ti_le < 0.35:
-        print("✓ ĐẠT — matcher và loss hoạt động đúng, có thể train tiếp")
-        if iou_cuoi10 < iou_tot_nhat - 0.1:
-            print("  (IoU dao động cuối quá trình — bình thường khi overfit 1 ảnh, "
-                  "không phải lỗi)")
-    elif ti_le < 0.5:
-        print("~ MỘT PHẦN — loss giảm rõ nhưng IoU chưa cao. Kiểm lại trước khi train dài:")
-        print("  chạy tools/visualize_data.py xem box GT có bao đúng vật không.")
+    if best_iou > 0.6 and ratio < 0.35:
+        print("[PASS] matcher and loss work correctly, safe to continue training")
+        if iou_last10 < best_iou - 0.1:
+            print("  (IoU oscillates at the end — normal when overfitting 1 image, "
+                  "not a bug)")
+    elif ratio < 0.5:
+        print("[PARTIAL] loss clearly drops but IoU is not high. Check before long training:")
+        print("  run tools/visualize_data.py to see whether GT boxes bound the objects.")
     else:
-        print("✗ KHÔNG ĐẠT — có lỗi ở matcher hoặc loss. DỪNG, đừng train dài.")
+        print("[FAIL] the matcher or the loss is broken. STOP, do not train long.")
 
 
 if __name__ == "__main__":

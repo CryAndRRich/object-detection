@@ -1,33 +1,36 @@
-"""CE-130 cho bài DETECTION có điều kiện theo category.
+"""CE-130 for CATEGORY-CONDITIONED DETECTION.
 
-Input:  (ground_truth.jpg, tên class)   Output: box của riêng class đó.
+Input:  (ground_truth.jpg, class name)   Output: boxes of that class only.
 
-Phần logic (parse / dedupe / toạ độ) là NUMPY THUẦN nên test được ở local không
-cần torch. `to_tensor` chỉ xảy ra ở collate.
+The logic (parsing / dedupe / coordinates) is PURE NUMPY, so it is testable
+locally without torch. `to_tensor` only happens in collate.
 
-BỐN ĐIỂM BẮT BUỘC ĐÚNG — mỗi cái là một lỗi đã đo được:
+FOUR THINGS THAT MUST BE RIGHT — each one is a bug that was actually measured:
 
-1. HAI NGUỒN, HAI ĐỊNH DẠNG BOX KHÁC NHAU:
+1. TWO SOURCES, TWO DIFFERENT BOX FORMATS:
      all_phase2_V2/*/annotation.json : all_bboxes, inpainted_bboxes -> **xyxy**
      samples/*/annotation/*.json     : target_bbox                  -> **cxcywh**
-   (đo: 10.368/10.376 nhất quán xyxy; 19.998/19.998 cxcywh, và đối chiếu chéo
-   giữa hai nguồn cho IoU = 1,0000)
+   (measured: 10,368/10,376 consistently xyxy; 19,998/19,998 cxcywh, and
+   cross-checking the two sources gives IoU = 1.0000)
 
-2. GIỮ NGUYÊN `all_bboxes`, KHÔNG trừ `inpainted_bboxes`.
-   `ground_truth.jpg` là ảnh GỐC CHƯA XOÁ GÌ. Bằng chứng pixel: diff giữa nó và
-   `inpainted_turn_1.png` tại vùng inpainted_bboxes[0] = 51,96/255 so với toàn
-   ảnh 1,41/255 -> vật CÓ trong ảnh rồi mới bị xoá ở turn sau.
-   Vòng 1 trừ đi -> vứt bỏ 7-8 % vật THẬT.
+2. KEEP `all_bboxes` AS IS; do NOT subtract `inpainted_bboxes`.
+   `ground_truth.jpg` is the ORIGINAL image with nothing removed. Pixel evidence:
+   the diff between it and `inpainted_turn_1.png` over the inpainted_bboxes[0]
+   region is 51.96/255 versus 1.41/255 for the whole image -> the object IS in
+   the image and is only removed on a later turn.
+   Round 1 subtracted them -> threw away 7-8 % of REAL objects.
 
-3. DEDUPE THEO ẢNH. Branch _b1/_b2/_b3 dùng chung một ground_truth.jpg (md5 trùng
-   186/186) và all_bboxes giống hệt (1.571/1.571) -> 1.911 / 908 / 779 ảnh.
+3. DEDUPE BY IMAGE. Branches _b1/_b2/_b3 share one ground_truth.jpg (md5 matches
+   186/186) and identical all_bboxes (1,571/1,571) -> 1,911 / 908 / 779 images.
 
-4. PAD BẰNG CLIP MEAN, không phải đen. Đen cho -1,79 sigma sau chuẩn hoá (khối
-   tối, tạo cạnh giả cho ViT); CLIP mean cho đúng 0,000.
+4. PAD WITH THE CLIP MEAN, not black. Black gives -1.79 sigma after normalisation
+   (a dark block, creating a fake edge for the ViT); the CLIP mean gives exactly
+   0.000.
 
-Ngoài ra: `fixed_annotation.json` chỉ có ở val/test -> fallback annotation.json.
-Lọc 14/37.110 box degenerate. Mọi ảnh cao đúng 384px nên luôn W>=H -> pad LUÔN ở
-dưới, `valid_h` là một ngưỡng vô hướng.
+Also: `fixed_annotation.json` only exists for val/test -> fall back to
+annotation.json. Filter 14/37,110 degenerate boxes. Every image is exactly 384px
+tall so W>=H always -> padding is ALWAYS at the bottom, and `valid_h` is a single
+scalar threshold.
 """
 
 import glob
@@ -46,9 +49,11 @@ CLIP_STD = np.array([0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
 
 
 def resize_and_pad(img, target=512):
-    """Giữ tỉ lệ, pad góc trên-trái bằng CLIP mean. Trả về (ảnh RGB uint8, valid_h).
+    """Aspect-preserving resize, top-left anchored, padded with the CLIP mean.
+    Returns (uint8 RGB image, valid_h).
 
-    Mọi ảnh CE-130 cao 384px và rộng >= 384 -> new_w luôn = target, pad ở DƯỚI.
+    Every CE-130 image is 384px tall and >= 384 wide -> new_w is always target,
+    and padding goes at the BOTTOM.
     """
     W, H = img.size
     s = min(target / W, target / H)
@@ -61,7 +66,7 @@ def resize_and_pad(img, target=512):
 
 
 class CE130Detection:
-    """Trả về dict numpy. Bọc torch Dataset ở tầng trên (giữ file này không cần torch)."""
+    """Returns numpy dicts. A torch Dataset wraps this above (keeping this file torch-free)."""
 
     def __init__(self, root, split, target=512, flip_prob=0.0, seed=None):
         self.root = root
@@ -69,41 +74,41 @@ class CE130Detection:
         self.target = target
         self.flip_prob = flip_prob
         self.rng = np.random.default_rng(seed)
-        self.items = self._quet()
+        self.items = self._scan()
 
     # ------------------------------------------------------------------ index
 
-    def _quet(self):
-        """Dedupe theo ảnh gốc: mỗi image-id lấy đúng một branch."""
-        theo_anh = {}
+    def _scan(self):
+        """Dedupe by source image: exactly one branch per image-id."""
+        by_image = {}
         for br in sorted(glob.glob(os.path.join(self.root, self.split, "*"))):
-            ann = self._doc_annotation(br)
+            ann = self._read_annotation(br)
             if ann is None:
                 continue
             iid = os.path.basename(br).split("_b")[0]
-            if iid not in theo_anh:                       # branch nào cũng như nhau
-                theo_anh[iid] = (br, ann)
+            if iid not in by_image:                       # every branch is equivalent
+                by_image[iid] = (br, ann)
 
         items = []
-        for iid, (br, ann) in sorted(theo_anh.items()):
+        for iid, (br, ann) in sorted(by_image.items()):
             img_path = os.path.join(br, "ground_truth.jpg")
             if not os.path.exists(img_path):
                 continue
             boxes = np.asarray(ann.get("all_bboxes", []), dtype=np.float64).reshape(-1, 4)
-            boxes, _ = filter_degenerate(boxes)           # bỏ 14/37.110 box w/h <= 0
+            boxes, _ = filter_degenerate(boxes)           # drop 14/37,110 boxes with w/h <= 0
             items.append({
                 "image_id": iid,
                 "img_path": img_path,
-                "boxes_xyxy_px": boxes,                   # KHÔNG trừ inpainted_bboxes
+                "boxes_xyxy_px": boxes,                   # NOT minus inpainted_bboxes
                 "text": ann.get("class_based_caption", ""),
             })
         return items
 
     @staticmethod
-    def _doc_annotation(branch_dir):
-        """fixed_annotation.json chỉ có ở val/test -> fallback annotation.json."""
-        for ten in ("fixed_annotation.json", "annotation.json"):
-            p = os.path.join(branch_dir, ten)
+    def _read_annotation(branch_dir):
+        """fixed_annotation.json only exists for val/test -> fall back to annotation.json."""
+        for name in ("fixed_annotation.json", "annotation.json"):
+            p = os.path.join(branch_dir, name)
             if os.path.exists(p):
                 with open(p, "r") as f:
                     return json.load(f)
@@ -125,49 +130,50 @@ class CE130Detection:
         if self.flip_prob > 0 and self.rng.random() < self.flip_prob:
             canvas = canvas[:, ::-1].copy()
             boxes = flip_horizontal(boxes)
-            lat = True
+            did_flip = True
         else:
-            lat = False
+            did_flip = False
 
         return {
-            "image": canvas,                 # uint8 [512,512,3], đã pad CLIP mean
-            "boxes": boxes,                  # cxcywh [0,1] — HỆ CHUẨN
-            "text": it["text"],              # 1 từ tên category
-            "valid_h": valid_h,              # ranh giới vùng ảnh thật (chặn placeholder)
+            "image": canvas,                 # uint8 [512,512,3], CLIP-mean padded
+            "boxes": boxes,                  # cxcywh [0,1] — CANONICAL
+            "text": it["text"],              # single-word category name
+            "valid_h": valid_h,              # real-image boundary (bounds placeholders)
             "image_id": it["image_id"],
             "orig_size": (W, H),
-            "flipped": lat,
+            "flipped": did_flip,
         }
 
-    # ------------------------------------------------------------ thống kê
+    # ------------------------------------------------------------ statistics
 
-    def thong_ke(self):
+    def stats(self):
         n = [len(it["boxes_xyxy_px"]) for it in self.items]
         return {
-            "so_anh": len(self.items),
-            "tong_box": int(np.sum(n)),
-            "box_moi_anh_median": float(np.median(n)) if n else 0.0,
-            "box_moi_anh_mean": float(np.mean(n)) if n else 0.0,
-            "box_moi_anh_max": int(np.max(n)) if n else 0,
-            "so_class": len({it["text"] for it in self.items}),
+            "n_images": len(self.items),
+            "n_boxes_total": int(np.sum(n)),
+            "boxes_per_image_median": float(np.median(n)) if n else 0.0,
+            "boxes_per_image_mean": float(np.mean(n)) if n else 0.0,
+            "boxes_per_image_max": int(np.max(n)) if n else 0,
+            "n_classes": len({it["text"] for it in self.items}),
         }
 
 
 def normalize_for_clip(canvas_uint8):
-    """uint8 HWC -> float32 CHW đã chuẩn hoá theo CLIP. Vùng pad ra đúng 0,000."""
+    """uint8 HWC -> CLIP-normalised float32 CHW. Padded regions become exactly 0.000."""
     x = np.asarray(canvas_uint8, dtype=np.float32) / 255.0
     return ((x - CLIP_MEAN) / CLIP_STD).transpose(2, 0, 1)
 
 
 class PatchCache:
-    """Đọc patch token CLIP đã cache (memmap fp16) + text embedding theo class.
+    """Reads cached CLIP patch tokens (fp16 memmap) + per-class text embeddings.
 
-    CLIP frozen nên feature cố định -> cache được. Đo trên A30: CLIP chiếm 76,8 %
-    thời gian mỗi batch, nên cache cho ~4,3x tốc độ (328ms -> 76ms/batch).
+    CLIP is frozen, so its features are fixed and cacheable. Measured on an A30:
+    CLIP takes 76.8 % of per-batch time, so caching gives ~4.3x speedup
+    (328ms -> 76ms/batch).
 
-    Cache 2 BẢN (gốc + lật ngang) vì KHÔNG flip được trên token đã cache: ViT trộn
-    thông tin toàn cục qua 12 layer nên token (i,j) không còn là "feature của riêng
-    ô (i,j)".
+    TWO VERSIONS are cached (original + horizontally flipped) because you CANNOT
+    flip already-cached tokens: the ViT mixes global information across 12 layers,
+    so token (i,j) is no longer "the feature of cell (i,j) alone".
     """
 
     def __init__(self, cache_dir, split):
@@ -178,12 +184,12 @@ class PatchCache:
         self.patch = np.memmap(os.path.join(cache_dir, f"{split}_patch.f16"),
                                dtype=np.float16, mode="r", shape=(n, v, t, d))
         self.text = np.load(os.path.join(cache_dir, f"{split}_text.npy"))
-        self.chi_so_anh = {k: i for i, k in enumerate(self.meta["image_ids"])}
-        self.chi_so_lop = {k: i for i, k in enumerate(self.meta["classes"])}
+        self.idx_image = {k: i for i, k in enumerate(self.meta["image_ids"])}
+        self.idx_class = {k: i for i, k in enumerate(self.meta["classes"])}
         self.n_ver = v
 
-    def lay(self, image_id, text, flipped=False):
+    def get(self, image_id, text, flipped=False):
         """-> (patch [T,D] fp32, text [1,D] fp32)."""
         v = 1 if (flipped and self.n_ver > 1) else 0
-        return (np.asarray(self.patch[self.chi_so_anh[image_id], v], dtype=np.float32),
-                np.asarray(self.text[self.chi_so_lop[text]], dtype=np.float32))
+        return (np.asarray(self.patch[self.idx_image[image_id], v], dtype=np.float32),
+                np.asarray(self.text[self.idx_class[text]], dtype=np.float32))

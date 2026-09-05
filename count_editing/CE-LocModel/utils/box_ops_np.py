@@ -1,26 +1,26 @@
-"""Phép toán trên bounding box — numpy thuần, KHÔNG phụ thuộc torch.
+"""Bounding-box math — pure numpy, NO torch dependency.
 
-File này là NGUỒN CHÂN LÝ cho mọi biến đổi toạ độ. Bản torch (`box_ops.py`) phải
-port cơ học từ đây và có test `allclose(torch_fn, np_fn)`.
+This file is the SOURCE OF TRUTH for every coordinate transform. The torch port
+(`box_ops.py`) must be mechanical, with `allclose(torch_fn, np_fn)` tests.
 
-HỆ CHUẨN DUY NHẤT: cxcywh trong [0, 1] trên canvas vuông (mặc định 512).
-- `w > 0` luôn đúng, đọc thẳng ra "rộng bao nhiêu phần ảnh".
-- `snr_scale` CHỈ tồn tại bên trong phần diffusion, không rò ra ngoài.
+THE ONE CANONICAL SYSTEM: cxcywh in [0, 1] on a square canvas (default 512).
+- `w > 0` always holds, and reads directly as "what fraction of the image wide".
+- `snr_scale` exists ONLY inside the diffusion part; it never leaks outside.
 
-Chuỗi 6 bước (xem docs/thiet-ke-ce-loc-vong-2.md §4.7):
+The 6-step chain (see docs/thiet-ke-ce-loc-vong-2.md §4.7):
 
-    all_bboxes: xyxy pixel tuyệt đối trên ảnh gốc (W x H)
+    all_bboxes: xyxy absolute pixels on the original image (W x H)
       (1) xyxy -> cxcywh
-      (2) x scale = min(target/W, target/H)      # pad ở DƯỚI, không dịch toạ độ
+      (2) x scale = min(target/W, target/H)      # pad at the BOTTOM, no shift
       (3) / target -> [0, 1]
-    ===> cxcywh [0,1]  (HỆ CHUẨN)
-      (4) (x*2 - 1) * snr_scale                  # chỉ trong diffusion
-    ===> x_start, dùng cho q_sample / DDIM
-      (5) clamp(±snr) -> /snr -> (x+1)/2         # về lại [0,1]
-      (6) cxcywh -> xyxy                         # chỉ để tính GIoU
+    ===> cxcywh [0,1]  (CANONICAL)
+      (4) (x*2 - 1) * snr_scale                  # diffusion only
+    ===> x_start, used by q_sample / DDIM
+      (5) clamp(+-snr) -> /snr -> (x+1)/2        # back to [0,1]
+      (6) cxcywh -> xyxy                         # only to compute GIoU
 
-LỖI VÒNG 1 (đừng lặp): giải mã extent là `(norm+1)/2`, KHÔNG phải `(norm+1)/4`.
-Chia 2 lần thì box còn nửa chiều rộng, IoU giữa đúng và sai chỉ 0,25.
+ROUND-1 BUG (do not repeat): decoding an extent is `(norm+1)/2`, NOT `(norm+1)/4`.
+Dividing twice leaves boxes at half width; IoU between right and wrong is 0.25.
 """
 
 import numpy as np
@@ -42,38 +42,39 @@ __all__ = [
 
 
 # --------------------------------------------------------------------------
-# Bước (1) và (6): đổi định dạng, KHÔNG đổi thang đo
+# Steps (1) and (6): change format, NOT scale
 # --------------------------------------------------------------------------
 
 def xyxy_to_cxcywh(boxes):
-    """[..., 4] (x1,y1,x2,y2) -> (cx,cy,w,h). Giữ nguyên đơn vị."""
+    """[..., 4] (x1,y1,x2,y2) -> (cx,cy,w,h). Units unchanged."""
     b = np.asarray(boxes, dtype=np.float64)
     x1, y1, x2, y2 = b[..., 0], b[..., 1], b[..., 2], b[..., 3]
     return np.stack([(x1 + x2) / 2.0, (y1 + y2) / 2.0, x2 - x1, y2 - y1], axis=-1)
 
 
 def cxcywh_to_xyxy(boxes):
-    """[..., 4] (cx,cy,w,h) -> (x1,y1,x2,y2). Giữ nguyên đơn vị."""
+    """[..., 4] (cx,cy,w,h) -> (x1,y1,x2,y2). Units unchanged."""
     b = np.asarray(boxes, dtype=np.float64)
     cx, cy, w, h = b[..., 0], b[..., 1], b[..., 2], b[..., 3]
     return np.stack([cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0], axis=-1)
 
 
 # --------------------------------------------------------------------------
-# Bước (2)+(3): pixel ảnh gốc -> hệ chuẩn [0,1]
+# Steps (2)+(3): original-image pixels -> canonical [0,1]
 # --------------------------------------------------------------------------
 
 def compute_scale(W, H, target=512):
-    """Hệ số resize giữ tỉ lệ. Mọi ảnh CE-130 cao đúng 384px nên luôn W >= H,
-    tức new_w == target và pad LUÔN ở dưới (xem data/README.md §8)."""
+    """Aspect-preserving resize factor. Every CE-130 image is exactly 384px tall,
+    so W >= H always, meaning new_w == target and padding is ALWAYS at the bottom
+    (see data/README.md §8)."""
     return min(target / float(W), target / float(H))
 
 
 def scale_to_canvas(boxes_xyxy_px, W, H, target=512):
-    """xyxy pixel trên ảnh gốc (W,H) -> cxcywh [0,1] trên canvas target x target.
+    """xyxy pixels on the original (W,H) -> cxcywh [0,1] on a target x target canvas.
 
-    Trả về (boxes_cxcywh_norm, scale, valid_h) với `valid_h = new_h / target`
-    là ranh giới vùng ảnh thật (phần dưới là pad).
+    Returns (boxes_cxcywh_norm, scale, valid_h) where `valid_h = new_h / target`
+    is the boundary of the real image region (everything below it is padding).
     """
     s = compute_scale(W, H, target)
     b = np.asarray(boxes_xyxy_px, dtype=np.float64).reshape(-1, 4) * s
@@ -83,31 +84,32 @@ def scale_to_canvas(boxes_xyxy_px, W, H, target=512):
 
 
 def canvas_to_pixel(boxes_cxcywh_norm, W, H, target=512):
-    """Nghịch đảo `scale_to_canvas`: cxcywh [0,1] -> xyxy pixel trên ảnh gốc."""
+    """Inverse of `scale_to_canvas`: cxcywh [0,1] -> xyxy pixels on the original."""
     s = compute_scale(W, H, target)
     b = np.asarray(boxes_cxcywh_norm, dtype=np.float64).reshape(-1, 4) * float(target)
     return cxcywh_to_xyxy(b) / s
 
 
 # --------------------------------------------------------------------------
-# Bước (4) và (5): hệ chuẩn <-> không gian diffusion
+# Steps (4) and (5): canonical <-> diffusion space
 # --------------------------------------------------------------------------
 
 def encode_diffusion(boxes_norm, snr_scale=2.0):
-    """cxcywh [0,1] -> x_start cho diffusion: (x*2 - 1) * snr_scale.
+    """cxcywh [0,1] -> x_start for diffusion: (x*2 - 1) * snr_scale.
 
-    Áp cho CẢ 4 chiều — giống hệt DiffusionDet (`detector.py:396`). Vật nhỏ cho
-    giá trị ÂM ở w/h (w=0,0686 -> -1,73); điều đó BÌNH THƯỜNG, không phải lỗi.
+    Applied to ALL 4 dimensions, exactly like DiffusionDet (`detector.py:396`).
+    Small objects therefore give NEGATIVE w/h (w=0.0686 -> -1.73); that is
+    NORMAL, not a bug.
     """
     b = np.asarray(boxes_norm, dtype=np.float64)
     return (b * 2.0 - 1.0) * float(snr_scale)
 
 
 def decode_diffusion(x, snr_scale=2.0):
-    """x_start -> cxcywh [0,1]. Clamp TRƯỚC khi chia (giống DiffusionDet).
+    """x_start -> cxcywh [0,1]. Clamp BEFORE dividing (same as DiffusionDet).
 
-    LỖI VÒNG 1: chia thêm 2 lần nữa ở đây làm box còn nửa kích thước.
-    Đúng là `(x/snr + 1) / 2`, không phải `(x/snr + 1) / 4`.
+    ROUND-1 BUG: dividing by 2 one extra time here halved every box.
+    Correct is `(x/snr + 1) / 2`, not `(x/snr + 1) / 4`.
     """
     s = float(snr_scale)
     v = np.clip(np.asarray(x, dtype=np.float64), -s, s)
@@ -115,7 +117,7 @@ def decode_diffusion(x, snr_scale=2.0):
 
 
 # --------------------------------------------------------------------------
-# IoU / GIoU — nhận xyxy, dùng chung cho matcher lẫn loss lẫn test
+# IoU / GIoU — take xyxy, shared by matcher, loss and tests alike
 # --------------------------------------------------------------------------
 
 def _area_xyxy(b):
@@ -123,7 +125,7 @@ def _area_xyxy(b):
 
 
 def box_iou(boxes1, boxes2):
-    """IoU từng cặp. boxes1 [N,4], boxes2 [M,4] xyxy -> (iou [N,M], union [N,M])."""
+    """Pairwise IoU. boxes1 [N,4], boxes2 [M,4] xyxy -> (iou [N,M], union [N,M])."""
     b1 = np.asarray(boxes1, dtype=np.float64).reshape(-1, 4)
     b2 = np.asarray(boxes2, dtype=np.float64).reshape(-1, 4)
     a1, a2 = _area_xyxy(b1)[:, None], _area_xyxy(b2)[None, :]
@@ -140,19 +142,19 @@ def box_iou(boxes1, boxes2):
 
 
 def generalized_box_iou(boxes1, boxes2):
-    """GIoU từng cặp, xyxy. Kết quả trong [-1, 1].
+    """Pairwise GIoU, xyxy. Range [-1, 1].
 
-    GIoU có gradient cả khi hai box RỜI NHAU (khác IoU thuần = 0) — quan trọng
-    với CE-130 vì vật rất nhỏ (median 0,41 % diện tích ảnh) nên phần lớn cặp
-    prediction-GT lúc đầu train là rời nhau.
+    GIoU has a gradient even when two boxes are DISJOINT (unlike plain IoU = 0),
+    which matters on CE-130 because objects are tiny (median 0.41 % of image
+    area), so most prediction-GT pairs are disjoint early in training.
 
-    Yêu cầu box hợp lệ (x2>=x1, y2>=y1). Box lộn ngược cho giá trị vô nghĩa —
-    vòng 1 từng ra GIoU 5e5 vì giải mã sai. Dùng `filter_degenerate` trước.
+    Requires valid boxes (x2>=x1, y2>=y1). Inverted boxes give nonsense — round 1
+    once produced GIoU 5e5 from a bad decode. Run `filter_degenerate` first.
     """
     b1 = np.asarray(boxes1, dtype=np.float64).reshape(-1, 4)
     b2 = np.asarray(boxes2, dtype=np.float64).reshape(-1, 4)
-    assert (b1[:, 2:] >= b1[:, :2]).all(), "boxes1 có box lộn ngược (x2<x1 hoặc y2<y1)"
-    assert (b2[:, 2:] >= b2[:, :2]).all(), "boxes2 có box lộn ngược (x2<x1 hoặc y2<y1)"
+    assert (b1[:, 2:] >= b1[:, :2]).all(), "boxes1 has an inverted box (x2<x1 or y2<y1)"
+    assert (b2[:, 2:] >= b2[:, :2]).all(), "boxes2 has an inverted box (x2<x1 or y2<y1)"
 
     iou, union = box_iou(b1, b2)
 
@@ -166,22 +168,23 @@ def generalized_box_iou(boxes1, boxes2):
 
 
 def pairwise_l1(boxes1, boxes2):
-    """Khoảng cách L1 từng cặp trên 4 toạ độ. [N,4] x [M,4] -> [N,M]."""
+    """Pairwise L1 distance over the 4 coordinates. [N,4] x [M,4] -> [N,M]."""
     b1 = np.asarray(boxes1, dtype=np.float64).reshape(-1, 4)
     b2 = np.asarray(boxes2, dtype=np.float64).reshape(-1, 4)
     return np.abs(b1[:, None, :] - b2[None, :, :]).sum(-1)
 
 
 # --------------------------------------------------------------------------
-# Augmentation + vệ sinh dữ liệu
+# Augmentation + data hygiene
 # --------------------------------------------------------------------------
 
 def flip_horizontal(boxes_cxcywh_norm):
-    """Lật ngang trong hệ chuẩn [0,1]: cx -> 1 - cx. w/h/cy giữ nguyên.
+    """Horizontal flip in canonical [0,1]: cx -> 1 - cx. w/h/cy unchanged.
 
-    Chỉ flip NGANG. Không rotate: rotate 5-30 độ làm box axis-aligned phình
-    x1,20-x1,98, quá lớn với vật CE-130 (median 0,069 x 0,061); rotate 90 độ thì
-    phá giả định "luôn pad ở dưới" (chỉ 9,6 % ảnh vuông).
+    Horizontal ONLY. No rotation: rotating 5-30 degrees inflates axis-aligned
+    boxes by 1.20x-1.98x, far too much for CE-130 objects (median 0.069 x 0.061),
+    and rotating 90 degrees breaks the "padding is always at the bottom"
+    assumption (only 9.6 % of images are square).
     """
     b = np.asarray(boxes_cxcywh_norm, dtype=np.float64).copy()
     b[..., 0] = 1.0 - b[..., 0]
@@ -189,10 +192,10 @@ def flip_horizontal(boxes_cxcywh_norm):
 
 
 def filter_degenerate(boxes_xyxy, min_size=0.0):
-    """Bỏ box có w hoặc h <= min_size. Trả về (boxes_sạch, mask_giữ).
+    """Drop boxes with w or h <= min_size. Returns (clean_boxes, keep_mask).
 
-    Đo được 14/37.110 box train của CE-130 bị degenerate. Phải lọc TRƯỚC khi
-    vào matcher VÀ trước khi tính GIoU.
+    Measured 14 of 37,110 CE-130 train boxes are degenerate. Must be filtered
+    BEFORE the matcher AND before computing GIoU.
     """
     b = np.asarray(boxes_xyxy, dtype=np.float64).reshape(-1, 4)
     keep = (b[:, 2] - b[:, 0] > min_size) & (b[:, 3] - b[:, 1] > min_size)

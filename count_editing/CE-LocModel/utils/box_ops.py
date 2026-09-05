@@ -1,10 +1,11 @@
-"""Bản TORCH của `box_ops_np.py` — port CƠ HỌC, cùng công thức từng dòng.
+"""TORCH port of `box_ops_np.py` — MECHANICAL, formula for formula.
 
-Mọi hàm ở đây phải cho kết quả trùng bản numpy trong sai số 1e-6; test đối chiếu
-ở `tests/test_torch_vs_numpy.py`. Đây là cửa chặn bắt đúng loại lỗi đã giết vòng
-1 (chia 2 lần, quên clamp, quên snr_scale) mà KHÔNG cần train.
+Every function here must match the numpy version to within 1e-6; the comparison
+tests live in `tests/test_torch_vs_numpy.py`. This is the gate that catches the
+exact class of bug that killed round 1 (dividing twice, forgetting the clamp,
+forgetting snr_scale) WITHOUT needing to train.
 
-HỆ CHUẨN DUY NHẤT: cxcywh [0,1]. `snr_scale` chỉ sống trong phần diffusion.
+THE ONE CANONICAL SYSTEM: cxcywh [0,1]. `snr_scale` lives only inside diffusion.
 """
 
 import torch
@@ -26,22 +27,22 @@ def cxcywh_to_xyxy(b):
 
 
 def encode_diffusion(boxes_norm, snr_scale=2.0):
-    """cxcywh [0,1] -> x_start. Vật nhỏ cho w ÂM — bình thường, giống DiffusionDet."""
+    """cxcywh [0,1] -> x_start. Small objects give NEGATIVE w — normal, as in DiffusionDet."""
     return (boxes_norm * 2.0 - 1.0) * snr_scale
 
 
 def decode_diffusion(x, snr_scale=2.0):
-    """x_start -> cxcywh [0,1]. Clamp TRƯỚC khi chia.
+    """x_start -> cxcywh [0,1]. Clamp BEFORE dividing.
 
-    LỖI VÒNG 1: chia thêm 2 lần nữa -> box còn nửa kích thước, IoU 0,25.
+    ROUND-1 BUG: dividing by 2 once more -> boxes at half size, IoU 0.25.
     """
     return (x.clamp(-snr_scale, snr_scale) / snr_scale + 1.0) / 2.0
 
 
 def sanitize_boxes(b_xyxy):
-    """Kẹp box lộn ngược (model chưa train hay trả w<0) trước khi tính GIoU.
+    """Sort corners of inverted boxes (an untrained model can emit w<0) before GIoU.
 
-    Không có bước này thì GIoU ra giá trị vô nghĩa — vòng 1 đo được 5e5.
+    Without this step GIoU returns nonsense — round 1 measured 5e5.
     """
     x1 = torch.minimum(b_xyxy[..., 0], b_xyxy[..., 2])
     y1 = torch.minimum(b_xyxy[..., 1], b_xyxy[..., 3])
@@ -66,7 +67,7 @@ def box_iou(b1, b2):
 
 
 def generalized_box_iou(b1, b2):
-    """GIoU [-1,1]. Có gradient cả khi hai box RỜI NHAU — thiết yếu với vật nhỏ."""
+    """GIoU [-1,1]. Has a gradient even for DISJOINT boxes — essential for tiny objects."""
     iou, union = box_iou(b1, b2)
     lt = torch.minimum(b1[:, None, :2], b2[None, :, :2])
     rb = torch.maximum(b1[:, None, 2:], b2[None, :, 2:])

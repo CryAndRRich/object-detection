@@ -1,12 +1,13 @@
-"""Bản TORCH của `matcher_np.py` — port CƠ HỌC. Chạy dưới `no_grad`.
+"""TORCH port of `matcher_np.py` — MECHANICAL. Runs under `no_grad`.
 
-MẶC ĐỊNH HUNGARIAN. SimOTA đo được thoái hoá về k=1 trên CE-130 (vật chỉ chiếm
-0,41 % diện tích -> IoU sụp rất nhanh, ngay t=100 đã chỉ ~0,15), nên nó thêm code
-phức tạp mà không mang lại gì ở giai đoạn model chưa tốt, lại kém ổn định nhãn
-hơn (55 % cặp giữ nguyên) — mâu thuẫn với chỉ số cảnh báo số 1.
+HUNGARIAN BY DEFAULT. SimOTA was measured to degenerate to k=1 on CE-130 (objects
+cover just 0.41 % of the area -> IoU collapses fast, already ~0.15 at t=100), so
+it adds complex code for no gain while the model is still weak, and it is also
+less label-stable (55 % of pairs preserved) — contradicting warning metric #1.
 
-Center prior (chỉ SimOTA): `is_in_boxes` AND `is_in_centers`, cộng +100 vào COST
-(không gán nhãn trực tiếp — vòng 1 sai cả hai chỗ). Mặc định TẮT.
+Center prior (SimOTA only): `is_in_boxes` AND `is_in_centers`, adding +100 to the
+COST (not assigning labels directly — round 1 got both of these wrong). OFF by
+default.
 """
 
 import torch
@@ -21,7 +22,7 @@ ALPHA, GAMMA = 0.25, 2.0
 
 
 def _focal_cost(scores):
-    """neg_cost - pos_cost, giống loss.py:305-308."""
+    """neg_cost - pos_cost, same as loss.py:305-308."""
     p = scores.reshape(-1).sigmoid().clamp(1e-8, 1 - 1e-8)
     pos = -ALPHA * ((1 - p) ** GAMMA) * p.log()
     neg = (1 - ALPHA) * (p ** GAMMA) * (-(1 - p).log())
@@ -30,7 +31,7 @@ def _focal_cost(scores):
 
 @torch.no_grad()
 def build_cost(pred_boxes, gt_boxes, scores=None):
-    """Cost [N,M] + iou [N,M]. Box ở hệ chuẩn cxcywh [0,1]. `scores` là LOGIT."""
+    """Cost [N,M] + iou [N,M]. Boxes in canonical cxcywh [0,1]. `scores` are LOGITS."""
     p_xyxy = sanitize_boxes(cxcywh_to_xyxy(pred_boxes))
     g_xyxy = cxcywh_to_xyxy(gt_boxes)
 
@@ -43,8 +44,8 @@ def build_cost(pred_boxes, gt_boxes, scores=None):
 
 
 def _center_prior_mask(pred_boxes, gt_boxes, radius_ratio=2.5):
-    """AND, và `center_radius` TỈ LỆ theo sqrt(w*h) của GT (không phải hằng 2,5
-    của DiffusionDet — vốn tính theo stride FPN mà ta không có)."""
+    """AND, with `center_radius` PROPORTIONAL to the GT's sqrt(w*h) (not
+    DiffusionDet's constant 2.5 — that is in FPN strides, which we do not have)."""
     cx, cy = pred_boxes[:, 0:1], pred_boxes[:, 1:2]
     gx, gy = gt_boxes[:, 0][None], gt_boxes[:, 1][None]
     gw, gh = gt_boxes[:, 2][None], gt_boxes[:, 3][None]
@@ -58,7 +59,7 @@ def _center_prior_mask(pred_boxes, gt_boxes, radius_ratio=2.5):
 
 @torch.no_grad()
 def hungarian_match(pred_boxes, gt_boxes, scores=None):
-    """Gán 1-1 -> (pred_idx, gt_idx) trên cùng device."""
+    """1-to-1 assignment -> (pred_idx, gt_idx) on the same device."""
     dev = pred_boxes.device
     if gt_boxes.shape[0] == 0:
         z = torch.zeros(0, dtype=torch.long, device=dev)
@@ -72,7 +73,7 @@ def hungarian_match(pred_boxes, gt_boxes, scores=None):
 @torch.no_grad()
 def simota_match(pred_boxes, gt_boxes, scores=None, use_center_prior=False,
                  radius_ratio=2.5, top_k=10):
-    """Một GT nhận k proposal; một proposal khớp TỐI ĐA 1 GT."""
+    """One GT takes k proposals; one proposal matches AT MOST 1 GT."""
     dev = pred_boxes.device
     n, m = pred_boxes.shape[0], gt_boxes.shape[0]
     if m == 0:
@@ -90,7 +91,7 @@ def simota_match(pred_boxes, gt_boxes, scores=None, use_center_prior=False,
     for j in range(m):
         matching[cost[:, j].topk(int(dynamic_k[j]), largest=False).indices, j] = True
 
-    def _khu_trung(mat):
+    def _dedup(mat):
         multi = mat.sum(1) > 1
         if multi.any():
             best = cost[multi].argmin(dim=1)
@@ -98,19 +99,19 @@ def simota_match(pred_boxes, gt_boxes, scores=None, use_center_prior=False,
             mat[multi.nonzero(as_tuple=True)[0], best] = True
         return mat
 
-    matching = _khu_trung(matching)
+    matching = _dedup(matching)
 
-    # Vòng cứu GT chưa được khớp (loss.py:428-438): khử trùng có thể làm một GT
-    # mất hết proposal -> phạt +1e5 vào proposal đã dùng rồi gán lại.
+    # Rescue loop for unmatched GT (loss.py:428-438): the dedup above can strip a
+    # GT of all its proposals -> penalise used proposals by +1e5 and reassign.
     for _ in range(100):
-        trong = matching.sum(0) == 0
-        if not trong.any():
+        empty = matching.sum(0) == 0
+        if not empty.any():
             break
         cost[matching.sum(1) > 0] += 1e5
-        for j in trong.nonzero(as_tuple=True)[0]:
+        for j in empty.nonzero(as_tuple=True)[0]:
             matching[cost[:, j].argmin(), j] = True
-        matching = _khu_trung(matching)
-    assert not (matching.sum(0) == 0).any(), "còn GT không được khớp"
+        matching = _dedup(matching)
+    assert not (matching.sum(0) == 0).any(), "a GT is still unmatched"
 
     pi, gi = matching.nonzero(as_tuple=True)
     return pi, gi
@@ -121,4 +122,4 @@ def match(pred_boxes, gt_boxes, scores=None, method="hungarian", **kw):
         return hungarian_match(pred_boxes, gt_boxes, scores)
     if method == "simota":
         return simota_match(pred_boxes, gt_boxes, scores, **kw)
-    raise ValueError(f"method không hợp lệ: {method!r}")
+    raise ValueError(f"invalid method: {method!r}")

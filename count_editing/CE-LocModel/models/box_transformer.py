@@ -1,38 +1,41 @@
-"""Decoder trên N box token — TransformerForDiffusion của Diffusion Policy, sửa
-3 chỗ để box là một TẬP chứ không phải chuỗi có thứ tự.
+"""Decoder over N box tokens — Diffusion Policy's TransformerForDiffusion, with
+3 changes so that boxes form a SET rather than an ordered sequence.
 
-Mỗi hàng [cx,cy,w,h] thành MỘT token. Cùng trọng số PE+Linear cho mọi hàng nên
-khác biệt duy nhất giữa các box là 4 con số toạ độ -> HOÁN VỊ BẤT BIẾN.
+Each row [cx,cy,w,h] becomes ONE token. The same PE+Linear weights apply to every
+row, so the only difference between boxes is their 4 coordinates -> PERMUTATION
+EQUIVARIANT.
 
-Mỗi layer, một token box làm 3 việc:
-  1. self-attention với N token box (kể cả chính nó) — "35 con cừu biết về nhau",
-     đây là chỗ intra-category coherence sống
-  2. cross-attention vào 1026 token condition — "box đọc ảnh tại vị trí của nó",
-     tương đương chức năng RoIAlign nhưng học được
+At each layer a box token does 3 things:
+  1. self-attention over the N box tokens (including itself) — "35 sheep know
+     about each other", which is where intra-category coherence lives
+  2. cross-attention into the 1026 condition tokens — "a box reads the image at
+     its own location", functionally RoIAlign but learned
   3. FFN
 
-BA SỬA BẮT BUỘC so với `transformer_for_diffusion.py` gốc:
+THREE MANDATORY CHANGES from the original `transformer_for_diffusion.py`:
 
-  (a) BỎ `pos_emb` học được trên box token. Với action thì "bước thứ 3" có nghĩa;
-      với box thì "box thứ 3" VÔ NGHĨA — thứ tự do prepare_diffusion_concat sinh
-      ngẫu nhiên và matcher hoán vị tự do. Giữ lại thì mạng học "slot 0 thường là
-      GT thật, slot 90 thường là placeholder" — đúng thứ KHÔNG được phép học vì
-      lúc inference mọi slot đều từ randn.
-      Vị trí đến từ SINUSOIDAL PE TRÊN TOẠ ĐỘ, không phải chỉ số mảng.
+  (a) DROP the learned `pos_emb` on box tokens. For actions, "the 3rd timestep"
+      is meaningful; for boxes, "the 3rd box" is MEANINGLESS — the order is
+      generated randomly by prepare_diffusion_concat and the matcher permutes
+      freely. Keeping it teaches the network "slot 0 is usually real GT, slot 90
+      is usually a placeholder" — exactly what it must NOT learn, since at
+      inference every slot comes from randn.
+      Position comes from SINUSOIDAL PE ON THE COORDINATES, not the array index.
 
-  (b) `causal_attn=False`, bỏ cả tgt_mask lẫn memory_mask. Box i phải thấy mọi
-      box j và TOÀN BỘ memory.
+  (b) `causal_attn=False`, dropping both tgt_mask and memory_mask. Box i must see
+      every box j and the ENTIRE memory.
 
-  (c) `T`, `T_cond` động -> N đổi tự do giữa train (100) và eval (300). Làm được
-      vì đã bỏ pos_emb theo chỉ số. `cond_pos_emb` thì GIỮ (memory CÓ thứ tự:
-      patch thứ 500 luôn là cùng vùng ảnh).
+  (c) Dynamic `T`, `T_cond` -> N can differ freely between train (100) and eval
+      (300). Possible precisely because index-based pos_emb is gone. `cond_pos_emb`
+      is KEPT (memory IS ordered: patch 500 is always the same image region).
 
-VÌ SAO SINUSOIDAL PE CHỨ KHÔNG Linear(4->D) THÔ: Linear là tuyến tính nên vị trí
-vào mạng dưới dạng ĐỘ LỚN — box ở x=0,4 cho vector gấp đôi box ở x=0,2. Sinusoidal
-cho mỗi vị trí một CHỮ KÝ với tích vô hướng giảm theo khoảng cách, đúng thứ
-attention cần. Quan trọng hơn: ViT dùng cùng cơ chế cho patch token nên box và
-patch NÓI CÙNG NGÔN NGỮ về vị trí. (DiffusionDet không cần vì RoIAlign dùng toạ
-độ trực tiếp để lấy mẫu.)
+WHY SINUSOIDAL PE RATHER THAN A RAW Linear(4->D): Linear is linear, so position
+enters the network as MAGNITUDE — a box at x=0.4 gives twice the vector of one at
+x=0.2. Sinusoidal gives each position a SIGNATURE whose dot product decays with
+distance, which is what attention actually needs. More importantly: ViT uses the
+same mechanism for patch tokens, so boxes and patches SPEAK THE SAME LANGUAGE
+about position. (DiffusionDet does not need this because RoIAlign samples using
+the coordinates directly.)
 """
 
 import math
@@ -44,7 +47,7 @@ __all__ = ["BoxTransformer", "SinusoidalCoordEmbedding"]
 
 
 class SinusoidalCoordEmbedding(nn.Module):
-    """Mỗi toạ độ -> `dim` chiều sin/cos ở nhiều tần số; 4 toạ độ nối lại."""
+    """Each coordinate -> `dim` sin/cos dims at several frequencies; 4 concatenated."""
 
     def __init__(self, dim=64, temperature=10000.0):
         super().__init__()
@@ -52,17 +55,17 @@ class SinusoidalCoordEmbedding(nn.Module):
         self.dim, self.temperature = dim, temperature
 
     def forward(self, boxes):
-        """[..., 4] trong [0,1] -> [..., 4*dim]."""
+        """[..., 4] in [0,1] -> [..., 4*dim]."""
         half = self.dim // 2
         freq = torch.arange(half, device=boxes.device, dtype=torch.float32)
         freq = self.temperature ** (2 * freq / self.dim)
-        x = boxes.unsqueeze(-1) * 100.0 / freq          # scale 100: [0,1] -> dải hữu dụng
+        x = boxes.unsqueeze(-1) * 100.0 / freq          # scale 100: [0,1] -> useful range
         emb = torch.cat([x.sin(), x.cos()], dim=-1)
         return emb.flatten(-2)
 
 
 class SinusoidalTimeEmbedding(nn.Module):
-    """Time embedding chuẩn DDPM (giống `components.py::SinusoidalPosEmb`)."""
+    """Standard DDPM time embedding (same as `components.py::SinusoidalPosEmb`)."""
 
     def __init__(self, dim):
         super().__init__()
@@ -82,14 +85,14 @@ class BoxTransformer(nn.Module):
         super().__init__()
         self.d_model = d_model
 
-        self.coord_emb = SinusoidalCoordEmbedding(coord_dim)          # SỬA (a)
+        self.coord_emb = SinusoidalCoordEmbedding(coord_dim)          # CHANGE (a)
         self.box_proj = nn.Linear(4 * coord_dim, d_model)
         self.time_emb = SinusoidalTimeEmbedding(d_model)
         self.time_mlp = nn.Sequential(
             nn.Linear(d_model, d_model * 4), nn.Mish(), nn.Linear(d_model * 4, d_model)
         )
 
-        # memory CÓ thứ tự -> giữ pos_emb cho nó (khác box token)
+        # memory IS ordered -> keep pos_emb for it (unlike box tokens)
         self.cond_pos_emb = nn.Parameter(torch.zeros(1, 4096, d_model))
         nn.init.trunc_normal_(self.cond_pos_emb, std=0.02)
 
@@ -97,27 +100,27 @@ class BoxTransformer(nn.Module):
             d_model=d_model, nhead=n_head,
             dim_feedforward=dim_feedforward or 4 * d_model,
             dropout=dropout, activation="gelu", batch_first=True,
-            norm_first=True,            # comment của tác giả: "important for stability"
+            norm_first=True,            # author's own comment: "important for stability"
         )
         self.decoder = nn.TransformerDecoder(layer, num_layers=n_layer)
         self.ln_f = nn.LayerNorm(d_model)
 
-        self.box_head = nn.Linear(d_model, 4)      # toạ độ TRỰC TIẾP (không delta)
-        self.score_head = nn.Linear(d_model, 1)    # 1 chiều: sigmoid ≡ softmax 2 chiều
+        self.box_head = nn.Linear(d_model, 4)      # DIRECT coordinates (not a delta)
+        self.score_head = nn.Linear(d_model, 1)    # 1 dim: sigmoid == 2-dim softmax
 
     def forward(self, boxes_norm, timesteps, memory):
         """
-        boxes_norm : [B, N, 4] cxcywh trong [0,1]
-        timesteps  : [B] long — MỘT giá trị mỗi ảnh
-        memory     : [B, M, d_model] (text + patch token)
-        -> (pred_boxes [B,N,4] trong [0,1], logits [B,N])
+        boxes_norm : [B, N, 4] cxcywh in [0,1]
+        timesteps  : [B] long — ONE value per image
+        memory     : [B, M, d_model] (text + patch tokens)
+        -> (pred_boxes [B,N,4] in [0,1], logits [B,N])
         """
-        tgt = self.box_proj(self.coord_emb(boxes_norm))               # SỬA (a)
+        tgt = self.box_proj(self.coord_emb(boxes_norm))               # CHANGE (a)
 
         t_tok = self.time_mlp(self.time_emb(timesteps)).unsqueeze(1)  # [B,1,D]
-        mem = torch.cat([t_tok, memory], dim=1)                       # SỬA (c): động
+        mem = torch.cat([t_tok, memory], dim=1)                       # CHANGE (c): dynamic
         mem = mem + self.cond_pos_emb[:, : mem.shape[1]]
 
-        # SỬA (b): KHÔNG mask nào cả
+        # CHANGE (b): NO masks at all
         h = self.ln_f(self.decoder(tgt=tgt, memory=mem))
         return self.box_head(h).sigmoid(), self.score_head(h).squeeze(-1)

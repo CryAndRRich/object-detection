@@ -1,30 +1,30 @@
-"""Matcher gán prediction <-> ground truth — numpy thuần, KHÔNG phụ thuộc torch.
+"""Prediction <-> ground-truth matcher — pure numpy, NO torch dependency.
 
-NGUỒN CHÂN LÝ. Bản torch phải port cơ học kèm test `allclose`.
+SOURCE OF TRUTH. The torch port must be mechanical, with `allclose` tests.
 
-HAI LỰA CHỌN, MẶC ĐỊNH HUNGARIAN:
+TWO OPTIONS, HUNGARIAN BY DEFAULT:
 
-  Hungarian 1-1 (mặc định) — `scipy.optimize.linear_sum_assignment`.
+  Hungarian 1-to-1 (default) — `scipy.optimize.linear_sum_assignment`.
 
-  SimOTA dynamic-k (cờ bật) — theo `diffusiondet/loss.py`, đọc đối chiếu, KHÔNG
-  import. Đo được nó THOÁI HOÁ về Hungarian trên CE-130:
-    - k = clamp(sum(top-10 IoU của GT đó), min=1), tỉ lệ với IoU
-    - vật CE-130 chỉ chiếm 0,41 % diện tích ảnh -> IoU sụp rất nhanh
-    - ngay t=100 (còn 98,6 % tín hiệu) IoU đã chỉ ~0,15 -> k = 1,0
-    - vòng 1 đo: IoU 0,10 -> k=1,0, tức 45/300 slot so với 48 của Hungarian
-  Nên nó thêm code phức tạp mà không mang lại gì ở giai đoạn model chưa tốt, và
-  còn KÉM ỔN ĐỊNH NHÃN hơn (55 % cặp giữ nguyên) — mâu thuẫn với việc đặt "ổn
-  định nhãn" làm chỉ số cảnh báo số 1.
+  SimOTA dynamic-k (opt-in flag) — follows `diffusiondet/loss.py`, read for
+  reference, NOT imported. Measured to DEGENERATE into Hungarian on CE-130:
+    - k = clamp(sum of that GT's top-10 IoU, min=1), i.e. proportional to IoU
+    - CE-130 objects occupy just 0.41 % of image area -> IoU collapses fast
+    - already at t=100 (98.6 % signal left) IoU is only ~0.15 -> k = 1.0
+    - round 1 measured: IoU 0.10 -> k=1.0, i.e. 45/300 slots vs Hungarian's 48
+  So it adds complex code for no gain while the model is still weak, and it is
+  also LESS LABEL-STABLE (55 % of pairs preserved) — which contradicts making
+  "label stability" the number-one warning metric.
 
-HAI LỖI VÒNG 1 VỀ CENTER PRIOR (đã sửa ở đây):
-  1. Dùng `is_in_boxes OR is_in_centers`; đúng là **AND** (loss.py:403).
-  2. Gán nhãn dương trực tiếp cho slot trong vùng; đúng là **cộng phạt +100 vào
-     cost matrix** (loss.py:364) rồi để matcher quyết định.
-  Đo được center prior KHÔNG ổn định hoá nhãn (55 % -> 51 %) vì với AND chỉ 2,1 %
-  cặp là hợp lệ. Mặc định TẮT.
+TWO ROUND-1 CENTER-PRIOR BUGS (fixed here):
+  1. Used `is_in_boxes OR is_in_centers`; correct is **AND** (loss.py:403).
+  2. Assigned positive labels directly to in-region slots; correct is to **add a
+     +100 penalty to the cost matrix** (loss.py:364) and let the matcher decide.
+  Measured: the center prior does NOT stabilise labels (55 % -> 51 %) because
+  under AND only 2.1 % of pairs are eligible. OFF by default.
 
-TRỌNG SỐ COST = trọng số LOSS (nguyên tắc DETR/DiffusionDet): 5,0 L1 + 2,0 GIoU
-+ 2,0 class. Lệch nhau thì matcher chọn cặp mà loss không đồng ý.
+COST WEIGHTS = LOSS WEIGHTS (the DETR/DiffusionDet principle): 5.0 L1 + 2.0 GIoU
++ 2.0 class. If they diverge, the matcher picks pairs the loss disagrees with.
 """
 
 import numpy as np
@@ -39,10 +39,11 @@ ALPHA, GAMMA = 0.25, 2.0
 
 
 def _focal_cost(scores):
-    """Cost phân loại kiểu focal, giống `loss.py:305-308`.
+    """Focal-style classification cost, same as `loss.py:305-308`.
 
-    neg_cost - pos_cost cho mỗi prediction; matcher ưu tiên slot model ĐÃ tự tin
-    là vật -> tạo vòng phản hồi dương ổn định hoá việc gán.
+    neg_cost - pos_cost per prediction; the matcher then prefers slots the model
+    is ALREADY confident about, creating a positive feedback loop that stabilises
+    the assignment.
     """
     p = np.clip(np.asarray(scores, dtype=np.float64).reshape(-1), 1e-8, 1 - 1e-8)
     pos = -ALPHA * ((1 - p) ** GAMMA) * np.log(p)
@@ -51,16 +52,16 @@ def _focal_cost(scores):
 
 
 def build_cost(pred_boxes, gt_boxes, scores=None):
-    """Cost matrix [N, M]. Box ở hệ chuẩn cxcywh [0,1].
+    """Cost matrix [N, M]. Boxes in canonical cxcywh [0,1].
 
-    Trả về (cost, iou) — `iou` dùng lại cho dynamic-k, khỏi tính hai lần.
+    Returns (cost, iou) — `iou` is reused for dynamic-k, avoiding a second pass.
     """
     p = np.asarray(pred_boxes, dtype=np.float64).reshape(-1, 4)
     g = np.asarray(gt_boxes, dtype=np.float64).reshape(-1, 4)
     p_xyxy, g_xyxy = cxcywh_to_xyxy(p), cxcywh_to_xyxy(g)
 
-    # box dự đoán có thể lộn ngược khi model chưa train -> kẹp lại trước GIoU,
-    # nếu không GIoU cho giá trị vô nghĩa (vòng 1: 5e5)
+    # An untrained model can emit inverted boxes -> sort the corners before GIoU,
+    # otherwise GIoU returns nonsense (round 1 saw 5e5)
     p_xyxy = np.stack([
         np.minimum(p_xyxy[:, 0], p_xyxy[:, 2]), np.minimum(p_xyxy[:, 1], p_xyxy[:, 3]),
         np.maximum(p_xyxy[:, 0], p_xyxy[:, 2]), np.maximum(p_xyxy[:, 1], p_xyxy[:, 3]),
@@ -75,9 +76,9 @@ def build_cost(pred_boxes, gt_boxes, scores=None):
 def _center_prior_mask(pred_boxes, gt_boxes, radius_ratio=2.5):
     """`is_in_boxes` AND `is_in_centers` (loss.py:403).
 
-    `center_radius` TỈ LỆ theo sqrt(w*h) của GT, không phải hằng 2,5 của
-    DiffusionDet (vốn tính theo stride FPN — ta không có FPN, và vật CE-130 chỉ
-    chiếm 0,41 % diện tích ảnh).
+    `center_radius` is PROPORTIONAL to the GT's sqrt(w*h), not DiffusionDet's
+    constant 2.5 (which is measured in FPN strides — we have no FPN, and CE-130
+    objects cover only 0.41 % of the image).
     """
     p = np.asarray(pred_boxes, dtype=np.float64).reshape(-1, 4)
     g = np.asarray(gt_boxes, dtype=np.float64).reshape(-1, 4)
@@ -93,7 +94,7 @@ def _center_prior_mask(pred_boxes, gt_boxes, radius_ratio=2.5):
 
 
 def hungarian_match(pred_boxes, gt_boxes, scores=None):
-    """Gán 1-1. Trả về (pred_idx, gt_idx) — hai mảng cùng độ dài."""
+    """1-to-1 assignment. Returns (pred_idx, gt_idx) — two arrays of equal length."""
     g = np.asarray(gt_boxes, dtype=np.float64).reshape(-1, 4)
     if g.shape[0] == 0:
         return np.zeros(0, dtype=int), np.zeros(0, dtype=int)
@@ -103,10 +104,10 @@ def hungarian_match(pred_boxes, gt_boxes, scores=None):
 
 def simota_match(pred_boxes, gt_boxes, scores=None, use_center_prior=False,
                  radius_ratio=2.5, top_k=10):
-    """SimOTA dynamic-k. Một GT nhận k proposal; một proposal khớp TỐI ĐA 1 GT.
+    """SimOTA dynamic-k. One GT takes k proposals; one proposal matches AT MOST 1 GT.
 
-    "1-to-k" nghĩa là một GT nhận k proposal, KHÔNG phải ngược lại — nhìn từ phía
-    proposal thì vẫn là 1-1 (khối khử trùng `anchor_matching_gt > 1`).
+    "1-to-k" means one GT receives k proposals, NOT the reverse — seen from the
+    proposal side it is still 1-to-1 (the `anchor_matching_gt > 1` dedup block).
     """
     g = np.asarray(gt_boxes, dtype=np.float64).reshape(-1, 4)
     n = np.asarray(pred_boxes, dtype=np.float64).reshape(-1, 4).shape[0]
@@ -120,7 +121,7 @@ def simota_match(pred_boxes, gt_boxes, scores=None, use_center_prior=False,
     m = g.shape[0]
     matching = np.zeros((n, m), dtype=bool)
 
-    # k = clamp(sum(top-k IoU của GT đó), min=1)
+    # k = clamp(sum of that GT's top-k IoU, min=1)
     k_cap = min(top_k, n)
     topk_iou = np.sort(iou, axis=0)[-k_cap:]
     dynamic_k = np.clip(topk_iou.sum(0).astype(int), 1, None)
@@ -129,8 +130,8 @@ def simota_match(pred_boxes, gt_boxes, scores=None, use_center_prior=False,
         idx = np.argsort(cost[:, j])[: dynamic_k[j]]
         matching[idx, j] = True
 
-    def _khu_trung(mat):
-        """Một proposal chỉ giữ GT có cost thấp nhất (loss.py:424-427)."""
+    def _dedup(mat):
+        """A proposal keeps only its lowest-cost GT (loss.py:424-427)."""
         multi = mat.sum(1) > 1
         if multi.any():
             best = np.argmin(cost[multi], axis=1)
@@ -138,30 +139,31 @@ def simota_match(pred_boxes, gt_boxes, scores=None, use_center_prior=False,
             mat[np.where(multi)[0], best] = True
         return mat
 
-    matching = _khu_trung(matching)
+    matching = _dedup(matching)
 
-    # Vòng cứu GT chưa được khớp (loss.py:428-438). Khử trùng ở trên có thể làm
-    # một GT mất hết proposal; DiffusionDet phạt +1e5 vào proposal đã dùng rồi
-    # gán lại proposal rẻ nhất cho GT trống, lặp tới khi mọi GT đều có.
+    # Rescue loop for unmatched GT (loss.py:428-438). The dedup above can strip a
+    # GT of all its proposals; DiffusionDet penalises already-used proposals by
+    # +1e5, reassigns the cheapest remaining proposal to each empty GT, and
+    # repeats until every GT has one.
     cost = cost.copy()
     for _ in range(100):
-        trong = matching.sum(0) == 0
-        if not trong.any():
+        empty = matching.sum(0) == 0
+        if not empty.any():
             break
         cost[matching.sum(1) > 0] += 1e5
-        for j in np.where(trong)[0]:
+        for j in np.where(empty)[0]:
             matching[np.argmin(cost[:, j]), j] = True
-        matching = _khu_trung(matching)
-    assert not (matching.sum(0) == 0).any(), "còn GT không được khớp"
+        matching = _dedup(matching)
+    assert not (matching.sum(0) == 0).any(), "a GT is still unmatched"
 
     pred_idx, gt_idx = np.where(matching)
     return pred_idx, gt_idx
 
 
 def match(pred_boxes, gt_boxes, scores=None, method="hungarian", **kw):
-    """Cửa vào chung. `method` là 'hungarian' (mặc định) hoặc 'simota'."""
+    """Shared entry point. `method` is 'hungarian' (default) or 'simota'."""
     if method == "hungarian":
         return hungarian_match(pred_boxes, gt_boxes, scores)
     if method == "simota":
         return simota_match(pred_boxes, gt_boxes, scores, **kw)
-    raise ValueError(f"method không hợp lệ: {method!r}")
+    raise ValueError(f"invalid method: {method!r}")

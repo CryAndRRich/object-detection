@@ -1,10 +1,10 @@
-"""Bản TORCH của `diffusion_np.py` — port CƠ HỌC.
+"""TORCH port of `diffusion_np.py` — MECHANICAL.
 
-Bốn lỗi số học vòng 1 (mỗi cái có test âm bản ở bản numpy):
-  1. không clamp pred_x_start (1/sqrt(ab) tới 20.291x ở t=999)
-  2. không tính LẠI pred_noise từ x_start ĐÃ clamp
-  3. x_T nhân snr_scale (phải là N(0,I) std 1,0)
-  4. loss trên epsilon dưới set-matching (vô nghĩa: matcher hoán vị)
+Round 1's four numerical bugs (each has a negative-control test on the numpy side):
+  1. not clamping pred_x_start (1/sqrt(ab) reaches 20,291x at t=999)
+  2. not RECOMPUTING pred_noise from the CLAMPED x_start
+  3. scaling x_T by snr_scale (it must be N(0,I) with std 1.0)
+  4. an epsilon loss under set matching (meaningless: the matcher permutes)
 """
 
 import math
@@ -20,10 +20,10 @@ __all__ = [
 
 
 def cosine_alphas_cumprod(num_timesteps=1000, s=0.008, dtype=torch.float64):
-    """Giống hệt `cosine_beta_schedule` của DiffusionDet (có clip betas).
+    """Identical to DiffusionDet's `cosine_beta_schedule` (betas clipped).
 
-    sqrt(alpha_bar) còn lại: t=249 -> 0,92 | t=499 -> 0,70 | t=749 -> 0,38.
-    Linear chỉ còn 0,058 ở t=749 -> đo được cosine cho 3,70x AP.
+    sqrt(alpha_bar) remaining: t=249 -> 0.92 | t=499 -> 0.70 | t=749 -> 0.38.
+    Linear leaves only 0.058 at t=749 -> measured cosine gives 3.70x the AP.
     """
     x = torch.linspace(0, num_timesteps, num_timesteps + 1, dtype=dtype)
     ac = torch.cos(((x / num_timesteps) + s) / (1 + s) * math.pi * 0.5) ** 2
@@ -33,13 +33,13 @@ def cosine_alphas_cumprod(num_timesteps=1000, s=0.008, dtype=torch.float64):
 
 
 def q_sample(x_start, t, noise, alphas_cumprod):
-    """x_t = sqrt(ab_t) x_0 + sqrt(1-ab_t) eps. `t` là MỘT giá trị cho cả ảnh."""
+    """x_t = sqrt(ab_t) x_0 + sqrt(1-ab_t) eps. `t` is ONE scalar for the whole image."""
     ab = alphas_cumprod[t].to(x_start.dtype)
     return ab.sqrt() * x_start + (1 - ab).sqrt() * noise
 
 
 def predict_noise_from_start(x_t, t, x_start, alphas_cumprod):
-    """Suy ngược eps từ (x_t, x_0) — nghịch đảo giải tích của q_sample."""
+    """Recover eps from (x_t, x_0) — the analytic inverse of q_sample."""
     ab = alphas_cumprod[t].to(x_t.dtype)
     return ((1.0 / ab).sqrt() * x_t - x_start) / (1.0 / ab - 1).sqrt()
 
@@ -52,19 +52,21 @@ def ddim_time_pairs(num_timesteps=1000, sampling_steps=4):
 
 def make_placeholders(n, median_wh=None, valid_h=1.0, device="cpu", dtype=torch.float32,
                       generator=None):
-    """Box giả trong hệ chuẩn cxcywh [0,1].
+    """Fake boxes in canonical cxcywh [0,1].
 
-    Gốc DiffusionDet `randn/6 + 0.5` = N(0,5; 1/6) cho CẢ 4 chiều. Hai sửa:
-      SỬA 1  — w/h theo log-normal quanh trung vị vật thật của CHÍNH ảnh đó
-               (gốc cho 0,5 = nửa ảnh, to gấp 7,3x vật CE-130 median 0,0686).
-      SỬA 1b — chặn cy trong vùng ảnh thật (13,7 % placeholder từng rơi vào pad).
+    DiffusionDet's original `randn/6 + 0.5` = N(0.5, 1/6) for ALL 4 dims. Two fixes:
+      FIX 1  — w/h from a log-normal around the median real object size OF THAT
+               SAME IMAGE (the original gives 0.5 = half the image, 7.3x larger
+               than CE-130's median object of 0.0686).
+      FIX 1b — keep cy inside the real image region (13.7 % of placeholders used
+               to land in the padding).
     """
     def _randn(*shape):
         return torch.randn(*shape, device=device, dtype=dtype, generator=generator)
 
     out = torch.empty(n, 4, device=device, dtype=dtype)
-    out[:, 0] = _randn(n) / 6.0 + 0.5                                # cx: gốc
-    out[:, 1] = (_randn(n) / 6.0 + 0.5).clamp(0.0, 1.0) * max(valid_h, 1e-6)  # SỬA 1b
+    out[:, 0] = _randn(n) / 6.0 + 0.5                                # cx: original
+    out[:, 1] = (_randn(n) / 6.0 + 0.5).clamp(0.0, 1.0) * max(valid_h, 1e-6)  # FIX 1b
 
     if median_wh is None:
         out[:, 2:] = (_randn(n, 2) / 6.0 + 0.5).clamp(min=1e-4)
@@ -80,8 +82,9 @@ def prepare_diffusion_concat(gt_boxes, num_proposals, t, alphas_cumprod, snr_sca
                              valid_h=1.0, adapt_placeholder=True, generator=None):
     """GT [M,4] cxcywh[0,1] -> (x_t [N,4], noise [N,4], is_gt [N] bool).
 
-    Pad placeholder khi M<N, crop ngẫu nhiên khi M>N. N=100 cắt GT ở 8-11 % ảnh
-    -> eval nên dùng N=300 (kiến trúc cho phép vì đã bỏ pos_emb theo chỉ số).
+    Pads with placeholders when M<N, randomly crops when M>N. N=100 truncates GT
+    on 8-11 % of images -> eval should use N=300 (the architecture allows it
+    because index-based pos_emb was removed).
     """
     dev, dt = gt_boxes.device, gt_boxes.dtype
     m = gt_boxes.shape[0]

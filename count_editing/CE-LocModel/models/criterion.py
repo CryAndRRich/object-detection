@@ -1,24 +1,26 @@
-"""Loss GIỐNG DIFFUSIONDET: 5,0 L1 + 2,0 GIoU + 2,0 Focal.
+"""Loss IDENTICAL TO DIFFUSIONDET: 5.0 L1 + 2.0 GIoU + 2.0 Focal.
 
-Trọng số đọc từ `diffusiondet/config.py:34-36,43-44`.
+Weights read from `diffusiondet/config.py:34-36,43-44`.
 
-  - L1 + GIoU: CHỈ trên cặp đã match (box không match không có target toạ độ).
-  - Focal: trên TOÀN BỘ N slot (slot không match có target rõ ràng: score = 0).
-  - Chuẩn hoá / num_boxes = số cặp matched, clamp(min=1) cho ảnh 0 GT.
+  - L1 + GIoU: ONLY on matched pairs (an unmatched box has no coordinate target).
+  - Focal: on ALL N slots (an unmatched slot has a well-defined target: score = 0).
+  - Normalised by / num_boxes = the number of matched pairs, clamp(min=1) for
+    images with 0 GT.
 
-KHÔNG có loss epsilon (vô nghĩa dưới set-matching: matcher hoán vị nên không tồn
-tại epsilon nào vừa thuộc prediction p vừa ứng với GT g -> train theo nhiễu của
-box padding). KHÔNG có deep supervision (kiến trúc 1-forward, không có stage
-trung gian để supervise).
+NO epsilon loss (meaningless under set matching: the matcher permutes, so no
+epsilon belongs to prediction p and corresponds to GT g at once -> you would be
+training on the noise of padding boxes). NO deep supervision (single-forward
+architecture, no intermediate stage to supervise).
 
-VÌ SAO CẦN CẢ L1 LẪN GIoU: L1 phạt sai lệch TUYỆT ĐỐI nên với vật CE-130 (median
-0,41 % diện tích ảnh) gần như bỏ qua vật nhỏ; GIoU phạt theo TỈ LỆ chồng lấn và
-có gradient cả khi hai box rời nhau.
+WHY BOTH L1 AND GIoU: L1 penalises ABSOLUTE error, so with CE-130 objects (median
+0.41 % of image area) it essentially ignores small objects; GIoU penalises
+RELATIVE overlap and has a gradient even when two boxes are disjoint.
 
-CẠM BẪY SCORE HEAD: focal alpha=0,25 với head không phân biệt được sẽ hội tụ về
-một HẰNG SỐ. Vòng 1 ra 0,263 (16 % dương) < ngưỡng 0,5 -> mọi box bị lọc ->
-fallback argmax giữ đúng 1 box ("viz chỉ vẽ 1 box", từng bị chẩn đoán nhầm là lỗi
-công cụ). Nên lúc inference dùng TOP-K, không dùng ngưỡng tuyệt đối.
+SCORE-HEAD TRAP: focal with alpha=0.25 and a non-discriminating head converges to
+a CONSTANT. Round 1 landed at 0.263 (16 % positive) < the 0.5 threshold -> every
+box filtered out -> the argmax fallback kept exactly 1 box ("the viz only draws
+one box", once misdiagnosed as a tooling bug). So use TOP-K at inference, never
+an absolute threshold.
 """
 
 import torch
@@ -43,7 +45,7 @@ class SetCriterion:
         pred_boxes  : [B, N, 4] cxcywh [0,1]
         pred_logits : [B, N]
         targets     : list[B] tensor [M_i, 4] cxcywh [0,1]
-        -> (loss tổng, dict thành phần, danh sách chỉ số ghép cặp)
+        -> (total loss, dict of components, list of matched index pairs)
         """
         dev = pred_boxes.device
         l1_all, giou_all, iou_all = [], [], []
@@ -70,9 +72,10 @@ class SetCriterion:
             g_xyxy = cxcywh_to_xyxy(g)
             giou = torch.diagonal(generalized_box_iou(p_xyxy, g_xyxy))
             giou_all.append(1.0 - giou)
-            # IoU THẬT (>= 0) để báo cáo, KHÔNG phải GIoU (có thể âm khi rời nhau).
-            # Chỉ số theo dõi mà sai thì vô dụng — đây là thứ dùng để biết toạ độ
-            # có tốt lên không, tách khỏi loss.
+            # REAL IoU (>= 0) for reporting, NOT GIoU (which goes negative when
+            # boxes are disjoint). A wrong tracking metric is worse than none —
+            # this is what tells you whether coordinates are improving, separate
+            # from the loss.
             iou_all.append(torch.diagonal(box_iou(p_xyxy, g_xyxy)[0]).detach())
 
         den = max(n_matched, 1)
@@ -94,11 +97,12 @@ class SetCriterion:
 
 
 def sigmoid_focal_loss(logits, targets, alpha=ALPHA, gamma=GAMMA):
-    """Focal loss dạng sigmoid — giống DiffusionDet (`use_focal=True`).
+    """Sigmoid focal loss — same as DiffusionDet (`use_focal=True`).
 
-    1 chiều + sigmoid TƯƠNG ĐƯƠNG 2 chiều + softmax về mặt toán học (softmax chỉ
-    phụ thuộc HIỆU hai logit -> một chiều tự do thừa). DiffusionDet với focal cũng
-    dùng 80 chiều chứ KHÔNG phải 81 — "nền" = mọi logit đều thấp.
+    1 dim + sigmoid is MATHEMATICALLY EQUIVALENT to 2 dims + softmax (softmax
+    depends only on the DIFFERENCE of the two logits -> one redundant degree of
+    freedom). DiffusionDet with focal likewise uses 80 dims, NOT 81 —
+    "background" simply means every logit is low.
     """
     p = logits.sigmoid()
     ce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")

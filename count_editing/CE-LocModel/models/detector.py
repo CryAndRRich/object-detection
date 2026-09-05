@@ -1,24 +1,25 @@
-"""CE-Loc vòng 2 — thân Diffusion Policy transformer, mượn cơ chế sinh N box của
-DiffusionDet.
+"""CE-Loc round 2 — a Diffusion Policy transformer body, borrowing DiffusionDet's
+mechanism for generating N boxes at once.
 
-    ẢNH  -> CLIP ViT-B/16 FROZEN -> 1024 patch token -> Linear(768->256) ─┐
-    TEXT -> CLIP text   FROZEN   -> 1 token          -> Linear(768->256) ─┤
-    t    -> sinusoidal                                                    ─┤
-                                                          memory 1026 token
-    box nhiễu [B,N,4] -> sinPE(cx,cy,w,h) -> decoder 6 layer ─────────────┘
-                              (self-attn giữa box + cross-attn vào memory)
+    IMAGE -> CLIP ViT-B/16 FROZEN -> 1024 patch tokens -> Linear(768->256) ─┐
+    TEXT  -> CLIP text    FROZEN  -> 1 token           -> Linear(768->256) ─┤
+    t     -> sinusoidal                                                     ─┤
+                                                          memory: 1026 tokens
+    noisy boxes [B,N,4] -> sinPE(cx,cy,w,h) -> 6-layer decoder ─────────────┘
+                             (self-attn among boxes + cross-attn into memory)
                                         |
-                            box [B,N,4] + score [B,N]
+                            boxes [B,N,4] + scores [B,N]
 
-Khác CE-Loc gốc: memory 2 token -> 1026 token CÓ VỊ TRÍ. Vòng 1 đo được với 2
-token thì cả N box nhận CÙNG một vector 256-d, và gradient trên box unmatched có
-hướng ngẫu nhiên (cosine -0,0074 = tung đồng xu).
+Difference from the original CE-Loc: memory goes from 2 tokens to 1026 POSITIONED
+tokens. Round 1 measured that with 2 tokens all N boxes receive the SAME 256-d
+vector, and gradients on unmatched boxes point in random directions (cosine
+-0.0074 = a coin flip).
 
-Đầu ra là TOẠ ĐỘ TRỰC TIẾP, không phải epsilon. DiffusionDet cũng vậy
-(`objective='pred_x0'`) — nó dự đoán x_start qua delta rồi SUY NGƯỢC ra pred_noise.
-Ba lý do: (1) set-matching bắt buộc, (2) GIoU chỉ định nghĩa được trên toạ độ,
-(3) hệ số 1/sqrt(ab) tới 20.291x ở t=999 nên dự đoán eps rồi suy ra x0 khuếch đại
-sai số chừng đó lần.
+The output is DIRECT COORDINATES, not epsilon. DiffusionDet does the same
+(`objective='pred_x0'`) — it predicts x_start via a delta and then DERIVES
+pred_noise. Three reasons: (1) set matching requires it, (2) GIoU is only definable
+on coordinates, (3) the 1/sqrt(ab) factor reaches 20,291x at t=999, so predicting
+eps and deriving x0 would amplify the error by that much.
 """
 
 import torch
@@ -33,6 +34,19 @@ from utils.diffusion_math import (
 )
 
 __all__ = ["CELocDetector"]
+
+
+def _check_generator(generator, dev):
+    """`torch.randn(device=X, generator=g)` requires g.device == X, otherwise it
+    raises a cryptic RuntimeError ("Expected a 'cuda' device type for generator
+    but found 'cpu'"). This bit us once in the val loop -- fail early with a
+    message that names the fix."""
+    if generator is None:
+        return
+    gd, dd = torch.device(generator.device).type, torch.device(dev).type
+    assert gd == dd, (
+        f"generator is on '{gd}' but tensors are created on '{dd}'. "
+        f"Fix: torch.Generator(device='{dd}').manual_seed(...)")
 
 
 class CELocDetector(nn.Module):
@@ -52,8 +66,9 @@ class CELocDetector(nn.Module):
     # ------------------------------------------------------------------ train
 
     def build_inputs(self, targets, num_proposals, valid_h, generator=None):
-        """Dựng x_t cho cả batch. `t` là MỘT giá trị cho cả ảnh (đúng DiffusionDet)."""
+        """Build x_t for the whole batch. `t` is ONE value per image (as in DiffusionDet)."""
         dev = self.alphas_cumprod.device
+        _check_generator(generator, targets[0].device if targets else "cpu")
         t = int(torch.randint(0, self.num_timesteps, (1,), generator=generator).item())
 
         xs, gts = [], []
@@ -69,7 +84,7 @@ class CELocDetector(nn.Module):
 
     def forward(self, x_t, timesteps, pixel_values=None, texts=None,
                 patch_raw=None, text_raw=None):
-        """x_t [B,N,4] trong không gian diffusion -> (box [0,1], logits)."""
+        """x_t [B,N,4] in diffusion space -> (boxes in [0,1], logits)."""
         memory = self.encoder(pixel_values, texts, patch_raw, text_raw)
         boxes_norm = decode_diffusion(x_t, self.snr_scale)
         return self.decoder(boxes_norm, timesteps, memory)
@@ -79,19 +94,22 @@ class CELocDetector(nn.Module):
     @torch.no_grad()
     def ddim_sample(self, num_proposals, pixel_values=None, texts=None,
                     patch_raw=None, text_raw=None, eta=1.0, generator=None):
-        """Sinh N box từ nhiễu thuần.
+        """Generate N boxes from pure noise.
 
-        x_T ~ N(0, I) std 1,0 — KHÔNG nhân snr_scale (lỗi 3 của vòng 1).
-        Mỗi bước: dự đoán x_start -> CLAMP -> TÍNH LẠI pred_noise từ bản đã clamp.
+        x_T ~ N(0, I) with std 1.0 — NOT scaled by snr_scale (round 1's bug 3).
+        Each step: predict x_start -> CLAMP -> RECOMPUTE pred_noise from the
+        clamped version.
 
-        `eta=1.0` là mặc định của DiffusionDet (`detector.py:97`) — DDIM suy biến
-        về DDPM. Hệ quả đã đo, KHÔNG phải lỗi: ở bước đầu (t=999 -> 749) thì
-        sigma=0,925 và c=0,0000, tức pred_noise bị nhân 0 và cả bước là
-        `x_start*sqrt(ab_next) + nhiễu`. Đặt eta=0 nếu muốn DDIM tất định.
+        `eta=1.0` is DiffusionDet's default (`detector.py:97`) — DDIM degenerates
+        into DDPM. A measured consequence, NOT a bug: on the first step
+        (t=999 -> 749), sigma=0.925 and c=0.0000, so pred_noise is multiplied by
+        zero and the whole step is `x_start*sqrt(ab_next) + noise`. Set eta=0 for
+        deterministic DDIM.
         """
         memory = self.encoder(pixel_values, texts, patch_raw, text_raw)
         B, dev = memory.shape[0], memory.device
 
+        _check_generator(generator, dev)
         img = torch.randn(B, num_proposals, 4, device=dev, generator=generator)
         boxes = logits = None
 
@@ -99,7 +117,7 @@ class CELocDetector(nn.Module):
             tb = torch.full((B,), t, dtype=torch.long, device=dev)
             boxes, logits = self.decoder(decode_diffusion(img, self.snr_scale), tb, memory)
 
-            x_start = encode_diffusion(boxes, self.snr_scale)          # đã trong miền
+            x_start = encode_diffusion(boxes, self.snr_scale)          # already in range
             if t_next < 0:
                 break
 

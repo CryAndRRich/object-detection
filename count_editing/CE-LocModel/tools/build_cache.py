@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Cache patch token CLIP ra memmap fp16.
+"""Cache CLIP patch tokens into an fp16 memmap.
 
-CHỈ CHẠY SAU KHI `profile_and_memory.py` cho thấy CLIP > 30 % thời gian.
+ONLY RUN THIS after `profile_and_memory.py` shows CLIP taking > 30 % of the time.
 
-Cache 2 BẢN (gốc + lật ngang) vì KHÔNG flip được trên token đã cache: ViT trộn
-thông tin toàn cục qua 12 layer nên token (i,j) không còn là "feature của riêng ô
-(i,j)". Dung lượng: 1.911 x 2 x 1024 x 768 fp16 ~ 6,0 GB.
+TWO VERSIONS are cached (original + horizontally flipped) because you CANNOT flip
+already-cached tokens: the ViT mixes global information across 12 layers, so token
+(i,j) is no longer "the feature of cell (i,j) alone". Size: 1,911 x 2 x 1024 x 768
+fp16 ~ 6.0 GB.
 
-Băng thông: 1,57 MB/ảnh -> 50 MB/batch(32) -> ~3 GB/epoch. Ổn trên SSD; chú ý nếu
-là network FS.
+Bandwidth: 1.57 MB/image -> 50 MB/batch(32) -> ~3 GB/epoch. Fine on SSD; watch out
+on a network filesystem.
 """
 
 import argparse
@@ -33,8 +34,8 @@ def main():
     ap.add_argument("--split", default="train")
     ap.add_argument("--out", required=True)
     ap.add_argument("--batch-size", type=int, default=8)
-    ap.add_argument("--no-flip", action="store_true", help="chỉ cache ảnh gốc")
-    ap.add_argument("--limit", type=int, default=None, help="cắt nhỏ để thử")
+    ap.add_argument("--no-flip", action="store_true", help="cache the original image only")
+    ap.add_argument("--limit", type=int, default=None, help="shrink for a smoke test")
     ap.add_argument("--device", default=None)
     a = ap.parse_args()
 
@@ -54,26 +55,27 @@ def main():
     n_tok = enc.num_patches
     d = enc.vision.config.hidden_size
     path = os.path.join(a.out, f"{a.split}_patch.f16")
-    print(f"[cache] {n_img} ảnh x {n_ver} bản x {n_tok} token x {d} "
+    print(f"[cache] {n_img} images x {n_ver} versions x {n_tok} tokens x {d} "
           f"= {n_img*n_ver*n_tok*d*2/1e9:.2f} GB -> {path}", flush=True)
 
     mm = np.memmap(path, dtype=np.float16, mode="w+", shape=(n_img, n_ver, n_tok, d))
     ids = []
 
-    # Text embedding: mỗi CLASS chỉ một vector (input là 1 từ), nên cache theo class
-    # thay vì theo ảnh — vài chục vector, bỏ luôn chi phí tokenize mỗi batch.
-    lop = sorted({it["text"] for it in ds.items})
-    txt = enc.encode_text_raw(lop, dev).cpu().numpy().astype(np.float16)  # [C,1,d_txt]
+    # Text embeddings: one vector per CLASS (the input is a single word), so cache
+    # per class rather than per image — a few dozen vectors, and it also removes
+    # the per-batch tokenisation cost.
+    classes = sorted({it["text"] for it in ds.items})
+    txt = enc.encode_text_raw(classes, dev).cpu().numpy().astype(np.float16)  # [C,1,d_txt]
     np.save(os.path.join(a.out, f"{a.split}_text.npy"), txt)
-    print(f"[cache] {len(lop)} class -> text embedding {txt.shape}", flush=True)
+    print(f"[cache] {len(classes)} classes -> text embeddings {txt.shape}", flush=True)
 
     for i0 in range(0, n_img, a.batch_size):
         idx = range(i0, min(i0 + a.batch_size, n_img))
-        mau = [ds[i] for i in idx]
-        ids += [m["image_id"] for m in mau]
+        samples = [ds[i] for i in idx]
+        ids += [m["image_id"] for m in samples]
 
         for v in range(n_ver):
-            imgs = [m["image"][:, ::-1].copy() if v == 1 else m["image"] for m in mau]
+            imgs = [m["image"][:, ::-1].copy() if v == 1 else m["image"] for m in samples]
             px = torch.stack([torch.from_numpy(normalize_for_clip(x)) for x in imgs]).to(dev)
             mm[list(idx), v] = enc.encode_image_raw(px).cpu().numpy().astype(np.float16)
 
@@ -84,9 +86,9 @@ def main():
     with open(os.path.join(a.out, f"{a.split}_meta.json"), "w") as f:
         json.dump({"image_ids": ids, "shape": [n_img, n_ver, n_tok, d],
                    "dtype": "float16", "image_size": cfg["data"]["image_size"],
-                   "clip": cfg["model"]["clip_name"], "classes": lop,
+                   "clip": cfg["model"]["clip_name"], "classes": classes,
                    "n_ver": n_ver}, f)
-    print(f"[cache] xong: {path}", flush=True)
+    print(f"[cache] done: {path}", flush=True)
 
 
 if __name__ == "__main__":

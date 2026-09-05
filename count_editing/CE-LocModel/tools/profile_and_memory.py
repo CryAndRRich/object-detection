@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Đo memory GPU thật + % thời gian CLIP forward. CHẠY TRƯỚC KHI TRAIN DÀI.
+"""Measure real GPU memory + the % of time spent in the CLIP forward.
+RUN THIS BEFORE ANY LONG TRAINING.
 
-Hai câu hỏi cần trả lời bằng SỐ, không phải suy đoán:
+Two questions that must be answered with NUMBERS, not guesses:
 
-1. MEMORY. Tính tay được ~0,8 GB decoder + ~1 GB CLIP (sdpa) trên A30 24GB. Nếu
-   đo ra > 5 GB thì có chỗ quên `no_grad` — backward qua ViT tốn ~19 GB.
+1. MEMORY. Hand calculation gives ~0.8 GB decoder + ~1 GB CLIP (sdpa) on a 24GB
+   A30. If the measurement exceeds 5 GB, a `no_grad` is missing somewhere —
+   backward through the ViT costs ~19 GB.
 
-2. CÓ CẦN CACHE KHÔNG. Bài học §6 đo nhánh detect có DataLoader chỉ 0,1-0,2 % ->
-   "không cần cache". Nhưng đó là với ResNet18; CLIP ViT-B/16 @512 đắt hơn nhiều
-   (27x chi phí attention so với 224px) nên cân bằng CÓ THỂ đã đảo. Chỉ build
-   cache nếu CLIP > 30 % thời gian — không xây thứ chưa biết có cần không.
+2. IS A CACHE NEEDED. Lessons §6 measured the detect branch spending only
+   0.1-0.2 % in the DataLoader -> "no cache needed". But that was with ResNet18;
+   CLIP ViT-B/16 @512 is far more expensive (27x the attention cost of 224px), so
+   the balance MAY have flipped. Only build the cache if CLIP > 30 % of the time —
+   do not build something before knowing it is needed.
 
   python3 tools/profile_and_memory.py --batch-size 8 --steps 10
 """
@@ -54,17 +57,17 @@ def main():
     ).to(dev)
     model.train()
     crit = SetCriterion(cfg["matcher"]["method"])
-    hoc = [p for p in model.parameters() if p.requires_grad]
-    opt = torch.optim.AdamW(hoc, lr=1e-4)
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    opt = torch.optim.AdamW(trainable, lr=1e-4)
 
-    print(f"[model] học được {sum(p.numel() for p in hoc)/1e6:.2f}M "
-          f"/ tổng {sum(p.numel() for p in model.parameters())/1e6:.1f}M", flush=True)
+    print(f"[model] trainable {sum(p.numel() for p in trainable)/1e6:.2f}M "
+          f"/ total {sum(p.numel() for p in model.parameters())/1e6:.1f}M", flush=True)
 
-    mau = [ds[i] for i in range(a.batch_size)]
-    px = torch.stack([torch.from_numpy(normalize_for_clip(m["image"])) for m in mau]).to(dev)
-    tg = [torch.from_numpy(m["boxes"]).float().to(dev) for m in mau]
-    txt = [m["text"] for m in mau]
-    vh = [m["valid_h"] for m in mau]
+    samples = [ds[i] for i in range(a.batch_size)]
+    px = torch.stack([torch.from_numpy(normalize_for_clip(m["image"])) for m in samples]).to(dev)
+    tg = [torch.from_numpy(m["boxes"]).float().to(dev) for m in samples]
+    txt = [m["text"] for m in samples]
+    vh = [m["valid_h"] for m in samples]
 
     if dev.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
@@ -90,26 +93,26 @@ def main():
         if dev.type == "cuda":
             torch.cuda.synchronize()
 
-        if i >= 2:                      # bỏ 2 bước warm-up
+        if i >= 2:                      # skip 2 warm-up steps
             t_clip += dt_clip
             t_total += time.time() - t0
 
     n = max(a.steps - 2, 1)
-    ti_le = 100 * t_clip / max(t_total, 1e-9)
-    print(f"\n=== THỜI GIAN (trung bình {n} bước) ===")
-    print(f"  CLIP forward : {1000*t_clip/n:7.1f} ms  ({ti_le:.1f} %)")
-    print(f"  còn lại      : {1000*(t_total-t_clip)/n:7.1f} ms")
-    print(f"  tổng / bước  : {1000*t_total/n:7.1f} ms")
-    print(f"\n  -> {'NÊN build cache' if ti_le > 30 else 'KHÔNG cần cache'} "
-          f"(ngưỡng 30 %)")
+    ratio = 100 * t_clip / max(t_total, 1e-9)
+    print(f"\n=== TIME (mean over {n} steps) ===")
+    print(f"  CLIP forward : {1000*t_clip/n:7.1f} ms  ({ratio:.1f} %)")
+    print(f"  everything else: {1000*(t_total-t_clip)/n:7.1f} ms")
+    print(f"  total / step : {1000*t_total/n:7.1f} ms")
+    print(f"\n  -> {'BUILD the cache' if ratio > 30 else 'NO cache needed'} "
+          f"(threshold 30 %)")
 
     if dev.type == "cuda":
         gb = torch.cuda.max_memory_allocated() / 1e9
-        print(f"\n=== MEMORY ===\n  đỉnh: {gb:.2f} GB")
-        print("  " + ("⚠ > 5 GB — có thể quên no_grad ở đâu đó" if gb > 5
-                      else "✓ khớp dự kiến (~0,8 GB decoder + ~1 GB CLIP)"))
+        print(f"\n=== MEMORY ===\n  peak: {gb:.2f} GB")
+        print("  " + ("[!] > 5 GB — a no_grad may be missing somewhere" if gb > 5
+                      else "[ok] matches the estimate (~0.8 GB decoder + ~1 GB CLIP)"))
     else:
-        print("\n(CPU — không đo được memory GPU; chạy lại trên server)")
+        print("\n(CPU — GPU memory cannot be measured here; re-run on the server)")
 
 
 if __name__ == "__main__":

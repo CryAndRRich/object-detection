@@ -1,31 +1,33 @@
-"""Phần toán diffusion — numpy thuần, KHÔNG phụ thuộc torch.
+"""Diffusion math — pure numpy, NO torch dependency.
 
-NGUỒN CHÂN LÝ cho `q_sample` / DDIM / `prepare_diffusion_concat`. Bản torch phải
-port cơ học từ đây kèm test `allclose(torch_fn, np_fn)`.
+SOURCE OF TRUTH for `q_sample` / DDIM / `prepare_diffusion_concat`. The torch
+port must be mechanical, with `allclose(torch_fn, np_fn)` tests.
 
-BỐN LỖI SỐ HỌC CỦA VÒNG 1 — mỗi cái đều có test âm bản trong tests/test_math.py:
+ROUND-1'S FOUR NUMERICAL BUGS — each has a negative-control test in tests/:
 
-  1. KHÔNG clamp `pred_x_start` trước khi dùng.
-     Hệ số 1/sqrt(alpha_bar) đạt 157x ở t=999 (>10x trên 33 % timestep) nên box
-     trong [-1,1] văng ra ±301, phá cả cost matrix lẫn loss.
-     (DiffusionDet clamp ở detector.py:181)
+  1. NOT clamping `pred_x_start` before use.
+     The 1/sqrt(alpha_bar) factor reaches 20,291x at t=999 (>10x on 6.5 % of
+     timesteps), so a box in [-1,1] flies out to huge values, wrecking both the
+     cost matrix and the loss.
+     (DiffusionDet clamps at detector.py:181)
 
-  2. KHÔNG tính lại `pred_noise` từ `x_start` ĐÃ clamp.
-     Bỏ bước này làm sai số DDIM tăng từ ~2e-7 lên ~5,4.
+  2. NOT recomputing `pred_noise` from the CLAMPED `x_start`.
+     Skipping this raises DDIM error from ~2e-7 to ~5.4.
      (DiffusionDet: detector.py:182)
 
-  3. Khởi tạo x_T nhân thêm `snr_scale`.
-     Phải là N(0, I) std 1,0 — ở t=T-1 thì alpha_bar = 4e-5.
-     (DiffusionDet dùng `randn` trơn: detector.py:197)
+  3. Scaling the x_T initialisation by `snr_scale`.
+     It must be N(0, I) with std 1.0 — at t=T-1, alpha_bar = 4e-5.
+     (DiffusionDet uses a plain `randn`: detector.py:197)
 
-  4. Loss trên epsilon dưới set-matching.
-     Vô nghĩa: sau khi matcher gán prediction p sang GT g, không tồn tại epsilon
-     nào vừa thuộc p vừa ứng với g. `SetCriterionDynamicK` chỉ có L1+GIoU trên x0.
+  4. An epsilon loss under set matching.
+     Meaningless: once the matcher assigns prediction p to GT g, no epsilon
+     belongs to p and corresponds to g at the same time. `SetCriterionDynamicK`
+     only has L1+GIoU on x0.
 
-GIỚI HẠN ĐÃ ĐO của việc sửa placeholder w/h (docs §(a)): model nhìn thấy
-`x_t = q_sample(x_start)`, không phải `x_start`. Clamp kéo mọi thứ về median 0,5
-khi t lớn (t=999: median w giải mã = 0,500; 79 % có w>0,3). Nên sửa placeholder
-CHỈ có tác dụng ở t nhỏ — vẫn cần, nhưng đừng kỳ vọng quá.
+MEASURED LIMIT of the placeholder w/h fix (docs §(a)): the model sees
+`x_t = q_sample(x_start)`, not `x_start`. Clamping pulls everything toward a
+median of 0.5 at large t (t=999: decoded median w = 0.500; 79 % have w>0.3). So
+the placeholder fix only helps at small t — still needed, but don't over-expect.
 """
 
 import numpy as np
@@ -49,15 +51,15 @@ __all__ = [
 # --------------------------------------------------------------------------
 
 def cosine_alphas_cumprod(num_timesteps=1000, s=0.008):
-    """Cosine schedule (Nichol & Dhariwal), đúng như DiffusionDet dùng.
+    """Cosine schedule (Nichol & Dhariwal), exactly what DiffusionDet uses.
 
-    Đo được vòng 1: cosine cho 3,70x AP so với linear. Lý do: ở t lớn linear chỉ
-    còn 5,8 % tín hiệu (t=749) nên box gần như thuần nhiễu, matcher gán bừa và
-    gradient nhiễu gấp 4,6 lần.
+    Measured in round 1: cosine gives 3.70x the AP of linear. Reason: at large t,
+    linear leaves only 5.8 % signal (t=749), so boxes are near-pure noise, the
+    matcher assigns arbitrarily, and gradients are 4.6x noisier.
 
-        sqrt(alpha_bar) còn lại   t=249    t=499    t=749
-        cosine                    0,92     0,70     0,38
-        linear                    0,72     0,28     0,058
+        sqrt(alpha_bar) remaining   t=249    t=499    t=749
+        cosine                      0.92     0.70     0.38
+        linear                      0.72     0.28     0.058
     """
     t = np.arange(num_timesteps + 1, dtype=np.float64)
     f = np.cos(((t / num_timesteps) + s) / (1.0 + s) * np.pi / 2.0) ** 2
@@ -67,7 +69,7 @@ def cosine_alphas_cumprod(num_timesteps=1000, s=0.008):
 
 
 def linear_alphas_cumprod(num_timesteps=1000, beta_start=1e-4, beta_end=0.02):
-    """Linear schedule — CHỈ để đối chiếu trong test, KHÔNG dùng để train."""
+    """Linear schedule — for test comparison ONLY, never used for training."""
     betas = np.linspace(beta_start, beta_end, num_timesteps, dtype=np.float64)
     return np.cumprod(1.0 - betas)
 
@@ -79,9 +81,10 @@ def linear_alphas_cumprod(num_timesteps=1000, beta_start=1e-4, beta_end=0.02):
 def q_sample(x_start, t, noise, alphas_cumprod):
     """x_t = sqrt(ab_t) * x_0 + sqrt(1 - ab_t) * eps.
 
-    `t` là MỘT giá trị vô hướng cho cả ảnh (không phải mỗi box một t) — N box là
-    *một* mẫu từ phân phối tập box; cho mỗi box một t thì lúc inference không tái
-    tạo được. DiffusionDet: `torch.randint(..., (1,))`.
+    `t` is ONE scalar for the whole image (not one t per box) — the N boxes are
+    *a single* sample from a distribution over box sets; with a per-box t you
+    could not reproduce the process at inference. DiffusionDet does the same:
+    `torch.randint(..., (1,))`.
     """
     ab = float(alphas_cumprod[int(t)])
     return np.sqrt(ab) * np.asarray(x_start, dtype=np.float64) + np.sqrt(1.0 - ab) * np.asarray(
@@ -90,10 +93,10 @@ def q_sample(x_start, t, noise, alphas_cumprod):
 
 
 def predict_noise_from_start(x_t, t, x_start, alphas_cumprod):
-    """Suy ngược eps từ (x_t, x_0). Nghịch đảo giải tích của `q_sample`.
+    """Recover eps from (x_t, x_0). The analytic inverse of `q_sample`.
 
-    Đây là lý do dự đoán x_0 KHÔNG mất gì so với dự đoán eps: biết x_t và t thì
-    hai đại lượng xác định lẫn nhau qua một phương trình tuyến tính.
+    This is why predicting x_0 loses NOTHING versus predicting eps: given x_t and
+    t, the two quantities determine each other through one linear equation.
     """
     ab = float(alphas_cumprod[int(t)])
     sqrt_recip = np.sqrt(1.0 / ab)
@@ -106,30 +109,30 @@ def predict_noise_from_start(x_t, t, x_start, alphas_cumprod):
 # --------------------------------------------------------------------------
 
 def ddim_time_pairs(num_timesteps=1000, sampling_steps=4):
-    """[(T-1, T-2), ..., (1, 0), (0, -1)] — giống DiffusionDet detector.py:191."""
+    """[(T-1, T-2), ..., (1, 0), (0, -1)] — same as DiffusionDet detector.py:191."""
     times = np.linspace(-1, num_timesteps - 1, sampling_steps + 1)
     times = list(reversed(times.astype(int).tolist()))
     return list(zip(times[:-1], times[1:]))
 
 
 def ddim_step(x_t, x_start_raw, t, t_next, alphas_cumprod, snr_scale=2.0, eta=1.0, noise=None):
-    """Một bước DDIM. Trả về (x_next, x_start_đã_clamp).
+    """One DDIM step. Returns (x_next, clamped_x_start).
 
-    Thứ tự BẮT BUỘC (lỗi 1 + 2 ở đầu file):
-      1. clamp x_start về miền hợp lệ
-      2. TÍNH LẠI pred_noise từ x_start ĐÃ clamp
-      3. mới đi bước DDIM
+    MANDATORY order (bugs 1 and 2 at the top of this file):
+      1. clamp x_start into the valid range
+      2. RECOMPUTE pred_noise from the CLAMPED x_start
+      3. only then take the DDIM step
 
-    Khi `t_next < 0` thì trả thẳng x_start (bước cuối, không thêm nhiễu).
+    When `t_next < 0`, return x_start directly (final step, no noise added).
     """
     s = float(snr_scale)
-    # (1) clamp — qua decode/encode để dùng đúng một định nghĩa miền hợp lệ
+    # (1) clamp — via decode/encode so there is exactly one definition of "valid"
     x_start = encode_diffusion(decode_diffusion(x_start_raw, s), s)
 
     if t_next < 0:
         return x_start, x_start
 
-    # (2) tính LẠI pred_noise từ x_start đã clamp
+    # (2) RECOMPUTE pred_noise from the clamped x_start
     pred_noise = predict_noise_from_start(x_t, t, x_start, alphas_cumprod)
 
     ab_t = float(alphas_cumprod[int(t)])
@@ -144,38 +147,41 @@ def ddim_step(x_t, x_start_raw, t, t_next, alphas_cumprod, snr_scale=2.0, eta=1.
 
 
 # --------------------------------------------------------------------------
-# prepare_diffusion_concat — pad/crop GT lên N proposal
+# prepare_diffusion_concat — pad/crop GT up to N proposals
 # --------------------------------------------------------------------------
 
 def make_placeholders(n, median_wh=None, valid_h=1.0, rng=None):
-    """Sinh `n` box giả trong hệ chuẩn cxcywh [0,1].
+    """Generate `n` fake boxes in canonical cxcywh [0,1].
 
-    Gốc DiffusionDet: `randn/6 + 0.5` cho CẢ 4 chiều — là Gaussian N(0,5; 1/6),
-    comment gốc ghi "3sigma = 1/2". Hai sửa cho CE-130:
+    DiffusionDet's original: `randn/6 + 0.5` for ALL 4 dimensions — a Gaussian
+    N(0.5, 1/6), whose own comment reads "3sigma = 1/2". Two fixes for CE-130:
 
-    SỬA 1 — w/h theo dữ liệu. Gốc cho w/h ~ 0,5 = nửa ảnh, trong khi vật CE-130
-      median 0,069 => placeholder to gấp 7,3x. Với N=100 và ~37,6 GT thì 62 %
-      slot là placeholder, model học prior "box thì to và ở giữa". Thay bằng
-      log-normal quanh trung vị vật thật CỦA CHÍNH ẢNH ĐÓ (7,3x -> ~0,8x).
+    FIX 1 — data-driven w/h. The original gives w/h ~ 0.5 = half the image, while
+      CE-130 objects have median 0.069, so placeholders are 7.3x too big. With
+      N=100 and ~37.6 GT, 62 % of slots are placeholders, teaching the model a
+      prior of "boxes are big and centred". Replaced with a log-normal around the
+      median real object size OF THAT SAME IMAGE (7.3x -> ~0.8x).
 
-    SỬA 1b — chặn cy trong vùng ảnh thật. Đo được 13,7 % placeholder có tâm rơi
-      vào vùng pad (ảnh nặng nhất 92,2 %). Rẻ vì mọi ảnh CE-130 cao đúng 384px
-      nên luôn W>=H, tức chỉ pad ở DƯỚI -> một ngưỡng vô hướng là đủ.
+    FIX 1b — keep cy inside the real image region. Measured 13.7 % of
+      placeholders had centres landing in the padding (worst image: 92.2 %).
+      Cheap because every CE-130 image is exactly 384px tall, so W>=H always,
+      meaning padding is only ever at the BOTTOM -> one scalar threshold suffices.
 
-    Tâm cx giữ nguyên Gaussian gốc (ảnh luôn rộng hết canvas).
+    The cx centre keeps the original Gaussian (images always span the full canvas
+    width).
     """
     rng = np.random.default_rng() if rng is None else rng
     out = np.empty((n, 4), dtype=np.float64)
 
-    out[:, 0] = rng.standard_normal(n) / 6.0 + 0.5                      # cx: gốc
-    out[:, 1] = np.clip(rng.standard_normal(n) / 6.0 + 0.5, 0.0, 1.0)   # cy: gốc
-    out[:, 1] *= max(valid_h, 1e-6)                                      # SỬA 1b
+    out[:, 0] = rng.standard_normal(n) / 6.0 + 0.5                      # cx: original
+    out[:, 1] = np.clip(rng.standard_normal(n) / 6.0 + 0.5, 0.0, 1.0)   # cy: original
+    out[:, 1] *= max(valid_h, 1e-6)                                      # FIX 1b
 
-    if median_wh is None:                                                # gốc DiffusionDet
+    if median_wh is None:                                                # DiffusionDet original
         out[:, 2:] = np.clip(rng.standard_normal((n, 2)) / 6.0 + 0.5, 1e-4, None)
-    else:                                                                # SỬA 1
+    else:                                                                # FIX 1
         mw, mh = float(median_wh[0]), float(median_wh[1])
-        sigma = 0.4  # độ tản của log-normal, ~1 bát phân
+        sigma = 0.4  # log-normal spread, roughly one octave
         out[:, 2] = np.clip(mw * np.exp(rng.standard_normal(n) * sigma), 1e-4, 1.0)
         out[:, 3] = np.clip(mh * np.exp(rng.standard_normal(n) * sigma), 1e-4, 1.0)
     return out
@@ -187,11 +193,11 @@ def prepare_diffusion_concat(
 ):
     """GT [M,4] cxcywh[0,1] -> (x_t [N,4], noise [N,4], is_gt [N] bool).
 
-    Pad bằng placeholder khi M < N, crop ngẫu nhiên khi M > N. `is_gt` đánh dấu
-    slot nào là GT thật (chỉ những slot đó vào loss toạ độ qua matcher).
+    Pads with placeholders when M < N, randomly crops when M > N. `is_gt` marks
+    which slots are real GT (only those enter the coordinate loss via the matcher).
 
-    N=100 cắt mất GT ở 8-11 % ảnh (test 11,2 %) -> eval nên dùng N=300. Kiến trúc
-    cho phép vì đã bỏ pos_emb theo chỉ số.
+    N=100 truncates GT on 8-11 % of images (test: 11.2 %), so eval should use
+    N=300. The architecture allows this because index-based pos_emb was removed.
     """
     rng = np.random.default_rng() if rng is None else rng
     gt = np.asarray(gt_boxes, dtype=np.float64).reshape(-1, 4)

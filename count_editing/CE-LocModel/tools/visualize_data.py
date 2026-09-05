@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Vẽ box qua ĐÚNG chuỗi 6 bước lên canvas đã pad. Chỉ cần PIL + numpy.
+"""Draw boxes through the EXACT 6-step chain onto the padded canvas. PIL + numpy only.
 
-Chạy TRƯỚC khi viết model. Vòng 1 visualize bắt được 3 lỗi mà toàn bộ test và 3
-vòng rà soát code bỏ sót — nhìn ảnh là cách kiểm duy nhất bắt được lỗi về BẢN
-CHẤT dữ liệu (loss chỉ tính trên cặp đã match nên không thấy 62 % placeholder).
+Run this BEFORE writing the model. In round 1, visualisation caught 3 bugs that
+the entire test suite and 3 code review passes had missed — looking at images is
+the only check that catches errors about the NATURE of the data (the loss is only
+computed on matched pairs, so it never sees the 62 % placeholders).
 
-  python3 tools/visualize_data.py --n 20 --out <thư mục>
+  python3 tools/visualize_data.py --n 20 --out <directory>
   python3 tools/visualize_data.py --split test --placeholder --n 8
 """
 
@@ -22,33 +23,33 @@ from data.ce130_dataset import CE130Detection  # noqa: E402
 from utils.box_ops_np import cxcywh_to_xyxy, decode_diffusion, encode_diffusion  # noqa: E402
 from utils.diffusion_np import cosine_alphas_cumprod, prepare_diffusion_concat  # noqa: E402
 
-XANH, DO, VANG, CAM = (0, 255, 0), (255, 60, 60), (255, 255, 0), (255, 150, 0)
+GREEN, RED, YELLOW, ORANGE = (0, 255, 0), (255, 60, 60), (255, 255, 0), (255, 150, 0)
 
 
-def ve(mau, snr_scale=2.0, ve_placeholder=False, num_proposals=100, t=None, rng=None):
-    """Trả về ảnh PIL đã vẽ. Box đi qua encode -> decode để kiểm cả chuỗi."""
-    img = Image.fromarray(mau["image"])
+def draw(sample, snr_scale=2.0, draw_placeholder=False, num_proposals=100, t=None, rng=None):
+    """Return the drawn PIL image. Boxes go through encode -> decode to test the chain."""
+    img = Image.fromarray(sample["image"])
     dr = ImageDraw.Draw(img)
     T = img.size[0]
 
-    if ve_placeholder:
+    if draw_placeholder:
         ab = cosine_alphas_cumprod(1000)
         tt = int(rng.integers(0, 1000)) if t is None else t
         x_t, _, is_gt = prepare_diffusion_concat(
-            mau["boxes"], num_proposals, tt, ab, snr_scale,
-            valid_h=mau["valid_h"], rng=rng,
+            sample["boxes"], num_proposals, tt, ab, snr_scale,
+            valid_h=sample["valid_h"], rng=rng,
         )
-        for b, thuc in zip(cxcywh_to_xyxy(decode_diffusion(x_t, snr_scale)) * T, is_gt):
-            dr.rectangle(b.tolist(), outline=XANH if thuc else CAM, width=2)
+        for b, real in zip(cxcywh_to_xyxy(decode_diffusion(x_t, snr_scale)) * T, is_gt):
+            dr.rectangle(b.tolist(), outline=GREEN if real else ORANGE, width=2)
     else:
-        # GT qua trọn chuỗi: cxcywh[0,1] -> encode -> decode -> xyxy px
-        back = decode_diffusion(encode_diffusion(mau["boxes"], snr_scale), snr_scale)
+        # GT through the whole chain: cxcywh[0,1] -> encode -> decode -> xyxy px
+        back = decode_diffusion(encode_diffusion(sample["boxes"], snr_scale), snr_scale)
         for b in cxcywh_to_xyxy(back) * T:
-            dr.rectangle(b.tolist(), outline=XANH, width=2)
+            dr.rectangle(b.tolist(), outline=GREEN, width=2)
 
-    nh = int(round(mau["valid_h"] * T))
-    if nh < T - 1:                                   # ranh giới vùng pad
-        dr.line([(0, nh), (T, nh)], fill=VANG, width=3)
+    nh = int(round(sample["valid_h"] * T))
+    if nh < T - 1:                                   # padding boundary
+        dr.line([(0, nh), (T, nh)], fill=YELLOW, width=3)
     return img
 
 
@@ -56,11 +57,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="../../data/all_phase2_V2")
     ap.add_argument("--split", default="train")
-    ap.add_argument("--n", type=int, default=20, help="số ảnh; -1 = tất cả")
+    ap.add_argument("--n", type=int, default=20, help="number of images; -1 = all")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--placeholder", action="store_true", help="vẽ cả box giả")
+    ap.add_argument("--placeholder", action="store_true", help="also draw fake boxes")
     ap.add_argument("--num-proposals", type=int, default=100)
-    ap.add_argument("--t", type=int, default=None, help="timestep cố định")
+    ap.add_argument("--t", type=int, default=None, help="fixed timestep")
     ap.add_argument("--snr-scale", type=float, default=2.0)
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
@@ -68,20 +69,20 @@ def main():
     os.makedirs(a.out, exist_ok=True)
     rng = np.random.default_rng(a.seed)
     ds = CE130Detection(a.root, a.split)
-    print(f"{a.split}: {ds.thong_ke()}")
+    print(f"{a.split}: {ds.stats()}")
 
     idx = range(len(ds)) if a.n < 0 else np.linspace(0, len(ds) - 1, min(a.n, len(ds))).astype(int)
-    dong = []
+    rows = []
     for i in idx:
         m = ds[int(i)]
-        img = ve(m, a.snr_scale, a.placeholder, a.num_proposals, a.t, rng)
-        ten = f"{a.split}_{m['image_id']}_{m['text'].replace(' ', '-')}.png"
-        img.save(os.path.join(a.out, ten))
-        dong.append(f"{ten},{len(m['boxes'])},{m['valid_h']:.4f},{m['orig_size'][0]}x{m['orig_size'][1]}")
+        img = draw(m, a.snr_scale, a.placeholder, a.num_proposals, a.t, rng)
+        name = f"{a.split}_{m['image_id']}_{m['text'].replace(' ', '-')}.png"
+        img.save(os.path.join(a.out, name))
+        rows.append(f"{name},{len(m['boxes'])},{m['valid_h']:.4f},{m['orig_size'][0]}x{m['orig_size'][1]}")
 
     with open(os.path.join(a.out, "index.csv"), "w") as f:
-        f.write("file,so_box,valid_h,kich_thuoc_goc\n" + "\n".join(dong) + "\n")
-    print(f"đã lưu {len(dong)} ảnh vào {a.out}")
+        f.write("file,n_boxes,valid_h,original_size\n" + "\n".join(rows) + "\n")
+    print(f"saved {len(rows)} images to {a.out}")
 
 
 if __name__ == "__main__":

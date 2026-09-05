@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Train CE-Loc vòng 2.
+"""Train CE-Loc round 2.
 
-BA CHỈ SỐ THEO DÕI (quan trọng ngang loss — vòng 1 thiếu nên mù suốt 5 vòng sửa):
+THREE TRACKING METRICS (as important as the loss — round 1 lacked them and stayed
+blind through 5 rounds of fixes):
 
-  1. % cặp match GIỮ NGUYÊN giữa 2 epoch — vòng luẩn quẩn score<->toạ độ đã phá
-     được chưa. Vòng 1 chỉ ~55 %, tức hơn nửa nhãn đổi mỗi epoch nên score head
-     không bao giờ học được.
-  2. std của sigmoid(score) — < 0,05 nghĩa là head kẹt ở hằng số (focal alpha=0,25
-     với head không phân biệt hội tụ về một giá trị cố định).
-  3. IoU trung bình của cặp matched — tách khỏi loss nên dễ đọc.
+  1. % of matched pairs PRESERVED between epochs — tells you whether the
+     score<->coordinate feedback loop has been broken. Round 1 sat at ~55 %, i.e.
+     more than half the labels changed every epoch, so the score head could never
+     learn anything.
+  2. std of sigmoid(score) — < 0.05 means the head is stuck at a constant (focal
+     with alpha=0.25 and a non-discriminating head converges to a fixed value).
+  3. mean IoU of matched pairs — separate from the loss, so it is easy to read.
 
-Chạy nền, ghi log ra file (trên server: /mnt/disk1/aiotlab/haitn/log/):
+Run in the background, logging to a file (on the server:
+/mnt/disk1/aiotlab/haitn/log/):
   nohup python3 train.py --config config/experiment_a.yaml > <log> 2>&1 & echo $!
 """
 
@@ -35,10 +38,11 @@ from models.criterion import SetCriterion  # noqa: E402
 
 
 class TorchWrap(Dataset):
-    """Bọc CE130Detection (numpy) thành torch Dataset.
+    """Wraps CE130Detection (numpy) as a torch Dataset.
 
-    Có `cache` thì trả patch/text token đã tính sẵn và BỎ HẲN ảnh — đo trên A30:
-    CLIP chiếm 76,8 % thời gian mỗi batch, cache cho ~4,3x tốc độ.
+    With a `cache`, it returns precomputed patch/text tokens and DROPS the image
+    entirely — measured on an A30: CLIP takes 76.8 % of per-batch time, so the
+    cache gives ~4.3x speedup.
     """
 
     def __init__(self, ds, cache=None):
@@ -50,24 +54,24 @@ class TorchWrap(Dataset):
 
     def __getitem__(self, i):
         m = self.ds[i]
-        ra = {
+        out = {
             "boxes": torch.from_numpy(m["boxes"]).float(),
             "text": m["text"],
             "valid_h": m["valid_h"],
             "image_id": m["image_id"],
         }
         if self.cache is None:
-            ra["pixel_values"] = torch.from_numpy(normalize_for_clip(m["image"]))
+            out["pixel_values"] = torch.from_numpy(normalize_for_clip(m["image"]))
         else:
-            patch, text = self.cache.lay(m["image_id"], m["text"], m["flipped"])
-            ra["patch_raw"] = torch.from_numpy(patch)
-            ra["text_raw"] = torch.from_numpy(text)
-        return ra
+            patch, text = self.cache.get(m["image_id"], m["text"], m["flipped"])
+            out["patch_raw"] = torch.from_numpy(patch)
+            out["text_raw"] = torch.from_numpy(text)
+        return out
 
 
 def collate(batch):
-    """Số box khác nhau mỗi ảnh -> giữ dạng list, không pad ở đây."""
-    ra = {
+    """Box count varies per image -> keep them as a list, do not pad here."""
+    out = {
         "boxes": [b["boxes"] for b in batch],
         "text": [b["text"] for b in batch],
         "valid_h": [b["valid_h"] for b in batch],
@@ -75,19 +79,19 @@ def collate(batch):
     }
     for k in ("pixel_values", "patch_raw", "text_raw"):
         if k in batch[0]:
-            ra[k] = torch.stack([b[k] for b in batch])
-    return ra
+            out[k] = torch.stack([b[k] for b in batch])
+    return out
 
 
-def dinh_dang_tg(giay):
-    """3661 -> '1h01m01s'. Dùng cho cả thời gian đã chạy lẫn ETA."""
-    giay = int(max(giay, 0))
-    h, m, s = giay // 3600, (giay % 3600) // 60, giay % 60
+def fmt_time(seconds):
+    """3661 -> '1h01m01s'. Used for both elapsed time and ETA."""
+    seconds = int(max(seconds, 0))
+    h, m, s = seconds // 3600, (seconds % 3600) // 60, seconds % 60
     return f"{h}h{m:02d}m{s:02d}s" if h else (f"{m}m{s:02d}s" if m else f"{s}s")
 
 
-def thong_ke_mang(x):
-    """Phân bố đầy đủ của một mảng — để đọc lại được khi có vấn đề."""
+def array_stats(x):
+    """Full distribution of an array — so it can be re-read when something breaks."""
     if x is None or len(x) == 0:
         return {}
     x = np.asarray(x, dtype=np.float64)
@@ -98,52 +102,53 @@ def thong_ke_mang(x):
             "p75": float(q[3]), "p99": float(q[4])}
 
 
-def do_on_dinh_nhan(truoc, sau):
-    """% cặp (image_id, pred_idx) -> gt_idx giữ nguyên giữa 2 epoch."""
-    if not truoc:
+def label_stability(before, after):
+    """% of (image_id, pred_idx) -> gt_idx pairs preserved between two epochs."""
+    if not before:
         return float("nan")
-    chung = set(truoc) & set(sau)
-    if not chung:
+    shared = set(before) & set(after)
+    if not shared:
         return 0.0
-    return sum(truoc[k] == sau[k] for k in chung) / len(chung)
+    return sum(before[k] == after[k] for k in shared) / len(shared)
 
 
-def ghi_json(save_dir, moi_truong, cfg, lich_su, best, ds_train, ds_val):
-    """Ghi TOÀN BỘ số liệu ra history.json sau MỖI epoch.
+def write_json(save_dir, env, cfg, history, best, ds_train, ds_val):
+    """Write EVERY metric to history.json after EACH epoch.
 
-    Ghi mỗi epoch (không đợi train xong) để nếu job chết giữa chừng vẫn đọc được.
-    Chứa đủ thứ để chẩn đoán mà không cần chạy lại: môi trường, config đầy đủ,
-    thống kê dataset, và mọi chỉ số per-epoch kèm phân bố (mean/std/min/max/
-    percentile) chứ không chỉ giá trị trung bình.
+    Written every epoch (not just at the end) so a job that dies mid-run is still
+    readable. It holds enough to diagnose without re-running: environment, the
+    full config, dataset statistics, and every per-epoch metric with its
+    distribution (mean/std/min/max/percentiles), not just the mean.
     """
-    # Tính best TỪ lich_su, không dùng biến `best` truyền vào — hàm này được gọi
-    # TRƯỚC khi vòng train cập nhật `best`, nên dùng nó sẽ lệch một epoch.
-    tot = min(lich_su, key=lambda e: e["val"]["loss"]) if lich_su else None
-    tom_tat = {
-        "so_epoch_da_chay": len(lich_su),
-        "best_val_loss": tot["val"]["loss"] if tot else None,
-        "best_epoch": tot["epoch"] if tot else None,
-        "tong_thoi_gian": dinh_dang_tg(lich_su[-1]["da_chay_giay"]) if lich_su else "0s",
-        "epoch_co_canh_bao": [e["epoch"] for e in lich_su if e["canh_bao"]],
+    # Compute best FROM history, not from the `best` argument — this function is
+    # called BEFORE the training loop updates `best`, so using it would be off by
+    # one epoch.
+    top = min(history, key=lambda e: e["val"]["loss"]) if history else None
+    summary = {
+        "epochs_completed": len(history),
+        "best_val_loss": top["val"]["loss"] if top else None,
+        "best_epoch": top["epoch"] if top else None,
+        "total_time": fmt_time(history[-1]["elapsed_sec"]) if history else "0s",
+        "epochs_with_warnings": [e["epoch"] for e in history if e["warnings"]],
     }
-    if len(lich_su) >= 2:
-        v = [e["val"]["loss"] for e in lich_su]
-        tom_tat["val_loss_dau_cuoi"] = [v[0], v[-1]]
-        tom_tat["val_tang_lien_tiep"] = sum(
+    if len(history) >= 2:
+        v = [e["val"]["loss"] for e in history]
+        summary["val_loss_first_last"] = [v[0], v[-1]]
+        summary["val_rising_streak"] = sum(
             1 for i in range(len(v) - 1, 0, -1) if v[i] > v[i - 1]) if v[-1] > v[-2] else 0
 
     with open(os.path.join(save_dir, "history.json"), "w") as f:
         json.dump({
-            "tom_tat": tom_tat,
-            "moi_truong": moi_truong,
+            "summary": summary,
+            "environment": env,
             "config": cfg,
-            "dataset": {"train": ds_train.thong_ke(), "val": ds_val.thong_ke()},
-            "epochs": lich_su,
+            "dataset": {"train": ds_train.stats(), "val": ds_val.stats()},
+            "epochs": history,
         }, f, indent=2, ensure_ascii=False)
 
 
-def dau_vao_model(batch, dev):
-    """Trả kwargs cho model: ảnh thô, hoặc token đã cache."""
+def model_inputs(batch, dev):
+    """Return model kwargs: raw images, or cached tokens."""
     if "patch_raw" in batch:
         return {"patch_raw": batch["patch_raw"].to(dev),
                 "text_raw": batch["text_raw"].to(dev)}
@@ -151,29 +156,32 @@ def dau_vao_model(batch, dev):
 
 
 @torch.no_grad()
-def chay_val(model, loader, crit, N, dev):
-    """Val loss — với 1.911 ảnh và class 3 split RỜI NHAU, không có val thì không
-    biết khi nào bắt đầu overfit. Dùng seed cố định cho `t` để so được giữa các
-    epoch (nếu t ngẫu nhiên thì val loss nhiễu, không đọc được xu hướng)."""
+def run_val(model, loader, crit, N, dev):
+    """Validation loss — with 1,911 images and 3 splits whose classes are DISJOINT,
+    without val you cannot tell when overfitting starts. A fixed seed for `t` makes
+    epochs comparable (a random t makes val loss noisy and the trend unreadable)."""
     model.eval()
-    khoa = ["loss", "loss_l1", "loss_giou", "loss_ce", "iou_matched", "n_matched"]
-    tong, nb, diem = {k: 0.0 for k in khoa}, 0, []
+    keys = ["loss", "loss_l1", "loss_giou", "loss_ce", "iou_matched", "n_matched"]
+    total, nb, scores = {k: 0.0 for k in keys}, 0, []
     t0 = time.time()
-    g = torch.Generator().manual_seed(1234)
+    # The generator MUST be on the same device as the tensors it creates
+    # (torch.randn(device='cuda', generator=<cpu gen>) -> RuntimeError). GT is
+    # already on `dev`, so placeholders are created on `dev` too.
+    g = torch.Generator(device=dev).manual_seed(1234)
     for batch in loader:
         tg = [b.to(dev) for b in batch["boxes"]]
         x_t, tt, _ = model.build_inputs(tg, N, batch["valid_h"], generator=g)
-        pb, lg = model(x_t, tt, **dau_vao_model(batch, dev))
+        pb, lg = model(x_t, tt, **model_inputs(batch, dev))
         _, st, _ = crit(pb, lg, tg)
-        for k in khoa:
-            tong[k] += st[k]
-        diem.append(lg.sigmoid().cpu().numpy().ravel())
+        for k in keys:
+            total[k] += st[k]
+        scores.append(lg.sigmoid().cpu().numpy().ravel())
         nb += 1
     model.train()
-    kq = {k: v / max(nb, 1) for k, v in tong.items()}
-    kq["score"] = thong_ke_mang(np.concatenate(diem)) if diem else {}
-    kq["giay"] = time.time() - t0
-    return kq
+    out = {k: v / max(nb, 1) for k, v in total.items()}
+    out["score"] = array_stats(np.concatenate(scores)) if scores else {}
+    out["seconds"] = time.time() - t0
+    return out
 
 
 def main():
@@ -181,13 +189,13 @@ def main():
     ap.add_argument("--config", default="config/experiment_a.yaml")
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--batch-size", type=int, default=None)
-    ap.add_argument("--limit", type=int, default=None, help="cắt nhỏ dataset để thử")
+    ap.add_argument("--limit", type=int, default=None, help="shrink the dataset for a smoke test")
     ap.add_argument("--device", default=None)
     ap.add_argument("--cache", default=None,
-                    help="thư mục cache patch token (tools/build_cache.py). Bật thì "
-                         "bỏ hẳn CLIP forward lúc train — đo được ~4,3x nhanh hơn.")
-    ap.add_argument("--log-moi-n-batch", type=int, default=None,
-                    help="in tiến độ mỗi N batch; mặc định tự chia 5 lần/epoch")
+                    help="patch-token cache dir (tools/build_cache.py). Enabling it "
+                         "removes the CLIP forward from training — measured ~4.3x faster.")
+    ap.add_argument("--log-every-n-batch", type=int, default=None,
+                    help="print progress every N batches; default is 5 times per epoch")
     a = ap.parse_args()
 
     with open(a.config) as f:
@@ -200,11 +208,11 @@ def main():
     dev = torch.device(a.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     torch.manual_seed(cfg["training"]["seed"])
 
-    ten_tn = cfg.get("experiment", "?")
-    moi_truong = {
-        "experiment": ten_tn,
-        "mo_ta": cfg.get("mo_ta", ""),
-        "thoi_diem_bat_dau": datetime.now().isoformat(timespec="seconds"),
+    exp_name = cfg.get("experiment", "?")
+    env = {
+        "experiment": exp_name,
+        "description": cfg.get("description", ""),
+        "started_at": datetime.now().isoformat(timespec="seconds"),
         "device": str(dev),
         "torch": torch.__version__,
         "python": sys.version.split()[0],
@@ -212,17 +220,17 @@ def main():
         "cuda": torch.cuda.is_available(),
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
         "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES"),
-        "lenh": " ".join(sys.argv),
+        "command": " ".join(sys.argv),
         "cwd": os.getcwd(),
     }
     print("=" * 78, flush=True)
-    print(f"  TRAIN — EXPERIMENT {ten_tn}", flush=True)
+    print(f"  TRAIN — EXPERIMENT {exp_name}", flush=True)
     print("-" * 78, flush=True)
-    for k, v in moi_truong.items():
+    for k, v in env.items():
         print(f"  {k:22s} {v}", flush=True)
     print("-" * 78, flush=True)
-    for muc in ["data", "model", "diffusion", "loss", "matcher", "training"]:
-        print(f"  {muc:10s} {json.dumps(cfg[muc], ensure_ascii=False)}", flush=True)
+    for section in ["data", "model", "diffusion", "loss", "matcher", "training"]:
+        print(f"  {section:10s} {json.dumps(cfg[section], ensure_ascii=False)}", flush=True)
     print("=" * 78, flush=True)
 
     ds = CE130Detection(cfg["data"]["root"], "train",
@@ -230,27 +238,27 @@ def main():
                         seed=cfg["training"]["seed"])
     if a.limit:
         ds.items = ds.items[: a.limit]
-    print(f"[data] {ds.thong_ke()}", flush=True)
+    print(f"[data] {ds.stats()}", flush=True)
 
     cache_tr = cache_va = None
     if a.cache:
         cache_tr = PatchCache(a.cache, "train")
         cache_va = PatchCache(a.cache, "val")
-        print(f"[cache] dùng {a.cache} — bỏ CLIP forward lúc train "
-              f"({cache_tr.n_ver} bản/ảnh)", flush=True)
+        print(f"[cache] using {a.cache} — CLIP forward skipped during training "
+              f"({cache_tr.n_ver} versions/image)", flush=True)
 
     loader = DataLoader(TorchWrap(ds, cache_tr), batch_size=cfg["training"]["batch_size"],
                         shuffle=True, num_workers=cfg["data"]["num_workers"],
                         collate_fn=collate, drop_last=False)
 
-    # val: KHÔNG flip (không augment lúc đánh giá)
+    # val: NO flipping (no augmentation at evaluation time)
     ds_val = CE130Detection(cfg["data"]["root"], "val", cfg["data"]["image_size"])
     if a.limit:
         ds_val.items = ds_val.items[: max(a.limit // 2, 1)]
     val_loader = DataLoader(TorchWrap(ds_val, cache_va), batch_size=cfg["training"]["batch_size"],
                             shuffle=False, num_workers=cfg["data"]["num_workers"],
                             collate_fn=collate)
-    print(f"[val ] {ds_val.thong_ke()}", flush=True)
+    print(f"[val ] {ds_val.stats()}", flush=True)
 
     model = CELocDetector(
         cfg["model"]["clip_name"], cfg["model"]["d_model"], cfg["model"]["n_layer"],
@@ -260,157 +268,158 @@ def main():
         cfg["model"]["freeze_clip"],
     ).to(dev)
 
-    hoc_duoc = [p for p in model.parameters() if p.requires_grad]
-    print(f"[model] tham số học được: {sum(p.numel() for p in hoc_duoc)/1e6:.2f}M "
-          f"/ tổng {sum(p.numel() for p in model.parameters())/1e6:.1f}M", flush=True)
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    print(f"[model] trainable parameters: {sum(p.numel() for p in trainable)/1e6:.2f}M "
+          f"/ total {sum(p.numel() for p in model.parameters())/1e6:.1f}M", flush=True)
 
     crit = SetCriterion(cfg["matcher"]["method"],
                         **({"use_center_prior": cfg["matcher"]["use_center_prior"],
                             "radius_ratio": cfg["matcher"]["center_radius"]}
                            if cfg["matcher"]["method"] == "simota" else {}))
-    opt = torch.optim.AdamW(hoc_duoc, lr=float(cfg["training"]["lr"]),
+    opt = torch.optim.AdamW(trainable, lr=float(cfg["training"]["lr"]),
                             weight_decay=float(cfg["training"]["weight_decay"]))
 
     save_dir = cfg["training"]["save_dir"]
     os.makedirs(save_dir, exist_ok=True)
     N = cfg["diffusion"]["num_proposals_train"]
-    if a.log_moi_n_batch is None:
-        a.log_moi_n_batch = max(len(loader) // 5, 1) if len(loader) >= 10 else 0
-    best, lich_su, nhan_truoc = float("inf"), [], {}
-    t_bat_dau = time.time()
+    if a.log_every_n_batch is None:
+        a.log_every_n_batch = max(len(loader) // 5, 1) if len(loader) >= 10 else 0
+    best, history, prev_labels = float("inf"), [], {}
+    t_start = time.time()
 
     for ep in range(cfg["training"]["epochs"]):
         model.train()
         t0 = time.time()
-        tong = {"loss": 0.0, "loss_l1": 0.0, "loss_giou": 0.0, "loss_ce": 0.0,
-                "iou_matched": 0.0, "n_matched": 0}
-        nhan_nay, diem, nb = {}, [], 0
-        grad_norms, so_gt, t_batch = [], [], []
+        total = {"loss": 0.0, "loss_l1": 0.0, "loss_giou": 0.0, "loss_ce": 0.0,
+                 "iou_matched": 0.0, "n_matched": 0}
+        labels_now, scores, nb = {}, [], 0
+        grad_norms, n_gt, t_batch = [], [], []
 
         for batch in loader:
             t_b = time.time()
             tg = [b.to(dev) for b in batch["boxes"]]
 
             x_t, tt, _ = model.build_inputs(tg, N, batch["valid_h"])
-            pb, lg = model(x_t, tt, **dau_vao_model(batch, dev))
+            pb, lg = model(x_t, tt, **model_inputs(batch, dev))
             loss, st, idx = crit(pb, lg, tg)
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
-            gn = torch.nn.utils.clip_grad_norm_(hoc_duoc, 1.0)
+            gn = torch.nn.utils.clip_grad_norm_(trainable, 1.0)
             opt.step()
 
-            for k in tong:
-                tong[k] += st[k]
+            for k in total:
+                total[k] += st[k]
             nb += 1
             grad_norms.append(float(gn))
-            so_gt += [len(b) for b in batch["boxes"]]
+            n_gt += [len(b) for b in batch["boxes"]]
             t_batch.append(time.time() - t_b)
-            diem.append(lg.detach().sigmoid().cpu().numpy().ravel())
+            scores.append(lg.detach().sigmoid().cpu().numpy().ravel())
 
-            # Tiến độ trong epoch — với 1.911 ảnh mỗi epoch mất nhiều phút, không
-            # nên im lặng suốt. In 5 lần/epoch (không dùng tqdm để log đọc được
-            # trong file).
-            if a.log_moi_n_batch and nb % a.log_moi_n_batch == 0:
-                da = time.time() - t0
+            # In-epoch progress — with 1,911 images an epoch takes several minutes,
+            # so it should not stay silent. Print 5 times per epoch (no tqdm, so the
+            # log stays readable in a file).
+            if a.log_every_n_batch and nb % a.log_every_n_batch == 0:
+                el = time.time() - t0
                 print(f"      ... batch {nb}/{len(loader)} | loss {st['loss']:.4f} | "
-                      f"{1000*da/nb:.0f}ms/batch | {dinh_dang_tg(da)} | "
-                      f"còn {dinh_dang_tg(da/nb*(len(loader)-nb))}", flush=True)
-            for i, (pi, gi) in enumerate(idx):                 # chỉ số 1
+                      f"{1000*el/nb:.0f}ms/batch | {fmt_time(el)} | "
+                      f"left {fmt_time(el/nb*(len(loader)-nb))}", flush=True)
+            for i, (pi, gi) in enumerate(idx):                 # metric 1
                 iid = batch["image_id"][i]
                 for p, g in zip(pi.tolist(), gi.tolist()):
-                    nhan_nay[(iid, p)] = g
+                    labels_now[(iid, p)] = g
 
-        tb = {k: v / max(nb, 1) for k, v in tong.items()}
-        on_dinh = do_on_dinh_nhan(nhan_truoc, nhan_nay)
-        nhan_truoc = nhan_nay
-        tk_score = thong_ke_mang(np.concatenate(diem)) if diem else {}
-        std_score = tk_score.get("std", 0.0)
-        giay_train = time.time() - t0
+        tr = {k: v / max(nb, 1) for k, v in total.items()}
+        stability = label_stability(prev_labels, labels_now)
+        prev_labels = labels_now
+        score_stats = array_stats(np.concatenate(scores)) if scores else {}
+        std_score = score_stats.get("std", 0.0)
+        train_sec = time.time() - t0
 
-        val = chay_val(model, val_loader, crit, N, dev)
-        giay_ep = time.time() - t0
-        da_chay = time.time() - t_bat_dau
-        con_lai = cfg["training"]["epochs"] - (ep + 1)
-        eta = (da_chay / (ep + 1)) * con_lai
+        val = run_val(model, val_loader, crit, N, dev)
+        epoch_sec = time.time() - t0
+        elapsed = time.time() - t_start
+        remaining = cfg["training"]["epochs"] - (ep + 1)
+        eta = (elapsed / (ep + 1)) * remaining
 
-        # --- LOG: 3 dòng cố định mỗi epoch, in đủ thứ đọc được ---
+        # --- LOG: 3 fixed lines per epoch, printing everything readable ---
         print(f"[ep {ep+1:4d}/{cfg['training']['epochs']}] "
-              f"train {tb['loss']:8.4f} (l1 {tb['loss_l1']:.4f} giou {tb['loss_giou']:.4f} "
-              f"ce {tb['loss_ce']:.4f})   val {val['loss']:8.4f} "
+              f"train {tr['loss']:8.4f} (l1 {tr['loss_l1']:.4f} giou {tr['loss_giou']:.4f} "
+              f"ce {tr['loss_ce']:.4f})   val {val['loss']:8.4f} "
               f"(l1 {val['loss_l1']:.4f} giou {val['loss_giou']:.4f} ce {val['loss_ce']:.4f})",
               flush=True)
-        print(f"           IoU train {tb['iou_matched']:.4f} / val {val['iou_matched']:.4f} | "
-              f"matched {tb['n_matched']:.1f}/{N} ({100*tb['n_matched']/N:.0f}%) | "
-              f"GT/ảnh {np.mean(so_gt):.1f} | ổn_định_nhãn {on_dinh:.3f} | "
+        print(f"           IoU train {tr['iou_matched']:.4f} / val {val['iou_matched']:.4f} | "
+              f"matched {tr['n_matched']:.1f}/{N} ({100*tr['n_matched']/N:.0f}%) | "
+              f"GT/img {np.mean(n_gt):.1f} | label_stability {stability:.3f} | "
               f"lr {opt.param_groups[0]['lr']:.2e} | grad {np.mean(grad_norms):.3f}",
               flush=True)
-        print(f"           score μ {tk_score.get('mean', 0):.4f} σ {std_score:.4f} "
-              f"[{tk_score.get('min', 0):.3f}, {tk_score.get('max', 0):.3f}] "
-              f"p50 {tk_score.get('p50', 0):.4f} | "
-              f"{dinh_dang_tg(giay_train)}+{dinh_dang_tg(val['giay'])} "
+        print(f"           score mu {score_stats.get('mean', 0):.4f} sd {std_score:.4f} "
+              f"[{score_stats.get('min', 0):.3f}, {score_stats.get('max', 0):.3f}] "
+              f"p50 {score_stats.get('p50', 0):.4f} | "
+              f"{fmt_time(train_sec)}+{fmt_time(val['seconds'])} "
               f"({1000*np.mean(t_batch):.0f}ms/batch) | "
-              f"đã chạy {dinh_dang_tg(da_chay)} | ETA {dinh_dang_tg(eta)}", flush=True)
+              f"elapsed {fmt_time(elapsed)} | ETA {fmt_time(eta)}", flush=True)
 
-        canh_bao = []
+        warnings = []
         if std_score < 0.05:
-            canh_bao.append("std_score < 0,05 — score head có thể kẹt ở hằng số")
-        if not np.isnan(on_dinh) and on_dinh < 0.4:
-            canh_bao.append(f"ổn_định_nhãn {on_dinh:.2f} < 0,40 — nhãn đổi quá nhiều mỗi epoch")
+            warnings.append("std_score < 0.05 — the score head may be stuck at a constant")
+        if not np.isnan(stability) and stability < 0.4:
+            warnings.append(f"label_stability {stability:.2f} < 0.40 — labels change too much per epoch")
         if np.mean(grad_norms) > 100:
-            canh_bao.append(f"grad norm {np.mean(grad_norms):.1f} rất lớn")
-        for c in canh_bao:
-            print(f"           ⚠ {c}", flush=True)
+            warnings.append(f"grad norm {np.mean(grad_norms):.1f} is very large")
+        for w in warnings:
+            print(f"           [!] {w}", flush=True)
 
-        lich_su.append({
+        history.append({
             "epoch": ep + 1,
-            "train": {**tb, "score": tk_score,
-                      "grad_norm": thong_ke_mang(grad_norms),
-                      "gt_moi_anh": thong_ke_mang(so_gt),
-                      "ms_moi_batch": thong_ke_mang([1000 * x for x in t_batch]),
-                      "so_batch": nb, "giay": giay_train},
+            "train": {**tr, "score": score_stats,
+                      "grad_norm": array_stats(grad_norms),
+                      "gt_per_image": array_stats(n_gt),
+                      "ms_per_batch": array_stats([1000 * x for x in t_batch]),
+                      "n_batches": nb, "seconds": train_sec},
             "val": val,
-            "on_dinh_nhan": on_dinh,
+            "label_stability": stability,
             "lr": opt.param_groups[0]["lr"],
-            "giay_epoch": giay_ep,
-            "da_chay_giay": da_chay,
-            "eta_giay": eta,
-            "canh_bao": canh_bao,
-            "thoi_diem": datetime.now().isoformat(timespec="seconds"),
+            "epoch_sec": epoch_sec,
+            "elapsed_sec": elapsed,
+            "eta_sec": eta,
+            "warnings": warnings,
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
         })
-        ghi_json(save_dir, moi_truong, cfg, lich_su, best, ds, ds_val)
+        write_json(save_dir, env, cfg, history, best, ds, ds_val)
 
-        # chọn best theo VAL loss, không phải train loss
+        # pick best by VAL loss, not train loss
         if val["loss"] < best:
             best = val["loss"]
-            # CHỈ lưu tham số HỌC ĐƯỢC (~8,3M). Lưu cả CLIP frozen thì checkpoint
-            # nặng 698 MB trong khi 98 % là trọng số tải lại được từ HuggingFace,
-            # và còn buộc phải khớp đúng phiên bản CLIP lúc load.
-            hoc_sd = {k: v for k, v in model.state_dict().items()
-                      if not (k.startswith("encoder.vision.") or k.startswith("encoder.text."))}
-            torch.save({"epoch": ep, "model": hoc_sd, "optimizer": opt.state_dict(),
-                        "loss": best, "cfg": cfg, "chi_tham_so_hoc_duoc": True},
+            # Save ONLY the TRAINABLE parameters (~8.3M). Saving frozen CLIP too
+            # made the checkpoint 698 MB, of which 98 % is weights re-downloadable
+            # from HuggingFace, and it would force an exact CLIP version match at
+            # load time.
+            trainable_sd = {k: v for k, v in model.state_dict().items()
+                            if not (k.startswith("encoder.vision.") or k.startswith("encoder.text."))}
+            torch.save({"epoch": ep, "model": trainable_sd, "optimizer": opt.state_dict(),
+                        "loss": best, "cfg": cfg, "trainable_only": True},
                        os.path.join(save_dir, "best.pth"))
-            print(f"  -> lưu best (val_loss {best:.4f})", flush=True)
+            print(f"  -> saved best (val_loss {best:.4f})", flush=True)
 
-    tong_tg = time.time() - t_bat_dau
+    total_time = time.time() - t_start
     print("=" * 78, flush=True)
-    print(f"XONG — EXPERIMENT {ten_tn} — {dinh_dang_tg(tong_tg)} ({len(lich_su)} epoch, "
-          f"{dinh_dang_tg(tong_tg/max(len(lich_su),1))}/epoch)", flush=True)
-    if lich_su:
-        tot = min(lich_su, key=lambda e: e["val"]["loss"])
-        print(f"  best: epoch {tot['epoch']} | val_loss {tot['val']['loss']:.4f} | "
-              f"val_IoU {tot['val']['iou_matched']:.4f}", flush=True)
-        print(f"  val_loss: {lich_su[0]['val']['loss']:.4f} -> "
-              f"{lich_su[-1]['val']['loss']:.4f}", flush=True)
-        if tot["epoch"] == len(lich_su):
-            print("  ⚠ best rơi vào epoch CUỐI — chưa bão hoà, nên train dài hơn "
-                  "(vòng 1 gặp đúng thế 4 lần liên tiếp)", flush=True)
-        canh = [e["epoch"] for e in lich_su if e["canh_bao"]]
-        if canh:
-            print(f"  ⚠ {len(canh)}/{len(lich_su)} epoch có cảnh báo: "
-                  f"{canh[:10]}{'...' if len(canh) > 10 else ''}", flush=True)
-    print(f"  số liệu đầy đủ: {os.path.join(save_dir, 'history.json')}", flush=True)
+    print(f"DONE — EXPERIMENT {exp_name} — {fmt_time(total_time)} ({len(history)} epochs, "
+          f"{fmt_time(total_time/max(len(history),1))}/epoch)", flush=True)
+    if history:
+        top = min(history, key=lambda e: e["val"]["loss"])
+        print(f"  best: epoch {top['epoch']} | val_loss {top['val']['loss']:.4f} | "
+              f"val_IoU {top['val']['iou_matched']:.4f}", flush=True)
+        print(f"  val_loss: {history[0]['val']['loss']:.4f} -> "
+              f"{history[-1]['val']['loss']:.4f}", flush=True)
+        if top["epoch"] == len(history):
+            print("  [!] best landed on the LAST epoch — not saturated yet, train longer "
+                  "(round 1 hit this 4 times in a row)", flush=True)
+        warned = [e["epoch"] for e in history if e["warnings"]]
+        if warned:
+            print(f"  [!] {len(warned)}/{len(history)} epochs had warnings: "
+                  f"{warned[:10]}{'...' if len(warned) > 10 else ''}", flush=True)
+    print(f"  full metrics: {os.path.join(save_dir, 'history.json')}", flush=True)
     print("=" * 78, flush=True)
 
 
