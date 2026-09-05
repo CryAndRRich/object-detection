@@ -53,7 +53,8 @@ class TorchWrap(Dataset):
         return len(self.ds)
 
     def __getitem__(self, i):
-        m = self.ds[i]
+        # With a cache the image is never used, so do not decode it (16.9 ms/image).
+        m = self.ds.__getitem__(i, need_image=self.cache is None)
         out = {
             "boxes": torch.from_numpy(m["boxes"]).float(),
             "text": m["text"],

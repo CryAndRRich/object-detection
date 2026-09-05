@@ -81,7 +81,7 @@ class SinusoidalTimeEmbedding(nn.Module):
 
 class BoxTransformer(nn.Module):
     def __init__(self, d_model=256, n_layer=6, n_head=8, coord_dim=64,
-                 dim_feedforward=None, dropout=0.1):
+                 dim_feedforward=None, dropout=0.1, max_cond_len=1152):
         super().__init__()
         self.d_model = d_model
 
@@ -92,8 +92,12 @@ class BoxTransformer(nn.Module):
             nn.Linear(d_model, d_model * 4), nn.Mish(), nn.Linear(d_model * 4, d_model)
         )
 
-        # memory IS ordered -> keep pos_emb for it (unlike box tokens)
-        self.cond_pos_emb = nn.Parameter(torch.zeros(1, 4096, d_model))
+        # memory IS ordered -> keep pos_emb for it (unlike box tokens).
+        # Sized for the actual memory length (1 time token + patches), not a round
+        # 4096: at 512px that is 1026, so a 4096 buffer left 75 % of the parameters
+        # unused yet still owned by AdamW (3 state buffers) and still updated every
+        # step. `max_cond_len` stays generous enough for a larger image size.
+        self.cond_pos_emb = nn.Parameter(torch.zeros(1, max_cond_len, d_model))
         nn.init.trunc_normal_(self.cond_pos_emb, std=0.02)
 
         layer = nn.TransformerDecoderLayer(
@@ -119,6 +123,10 @@ class BoxTransformer(nn.Module):
 
         t_tok = self.time_mlp(self.time_emb(timesteps)).unsqueeze(1)  # [B,1,D]
         mem = torch.cat([t_tok, memory], dim=1)                       # CHANGE (c): dynamic
+        if mem.shape[1] > self.cond_pos_emb.shape[1]:
+            raise ValueError(
+                f"memory has {mem.shape[1]} tokens but cond_pos_emb holds only "
+                f"{self.cond_pos_emb.shape[1]}; raise max_cond_len")
         mem = mem + self.cond_pos_emb[:, : mem.shape[1]]
 
         # CHANGE (b): NO masks at all

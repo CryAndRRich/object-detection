@@ -39,8 +39,13 @@ __all__ = ["CELocDetector"]
 def _check_generator(generator, dev):
     """`torch.randn(device=X, generator=g)` requires g.device == X, otherwise it
     raises a cryptic RuntimeError ("Expected a 'cuda' device type for generator
-    but found 'cpu'"). This bit us once in the val loop -- fail early with a
-    message that names the fix."""
+    but found 'cpu'").
+
+    This bit us TWICE in the val loop. The second time is the instructive one: the
+    guard passed and the very next line still raised, because `randint` had no
+    `device=` and so wanted a CPU generator while everything downstream wanted a
+    CUDA one. A guard only covers calls that actually use the device it checks --
+    so every RNG call under it must pass `device=dev` explicitly."""
     if generator is None:
         return
     gd, dd = torch.device(generator.device).type, torch.device(dev).type
@@ -68,8 +73,14 @@ class CELocDetector(nn.Module):
     def build_inputs(self, targets, num_proposals, valid_h, generator=None):
         """Build x_t for the whole batch. `t` is ONE value per image (as in DiffusionDet)."""
         dev = self.alphas_cumprod.device
-        _check_generator(generator, targets[0].device if targets else "cpu")
-        t = int(torch.randint(0, self.num_timesteps, (1,), generator=generator).item())
+        _check_generator(generator, dev)
+        # `device=dev` is REQUIRED, not cosmetic: without it randint creates a CPU
+        # tensor and demands a CPU generator, while prepare_diffusion_concat below
+        # creates CUDA tensors and demands a CUDA one. A single generator cannot
+        # satisfy both, so one of the two always raises. Pinning both to `dev`
+        # leaves exactly one device requirement.
+        t = int(torch.randint(0, self.num_timesteps, (1,), device=dev,
+                              generator=generator).item())
 
         xs, gts = [], []
         for i, gt in enumerate(targets):

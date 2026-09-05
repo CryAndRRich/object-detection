@@ -119,16 +119,29 @@ class CE130Detection:
     def __len__(self):
         return len(self.items)
 
-    def __getitem__(self, idx):
-        it = self.items[idx]
-        img = Image.open(it["img_path"]).convert("RGB")
-        W, H = img.size
+    def __getitem__(self, idx, need_image=True):
+        """`need_image=False` skips the JPEG decode + resize entirely.
 
-        canvas, valid_h = resize_and_pad(img, self.target)
+        Measured 16.9 ms/image (135 ms per batch of 8) purely to build a canvas the
+        caller throws away when patch tokens come from the cache. The box geometry
+        still needs (W,H), but PIL reads those from the header without decoding
+        pixels, which is ~1000x cheaper.
+        """
+        it = self.items[idx]
+        img = Image.open(it["img_path"])
+        W, H = img.size                       # header only, no decode yet
+
+        if need_image:
+            canvas, valid_h = resize_and_pad(img.convert("RGB"), self.target)
+        else:
+            canvas = None
+            s = min(self.target / W, self.target / H)
+            valid_h = int(H * s) / float(self.target)
         boxes, _, _ = scale_to_canvas(it["boxes_xyxy_px"], W, H, self.target)
 
         if self.flip_prob > 0 and self.rng.random() < self.flip_prob:
-            canvas = canvas[:, ::-1].copy()
+            if canvas is not None:
+                canvas = canvas[:, ::-1].copy()
             boxes = flip_horizontal(boxes)
             did_flip = True
         else:
