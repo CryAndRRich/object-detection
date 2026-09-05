@@ -1,76 +1,82 @@
-"""Cache the resize+pad result of every sample into one flat uint8 memmap.
+#!/usr/bin/env python3
+"""Cache patch token CLIP ra memmap fp16.
 
-Profiling on the server showed the training loop is 92.6% DataLoader (28.3 of
-30.6 min/epoch), and a local split showed PNG decode is 83% of that per-sample
-cost. Decoding the same 20k PNGs identically on every one of 200 epochs is pure
-waste: resize+pad is deterministic, so it can be done once.
+CHỈ CHẠY SAU KHI `profile_and_memory.py` cho thấy CLIP > 30 % thời gian.
 
-Layout (per split): cache_{size}.u8    -- N * (3+1) * S * S bytes, C-order
-                    cache_{size}.json  -- file order + per-sample scale + meta
-Read back with np.memmap; a batch is then a memcpy, no decode, no PIL.
+Cache 2 BẢN (gốc + lật ngang) vì KHÔNG flip được trên token đã cache: ViT trộn
+thông tin toàn cục qua 12 layer nên token (i,j) không còn là "feature của riêng ô
+(i,j)". Dung lượng: 1.911 x 2 x 1024 x 768 fp16 ~ 6,0 GB.
 
-Run once per split, then train with `--use_cache`.
+Băng thông: 1,57 MB/ảnh -> 50 MB/batch(32) -> ~3 GB/epoch. Ổn trên SSD; chú ý nếu
+là network FS.
 """
+
 import argparse
 import json
 import os
 import sys
-import time
 
 import numpy as np
-from PIL import Image
+import torch
+import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from data.dataset import ObjectPlacementDataset
+from data.ce130_dataset import CE130Detection, normalize_for_clip  # noqa: E402
+from models.clip_encoder import CLIPConditionEncoder  # noqa: E402
 
 
-def build(root, size, out_dir=None):
-    out_dir = out_dir or root
-    os.makedirs(out_dir, exist_ok=True)
-    ds = ObjectPlacementDataset(root, target_size=(size, size))
-    n = len(ds.files)
-    bin_path = os.path.join(out_dir, f"cache_{size}.u8")
-    meta_path = os.path.join(out_dir, f"cache_{size}.json")
+@torch.no_grad()
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", default="config/experiment_a.yaml")
+    ap.add_argument("--split", default="train")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--batch-size", type=int, default=8)
+    ap.add_argument("--no-flip", action="store_true", help="chỉ cache ảnh gốc")
+    ap.add_argument("--device", default=None)
+    a = ap.parse_args()
 
-    per = 4 * size * size
-    print(f"{root}: {n} mẫu -> {bin_path} ({n * per / 1e9:.1f} GB)", flush=True)
+    with open(a.config) as f:
+        cfg = yaml.safe_load(f)
+    dev = torch.device(a.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    os.makedirs(a.out, exist_ok=True)
 
-    mm = np.memmap(bin_path, dtype=np.uint8, mode="w+", shape=(n, 4, size, size))
-    scales, sizes = [], []
-    t0 = time.monotonic()
+    ds = CE130Detection(cfg["data"]["root"], a.split, cfg["data"]["image_size"])
+    enc = CLIPConditionEncoder(cfg["model"]["clip_name"], cfg["model"]["d_model"],
+                               cfg["data"]["image_size"], freeze=True).to(dev).eval()
 
-    for i, fname in enumerate(ds.files):
-        img = Image.open(os.path.join(ds.image_dir, fname)).convert("RGB")
-        dname = os.path.splitext(fname)[0] + ".png"
-        den = Image.open(os.path.join(ds.density_dir, dname)).convert("L")
-        orig_size = img.size
-        pimg, pden, scale = ds.resize_and_pad(img, den)
+    n_img = len(ds)
+    n_ver = 1 if a.no_flip else 2
+    n_tok = enc.num_patches
+    d = enc.vision.config.hidden_size
+    path = os.path.join(a.out, f"{a.split}_patch.f16")
+    print(f"[cache] {n_img} ảnh x {n_ver} bản x {n_tok} token x {d} "
+          f"= {n_img*n_ver*n_tok*d*2/1e9:.2f} GB -> {path}", flush=True)
 
-        mm[i, :3] = np.asarray(pimg, dtype=np.uint8).transpose(2, 0, 1)
-        mm[i, 3] = np.asarray(pden, dtype=np.uint8)
-        scales.append(float(scale))
-        sizes.append([int(orig_size[0]), int(orig_size[1])])
+    mm = np.memmap(path, dtype=np.float16, mode="w+", shape=(n_img, n_ver, n_tok, d))
+    ids = []
 
-        if (i + 1) % 2000 == 0 or i + 1 == n:
-            el = time.monotonic() - t0
-            eta = el / (i + 1) * (n - i - 1)
-            print(f"  {i+1}/{n}  elapsed {el/60:.1f}m  ETA {eta/60:.1f}m", flush=True)
+    for i0 in range(0, n_img, a.batch_size):
+        idx = range(i0, min(i0 + a.batch_size, n_img))
+        mau = [ds[i] for i in idx]
+        ids += [m["image_id"] for m in mau]
+
+        for v in range(n_ver):
+            imgs = [m["image"][:, ::-1].copy() if v == 1 else m["image"] for m in mau]
+            px = torch.stack([torch.from_numpy(normalize_for_clip(x)) for x in imgs]).to(dev)
+            mm[list(idx), v] = enc.encode_image_raw(px).cpu().numpy().astype(np.float16)
+
+        if i0 % (a.batch_size * 20) == 0:
+            print(f"  {i0}/{n_img}", flush=True)
 
     mm.flush()
-    del mm
-    with open(meta_path, "w") as f:
-        json.dump({"files": ds.files, "scales": scales, "sizes": sizes,
-                   "size": size, "n": n}, f)
-    print(f"  xong trong {(time.monotonic()-t0)/60:.1f} phút -> {meta_path}", flush=True)
+    with open(os.path.join(a.out, f"{a.split}_meta.json"), "w") as f:
+        json.dump({"image_ids": ids, "shape": [n_img, n_ver, n_tok, d],
+                   "dtype": "float16", "image_size": cfg["data"]["image_size"],
+                   "clip": cfg["model"]["clip_name"]}, f)
+    print(f"[cache] xong: {path}", flush=True)
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser()
-    p.add_argument("--roots", nargs="+", required=True,
-                   help="các split cần cache, vd ../../data/samples/train ../../data/samples/test")
-    p.add_argument("--size", type=int, default=512)
-    p.add_argument("--out_dir", default=None, help="mặc định: ghi ngay trong thư mục split")
-    a = p.parse_args()
-    for r in a.roots:
-        build(r, a.size, a.out_dir)
+    main()

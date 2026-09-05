@@ -1,141 +1,124 @@
+"""Bản TORCH của `matcher_np.py` — port CƠ HỌC. Chạy dưới `no_grad`.
+
+MẶC ĐỊNH HUNGARIAN. SimOTA đo được thoái hoá về k=1 trên CE-130 (vật chỉ chiếm
+0,41 % diện tích -> IoU sụp rất nhanh, ngay t=100 đã chỉ ~0,15), nên nó thêm code
+phức tạp mà không mang lại gì ở giai đoạn model chưa tốt, lại kém ổn định nhãn
+hơn (55 % cặp giữ nguyên) — mâu thuẫn với chỉ số cảnh báo số 1.
+
+Center prior (chỉ SimOTA): `is_in_boxes` AND `is_in_centers`, cộng +100 vào COST
+(không gán nhãn trực tiếp — vòng 1 sai cả hai chỗ). Mặc định TẮT.
 """
-Hungarian matching between N predicted boxes and M ground-truth boxes, for the
-multi-box variant (c) of CE-Loc (sinh N box cùng lúc, theo cơ chế DiffusionDet).
 
-Cross-checked against `object-detection/diffusiondet/diffusiondet/loss.py`
-(`HungarianMatcherDynamicK`) — NOT ported/imported from there. DiffusionDet's own
-matcher is a SimOTA-style dynamic-K assignment gated on a classification score
-(`pred_logits`) and an anchor-center-region mask (`get_in_boxes_info`), because it
-is matching across many object CATEGORIES at once. CE-Loc's multi-box variant has
-no class head — every box in one image is the same category (the sample's single
-"class" text) — so a plain 1-to-1 Hungarian assignment on box cost alone is the
-right-sized tool, not a simplification that drops something CE-Loc needs.
-
-Cost = cost_bbox * L1(cx,cy,w,h) + cost_giou * (1 - GIoU), same weighting formula
-as DiffusionDet's `loss_boxes` (see loss.py:159-201): L1 on normalized cxcywh +
-GIoU on xyxy. Padding predictions (beyond num_gt) are left unmatched by
-`linear_sum_assignment` itself (it only returns min(N, M) pairs) — the caller
-uses `matched_pred_idx` to know which of the N predictions actually have a target.
-
-COORDINATE SPACE — read before touching the geometry helpers. CE-Loc normalizes
-BOTH centers and sizes with the same affine map (data/dataset.py::_normalize_bbox,
-inherited verbatim from the original repo):
-
-    norm_cx = (cx / target_w) * 2 - 1        norm_w = (w / target_w) * 2 - 1
-
-For the CENTER that is the usual [0,size] -> [-1,1] mapping, but for the SIZE it
-means a box occupying a fraction f of the image has norm_w = 2f - 1, so every box
-smaller than half the image has a NEGATIVE norm_w (measured: 100% of real boxes in
-samples/train). Feeding that straight into a cxcywh->xyxy conversion yields x2 < x1,
-i.e. inverted boxes, and IoU/GIoU then returns nonsense (measured: GIoU of a box
-with itself = 5e5 instead of 1.0). So every geometric helper here first converts
-size back to a true width/height via (norm + 1) / 2 before building corners.
-(The original repo's own `calculate_iou` in test_mul_box.py does NOT do this — it
-treats norm_w as a raw width. That flaw is left untouched there so the reported
-IoU@10/IoU@30 numbers stay comparable with the paper's, but it must not leak into
-the matcher/loss, where inverted boxes would corrupt training rather than a metric.)
-"""
-import numpy as np
 import torch
 from scipy.optimize import linear_sum_assignment
 
+from .box_ops import cxcywh_to_xyxy, box_iou, generalized_box_iou, sanitize_boxes
 
-def _cxcywh_to_xyxy(boxes):
-    """CE-Loc-normalized [-1,1] cxcywh -> xyxy corners in the same [-1,1] frame.
+__all__ = ["build_cost", "hungarian_match", "simota_match", "match"]
 
-    `w`/`h` arrive as (2 * fraction_of_image - 1) — see the COORDINATE SPACE note
-    in the module docstring — so they are mapped back to a true extent with
-    (w + 1) / 2 before halving. Without this the corners come out inverted for
-    any box smaller than half the image, which is essentially all of them.
-    """
-    cx, cy, w, h = boxes.unbind(-1)
-    # clamp(min=0): a predicted norm_w below -1 would mean a negative true
-    # width, which makes x2 < x1 and sends GIoU to garbage (the union area
-    # goes negative). DiffusionDet asserts against degenerate boxes instead
-    # (util/box_ops.py:51-52); clamping is the non-fatal equivalent, since
-    # here the offending boxes come from an untrained network, not from data.
-    # `true_w` ở đây là PHÂN SỐ của chiều rộng ảnh (hệ [0,1]), trong khi `cx`
-    # nằm trong hệ [-1,1] — tức MỘT ĐƠN VỊ của cx chỉ bằng NỬA ảnh, còn một đơn
-    # vị của true_w bằng CẢ ảnh. Trộn hai thang này khi dựng góc làm box hẹp đi
-    # đúng 2 lần so với khoảng cách giữa các tâm.
-    #
-    # LỖI NÀY ĐÃ TỪNG TỒN TẠI (phát hiện 2026-09-04 qua visualize: box GT vẽ ra
-    # không bao nổi vật thể, chỉ rộng bằng nửa). Hệ quả: IoU đúng khi hai box
-    # CÙNG TÂM, nhưng sai — luôn thấp hơn thật — ngay khi tâm lệch nhau, vì độ
-    # lệch tâm bị đo ở thang gấp đôi extent. Đo được: hai box lệch nhau chút ít
-    # cho IoU 0,309 thay vì 0,553 thật.
-    #
-    # Sửa: nhân extent lên 2 để đưa về CÙNG hệ [-1,1] với tâm. Kiểm bằng
-    # round-trip pixel (tests/test_matcher_coords.py).
-    true_w = ((w + 1.0)).clamp(min=0.0)   # (w+1)/2 phân số ảnh, x2 để vào hệ [-1,1]
-    true_h = ((h + 1.0)).clamp(min=0.0)
-    return torch.stack([cx - true_w / 2, cy - true_h / 2,
-                        cx + true_w / 2, cy + true_h / 2], dim=-1)
+COST_L1, COST_GIOU, COST_CLASS = 5.0, 2.0, 2.0
+ALPHA, GAMMA = 0.25, 2.0
 
 
-def box_iou_normalized(boxes1_xyxy, boxes2_xyxy):
-    """Pairwise plain IoU, boxes1: [N,4], boxes2: [M,4] -> [N,M]. Inputs must
-    already be xyxy from `_cxcywh_to_xyxy` (so their extents are true widths,
-    not CE-Loc's (2f-1)-encoded sizes)."""
-    area1 = (boxes1_xyxy[:, 2] - boxes1_xyxy[:, 0]) * (boxes1_xyxy[:, 3] - boxes1_xyxy[:, 1])
-    area2 = (boxes2_xyxy[:, 2] - boxes2_xyxy[:, 0]) * (boxes2_xyxy[:, 3] - boxes2_xyxy[:, 1])
-    lt = torch.max(boxes1_xyxy[:, None, :2], boxes2_xyxy[None, :, :2])
-    rb = torch.min(boxes1_xyxy[:, None, 2:], boxes2_xyxy[None, :, 2:])
-    wh = (rb - lt).clamp(min=0)
-    inter = wh[:, :, 0] * wh[:, :, 1]
-    union = area1[:, None] + area2[None, :] - inter
-    return inter / union.clamp(min=1e-6)
-
-
-def generalized_box_iou(boxes1_xyxy, boxes2_xyxy):
-    """Pairwise GIoU, boxes1: [N,4], boxes2: [M,4] -> [N,M]. Standard formula
-    (Rezatofighi et al., CVPR 2019 Eq. 1). Inputs must come from
-    `_cxcywh_to_xyxy`, which already clamps away negative extents, so the
-    degenerate case DiffusionDet asserts on (util/box_ops.py:51-52) cannot
-    reach the area arithmetic here.
-    """
-    area1 = (boxes1_xyxy[:, 2] - boxes1_xyxy[:, 0]) * (boxes1_xyxy[:, 3] - boxes1_xyxy[:, 1])
-    area2 = (boxes2_xyxy[:, 2] - boxes2_xyxy[:, 0]) * (boxes2_xyxy[:, 3] - boxes2_xyxy[:, 1])
-
-    lt = torch.max(boxes1_xyxy[:, None, :2], boxes2_xyxy[None, :, :2])
-    rb = torch.min(boxes1_xyxy[:, None, 2:], boxes2_xyxy[None, :, 2:])
-    wh = (rb - lt).clamp(min=0)
-    inter = wh[:, :, 0] * wh[:, :, 1]
-    union = area1[:, None] + area2[None, :] - inter
-    iou = inter / union.clamp(min=1e-6)
-
-    lt_c = torch.min(boxes1_xyxy[:, None, :2], boxes2_xyxy[None, :, :2])
-    rb_c = torch.max(boxes1_xyxy[:, None, 2:], boxes2_xyxy[None, :, 2:])
-    wh_c = (rb_c - lt_c).clamp(min=0)
-    area_c = wh_c[:, :, 0] * wh_c[:, :, 1]
-
-    return iou - (area_c - union) / area_c.clamp(min=1e-6)
+def _focal_cost(scores):
+    """neg_cost - pos_cost, giống loss.py:305-308."""
+    p = scores.reshape(-1).sigmoid().clamp(1e-8, 1 - 1e-8)
+    pos = -ALPHA * ((1 - p) ** GAMMA) * p.log()
+    neg = (1 - ALPHA) * (p ** GAMMA) * (-(1 - p).log())
+    return (neg - pos)[:, None]
 
 
 @torch.no_grad()
-def hungarian_match(pred_boxes_cxcywh, gt_boxes_cxcywh, cost_bbox=1.0, cost_giou=1.0):
-    """
-    pred_boxes_cxcywh: [N, 4] tensor, normalized [-1, 1] cxcywh (one image's predictions)
-    gt_boxes_cxcywh:   [M, 4] tensor, same normalization, M <= N (padding already
-                       stripped by the caller — this function assumes every row of
-                       gt_boxes_cxcywh is a real target)
+def build_cost(pred_boxes, gt_boxes, scores=None):
+    """Cost [N,M] + iou [N,M]. Box ở hệ chuẩn cxcywh [0,1]. `scores` là LOGIT."""
+    p_xyxy = sanitize_boxes(cxcywh_to_xyxy(pred_boxes))
+    g_xyxy = cxcywh_to_xyxy(gt_boxes)
 
-    Returns (pred_idx, gt_idx): 1-D LongTensors of length min(N, M) — pred_idx[i]
-    is matched to gt_idx[i]. Predictions not in pred_idx are unmatched (padding
-    slots or, when M < N, simply extra proposals with no target this step).
-    """
-    N = pred_boxes_cxcywh.shape[0]
-    M = gt_boxes_cxcywh.shape[0]
-    if M == 0:
-        return (torch.empty(0, dtype=torch.long), torch.empty(0, dtype=torch.long))
+    l1 = torch.cdist(pred_boxes, gt_boxes, p=1)
+    giou = generalized_box_iou(p_xyxy, g_xyxy)
+    cost = COST_L1 * l1 + COST_GIOU * (1.0 - giou)
+    if scores is not None:
+        cost = cost + COST_CLASS * _focal_cost(scores)
+    return cost, box_iou(p_xyxy, g_xyxy)[0]
 
-    pred_xyxy = _cxcywh_to_xyxy(pred_boxes_cxcywh)
-    gt_xyxy = _cxcywh_to_xyxy(gt_boxes_cxcywh)
 
-    l1 = torch.cdist(pred_boxes_cxcywh, gt_boxes_cxcywh, p=1)  # [N, M]
-    giou = generalized_box_iou(pred_xyxy, gt_xyxy)  # [N, M], higher = more overlap
+def _center_prior_mask(pred_boxes, gt_boxes, radius_ratio=2.5):
+    """AND, và `center_radius` TỈ LỆ theo sqrt(w*h) của GT (không phải hằng 2,5
+    của DiffusionDet — vốn tính theo stride FPN mà ta không có)."""
+    cx, cy = pred_boxes[:, 0:1], pred_boxes[:, 1:2]
+    gx, gy = gt_boxes[:, 0][None], gt_boxes[:, 1][None]
+    gw, gh = gt_boxes[:, 2][None], gt_boxes[:, 3][None]
 
-    cost = cost_bbox * l1 + cost_giou * (1.0 - giou)  # [N, M], lower = better match
-    cost_np = cost.cpu().numpy()
-    pred_idx, gt_idx = linear_sum_assignment(cost_np)
-    return torch.as_tensor(pred_idx, dtype=torch.long), torch.as_tensor(gt_idx, dtype=torch.long)
+    in_boxes = ((cx > gx - gw / 2) & (cx < gx + gw / 2) &
+                (cy > gy - gh / 2) & (cy < gy + gh / 2))
+    r = radius_ratio * (gw * gh).sqrt()
+    in_centers = (cx > gx - r) & (cx < gx + r) & (cy > gy - r) & (cy < gy + r)
+    return in_boxes & in_centers
+
+
+@torch.no_grad()
+def hungarian_match(pred_boxes, gt_boxes, scores=None):
+    """Gán 1-1 -> (pred_idx, gt_idx) trên cùng device."""
+    dev = pred_boxes.device
+    if gt_boxes.shape[0] == 0:
+        z = torch.zeros(0, dtype=torch.long, device=dev)
+        return z, z
+    cost, _ = build_cost(pred_boxes, gt_boxes, scores)
+    r, c = linear_sum_assignment(cost.detach().float().cpu().numpy())
+    return (torch.as_tensor(r, dtype=torch.long, device=dev),
+            torch.as_tensor(c, dtype=torch.long, device=dev))
+
+
+@torch.no_grad()
+def simota_match(pred_boxes, gt_boxes, scores=None, use_center_prior=False,
+                 radius_ratio=2.5, top_k=10):
+    """Một GT nhận k proposal; một proposal khớp TỐI ĐA 1 GT."""
+    dev = pred_boxes.device
+    n, m = pred_boxes.shape[0], gt_boxes.shape[0]
+    if m == 0:
+        z = torch.zeros(0, dtype=torch.long, device=dev)
+        return z, z
+
+    cost, iou = build_cost(pred_boxes, gt_boxes, scores)
+    if use_center_prior:
+        cost = cost + 100.0 * (~_center_prior_mask(pred_boxes, gt_boxes, radius_ratio))
+    cost = cost.clone()
+
+    matching = torch.zeros(n, m, dtype=torch.bool, device=dev)
+    k_cap = min(top_k, n)
+    dynamic_k = iou.topk(k_cap, dim=0).values.sum(0).int().clamp(min=1)
+    for j in range(m):
+        matching[cost[:, j].topk(int(dynamic_k[j]), largest=False).indices, j] = True
+
+    def _khu_trung(mat):
+        multi = mat.sum(1) > 1
+        if multi.any():
+            best = cost[multi].argmin(dim=1)
+            mat[multi] = False
+            mat[multi.nonzero(as_tuple=True)[0], best] = True
+        return mat
+
+    matching = _khu_trung(matching)
+
+    # Vòng cứu GT chưa được khớp (loss.py:428-438): khử trùng có thể làm một GT
+    # mất hết proposal -> phạt +1e5 vào proposal đã dùng rồi gán lại.
+    for _ in range(100):
+        trong = matching.sum(0) == 0
+        if not trong.any():
+            break
+        cost[matching.sum(1) > 0] += 1e5
+        for j in trong.nonzero(as_tuple=True)[0]:
+            matching[cost[:, j].argmin(), j] = True
+        matching = _khu_trung(matching)
+    assert not (matching.sum(0) == 0).any(), "còn GT không được khớp"
+
+    pi, gi = matching.nonzero(as_tuple=True)
+    return pi, gi
+
+
+def match(pred_boxes, gt_boxes, scores=None, method="hungarian", **kw):
+    if method == "hungarian":
+        return hungarian_match(pred_boxes, gt_boxes, scores)
+    if method == "simota":
+        return simota_match(pred_boxes, gt_boxes, scores, **kw)
+    raise ValueError(f"method không hợp lệ: {method!r}")

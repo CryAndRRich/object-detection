@@ -45,4 +45,6 @@ giấy phép CC-BY-NC 4.0 (xem [LICENSE](LICENSE)). GroundingDINO: Shilong Liu e
 DiffuGroundingDINO tự viết lại toàn bộ theo công thức, không import từ `repos/` — chi tiết ghi
 công/tham khảo trong [`diffu_grounding_dino/README.md`](diffu_grounding_dino/README.md).
 Count-Editing (CE-Loc/CE-Gen): bài NeurIPS 2026 của chính người dùng dự án — xem
-[`count_editing/README_upstream.md`](count_editing/README_upstream.md) cho README gốc.
+[`count_editing/CE-LocModel/README.md`](count_editing/CE-LocModel/README.md) cho README gốc
+(thư mục `count_editing/` hiện là bản copy nguyên vẹn của `refs/repos/Count-Editing/`, chưa có
+sửa đổi nào của dự án — xem `../docs/bai-hoc-ce-loc-detection.md` cho bài học vòng trước).

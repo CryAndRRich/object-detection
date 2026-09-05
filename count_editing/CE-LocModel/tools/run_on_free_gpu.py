@@ -1,4 +1,4 @@
-"""Chạy một script Python bất kỳ (train_w_args.py, eval_detection.py, ...) trên
+"""Chạy một script Python bất kỳ (train.py, eval.py, tools/*.py) trên
 GPU trống nhất của server, tự động chọn qua nvidia-smi.
 
 Port lại nguyên logic từ
@@ -6,7 +6,7 @@ object-detection/diffu_grounding_dino/tools/run_train.py — cùng lý do: serve
 này chạy chung với người/job khác, nên không thể cứ mặc định GPU 0. Khác với
 bản gốc (chỉ wrap main.py cố định), script này wrap MỘT SCRIPT PYTHON BẤT KỲ
 truyền vào — vì CE-LocModel có nhiều entry point cần chạy trên server
-(train_w_args.py, eval_detection.py, test_mul_box.py, tools/*.py).
+(train.py, eval.py, tools/*.py).
 
   1. Query nvidia-smi cho mọi GPU: free memory + utilization.
   2. Chọn GPU TRỐNG NHẤT: ưu tiên GPU không bận tính toán (utilization dưới
@@ -31,9 +31,10 @@ khác (mỗi lần thử đọc nvidia-smi mới).
 Cách dùng — script Python cần chạy đứng ngay sau --, mọi tham số của NÓ đứng
 sau đó:
 
-    python tools/run_on_free_gpu.py -- train_w_args.py --variant detect/e_cosine_multibox
-    python tools/run_on_free_gpu.py -- eval_detection.py --checkpoint ... --variant ...
-    python tools/run_on_free_gpu.py -- tools/visualize_predictions.py --checkpoint ...
+    python tools/run_on_free_gpu.py -- train.py --config config/experiment_a.yaml
+    python tools/run_on_free_gpu.py -- eval.py --ckpt checkpoints/experiment_a/best.pth --split test
+    python tools/run_on_free_gpu.py -- tools/profile_and_memory.py --batch-size 8
+    python tools/run_on_free_gpu.py -- tools/overfit_one.py --steps 300
 
 Muốn ép 1 GPU cụ thể: --gpu <index> (đặt TRƯỚC --).
 """
@@ -48,17 +49,25 @@ UTIL_BUSY_THRESHOLD = 50  # phần trăm; GPU trên ngưỡng này coi là đang
 
 
 def query_gpus():
-    """``[(index, free_mib, total_mib, util_percent), ...]`` từ nvidia-smi."""
-    out = subprocess.run(
-        [
-            "nvidia-smi",
-            "--query-gpu=index,memory.used,memory.total,utilization.gpu",
-            "--format=csv,noheader,nounits",
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
+    """``[(index, free_mib, total_mib, util_percent), ...]`` từ nvidia-smi.
+
+    Trả về ``[]`` khi không có nvidia-smi (máy dev không GPU) -- lúc đó chạy
+    thẳng, không set CUDA_VISIBLE_DEVICES.
+    """
+    try:
+        out = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,memory.used,memory.total,utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True, text=True, check=False,
+        )
+    except FileNotFoundError:
+        return []
+    if out.returncode != 0:
+        return []
+    out = out.stdout
     gpus = []
     for line in out.strip().splitlines():
         idx, used, total, util = (int(x.strip()) for x in line.split(","))
@@ -97,7 +106,7 @@ def main():
     parser.add_argument(
         "target", nargs=argparse.REMAINDER,
         help="script Python cần chạy + tham số của nó, đặt sau --, ví dụ: "
-        "-- train_w_args.py --variant detect/e_cosine_multibox",
+        "-- train.py --config config/experiment_a.yaml",
     )
     args = parser.parse_args()
 
@@ -105,7 +114,7 @@ def main():
     if target and target[0] == "--":
         target = target[1:]
     if not target:
-        parser.error("thiếu script cần chạy — đặt sau --, ví dụ: -- train_w_args.py --variant a_cnn_1box")
+        parser.error("thiếu script cần chạy — đặt sau --, ví dụ: -- train.py --config config/experiment_a.yaml")
 
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     cmd = [sys.executable] + target
@@ -151,6 +160,11 @@ def _pick_and_run(args, cmd, repo_root):
         print(f"dùng GPU {chosen_index} (ép bằng --gpu)", flush=True)
     else:
         gpus = query_gpus()
+        if not gpus:
+            print("không thấy nvidia-smi -- chạy thẳng, không set CUDA_VISIBLE_DEVICES",
+                  flush=True)
+            print(f"chạy: {' '.join(cmd)}", flush=True)
+            return subprocess.run(cmd, cwd=repo_root).returncode
         print("trạng thái GPU hiện tại:", flush=True)
         for idx, free, total, util in gpus:
             print(f"  GPU {idx}: free {free:6d} MiB / {total} MiB, utilization {util:3d}%")

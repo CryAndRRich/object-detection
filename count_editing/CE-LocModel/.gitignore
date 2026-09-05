@@ -1,5 +1,17 @@
-# Ignore the data folder
+# Dữ liệu (quá lớn, không push git)
 samples/
 samples_test/
 samples_real/
+
+# Checkpoint + môi trường
 checkpoints/
+.venv-cpu/
+*.pth
+
+# Rác Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Bộ test — chỉ chạy ở local, không push lên server
+tests/

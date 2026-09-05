@@ -1,0 +1,78 @@
+# EXPERIMENT A — CE-Loc multi-box: thân Diffusion Policy transformer + cơ chế
+# sinh N box của DiffusionDet. Thiết kế: docs/thiet-ke-ce-loc-vong-2.md
+#
+# Mọi con số dưới đây đều có lý do, ghi rõ để không ai đổi bừa.
+
+experiment: "A"
+mo_ta: "CLIP ViT-B/16 frozen (1026 token) + decoder transformer 6 layer + loss DiffusionDet"
+
+data:
+  root: "../../data/all_phase2_V2"
+  image_size: 512          # vật CE-130 median 0,069x0,061 canvas -> ở patch16 là
+                           # 2,20x1,95 patch. Xuống 224 thì chỉ 0,96x0,85 -> nhỏ
+                           # hơn MỘT patch, cross-attention không có gì để trỏ vào.
+  flip_prob: 0.5           # CHỈ flip ngang. Không rotate: 5-30 độ làm box phình
+                           # x1,20-x1,98 (quá lớn với vật nhỏ); 90 độ phá giả định
+                           # "luôn pad ở dưới" (chỉ 9,6 % ảnh vuông).
+  num_workers: 4
+
+model:
+  clip_name: "openai/clip-vit-base-patch16"
+  freeze_clip: true        # BẮT BUỘC, không phải tuỳ chọn: (1) 1.911 ảnh không
+                           # nuôi nổi 86M tham số; (2) class 3 split RỜI NHAU hoàn
+                           # toàn -> bài toán là zero-shot, finetune sẽ phá chính
+                           # khả năng cần dùng; (3) backward qua ViT tốn ~19 GB.
+  d_model: 256             # CE-Loc gốc 256; nhỏ = ít overfit
+  n_layer: 6               # Diffusion Policy 8 (chuỗi 16 action); DiffusionDet 6 stage
+  n_head: 8
+  dropout: 0.1             # paper: dropout transformer "varies greatly across
+                           # tasks" -> đây là hyperparam nhạy nhất, sweep sau
+
+diffusion:
+  num_timesteps: 1000      # CE-Loc gốc 100 — quá ít cho cosine
+  schedule: "cosine"       # đo được 3,70x AP so với linear (linear chỉ còn 5,8 %
+                           # tín hiệu ở t=749 -> matcher gán bừa)
+  snr_scale: 2.0           # DiffusionDet SNR_SCALE
+  sampling_steps: 4        # sweep 1/2/4/8 sau
+  num_proposals_train: 100 # GT median 20-30, mean 37,6-48,5/ảnh. N=300 -> 87 %
+                           # placeholder. Transformer KHÔNG có ràng buộc N%4
+                           # (đó là của ConditionalUnet1D do stride-2 conv).
+  num_proposals_eval: 300  # N=100 cắt GT ở 8-11 % ảnh (test 11,2 %). Đổi được vì
+                           # đã bỏ pos_emb theo chỉ số.
+
+loss:
+  # Giống DiffusionDet (config.py:34-36,43-44). KHÔNG loss epsilon (vô nghĩa dưới
+  # set-matching), KHÔNG deep supervision (kiến trúc 1-forward).
+  l1: 5.0
+  giou: 2.0
+  cls: 2.0
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+
+matcher:
+  method: "hungarian"      # SimOTA thoái hoá về k=1 trên CE-130 (vật chỉ 0,41 %
+                           # diện tích -> IoU sụp nhanh), thêm code phức tạp mà
+                           # không lợi ở giai đoạn model chưa tốt, lại kém ổn định
+                           # nhãn hơn. Bật "simota" để thử như can thiệp một-biến.
+  use_center_prior: false  # đo được KHÔNG cải thiện ổn định nhãn (55 % -> 51 %)
+  center_radius: 2.5       # TỈ LỆ theo sqrt(w*h) của GT, không phải hằng số theo
+                           # stride FPN như DiffusionDet (ta không có FPN)
+
+training:
+  batch_size: 8            # A30 24GB thừa sức (decoder ~0,8 GB + CLIP ~1 GB);
+                           # để thấp cho an toàn, tăng sau khi đo memory thật
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  epochs: 300              # vòng 1 best ở epoch cuối 4 LẦN LIÊN TIẾP — chưa bao
+                           # giờ bão hoà, nên train dài ngay từ đầu
+  save_dir: "checkpoints/experiment_a/"
+  seed: 42
+  amp: false               # QUY ƯỚC DỰ ÁN: không bao giờ bật AMP
+
+eval:
+  # TOP-K, KHÔNG ngưỡng tuyệt đối 0,5: focal với head không phân biệt hội tụ về
+  # hằng số (vòng 1: 0,263 < 0,5) -> mọi box bị lọc -> argmax giữ đúng 1 box.
+  topk: 100
+  nms_iou: 0.5
+  box_renewal: false       # cần score head phân biệt được; vòng 1 đo recall sụp 11x
+  use_ensemble: false
