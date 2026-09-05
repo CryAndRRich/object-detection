@@ -30,8 +30,13 @@ def _focal_cost(scores):
 
 
 @torch.no_grad()
-def build_cost(pred_boxes, gt_boxes, scores=None):
-    """Cost [N,M] + iou [N,M]. Boxes in canonical cxcywh [0,1]. `scores` are LOGITS."""
+def build_cost(pred_boxes, gt_boxes, scores=None, need_iou=True):
+    """Cost [N,M] + iou [N,M]. Boxes in canonical cxcywh [0,1]. `scores` are LOGITS.
+
+    `need_iou=False` skips the IoU matrix, which only SimOTA's dynamic-k consumes;
+    Hungarian discards it. That is one N x M pass saved per image per step, and the
+    matcher was measured at 24 % of a step on the A30.
+    """
     p_xyxy = sanitize_boxes(cxcywh_to_xyxy(pred_boxes))
     g_xyxy = cxcywh_to_xyxy(gt_boxes)
 
@@ -40,7 +45,7 @@ def build_cost(pred_boxes, gt_boxes, scores=None):
     cost = COST_L1 * l1 + COST_GIOU * (1.0 - giou)
     if scores is not None:
         cost = cost + COST_CLASS * _focal_cost(scores)
-    return cost, box_iou(p_xyxy, g_xyxy)[0]
+    return cost, (box_iou(p_xyxy, g_xyxy)[0] if need_iou else None)
 
 
 def _center_prior_mask(pred_boxes, gt_boxes, radius_ratio=2.5):
@@ -64,7 +69,7 @@ def hungarian_match(pred_boxes, gt_boxes, scores=None):
     if gt_boxes.shape[0] == 0:
         z = torch.zeros(0, dtype=torch.long, device=dev)
         return z, z
-    cost, _ = build_cost(pred_boxes, gt_boxes, scores)
+    cost, _ = build_cost(pred_boxes, gt_boxes, scores, need_iou=False)
     r, c = linear_sum_assignment(cost.detach().float().cpu().numpy())
     return (torch.as_tensor(r, dtype=torch.long, device=dev),
             torch.as_tensor(c, dtype=torch.long, device=dev))

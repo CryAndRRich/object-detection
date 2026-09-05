@@ -101,8 +101,11 @@ def main():
     ds = CE130Detection(cfg["data"]["root"], "train", cfg["data"]["image_size"],
                         cfg["data"]["flip_prob"], seed=cfg["training"]["seed"])
     cache = PatchCache(a.cache, "train") if a.cache else None
+    dl_kw = dict(collate_fn=collate, num_workers=nw, pin_memory=(dev.type == "cuda"))
+    if nw > 0:
+        dl_kw.update(persistent_workers=True, prefetch_factor=4)
     loader = DataLoader(TorchWrap(ds, cache), batch_size=B, shuffle=True,
-                        num_workers=nw, collate_fn=collate, drop_last=True)
+                        drop_last=True, **dl_kw)
 
     model = CELocDetector(
         cfg["model"]["clip_name"], cfg["model"]["d_model"], cfg["model"]["n_layer"],

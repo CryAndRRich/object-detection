@@ -51,10 +51,13 @@ def _focal_cost(scores):
     return (neg - pos)[:, None]
 
 
-def build_cost(pred_boxes, gt_boxes, scores=None):
+def build_cost(pred_boxes, gt_boxes, scores=None, need_iou=True):
     """Cost matrix [N, M]. Boxes in canonical cxcywh [0,1].
 
     Returns (cost, iou) — `iou` is reused for dynamic-k, avoiding a second pass.
+    `need_iou=False` skips it entirely for Hungarian, which never reads it (the
+    torch port does the same; keeping the signatures identical keeps the
+    allclose comparison tests meaningful).
     """
     p = np.asarray(pred_boxes, dtype=np.float64).reshape(-1, 4)
     g = np.asarray(gt_boxes, dtype=np.float64).reshape(-1, 4)
@@ -70,7 +73,7 @@ def build_cost(pred_boxes, gt_boxes, scores=None):
     cost = COST_L1 * pairwise_l1(p, g) + COST_GIOU * (1.0 - generalized_box_iou(p_xyxy, g_xyxy))
     if scores is not None:
         cost = cost + COST_CLASS * _focal_cost(scores)
-    return cost, box_iou(p_xyxy, g_xyxy)[0]
+    return cost, (box_iou(p_xyxy, g_xyxy)[0] if need_iou else None)
 
 
 def _center_prior_mask(pred_boxes, gt_boxes, radius_ratio=2.5):
@@ -98,7 +101,7 @@ def hungarian_match(pred_boxes, gt_boxes, scores=None):
     g = np.asarray(gt_boxes, dtype=np.float64).reshape(-1, 4)
     if g.shape[0] == 0:
         return np.zeros(0, dtype=int), np.zeros(0, dtype=int)
-    cost, _ = build_cost(pred_boxes, g, scores)
+    cost, _ = build_cost(pred_boxes, g, scores, need_iou=False)
     return linear_sum_assignment(cost)
 
 

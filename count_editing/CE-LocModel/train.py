@@ -149,11 +149,18 @@ def write_json(save_dir, env, cfg, history, best, ds_train, ds_val):
 
 
 def model_inputs(batch, dev):
-    """Return model kwargs: raw images, or cached tokens."""
+    """Return model kwargs: raw images, or cached tokens.
+
+    `non_blocking=True` is what makes the loader's `pin_memory` worth anything: on
+    page-locked memory the host->device copy is asynchronous and overlaps with
+    compute. Without it, pin_memory only adds a staging copy.
+    """
+    nb = dev.type == "cuda"
     if "patch_raw" in batch:
-        return {"patch_raw": batch["patch_raw"].to(dev),
-                "text_raw": batch["text_raw"].to(dev)}
-    return {"pixel_values": batch["pixel_values"].to(dev), "texts": batch["text"]}
+        return {"patch_raw": batch["patch_raw"].to(dev, non_blocking=nb),
+                "text_raw": batch["text_raw"].to(dev, non_blocking=nb)}
+    return {"pixel_values": batch["pixel_values"].to(dev, non_blocking=nb),
+            "texts": batch["text"]}
 
 
 @torch.no_grad()
@@ -248,17 +255,29 @@ def main():
         print(f"[cache] using {a.cache} — CLIP forward skipped during training "
               f"({cache_tr.n_ver} versions/image)", flush=True)
 
+    # Measured on an A30 with the cache enabled: the DataLoader, not the GPU, is the
+    # bottleneck. At 4 workers the step waited 740 ms (89 %) with std 1612 ms —
+    # worker starvation. Raising workers to 8 took the whole step from 1012 to 91 ms.
+    #   persistent_workers : 8 processes are rebuilt every epoch otherwise, and with
+    #                        300 epochs that startup cost is paid 300 times.
+    #   prefetch_factor    : each worker keeps 4 batches ready, absorbing the spikes
+    #                        that showed up as max 5172 ms.
+    #   pin_memory         : page-locked staging so the 12.6 MB/batch host->device
+    #                        copy can overlap compute.
+    dl_kw = dict(collate_fn=collate, num_workers=cfg["data"]["num_workers"],
+                 pin_memory=(dev.type == "cuda"))
+    if cfg["data"]["num_workers"] > 0:
+        dl_kw.update(persistent_workers=True, prefetch_factor=4)
+
     loader = DataLoader(TorchWrap(ds, cache_tr), batch_size=cfg["training"]["batch_size"],
-                        shuffle=True, num_workers=cfg["data"]["num_workers"],
-                        collate_fn=collate, drop_last=False)
+                        shuffle=True, drop_last=False, **dl_kw)
 
     # val: NO flipping (no augmentation at evaluation time)
     ds_val = CE130Detection(cfg["data"]["root"], "val", cfg["data"]["image_size"])
     if a.limit:
         ds_val.items = ds_val.items[: max(a.limit // 2, 1)]
     val_loader = DataLoader(TorchWrap(ds_val, cache_va), batch_size=cfg["training"]["batch_size"],
-                            shuffle=False, num_workers=cfg["data"]["num_workers"],
-                            collate_fn=collate)
+                            shuffle=False, **dl_kw)
     print(f"[val ] {ds_val.stats()}", flush=True)
 
     model = CELocDetector(
