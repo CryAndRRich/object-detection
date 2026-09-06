@@ -200,7 +200,11 @@ def main():
             # over whatever it is handed, so this composes without changing it.
             c_k = cls[keep][k2]
             g_lab = m["labels"]
-            for c in np.unique(np.concatenate([c_k, g_lab])) if len(g_lab) or len(c_k) else []:
+            # The union, not just the predicted classes: a class present only in the
+            # GT must still contribute its misses to recall, and a class predicted
+            # but absent from the GT must still contribute its false positives.
+            # Dropping either side would flatter the score.
+            for c in np.unique(np.concatenate([c_k, g_lab])):
                 predictions.append((b_xyxy[k2][c_k == c], s_k[k2][c_k == c],
                                     gt[g_lab == c]))
 
