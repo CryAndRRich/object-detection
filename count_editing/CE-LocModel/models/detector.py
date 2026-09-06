@@ -57,10 +57,13 @@ def _check_generator(generator, dev):
 class CELocDetector(nn.Module):
     def __init__(self, clip_name="openai/clip-vit-base-patch16", d_model=256,
                  n_layer=6, n_head=8, image_size=512, num_timesteps=1000,
-                 snr_scale=2.0, sampling_steps=4, dropout=0.1, freeze_clip=True):
+                 snr_scale=2.0, sampling_steps=4, dropout=0.1, freeze_clip=True,
+                 roi_k=0):
         super().__init__()
         self.encoder = CLIPConditionEncoder(clip_name, d_model, image_size, freeze_clip)
-        self.decoder = BoxTransformer(d_model, n_layer, n_head, dropout=dropout)
+        self.decoder = BoxTransformer(
+            d_model, n_layer, n_head, dropout=dropout, roi_k=roi_k,
+            roi_dim=self.encoder.vision.config.hidden_size)
 
         self.num_timesteps = num_timesteps
         self.snr_scale = snr_scale
@@ -96,9 +99,12 @@ class CELocDetector(nn.Module):
     def forward(self, x_t, timesteps, pixel_values=None, texts=None,
                 patch_raw=None, text_raw=None):
         """x_t [B,N,4] in diffusion space -> (boxes in [0,1], logits)."""
-        memory = self.encoder(pixel_values, texts, patch_raw, text_raw)
+        need_raw = self.decoder.roi is not None
+        out = self.encoder(pixel_values, texts, patch_raw, text_raw,
+                           return_patch_raw=need_raw)
+        memory, praw = out if need_raw else (out, None)
         boxes_norm = decode_diffusion(x_t, self.snr_scale)
-        return self.decoder(boxes_norm, timesteps, memory)
+        return self.decoder(boxes_norm, timesteps, memory, patch_raw=praw)
 
     # -------------------------------------------------------------- inference
 
@@ -117,7 +123,10 @@ class CELocDetector(nn.Module):
         zero and the whole step is `x_start*sqrt(ab_next) + noise`. Set eta=0 for
         deterministic DDIM.
         """
-        memory = self.encoder(pixel_values, texts, patch_raw, text_raw)
+        need_raw = self.decoder.roi is not None
+        out = self.encoder(pixel_values, texts, patch_raw, text_raw,
+                           return_patch_raw=need_raw)
+        memory, praw = out if need_raw else (out, None)
         B, dev = memory.shape[0], memory.device
 
         _check_generator(generator, dev)
@@ -126,7 +135,8 @@ class CELocDetector(nn.Module):
 
         for t, t_next in ddim_time_pairs(self.num_timesteps, self.sampling_steps):
             tb = torch.full((B,), t, dtype=torch.long, device=dev)
-            boxes, logits = self.decoder(decode_diffusion(img, self.snr_scale), tb, memory)
+            boxes, logits = self.decoder(decode_diffusion(img, self.snr_scale), tb,
+                                         memory, patch_raw=praw)
 
             x_start = encode_diffusion(boxes, self.snr_scale)          # already in range
             if t_next < 0:

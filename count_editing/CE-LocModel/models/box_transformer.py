@@ -43,6 +43,8 @@ import math
 import torch
 import torch.nn as nn
 
+from models.roi_sampler import RoIFeatureSampler
+
 __all__ = ["BoxTransformer", "SinusoidalCoordEmbedding"]
 
 
@@ -81,9 +83,14 @@ class SinusoidalTimeEmbedding(nn.Module):
 
 class BoxTransformer(nn.Module):
     def __init__(self, d_model=256, n_layer=6, n_head=8, coord_dim=64,
-                 dim_feedforward=None, dropout=0.1, max_cond_len=1152):
+                 dim_feedforward=None, dropout=0.1, max_cond_len=1152,
+                 roi_k=0, roi_dim=768):
+        """`roi_k > 0` turns on EXPERIMENT B: each box additionally reads the frozen
+        patch features sampled on a roi_k x roi_k grid INSIDE itself. roi_k=0 keeps
+        experiment A's behaviour exactly."""
         super().__init__()
         self.d_model = d_model
+        self.roi_k = roi_k
 
         self.coord_emb = SinusoidalCoordEmbedding(coord_dim)          # CHANGE (a)
         self.box_proj = nn.Linear(4 * coord_dim, d_model)
@@ -112,14 +119,31 @@ class BoxTransformer(nn.Module):
         self.box_head = nn.Linear(d_model, 4)      # DIRECT coordinates (not a delta)
         self.score_head = nn.Linear(d_model, 1)    # 1 dim: sigmoid == 2-dim softmax
 
-    def forward(self, boxes_norm, timesteps, memory):
+        # EXPERIMENT B. Zero-initialised, so at step 0 this contributes nothing and
+        # B is numerically identical to A -- the comparison changes one variable.
+        #
+        # Built LAST on purpose. Constructing it earlier would consume RNG draws and
+        # shift every layer after it, so B and A would start from different weights
+        # and "identical at step 0" would be false for a reason unrelated to the RoI
+        # branch. Verified by tests/test_roi.py.
+        self.roi = (RoIFeatureSampler(roi_dim, d_model, roi_k, dropout)
+                    if roi_k > 0 else None)
+
+    def forward(self, boxes_norm, timesteps, memory, patch_raw=None):
         """
         boxes_norm : [B, N, 4] cxcywh in [0,1]
         timesteps  : [B] long — ONE value per image
         memory     : [B, M, d_model] (text + patch tokens)
+        patch_raw  : [B, P, d_in] raw patch tokens, only needed when roi_k > 0
         -> (pred_boxes [B,N,4] in [0,1], logits [B,N])
         """
         tgt = self.box_proj(self.coord_emb(boxes_norm))               # CHANGE (a)
+
+        if self.roi is not None:
+            if patch_raw is None:
+                raise ValueError("roi_k > 0 needs patch_raw (the raw CLIP patch "
+                                 "tokens); the model was built for experiment B")
+            tgt = tgt + self.roi(patch_raw, boxes_norm)               # EXPERIMENT B
 
         t_tok = self.time_mlp(self.time_emb(timesteps)).unsqueeze(1)  # [B,1,D]
         mem = torch.cat([t_tok, memory], dim=1)                       # CHANGE (c): dynamic

@@ -145,6 +145,7 @@ def main():
         cfg["model"]["n_head"], cfg["data"]["image_size"],
         cfg["diffusion"]["num_timesteps"], cfg["diffusion"]["snr_scale"],
         cfg["diffusion"]["sampling_steps"], 0.0, cfg["model"]["freeze_clip"],
+        roi_k=cfg["model"].get("roi_k", 0),
     ).to(dev)
     sd = torch.load(a.ckpt, map_location=dev)
     w = sd["model"] if "model" in sd else sd

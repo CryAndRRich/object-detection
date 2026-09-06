@@ -127,7 +127,8 @@ def main():
         cfg["model"]["clip_name"], cfg["model"]["d_model"], cfg["model"]["n_layer"],
         cfg["model"]["n_head"], cfg["data"]["image_size"],
         cfg["diffusion"]["num_timesteps"], cfg["diffusion"]["snr_scale"],
-        cfg["diffusion"]["sampling_steps"], 0.0, cfg["model"]["freeze_clip"]).to(dev)
+        cfg["diffusion"]["sampling_steps"], 0.0, cfg["model"]["freeze_clip"],
+        roi_k=cfg["model"].get("roi_k", 0)).to(dev)
     sd = torch.load(a.ckpt, map_location=dev)
     missing, unexpected = model.load_state_dict(sd.get("model", sd), strict=False)
     missing = [k for k in missing

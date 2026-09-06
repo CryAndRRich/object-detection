@@ -54,7 +54,8 @@ def main():
         cfg["diffusion"]["num_timesteps"], cfg["diffusion"]["snr_scale"],
         cfg["diffusion"]["sampling_steps"], cfg["model"]["dropout"],
         cfg["model"]["freeze_clip"],
-    ).to(dev)
+    ,
+        roi_k=cfg["model"].get("roi_k", 0)).to(dev)
     model.train()
     crit = SetCriterion(cfg["matcher"]["method"])
     trainable = [p for p in model.parameters() if p.requires_grad]

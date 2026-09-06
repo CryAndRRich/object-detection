@@ -1,0 +1,111 @@
+# EXPERIMENT B — experiment A plus ONE change: RoI feature sampling.
+#
+# WHY. A's predictions land on the right REGION but at a near-constant SIZE: too
+# big for peas, too small for elephants. Measured recall by object size: 0.217 on
+# mid-sized objects, 0.041 when objects are tiny. A asked cross-attention to learn
+# the mapping from a box's sinusoidal PE to the right patch token out of 1024, and
+# 1,911 images were not enough. DiffusionDet never learns it -- RoIAlign crops at
+# the box coordinates, so the relation is exact by construction.
+#
+# WHAT CHANGES. Exactly one thing: `model.roi_k`. Every other number below is
+# copied from experiment_a.yaml unchanged, so the comparison is one variable.
+# The RoI branch is zero-initialised, so at step 0 B is bit-identical to A
+# (locked by tests/test_roi.py::test_B_equals_A_at_step_zero).
+
+experiment: "B"
+description: "EXPERIMENT A + RoI feature sampling: each box reads frozen CLIP features on a 3x3 grid inside itself"
+
+data:
+  root: "../../data/all_phase2_V2"
+  image_size: 512          # CE-130 objects are median 0.069x0.061 of the canvas ->
+                           # 2.20x1.95 patches at patch16. At 224 that is only
+                           # 0.96x0.85 -> smaller than ONE patch, leaving
+                           # cross-attention nothing to point at.
+  flip_prob: 0.5           # HORIZONTAL flips only. No rotation: 5-30 degrees
+                           # inflates boxes 1.20x-1.98x (far too much for tiny
+                           # objects); 90 degrees breaks the "padding is always at
+                           # the bottom" assumption (only 9.6 % of images are square).
+  num_workers: 8           # MEASURED, not guessed: with the cache, 4 workers cannot
+                           # keep up with 12.6 MB/batch of memmap reads and the step
+                           # spends 740 ms (89 %) waiting on the DataLoader
+                           # (std 1612 ms, max 5172 ms — classic worker starvation).
+                           # 8 workers: 740 ms -> 7.4 ms, whole step 1012 -> 91 ms.
+
+model:
+  clip_name: "openai/clip-vit-base-patch16"
+  freeze_clip: true        # MANDATORY, not optional: (1) 1,911 images cannot feed
+                           # 86M parameters; (2) the 3 splits' classes are COMPLETELY
+                           # disjoint -> the task is zero-shot, and finetuning would
+                           # destroy the very capability needed; (3) backward through
+                           # the ViT costs ~19 GB.
+  d_model: 256             # original CE-Loc used 256; smaller = less overfitting
+  n_layer: 6               # Diffusion Policy uses 8 (16-action sequences);
+                           # DiffusionDet uses 6 stages
+  n_head: 8
+  roi_k: 3                 # k x k sample grid INSIDE each box. Measured on real
+                           # test images with frozen CLIP: telling a correct box
+                           # from one twice too big scores AUC 0.000 at k=1 (the
+                           # centre gives the same vector at any size) versus
+                           # 0.896 at k=3. Object/background separation is
+                           # unchanged (0.990 vs 0.989), so k=3 adds the missing
+                           # signal for free. NOT DiffusionDet's 7x7: CE-130
+                           # objects are ~2.0 x 1.7 patches on the 32x32 grid, so
+                           # 49 points resample the same features at 5.4x the cost.
+                           # Set 0 to fall back to experiment A exactly.
+  dropout: 0.1             # the paper notes transformer dropout "varies greatly
+                           # across tasks" -> the most sensitive hyperparameter,
+                           # sweep it later
+
+diffusion:
+  num_timesteps: 1000      # original CE-Loc used 100 — too few for cosine
+  schedule: "cosine"       # measured 3.70x the AP of linear (linear leaves only
+                           # 5.8 % signal at t=749 -> the matcher assigns arbitrarily)
+  snr_scale: 2.0           # DiffusionDet's SNR_SCALE
+  sampling_steps: 4        # sweep 1/2/4/8 later
+  num_proposals_train: 100 # GT median is 20-30, mean 37.6-48.5 per image. N=300
+                           # would be 87 % placeholders. The transformer has NO
+                           # N%4 constraint (that belongs to ConditionalUnet1D and
+                           # its stride-2 convolutions).
+  num_proposals_eval: 300  # N=100 truncates GT on 8-11 % of images (test: 11.2 %).
+                           # Changeable because index-based pos_emb was removed.
+
+loss:
+  # Same as DiffusionDet (config.py:34-36,43-44). NO epsilon loss (meaningless
+  # under set matching), NO deep supervision (single-forward architecture).
+  l1: 5.0
+  giou: 2.0
+  cls: 2.0
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+
+matcher:
+  method: "hungarian"      # SimOTA degenerates to k=1 on CE-130 (objects are only
+                           # 0.41 % of the area -> IoU collapses fast), adding
+                           # complex code for no gain while the model is weak, and
+                           # it is less label-stable. Set "simota" to try it as a
+                           # single-variable intervention.
+  use_center_prior: false  # measured NOT to improve label stability (55 % -> 51 %)
+  center_radius: 2.5       # PROPORTIONAL to the GT's sqrt(w*h), not a constant in
+                           # FPN strides like DiffusionDet (we have no FPN)
+
+training:
+  batch_size: 8            # an A30 24GB has plenty of room (decoder ~0.8 GB +
+                           # CLIP ~1 GB); kept low for safety, raise it after
+                           # measuring real memory use
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  epochs: 300              # round 1's best landed on the last epoch 4 TIMES IN A
+                           # ROW — it never saturated, so train long from the start
+  save_dir: "checkpoints/experiment_b/"
+  seed: 42
+  amp: false               # PROJECT RULE: never enable AMP
+
+eval:
+  # TOP-K, NOT an absolute 0.5 threshold: focal with a non-discriminating head
+  # converges to a constant (round 1: 0.263 < 0.5) -> every box gets filtered ->
+  # argmax keeps exactly 1 box.
+  topk: 100
+  nms_iou: 0.5
+  box_renewal: false       # needs a discriminating score head; round 1 measured
+                           # recall collapsing 11x
+  use_ensemble: false

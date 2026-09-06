@@ -285,12 +285,20 @@ def main():
         cfg["model"]["n_head"], cfg["data"]["image_size"],
         cfg["diffusion"]["num_timesteps"], cfg["diffusion"]["snr_scale"],
         cfg["diffusion"]["sampling_steps"], cfg["model"]["dropout"],
-        cfg["model"]["freeze_clip"],
+        cfg["model"]["freeze_clip"], roi_k=cfg["model"].get("roi_k", 0),
     ).to(dev)
 
     trainable = [p for p in model.parameters() if p.requires_grad]
     print(f"[model] trainable parameters: {sum(p.numel() for p in trainable)/1e6:.2f}M "
           f"/ total {sum(p.numel() for p in model.parameters())/1e6:.1f}M", flush=True)
+    roi = model.decoder.roi
+    if roi is not None:
+        print(f"[roi  ] EXPERIMENT B active: {roi.k}x{roi.k} grid inside each box, "
+              f"{sum(p.numel() for p in roi.parameters())/1e6:.3f}M params, "
+              f"zero-init (branch_norm {roi.branch_norm():.4f} -> B == A at step 0)",
+              flush=True)
+    else:
+        print("[roi  ] no RoI branch (experiment A behaviour)", flush=True)
 
     crit = SetCriterion(cfg["matcher"]["method"],
                         **({"use_center_prior": cfg["matcher"]["use_center_prior"],
@@ -379,6 +387,11 @@ def main():
               f"GT/img {np.mean(n_gt):.1f} | label_stability {stability:.3f} | "
               f"lr {opt.param_groups[0]['lr']:.2e} | grad {np.mean(grad_norms):.3f}",
               flush=True)
+        roi_norm = roi.branch_norm() if roi is not None else None
+        if roi_norm is not None:
+            print(f"           roi_branch_norm {roi_norm:.4f}"
+                  f"{'  (still ~0: the net is not using RoI features)' if roi_norm < 1e-3 else ''}",
+                  flush=True)
         print(f"           score mu {score_stats.get('mean', 0):.4f} sd {std_score:.4f} "
               f"[{score_stats.get('min', 0):.3f}, {score_stats.get('max', 0):.3f}] "
               f"p50 {score_stats.get('p50', 0):.4f} | "
@@ -404,6 +417,11 @@ def main():
                             f"(~1/GT_per_image) — matching may be broken")
         if np.mean(grad_norms) > 100:
             warnings.append(f"grad norm {np.mean(grad_norms):.1f} is very large")
+        # A zero-initialised branch that never grows is the network saying the RoI
+        # features are useless. Cheap early read: stop at ~30 epochs instead of 300.
+        if roi_norm is not None and ep >= 10 and roi_norm < 1e-3:
+            warnings.append(f"roi_branch_norm {roi_norm:.5f} still ~0 after {ep+1} "
+                            f"epochs — the RoI branch is not being used")
         for w in warnings:
             print(f"           [!] {w}", flush=True)
 
@@ -416,6 +434,7 @@ def main():
                       "n_batches": nb, "seconds": train_sec},
             "val": val,
             "label_stability": stability,
+            "roi_branch_norm": roi_norm,
             "lr": opt.param_groups[0]["lr"],
             "epoch_sec": epoch_sec,
             "elapsed_sec": elapsed,

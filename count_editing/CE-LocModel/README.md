@@ -1,4 +1,63 @@
-# CE-Loc — EXPERIMENT A (2026-09-05)
+# CE-Loc — EXPERIMENT A và B
+
+## EXPERIMENT A (2026-09-05) — ĐÃ CHẠY XONG, KẾT QUẢ THẤP
+
+Train 300 epoch / 2h16m, best epoch 266 (val_loss 2,5096). **Đã bão hoà** — 100
+epoch cuối chỉ cải thiện val_loss 0,032, lần đầu tiên trong dự án chạm trần.
+
+| | test | val |
+|---|---|---|
+| AP50 | 0,0152 | 0,0073 |
+| AP (COCO) | 0,0028 | 0,0013 |
+| precision / recall | 0,106 / 0,118 | 0,067 / 0,090 |
+
+**Thắng lợi thật**: score head hết kẹt (sd 0,175, khoảng [0,14–0,98]) — vòng 1 kẹt
+cứng ở 0,263. Việc đưa memory từ 2 lên 1026 token có tác dụng.
+
+**Nhưng định vị vẫn yếu.** Nhìn ảnh dự đoán (`tools/visualize_predictions.py`)
+thấy rõ: box bám ĐÚNG VÙNG có vật (ảnh viên bi ở góc → box ở góc) nhưng KÍCH
+THƯỚC gần như cố định — to hơn hạt đậu, nhỏ hơn con voi. Recall theo cỡ vật:
+0,217 (vật trung bình) → 0,041 (vật rất nhỏ).
+
+Đo thêm: recall@0,10 = 0,328, tức 67 % vật không có box nào chạm vào.
+
+## EXPERIMENT B — ĐỔI ĐÚNG MỘT BIẾN, CHƯA TRAIN
+
+`model.roi_k: 3`. Mỗi box đọc thêm feature CLIP lấy mẫu trên lưới 3×3 **bên
+trong chính nó** (`models/roi_sampler.py`), cộng vào box token.
+
+**Vì sao**: A bắt mạng TỰ HỌC ánh xạ từ sinusoidal PE của `(cx,cy)` sang "phải
+attend vào patch nào trong 1024" — hai hệ toạ độ không liên quan, `cond_pos_emb`
+khởi tạo ngẫu nhiên. 1.911 ảnh không đủ. DiffusionDet không học thứ này bao giờ:
+RoIAlign cắt feature ngay tại toạ độ box, quan hệ là CỨNG.
+
+**Đo trước khi implement** (CLIP frozen, ảnh test thật):
+
+| lưới | AUC vật/nền | AUC "đúng cỡ" vs "to gấp đôi" |
+|---|---|---|
+| 1×1 (tâm) | 0,990 | **0,000** |
+| 3×3 | 0,989 | **0,896** |
+
+Lấy 1 điểm ở tâm cho CÙNG một vector dù box to hay nhỏ → AUC 0,000 không phải
+nhiễu mà là chứng minh nó vô cảm với kích thước. Lưới 3×3 lấy lại tín hiệu đó mà
+không mất gì.
+
+k=3 chứ không phải 7×7 của DiffusionDet: vật CE-130 chỉ ~2,0×1,7 patch trên lưới
+32×32, đặt 49 điểm vào đó là lấy mẫu thừa với chi phí 5,4×.
+
+**Zero-init**: `roi.out` khởi tạo 0 nên **step 0 thì B giống hệt A từng bit**
+(khoá bằng `tests/test_roi.py::test_B_equals_A_at_step_zero`). So sánh A vs B là
+một biến duy nhất. Lớp vẫn train bình thường — với `y=Wx+b, W=0` thì
+`∂L/∂W = δxᵀ ≠ 0`.
+
+**Cửa chặn rẻ**: `roi_branch_norm` in mỗi epoch. Nếu sau ~30 epoch vẫn ~0 thì
+chính mạng đang nói RoI feature vô dụng → dừng sớm thay vì đốt 300 epoch. Smoke
+test 1 epoch đã cho 0,1185, tức nhánh đang được dùng.
+
+Cache dùng chung với A (`image_size`, `clip_name` không đổi) — RoI lấy mẫu trên
+chính `patch_raw` đã cache, không phải build lại.
+
+
 
 **Nhánh CE-Loc gốc (ResNet18 + SpatialSoftmax + Conv1D U-Net, single-box) đã XOÁ khỏi thư mục
 này.** Bản read-only đầy đủ vẫn ở `refs/repos/Count-Editing/CE-LocModel/` nếu cần đọc lại.

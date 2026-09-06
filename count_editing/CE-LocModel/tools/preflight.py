@@ -131,7 +131,8 @@ def main():
             cfg["model"]["n_head"], cfg["data"]["image_size"],
             cfg["diffusion"]["num_timesteps"], cfg["diffusion"]["snr_scale"],
             cfg["diffusion"]["sampling_steps"], cfg["model"]["dropout"],
-            cfg["model"]["freeze_clip"]).to(dev)
+            cfg["model"]["freeze_clip"],
+        roi_k=cfg["model"].get("roi_k", 0)).to(dev)
         model["m"] = m
         tr = sum(p.numel() for p in m.parameters() if p.requires_grad)
         return f"{tr/1e6:.2f}M trainable / {sum(p.numel() for p in m.parameters())/1e6:.1f}M"

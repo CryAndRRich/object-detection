@@ -128,11 +128,16 @@ class CLIPConditionEncoder(nn.Module):
         tok = self.tokenizer(texts, padding=True, truncation=True, return_tensors="pt").to(device)
         return self.text(**tok).pooler_output.unsqueeze(1)
 
-    def forward(self, pixel_values=None, texts=None, patch_raw=None, text_raw=None):
+    def forward(self, pixel_values=None, texts=None, patch_raw=None, text_raw=None,
+                return_patch_raw=False):
         """Returns memory [B, 1 + num_patches, d_model] = [text; patches...].
 
         Accepts `patch_raw`/`text_raw` to use the CACHE (removing the per-epoch
         ViT cost entirely). The time token is prepended later by the model, not here.
+
+        `return_patch_raw=True` also hands back the RAW (unprojected) patch tokens.
+        Experiment B's RoI sampler needs those, and without this the caller would
+        have to run the ViT a second time just to get them back.
         """
         if patch_raw is None:
             patch_raw = self.encode_image_raw(pixel_values)
@@ -142,7 +147,8 @@ class CLIPConditionEncoder(nn.Module):
 
         patch = self.proj_patch(patch_raw.to(self.proj_patch.weight.dtype))
         text = self.proj_text(text_raw.to(self.proj_text.weight.dtype))
-        return torch.cat([text, patch], dim=1)
+        memory = torch.cat([text, patch], dim=1)
+        return (memory, patch_raw) if return_patch_raw else memory
 
     def train(self, mode=True):
         """Keep CLIP in eval even when the parent calls .train() — important
