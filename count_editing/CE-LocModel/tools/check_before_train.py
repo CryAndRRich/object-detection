@@ -133,6 +133,51 @@ def one_step(cfg_path):
             f"grads={len(grads)}")
 
 
+def compile_and_import_tools(python):
+    """Import every tool with its module-level code executed.
+
+    `py_compile` (in the test suite) catches SyntaxError but NOT NameError: a name
+    used inside a function is only resolved when that function RUNS. preflight.py
+    shipped with `tl` referenced in four nested callbacks that never saw it, passed
+    every local check, and failed on the server -- which is the one place these
+    tools are ever run.
+
+    Importing is still not execution, so the guarantee is limited; the real fix is
+    the smoke run below, which executes preflight end to end on tiny data.
+    """
+    head("2b/3  tools import cleanly")
+    import importlib
+    import glob
+    ok_all = True
+    for f in sorted(glob.glob("tools/*.py")):
+        mod = "tools." + os.path.basename(f)[:-3]
+        try:
+            importlib.import_module(mod)
+            report(os.path.basename(f), True)
+        except Exception as e:                                    # noqa: BLE001
+            report(os.path.basename(f), False, f"{type(e).__name__}: {e}")
+            ok_all = False
+    return ok_all
+
+
+def smoke_preflight(python, cfg_path):
+    """Run tools/preflight.py itself, on a handful of samples, on the CPU.
+
+    preflight is what guards the GPU budget, so it is the LAST thing that should
+    be discovered broken on the server. Running it here on --limit-sized data
+    executes every one of its callbacks, which is what actually catches a
+    NameError inside them.
+    """
+    r = subprocess.run(
+        [python, "tools/preflight.py", "--config", cfg_path,
+         "--device", "cpu", "--batch-size", "2", "--limit", "8"],
+        capture_output=True, text=True)
+    fails = [l.strip() for l in r.stdout.splitlines() if "[FAIL]" in l]
+    return r.returncode == 0, (fails[0][:70] if fails else
+                               ("all checks passed" if r.returncode == 0
+                                else (r.stderr.strip().splitlines() or ["?"])[-1][:70]))
+
+
 def compare_configs():
     """The comparisons only mean something if the runs differ where intended and
     nowhere else. Checked here rather than trusted to review."""
@@ -194,6 +239,14 @@ def main():
             report(os.path.basename(p), True, one_step(p))
         except Exception as e:                                    # noqa: BLE001
             report(os.path.basename(p), False, f"{type(e).__name__}: {e}")
+
+    compile_and_import_tools(a.python)
+
+    head("2c/3  preflight itself, on tiny data (CPU)")
+    for p in a.configs:
+        if os.path.exists(p):
+            ok, detail = smoke_preflight(a.python, p)
+            report(f"preflight {os.path.basename(p)}", ok, detail)
 
     compare_configs()
 

@@ -218,13 +218,17 @@ là `tools/overfit_one.py` (§4 dưới) — nếu loss không về ~0 thì dừ
 ## Chạy
 
 ```bash
-# 0. CỬA CHẶN Ở MÁY DEV — chạy TRƯỚC KHI push. Không cần GPU, ~4 phút.
-#    Gồm: pytest + 1 bước train THẬT cho từng config (data -> collate -> loss ->
-#    backward) + đối chiếu chéo 4 config. Bước train thật là bắt buộc: mọi test
-#    dataset đều pass trong khi train chết ngay ở `KeyError: 'labels'` trong
-#    collate — dataset trả key, wrapper không chuyển tiếp, không test nào đi qua
-#    cả hai cùng lúc.
+# 0. CỬA CHẶN Ở MÁY DEV — chạy TRƯỚC KHI push. Không cần GPU, ~5 phút.
+#    5 bước: pytest -> 1 bước train THẬT mỗi config (data -> collate -> loss ->
+#    backward) -> import mọi tool -> CHẠY THẬT preflight trên dữ liệu nhỏ -> đối
+#    chiếu chéo 4 config.
 python3 tools/check_before_train.py
+#    Hai bước "chạy thật" là bắt buộc, mỗi bước ứng với một bug ĐÃ LỌT:
+#    - `KeyError: 'labels'` trong collate: dataset trả key, TorchWrap không
+#      chuyển tiếp. Mọi test dataset pass, train chết ngay bước đầu.
+#    - `NameError: tl` trong 4 callback của preflight.py: py_compile chỉ bắt
+#      SyntaxError, tên trong hàm chỉ resolve khi hàm CHẠY. Lọt tới server.
+#    Cả hai đều có test âm bản: tái tạo lỗi -> check phải đỏ.
 
 # 1. Test riêng (nếu chỉ muốn phần này), ~2 phút
 python3 -m pytest tests/ -q

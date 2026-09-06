@@ -58,6 +58,11 @@ def main():
     ap.add_argument("--cache", default=None)
     ap.add_argument("--device", default=None)
     ap.add_argument("--batch-size", type=int, default=None)
+    ap.add_argument("--limit", type=int, default=None,
+                    help="truncate each split — for running preflight ITSELF as a "
+                         "smoke test on a laptop (tools/check_before_train.py). "
+                         "Never use it for the real pre-run check: the point of "
+                         "that one is the LARGEST images and the FULL cache.")
     a = ap.parse_args()
 
     with open(a.config) as f:
@@ -80,6 +85,10 @@ def main():
                   seed=cfg["training"]["seed"])), ds[s].stats())[1])
     if len(ds) < 2:
         print("\nCannot continue without both splits."); return _finish()
+    if a.limit:
+        for _s in ds:
+            ds[_s].items = ds[_s].items[: a.limit]
+        print(f"  (--limit {a.limit}: SMOKE MODE, not a real pre-run check)", flush=True)
 
     # ------------------------------------------------------------------ cache
     print("\n[2/7] cache completeness  (a KeyError here would fire mid-training)",
@@ -148,7 +157,13 @@ def main():
     print("\n[4/7] one real step on the LARGEST images of each split", flush=True)
 
     def _batch(split, idxs):
-        """Build a batch exactly the way TorchWrap+collate does."""
+        """Build a batch exactly the way TorchWrap+collate does.
+
+        Returns (boxes, labels, valid_h, model_kwargs) -- `labels` is part of the
+        tuple, not a closure variable: it was first written as one and every caller
+        raised NameError, because these callbacks are nested functions that do not
+        see _batch's locals.
+        """
         samples = [ds[split][i] for i in idxs]
         tg = [torch.from_numpy(s["boxes"]).float().to(dev) for s in samples]
         # A.2's C-way head needs the class of each GT; A/B ignore it.
@@ -163,7 +178,7 @@ def main():
             kw = {"pixel_values": torch.stack(
                       [torch.from_numpy(normalize_for_clip(s["image"])) for s in samples]).to(dev),
                   "texts": [s["text"] for s in samples]}
-        return tg, vh, kw
+        return tg, tl, vh, kw
 
     for split in ["train", "val"]:
         # the worst case for memory is the image with the most boxes
@@ -173,7 +188,7 @@ def main():
         n_max = len(ds[split].items[order[0]]["boxes_xyxy_px"])
 
         def _step(sp=split, ix=idxs, nm=n_max):
-            tg, vh, kw = _batch(sp, ix)
+            tg, tl, vh, kw = _batch(sp, ix)
             x_t, tt, _ = m.build_inputs(tg, N, vh)
             pb, lg = m(x_t, tt, **kw)
             loss, st, _ = crit(pb, lg, tg, labels=tl)
@@ -189,7 +204,7 @@ def main():
     print("\n[5/7] the val loop (this is what died twice)", flush=True)
 
     def _val():
-        tg, vh, kw = _batch("val", list(range(B)))
+        tg, tl, vh, kw = _batch("val", list(range(B)))
         m.eval()                        # as run_val does; without it dropout stays
                                         # active and nothing is reproducible
         g = torch.Generator(device=dev).manual_seed(1234)   # exactly as run_val does
@@ -201,7 +216,7 @@ def main():
     check("seeded generator through build_inputs (device match)", _val)
 
     def _repeat():
-        tg, vh, kw = _batch("val", list(range(B)))
+        tg, tl, vh, kw = _batch("val", list(range(B)))
         m.eval()                        # dropout off, else this can never pass
         out = []
         for _ in range(2):
@@ -219,7 +234,7 @@ def main():
     def _ddim():
         # keep `texts` if present: ddim_sample needs either cached text_raw OR the
         # raw strings, and dropping both makes the CLIP tokenizer raise
-        _, _, kw = _batch("val", list(range(min(2, B))))
+        _, _, _, kw = _batch("val", list(range(min(2, B))))
         m.eval()
         with torch.no_grad():
             b, lg = m.ddim_sample(cfg["diffusion"]["num_proposals_eval"], **kw)
@@ -269,9 +284,16 @@ def main():
     check("A.2 truly ignores text", _text_ignored)
 
     def _labels():
-        """Labels must be contiguous 0..n_class-1 and row-aligned with boxes. COCO's
-        own ids run 1..90 with gaps; indexing a head with those is out of range for
-        some and silently wrong for the rest."""
+        """Labels must be row-aligned with boxes, and -- only where the head reads
+        them -- inside 0..n_class-1.
+
+        THE RANGE CHECK APPLIES TO A.2 ONLY. A.1 keeps a 1-D score head, so
+        SetCriterion never touches `labels`; the COCO dataset still fills them in
+        (it is the same class, `per_class` only regroups), and a class index of 23
+        there is correct data, not an out-of-range label. Asserting hi < n_class
+        unconditionally failed A.1 on perfectly good data -- a check that is wrong
+        is worse than no check, because it trains you to ignore red output.
+        """
         bad, seen = 0, set()
         for split in ("train", "val"):
             for i in range(0, len(ds[split]), max(len(ds[split]) // 200, 1)):
@@ -280,14 +302,23 @@ def main():
                     bad += 1
                 if len(r["labels"]):
                     lo, hi = int(r["labels"].min()), int(r["labels"].max())
-                    if lo < 0 or hi >= n_class:
-                        raise ValueError(f"label {lo}..{hi} outside 0..{n_class-1}")
+                    if lo < 0:
+                        raise ValueError(f"negative label {lo}")
+                    if n_class > 1 and hi >= n_class:
+                        raise ValueError(f"label {lo}..{hi} outside 0..{n_class-1} "
+                                         f"— the {n_class}-way head cannot index it")
                     seen.update(r["labels"].tolist())
         if bad:
             raise ValueError(f"{bad} samples have labels not aligned with boxes")
-        if n_class > 1 and len(seen) < n_class * 0.6:
+        # Coverage only means something on the full dataset: 8 images cannot show
+        # 80 classes, so under --limit this would fail on correct data. Guarding a
+        # real check behind the smoke flag is better than deleting it.
+        if n_class > 1 and not a.limit and len(seen) < n_class * 0.6:
             raise ValueError(f"only {len(seen)}/{n_class} classes seen in the sample "
                              f"— the id mapping looks wrong")
+        if n_class == 1:
+            return (f"aligned; {len(seen)} distinct value(s) present but UNUSED "
+                    f"(1-D score head never reads labels)")
         return f"aligned, {len(seen)} distinct class(es) in 0..{n_class-1}"
     check("labels aligned and in range", _labels)
 
