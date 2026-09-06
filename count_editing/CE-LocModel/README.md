@@ -1,4 +1,4 @@
-# CE-Loc — EXPERIMENT A và B
+# CE-Loc — EXPERIMENT A, B, A.1, A.2
 
 ## EXPERIMENT A (2026-09-05) — ĐÃ CHẠY XONG, KẾT QUẢ THẤP
 
@@ -21,7 +21,7 @@ THƯỚC gần như cố định — to hơn hạt đậu, nhỏ hơn con voi. R
 
 Đo thêm: recall@0,10 = 0,328, tức 67 % vật không có box nào chạm vào.
 
-## EXPERIMENT B — ĐỔI ĐÚNG MỘT BIẾN, CHƯA TRAIN
+## EXPERIMENT B — THIẾT KẾ (đổi đúng một biến)
 
 `model.roi_k: 3`. Mỗi box đọc thêm feature CLIP lấy mẫu trên lưới 3×3 **bên
 trong chính nó** (`models/roi_sampler.py`), cộng vào box token.
@@ -68,6 +68,113 @@ Lỗi vòng 1 (đọc TRƯỚC khi sửa gì): [`../../../docs/bai-hoc-ce-loc-de
 **Ràng buộc**: thân model là **Diffusion Policy transformer-based**, chỉ **mượn cơ chế sinh N box**
 của DiffusionDet.
 
+## EXPERIMENT B — ĐÃ CHẠY XONG (2026-09-06), KHÔNG CẢI THIỆN
+
+Train 300 epoch / 2h07m trên 1 GPU A30 (batch 8), best epoch **87**.
+
+| test | A | B |
+|---|---|---|
+| AP50 | 0,0152 | **0,0144** |
+| AP (COCO) | 0,0028 | 0,0025 |
+| val IoU tốt nhất | 0,345 | 0,347 |
+
+`roi_branch_norm` 0 → **15,84**, tăng đều suốt 300 epoch → nhánh RoI **có** được
+dùng, không chết. Nhưng val IoU +0,002 (trong nhiễu).
+
+**Đáng chú ý hơn: B overfit sớm.** Best epoch tụt từ 266 (A) xuống 87, và
+`val_rising_streak = 142` — val loss tăng liên tục 142 epoch cuối, trong khi train
+IoU vẫn tăng 0,339 → 0,372. Thêm 0,787M tham số trên 1.911 ảnh với split class rời
+nhau → nhánh RoI học đặc trưng bám class thay vì quy luật hình học tổng quát.
+
+### Đo tiếp: nút thắt là TÂM, không phải kích thước
+
+`tools/measure_size_regression.py` trên checkpoint B (`recall@0.50`, thay từng nửa
+box bằng GT):
+
+| | test | val |
+|---|---|---|
+| thật | 0,029 | 0,020 |
+| thay **w,h** bằng GT | 0,060 | 0,047 |
+| thay **cx,cy** bằng GT | **0,284** | **0,232** |
+
+Sửa kích thước cho +0,031; sửa tâm cho **+0,254** — gấp **8 lần**, nhất quán cả 2
+split. Giả thuyết "kích thước hằng số" chỉ **PARTIAL** (`size_ratio_within_image`
+0,264/0,312, IQR ratio 0,72 — model có biến thiên size, hẹp hơn GT). Và
+`l1_share_wh` 53 %/47 % — **cân bằng**, nên giả thuyết "L1 bỏ quên w,h" là **sai**.
+
+→ **Không rebalance loss về w,h.** Model không định vị được từng vật, chứ không
+phải định vị được rồi vẽ hộp lệch.
+
+## EXPERIMENT A.1 / A.2 — CHƯA TRAIN
+
+Sau A và B, AP thấp còn **4 nguyên nhân chồng lên nhau, không tách được**:
+
+1. code/thiết kế sai?
+2. zero-shot (train 72 class / test 28, **giao = 0**)
+3. chỉ 1.911 ảnh
+4. vật cực nhỏ, cực đông (37,6 vật/ảnh, 0,41 % diện tích)
+
+COCO-minitrain **gỡ đồng thời (2) và (3)**: 80 class dùng chung train/eval,
+73.531 mẫu.
+
+### A.1 — model của A, y nguyên, chạy trên COCO
+
+**Chỉ đổi DỮ LIỆU.** `models/` không sửa dòng nào; score head vẫn **1 chiều**.
+
+Một ảnh COCO có trung bình 2,94 class (chỉ 20,7 % ảnh có đúng 1 class), mà model
+nhận **1 text/forward** → tách mỗi ảnh thành nhiều mẫu theo class:
+
+```
+ảnh_42 + "person" → 4 box người   (bỏ qua xe, chó)
+ảnh_42 + "car"    → 2 box xe
+ảnh_42 + "dog"    → 1 box chó
+```
+
+→ **73.531 cặp (ảnh, class)** từ 25.000 ảnh.
+
+**Ngưỡng đọc kết quả, chốt TRƯỚC khi chạy** (nếu không thì số nào cũng biện minh
+được):
+
+| AP50 trên val2017 | kết luận |
+|---|---|
+| **< 0,05** | stack hỏng → dừng CE-Loc, sửa code trước |
+| 0,05–0,15 | stack chạy đúng, kiến trúc nhỏ |
+| **> 0,15** | stack ổn → số thấp trên CE-130 là do **bài toán**, không do bug |
+
+Tham chiếu: DiffusionDet R50 đạt ~30 AP trên đúng 25K ảnh này — nhưng có FPN,
+RoIAlign, 6 stage deep supervision, backbone train được. Ghi để thấy khoảng cách
+kiến trúc, **không phải mục tiêu**.
+
+**CHỈ ĐỌC AP50, BỎ QUA PRECISION THÔ.** COCO có 2,47 box/cặp so với CE-130 37,6 →
+với N=100 trần precision cấu trúc `min(M,N)/N` ở đây là ~0,01 còn CE-130 là 0,376.
+
+### A.2 — bỏ text, score head 80 chiều
+
+**A.1 và A.2 khác đúng MỘT thứ**: class đến với model qua đâu.
+
+| | class đi qua | memory | head | mẫu |
+|---|---|---|---|---|
+| A.1 | **text đầu vào** | 1025 token (patch + text) | 1 chiều | 73.531 cặp |
+| A.2 | **head đầu ra** | 1024 token (chỉ patch) | 80 chiều | 25.000 ảnh |
+
+Cùng ảnh, cùng annotation (181.475 box), cùng loss/matcher/diffusion/N.
+
+Đọc kết quả:
+- **A.2 ≈ A.1** → đường text hoạt động tốt ngang head trực tiếp. Tốt nhất cho CE-Loc.
+- **A.2 ≫ A.1** → đường text **là nút thắt** → khớp với mismatch không gian đã đo
+  ([docs/y-tuong-khong-gian-box-vs-anh.md](../../../docs/y-tuong-khong-gian-box-vs-anh.md)).
+- **cả hai đều kém** → lỗi ở phần chung (diffusion/matcher/decoder).
+
+**A.2 đang giải bài DỄ HƠN** — 1 forward xong cả ảnh (7,26 box) thay vì ~2,94
+forward; và nó tự đặt tên class nên không bị phạt vì "đặt nhầm class". Nên A.2 cao
+hơn là **dự kiến**; chỉ khoảng cách **lớn** mới là bằng chứng. Eval đã làm
+class-aware (`eval.py` tách theo class) nên ít nhất box đúng vị trí sai class
+không được tính.
+
+**Ngân sách khớp theo lượt-ảnh, không theo epoch**: A.1 20 epoch × 73.531 =
+1,47M; A.2 **59** epoch × 25.000 = 1,475M (lệch 0,3 %). Bằng epoch thì A.1 được
+gấp 3 lần compute và phép so đo ngân sách chứ không đo điều kiện hoá.
+
 ## Thay đổi cốt lõi
 
 Memory của decoder từ **2 token** → **1026 token có vị trí**. Vòng 1 đo được: với 2 token thì cả N
@@ -111,7 +218,15 @@ là `tools/overfit_one.py` (§4 dưới) — nếu loss không về ~0 thì dừ
 ## Chạy
 
 ```bash
-# 1. Test — CHỈ CHẠY ĐƯỢC Ở MÁY DEV (tests/ không push git), ~15s
+# 0. CỬA CHẶN Ở MÁY DEV — chạy TRƯỚC KHI push. Không cần GPU, ~4 phút.
+#    Gồm: pytest + 1 bước train THẬT cho từng config (data -> collate -> loss ->
+#    backward) + đối chiếu chéo 4 config. Bước train thật là bắt buộc: mọi test
+#    dataset đều pass trong khi train chết ngay ở `KeyError: 'labels'` trong
+#    collate — dataset trả key, wrapper không chuyển tiếp, không test nào đi qua
+#    cả hai cùng lúc.
+python3 tools/check_before_train.py
+
+# 1. Test riêng (nếu chỉ muốn phần này), ~2 phút
 python3 -m pytest tests/ -q
 
 # 2. Nhìn ảnh TRƯỚC khi train — vòng 1 visualize bắt được 3 lỗi mà test bỏ sót
@@ -142,6 +257,34 @@ nohup python3 tools/run_on_free_gpu.py -- train.py --config config/experiment_a.
 # 6. Eval — train N=100 nhưng eval N=300
 python3 tools/run_on_free_gpu.py -- eval.py --ckpt checkpoints/experiment_a/best.pth --split test
 ```
+
+### A.1 / A.2 trên COCO — không dùng cache
+
+Cache cho A.1 sẽ là **78,6 GB** (25.000 ảnh × 2 bản flip × 1024 × 768 fp16) nên
+**không build** — CLIP chạy thật mỗi bước. Bù lại batch 32 thay vì 8.
+
+```bash
+# preflight (có riêng mục "experiment wiring" kiểm A.1/A.2)
+python3 tools/run_on_free_gpu.py -- tools/preflight.py --config config/experiment_a1.yaml
+
+# A.1 — 20 epoch, ~2-5h
+nohup python3 tools/run_on_free_gpu.py -- train.py --config config/experiment_a1.yaml \
+    > /mnt/disk1/aiotlab/haitn/log/experiment_a1.log 2>&1 & echo "PID=$!"
+
+# A.2 — 59 epoch (khớp lượt-ảnh với A.1, KHÔNG khớp epoch), ~2-5h
+nohup python3 tools/run_on_free_gpu.py -- train.py --config config/experiment_a2.yaml \
+    > /mnt/disk1/aiotlab/haitn/log/experiment_a2.log 2>&1 & echo "PID=$!"
+
+# eval (val2017; COCO không có split thứ ba, --split test trỏ về cùng file)
+python3 tools/run_on_free_gpu.py -- eval.py --config config/experiment_a1.yaml \
+    --ckpt checkpoints/experiment_a1/best.pth --split val --num-proposals 300
+```
+
+**`loss_ce` của A.2 sẽ rất lớn ở epoch đầu — đừng "sửa".** Với C=80 và logit=0 thì
+nó đúng bằng **80×** giá trị 1 chiều (đo được 520 vs 6,5). Focal dập rất nhanh
+(520 → 3,16 ở p=0,1 → 0,02 ở p=0,02), hết ngay trong epoch đầu. Hệ quả thật: grad
+đầu run lớn nên clipping quan trọng hơn, và **`loss_ce` không so được** giữa A.1
+và A.2 — so AP và IoU.
 
 ## Ba chỉ số phải nhìn khi train
 

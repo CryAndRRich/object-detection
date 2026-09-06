@@ -32,8 +32,9 @@ import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from data.ce130_dataset import CE130Detection, normalize_for_clip  # noqa: E402
-from models.detector import CELocDetector  # noqa: E402
+from data.ce130_dataset import normalize_for_clip  # noqa: E402
+from data.factory import build_dataset  # noqa: E402
+from models.detector import build_model  # noqa: E402
 from utils.box_ops_np import box_iou, cxcywh_to_xyxy  # noqa: E402
 
 
@@ -50,6 +51,22 @@ def nms_class_agnostic(boxes_xyxy, scores, iou_thr=0.5):
         iou = box_iou(boxes_xyxy[i:i + 1], boxes_xyxy[order[1:]])[0][0]
         order = order[1:][iou <= iou_thr]
     return np.array(keep, dtype=int)
+
+
+def scores_and_classes(logits_1):
+    """[N] or [N,C] logits for ONE image -> (score [N], class [N] or None).
+
+    A/B have a 1-D head, so the score is the sigmoid and there is no class.
+    A.2 has a C-way head: the score is the BEST class's confidence and the class
+    is its index -- the standard detector reading, and the one that keeps AP
+    comparable, because a proposal's confidence must not be diluted by the 79
+    classes it is not.
+    """
+    if logits_1.dim() == 1:
+        return torch.sigmoid(logits_1).cpu().numpy(), None
+    p = torch.sigmoid(logits_1)
+    best = p.max(dim=-1)
+    return best.values.cpu().numpy(), best.indices.cpu().numpy()
 
 
 def ap_from_pr(rec, prec):
@@ -115,7 +132,7 @@ def main():
     dev = torch.device(a.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     N = a.num_proposals or cfg["diffusion"]["num_proposals_eval"]
 
-    ds = CE130Detection(cfg["data"]["root"], a.split, cfg["data"]["image_size"])
+    ds = build_dataset(cfg, a.split)
     if a.limit:
         ds.items = ds.items[: a.limit]
 
@@ -140,13 +157,7 @@ def main():
     print(f"  {'dataset':22s} {ds.stats()}", flush=True)
     print("=" * 78, flush=True)
 
-    model = CELocDetector(
-        cfg["model"]["clip_name"], cfg["model"]["d_model"], cfg["model"]["n_layer"],
-        cfg["model"]["n_head"], cfg["data"]["image_size"],
-        cfg["diffusion"]["num_timesteps"], cfg["diffusion"]["snr_scale"],
-        cfg["diffusion"]["sampling_steps"], 0.0, cfg["model"]["freeze_clip"],
-        roi_k=cfg["model"].get("roi_k", 0),
-    ).to(dev)
+    model = build_model(cfg, dropout=0.0).to(dev)
     sd = torch.load(a.ckpt, map_location=dev)
     w = sd["model"] if "model" in sd else sd
     # The checkpoint holds trainable parameters only; frozen CLIP is reloaded from
@@ -170,7 +181,7 @@ def main():
         boxes, logits = model.ddim_sample(N, pixel_values=px, texts=[m["text"]])
 
         b = boxes[0].cpu().numpy()
-        s = torch.sigmoid(logits[0]).cpu().numpy()
+        s, cls = scores_and_classes(logits[0])
         all_scores.append(s)
 
         keep = np.argsort(-s)[:topk]                       # TOP-K, no threshold
@@ -179,7 +190,19 @@ def main():
         k2 = nms_class_agnostic(b_xyxy, s_k, nms_iou)
 
         gt = cxcywh_to_xyxy(m["boxes"]) * cfg["data"]["image_size"]
-        predictions.append((b_xyxy[k2], s_k[k2], gt))
+        if cls is None:
+            predictions.append((b_xyxy[k2], s_k[k2], gt))
+        else:
+            # A.2 must be scored CLASS-AWARE, or a box that finds a dog where a cat
+            # stands would count as a hit and A.2 would look better than A.1 for a
+            # reason that has nothing to do with the experiment. Boxes and GT are
+            # split per class and each class evaluated on its own; `evaluate` sums
+            # over whatever it is handed, so this composes without changing it.
+            c_k = cls[keep][k2]
+            g_lab = m["labels"]
+            for c in np.unique(np.concatenate([c_k, g_lab])) if len(g_lab) or len(c_k) else []:
+                predictions.append((b_xyxy[k2][c_k == c], s_k[k2][c_k == c],
+                                    gt[g_lab == c]))
 
         per_image.append({"image_id": m["image_id"], "class": m["text"],
                           "n_gt": len(gt), "n_after_topk": len(keep),
@@ -216,6 +239,11 @@ def main():
         low[f"recall{int(100*t)}"] = r["recall"]
         low[f"precision{int(100*t)}"] = r["precision"]
 
+    # NOTE for A.2: `predictions` holds one entry PER CLASS per image, so this
+    # ceiling is averaged over class groups, not over images. It is a diagnostic
+    # for reading raw precision, never a headline number -- and raw precision is
+    # already not comparable between A.1 and A.2 (2.47 boxes per pair vs 7.26 per
+    # image). Compare AP.
     ceiling = float(np.mean([min(len(g), len(b)) / max(len(b), 1) for b, _, g in predictions]))
     scores = np.concatenate(all_scores)
     n_box = [len(b) for b, _, _ in predictions]

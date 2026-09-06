@@ -1,0 +1,115 @@
+# EXPERIMENT A.2 — A.1 with the class moved from the INPUT to the OUTPUT.
+#
+# A.1 and A.2 differ by ONE thing: how the model learns which class a box holds.
+#     A.1  the class arrives as TEXT      -> CLIP text token in memory, 1-D score
+#     A.2  the class is PREDICTED         -> no text token at all, 80-way head
+# Same images, same annotations, same loss, same matcher, same diffusion, same N.
+#
+# WHY THE PAIR IS WORTH RUNNING
+#   A.2 is the direct route a normal detector takes. A.1 is the route CE-Loc needs,
+#   because CE-130's test set holds 28 classes that were never trained on and no
+#   80-way head can point at them. Comparing the two measures the COST of the
+#   text pathway -- something neither run can show on its own:
+#     A.2 ~ A.1   the text pathway works as well as a direct head. Best case.
+#     A.2 >> A.1  the text pathway IS the bottleneck -> that is where to work, and
+#                 it lines up with the measured spatial mismatch between box
+#                 tokens and CLIP tokens (docs/y-tuong-khong-gian-box-vs-anh.md).
+#     both poor   the fault is in the shared parts (diffusion / matcher / decoder),
+#                 not in the conditioning at all.
+#
+# READ THE COMPARISON CAREFULLY -- A.2 IS SOLVING AN EASIER PROBLEM
+#   One A.2 forward resolves a whole image (7.26 boxes); A.1 needs ~2.94 forwards
+#   for the same image (2.47 boxes each). A.2 also cannot be penalised for putting
+#   a box on the "wrong" class, because it names the class itself. So a higher A.2
+#   number is EXPECTED and is not by itself evidence that the text pathway is bad;
+#   only a LARGE gap is. Evaluation is class-aware (eval.py splits per class), so
+#   at least a dog found where a cat stands is not scored as a hit.
+
+experiment: "A.2"
+description: "A.1 with no text token and an 80-way class head: one sample per IMAGE (25,000), class predicted not given"
+
+data:
+  dataset: "coco"          # the ONLY line that differs in kind from A
+  root: "../../data"       # factory appends coco_minitrain/... and coco/...
+                           # train -> minitrain 25K (73,531 pairs)
+                           # val|test -> val2017 (14,631 pairs from 4,952 images)
+  image_size: 512          # same as A. COCO objects are larger (area median
+                           # 0.85 % vs CE-130's 0.41 %) so 512 is not required
+                           # here -- but changing it would add a second variable.
+  flip_prob: 0.5
+  num_workers: 8
+  min_boxes: 1             # keep every pair.
+  per_class: false         # A.2: group by IMAGE, not by (image, class). 25,000
+                           # samples of 7.26 boxes instead of 73,531 of 2.47, over
+                           # exactly the same annotations. Every box carries a
+                           # `labels` entry (contiguous 0..79; COCO's own ids run
+                           # 1..90 WITH GAPS and can never index a head).
+
+# ---- everything below is byte-identical to experiment_a.yaml ----------------
+
+model:
+  clip_name: "openai/clip-vit-base-patch16"
+  freeze_clip: true
+  d_model: 256
+  n_layer: 6
+  n_head: 8
+  dropout: 0.1
+  # NO roi_k: this is A's model, not B's.
+  n_class: 80              # one logit per COCO category. Background is NOT an 81st
+                           # class -- with focal loss it simply means every logit is
+                           # low, the same convention DiffusionDet uses.
+  use_text: false          # the CLIP text tower is not built at all. Merely leaving
+                           # it unused would still register frozen parameters in the
+                           # checkpoint and in every parameter count, making A.1 and
+                           # A.2 differ for a reason unrelated to the experiment.
+
+diffusion:
+  num_timesteps: 1000
+  schedule: "cosine"
+  snr_scale: 2.0
+  sampling_steps: 4
+  num_proposals_train: 100 # UNCHANGED even though COCO averages 2.47 GT/pair and
+                           # 100 would be ~97 % placeholders. Lowering N would be
+                           # the sensible choice for scoring well on COCO, and
+                           # exactly the wrong choice for a control run.
+  num_proposals_eval: 300
+
+loss:
+  l1: 5.0
+  giou: 2.0
+  cls: 2.0
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+
+matcher:
+  method: "hungarian"
+  use_center_prior: false
+  center_radius: 2.5
+
+training:
+  batch_size: 32           # RAISED from A's 8, for time, not for quality. A.1 has
+                           # 73,531 samples against 1,911: at batch 8 one epoch is
+                           # 9,192 steps (~11-38 min). At 32 it is 2,298 (~3-10
+                           # min). Measured earlier on this stack, batch 32 is 18 %
+                           # cheaper PER IMAGE than batch 8. Memory is not the
+                           # constraint (decoder ~0.8 GB, CLIP ~1 GB with sdpa).
+  lr: 1.0e-4               # kept at A's value despite the 4x batch. The usual
+                           # linear-scaling rule would say 4e-4, but that changes
+                           # two things at once; if A.1 underperforms, re-running
+                           # with 4e-4 is the single-variable follow-up.
+  weight_decay: 1.0e-4
+  epochs: 59               # MATCHED TO A.1 IN IMAGE-VIEWS, NOT IN EPOCHS. A.1 does
+                           # 20 x 73,531 = 1.47M forwards; A.2 has only 25,000
+                           # samples, so 59 epochs give 1.475M -- within 0.3 %.
+                           # Equal epochs would hand A.1 nearly 3x the compute and
+                           # the comparison would measure budget, not conditioning.
+                           # Wall clock is therefore about the same, ~2-5 h.
+  save_dir: "checkpoints/experiment_a2/"
+  seed: 42
+  amp: false               # PROJECT RULE: never enable AMP
+
+eval:
+  topk: 100
+  nms_iou: 0.5
+  box_renewal: false
+  use_ensemble: false

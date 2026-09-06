@@ -32,13 +32,14 @@ from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from data.ce130_dataset import CE130Detection, PatchCache, normalize_for_clip  # noqa: E402
-from models.detector import CELocDetector  # noqa: E402
+from data.ce130_dataset import PatchCache, normalize_for_clip  # noqa: E402
+from data.factory import build_dataset  # noqa: E402
+from models.detector import build_model  # noqa: E402
 from models.criterion import SetCriterion  # noqa: E402
 
 
 class TorchWrap(Dataset):
-    """Wraps CE130Detection (numpy) as a torch Dataset.
+    """Wraps a numpy dataset (CE-130 or COCO, see data/factory.py) as a torch Dataset.
 
     With a `cache`, it returns precomputed patch/text tokens and DROPS the image
     entirely — measured on an A30: CLIP takes 76.8 % of per-batch time, so the
@@ -57,6 +58,9 @@ class TorchWrap(Dataset):
         m = self.ds.__getitem__(i, need_image=self.cache is None)
         out = {
             "boxes": torch.from_numpy(m["boxes"]).float(),
+            # Row-aligned with "boxes"; only A.2's C-way head reads it, but every
+            # dataset supplies it so the loop needs no per-experiment branch.
+            "labels": torch.from_numpy(m["labels"]).long(),
             "text": m["text"],
             "valid_h": m["valid_h"],
             "image_id": m["image_id"],
@@ -74,6 +78,9 @@ def collate(batch):
     """Box count varies per image -> keep them as a list, do not pad here."""
     out = {
         "boxes": [b["boxes"] for b in batch],
+        # Parallel to "boxes" row for row. Needed only by A.2's C-way head, but
+        # carried always so the loop has no per-experiment branch.
+        "labels": [b["labels"] for b in batch],
         "text": [b["text"] for b in batch],
         "valid_h": [b["valid_h"] for b in batch],
         "image_id": [b["image_id"] for b in batch],
@@ -178,12 +185,17 @@ def run_val(model, loader, crit, N, dev):
     g = torch.Generator(device=dev).manual_seed(1234)
     for batch in loader:
         tg = [b.to(dev) for b in batch["boxes"]]
+        tl = [l.to(dev) for l in batch["labels"]]
         x_t, tt, _ = model.build_inputs(tg, N, batch["valid_h"], generator=g)
         pb, lg = model(x_t, tt, **model_inputs(batch, dev))
-        _, st, _ = crit(pb, lg, tg)
+        _, st, _ = crit(pb, lg, tg, labels=tl)
         for k in keys:
             total[k] += st[k]
-        scores.append(lg.sigmoid().cpu().numpy().ravel())
+        # A.2's logits are [B,N,C]: take the max over classes so the reported
+        # distribution keeps meaning "confidence that this slot holds an object",
+        # comparable with A/B's 1-D score rather than diluted by 79 negatives.
+        scores.append((lg if lg.dim() == 2 else lg.max(-1).values)
+                      .sigmoid().cpu().numpy().ravel())
         nb += 1
     model.train()
     out = {k: v / max(nb, 1) for k, v in total.items()}
@@ -241,9 +253,8 @@ def main():
         print(f"  {section:10s} {json.dumps(cfg[section], ensure_ascii=False)}", flush=True)
     print("=" * 78, flush=True)
 
-    ds = CE130Detection(cfg["data"]["root"], "train",
-                        cfg["data"]["image_size"], cfg["data"]["flip_prob"],
-                        seed=cfg["training"]["seed"])
+    ds = build_dataset(cfg, "train", cfg["data"]["flip_prob"],
+                       seed=cfg["training"]["seed"])
     if a.limit:
         ds.items = ds.items[: a.limit]
     print(f"[data] {ds.stats()}", flush=True)
@@ -273,20 +284,14 @@ def main():
                         shuffle=True, drop_last=False, **dl_kw)
 
     # val: NO flipping (no augmentation at evaluation time)
-    ds_val = CE130Detection(cfg["data"]["root"], "val", cfg["data"]["image_size"])
+    ds_val = build_dataset(cfg, "val")     # flip_prob 0.0: never augment at eval
     if a.limit:
         ds_val.items = ds_val.items[: max(a.limit // 2, 1)]
     val_loader = DataLoader(TorchWrap(ds_val, cache_va), batch_size=cfg["training"]["batch_size"],
                             shuffle=False, **dl_kw)
     print(f"[val ] {ds_val.stats()}", flush=True)
 
-    model = CELocDetector(
-        cfg["model"]["clip_name"], cfg["model"]["d_model"], cfg["model"]["n_layer"],
-        cfg["model"]["n_head"], cfg["data"]["image_size"],
-        cfg["diffusion"]["num_timesteps"], cfg["diffusion"]["snr_scale"],
-        cfg["diffusion"]["sampling_steps"], cfg["model"]["dropout"],
-        cfg["model"]["freeze_clip"], roi_k=cfg["model"].get("roi_k", 0),
-    ).to(dev)
+    model = build_model(cfg, dropout=None).to(dev)
 
     trainable = [p for p in model.parameters() if p.requires_grad]
     print(f"[model] trainable parameters: {sum(p.numel() for p in trainable)/1e6:.2f}M "
@@ -326,10 +331,11 @@ def main():
         for batch in loader:
             t_b = time.time()
             tg = [b.to(dev) for b in batch["boxes"]]
+            tl = [l.to(dev) for l in batch["labels"]]
 
             x_t, tt, _ = model.build_inputs(tg, N, batch["valid_h"])
             pb, lg = model(x_t, tt, **model_inputs(batch, dev))
-            loss, st, idx = crit(pb, lg, tg)
+            loss, st, idx = crit(pb, lg, tg, labels=tl)
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -342,7 +348,8 @@ def main():
             grad_norms.append(float(gn))
             n_gt += [len(b) for b in batch["boxes"]]
             t_batch.append(time.time() - t_b)
-            scores.append(lg.detach().sigmoid().cpu().numpy().ravel())
+            scores.append((lg if lg.dim() == 2 else lg.max(-1).values)
+                          .detach().sigmoid().cpu().numpy().ravel())
 
             # In-epoch progress — with 1,911 images an epoch takes several minutes,
             # so it should not stay silent. Print 5 times per epoch (no tqdm, so the

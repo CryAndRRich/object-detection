@@ -27,8 +27,9 @@ import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from data.ce130_dataset import CE130Detection, normalize_for_clip  # noqa: E402
-from models.detector import CELocDetector  # noqa: E402
+from data.ce130_dataset import normalize_for_clip  # noqa: E402
+from data.factory import build_dataset  # noqa: E402
+from models.detector import build_model  # noqa: E402
 from models.criterion import SetCriterion  # noqa: E402
 
 
@@ -47,15 +48,8 @@ def main():
     N = a.num_proposals or cfg["diffusion"]["num_proposals_train"]
     print(f"[cfg] device={dev} batch={a.batch_size} N={N}", flush=True)
 
-    ds = CE130Detection(cfg["data"]["root"], "train", cfg["data"]["image_size"])
-    model = CELocDetector(
-        cfg["model"]["clip_name"], cfg["model"]["d_model"], cfg["model"]["n_layer"],
-        cfg["model"]["n_head"], cfg["data"]["image_size"],
-        cfg["diffusion"]["num_timesteps"], cfg["diffusion"]["snr_scale"],
-        cfg["diffusion"]["sampling_steps"], cfg["model"]["dropout"],
-        cfg["model"]["freeze_clip"],
-    ,
-        roi_k=cfg["model"].get("roi_k", 0)).to(dev)
+    ds = build_dataset(cfg, "train")
+    model = build_model(cfg, dropout=None).to(dev)
     model.train()
     crit = SetCriterion(cfg["matcher"]["method"])
     trainable = [p for p in model.parameters() if p.requires_grad]
@@ -67,6 +61,7 @@ def main():
     samples = [ds[i] for i in range(a.batch_size)]
     px = torch.stack([torch.from_numpy(normalize_for_clip(m["image"])) for m in samples]).to(dev)
     tg = [torch.from_numpy(m["boxes"]).float().to(dev) for m in samples]
+    tl = [torch.from_numpy(m["labels"]).long().to(dev) for m in samples]
     txt = [m["text"] for m in samples]
     vh = [m["valid_h"] for m in samples]
 
@@ -87,7 +82,7 @@ def main():
 
         x_t, tt, _ = model.build_inputs(tg, N, vh)
         pb, lg = model(x_t, tt, patch_raw=patch_raw, text_raw=text_raw)
-        loss, st, _ = crit(pb, lg, tg)
+        loss, st, _ = crit(pb, lg, tg, labels=tl)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()

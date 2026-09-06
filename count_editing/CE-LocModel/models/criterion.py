@@ -40,15 +40,28 @@ class SetCriterion:
         self.method = matcher_method
         self.matcher_kw = matcher_kw
 
-    def __call__(self, pred_boxes, pred_logits, targets):
+    def __call__(self, pred_boxes, pred_logits, targets, labels=None):
         """
         pred_boxes  : [B, N, 4] cxcywh [0,1]
-        pred_logits : [B, N]
+        pred_logits : [B, N]   (A/B, 1-D score) or [B, N, C] (A.2, C-way class head)
         targets     : list[B] tensor [M_i, 4] cxcywh [0,1]
+        labels      : list[B] tensor [M_i] long, REQUIRED when pred_logits is 3-D.
+                      Class index of each GT box; ignored in the 1-D case.
         -> (total loss, dict of components, list of matched index pairs)
+
+        The multi-class path changes only WHICH target the focal loss is pushed
+        towards. Everything else -- matcher, L1, GIoU, the /num_matched
+        normalisation -- is shared, so A.1 and A.2 differ by the class pathway and
+        nothing else.
         """
         dev = pred_boxes.device
+        multiclass = pred_logits.dim() == 3
+        if multiclass and labels is None:
+            raise ValueError("pred_logits is [B,N,C] but no `labels` were given")
+
         l1_all, giou_all, iou_all = [], [], []
+        # Zeros everywhere = "background": with focal, background is not a class,
+        # it is simply every logit being low (DiffusionDet's 80-not-81 convention).
         tgt_score = torch.zeros_like(pred_logits)
         indices, n_matched = [], 0
 
@@ -57,13 +70,26 @@ class SetCriterion:
                 indices.append((torch.zeros(0, dtype=torch.long, device=dev),) * 2)
                 continue
 
-            pi, gi = match(pred_boxes[i].detach(), gt, pred_logits[i].detach(),
+            # The matcher's class cost wants ONE score per proposal. With a C-way
+            # head the meaningful score is the box's confidence in the class it is
+            # being considered for -- but the matcher is class-agnostic here, so it
+            # gets the max over classes, i.e. "how object-like is this proposal".
+            # Using the raw [N,C] tensor instead would silently broadcast and
+            # produce a cost matrix of the wrong shape.
+            m_scores = pred_logits[i].detach()
+            if multiclass:
+                m_scores = m_scores.max(dim=-1).values
+
+            pi, gi = match(pred_boxes[i].detach(), gt, m_scores,
                            method=self.method, **self.matcher_kw)
             indices.append((pi, gi))
             if len(pi) == 0:
                 continue
             n_matched += len(pi)
-            tgt_score[i, pi] = 1.0
+            if multiclass:
+                tgt_score[i, pi, labels[i][gi].to(dev)] = 1.0
+            else:
+                tgt_score[i, pi] = 1.0
 
             p, g = pred_boxes[i][pi], gt[gi]
             l1_all.append(F.l1_loss(p, g, reduction="none").sum(-1))
@@ -82,6 +108,20 @@ class SetCriterion:
         loss_l1 = torch.cat(l1_all).sum() / den if l1_all else pred_boxes.sum() * 0.0
         loss_giou = torch.cat(giou_all).sum() / den if giou_all else pred_boxes.sum() * 0.0
 
+        # SUM over every element then / num_matched, exactly as DiffusionDet does.
+        # With a C-way head this sums B*N*C terms rather than B*N, but that is what
+        # DiffusionDet itself does with its 80 classes -- the extra terms are all
+        # well-classified negatives, which focal already drives towards zero. Any
+        # other normalisation would make A.1 and A.2 use different loss scales and
+        # break the comparison.
+        #
+        # EXPECT A HUGE loss_ce AT INITIALISATION and do not "fix" it: with C=80 and
+        # every logit at 0, this term is exactly 80x the 1-D value (measured: 520 vs
+        # 6.5). Focal collapses it as soon as the negatives are pushed down --
+        # measured 520 -> 3.16 at p=0.1 and 0.02 at p=0.02 -- so it falls within the
+        # first epoch. What it does mean is that A.2's early gradients are large, so
+        # gradient clipping matters more there, and that loss_ce is NOT comparable
+        # between A.1 and A.2 in absolute terms. Compare AP and IoU.
         loss_ce = sigmoid_focal_loss(pred_logits, tgt_score).sum() / den
 
         total = W_L1 * loss_l1 + W_GIOU * loss_giou + W_CLASS * loss_ce

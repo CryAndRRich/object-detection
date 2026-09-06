@@ -21,8 +21,9 @@ import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from data.ce130_dataset import CE130Detection, normalize_for_clip  # noqa: E402
-from models.detector import CELocDetector  # noqa: E402
+from data.ce130_dataset import normalize_for_clip  # noqa: E402
+from data.factory import build_dataset  # noqa: E402
+from models.detector import build_model  # noqa: E402
 from models.criterion import SetCriterion  # noqa: E402
 from utils.diffusion_math import prepare_diffusion_concat  # noqa: E402
 
@@ -43,20 +44,15 @@ def main():
     dev = torch.device(a.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     torch.manual_seed(0)
 
-    ds = CE130Detection(cfg["data"]["root"], "train", cfg["data"]["image_size"])
+    ds = build_dataset(cfg, "train")
     m = ds[a.index]
     px = torch.from_numpy(normalize_for_clip(m["image"])).unsqueeze(0).to(dev)
     gt = torch.from_numpy(m["boxes"]).float().to(dev)
+    lab = torch.from_numpy(m["labels"]).long().to(dev)
     print(f"[image] {m['image_id']} '{m['text']}' | {len(gt)} GT | N={a.num_proposals} "
           f"| t={a.t}", flush=True)
 
-    model = CELocDetector(
-        cfg["model"]["clip_name"], cfg["model"]["d_model"], cfg["model"]["n_layer"],
-        cfg["model"]["n_head"], cfg["data"]["image_size"],
-        cfg["diffusion"]["num_timesteps"], cfg["diffusion"]["snr_scale"],
-        cfg["diffusion"]["sampling_steps"], 0.0, cfg["model"]["freeze_clip"],
-    ,
-        roi_k=cfg["model"].get("roi_k", 0)).to(dev)
+    model = build_model(cfg, dropout=0.0).to(dev)
     model.train()
     crit = SetCriterion(cfg["matcher"]["method"])
     trainable = [p for p in model.parameters() if p.requires_grad]
@@ -78,7 +74,7 @@ def main():
     first_loss, history = None, []
     for i in range(a.steps):
         pb, lg = model(x_t, tt, patch_raw=patch_raw, text_raw=text_raw)
-        loss, st, _ = crit(pb, lg, [gt])
+        loss, st, _ = crit(pb, lg, [gt], labels=[lab])
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()

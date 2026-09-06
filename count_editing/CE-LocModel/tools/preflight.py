@@ -30,9 +30,10 @@ import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from data.ce130_dataset import CE130Detection, PatchCache, normalize_for_clip  # noqa: E402
+from data.ce130_dataset import PatchCache, normalize_for_clip  # noqa: E402
+from data.factory import build_dataset  # noqa: E402
 from models.criterion import SetCriterion  # noqa: E402
-from models.detector import CELocDetector  # noqa: E402
+from models.detector import build_model  # noqa: E402
 
 OK, BAD = "[ok]", "[FAIL]"
 failures = []
@@ -70,19 +71,18 @@ def main():
     print("=" * 78, flush=True)
 
     # ---------------------------------------------------------------- datasets
-    print("\n[1/6] datasets", flush=True)
+    print("\n[1/7] datasets", flush=True)
     ds = {}
     for split in ["train", "val"]:
         check(f"load {split}",
-              lambda s=split: (ds.__setitem__(s, CE130Detection(
-                  cfg["data"]["root"], s, cfg["data"]["image_size"],
-                  cfg["data"]["flip_prob"] if s == "train" else 0.0,
+              lambda s=split: (ds.__setitem__(s, build_dataset(
+                  cfg, s, cfg["data"]["flip_prob"] if s == "train" else 0.0,
                   seed=cfg["training"]["seed"])), ds[s].stats())[1])
     if len(ds) < 2:
         print("\nCannot continue without both splits."); return _finish()
 
     # ------------------------------------------------------------------ cache
-    print("\n[2/6] cache completeness  (a KeyError here would fire mid-training)",
+    print("\n[2/7] cache completeness  (a KeyError here would fire mid-training)",
           flush=True)
     caches = {}
     if a.cache:
@@ -122,17 +122,11 @@ def main():
         print("  (skipped: no --cache given)")
 
     # ------------------------------------------------------------------ model
-    print("\n[3/6] model", flush=True)
+    print("\n[3/7] model", flush=True)
     model = {}
 
     def _build():
-        m = CELocDetector(
-            cfg["model"]["clip_name"], cfg["model"]["d_model"], cfg["model"]["n_layer"],
-            cfg["model"]["n_head"], cfg["data"]["image_size"],
-            cfg["diffusion"]["num_timesteps"], cfg["diffusion"]["snr_scale"],
-            cfg["diffusion"]["sampling_steps"], cfg["model"]["dropout"],
-            cfg["model"]["freeze_clip"],
-        roi_k=cfg["model"].get("roi_k", 0)).to(dev)
+        m = build_model(cfg, dropout=None).to(dev)
         model["m"] = m
         tr = sum(p.numel() for p in m.parameters() if p.requires_grad)
         return f"{tr/1e6:.2f}M trainable / {sum(p.numel() for p in m.parameters())/1e6:.1f}M"
@@ -151,12 +145,14 @@ def main():
     check("CLIP is frozen (else ~19 GB backward -> OOM)", _frozen)
 
     # ------------------------------------------- one real train step, per split
-    print("\n[4/6] one real step on the LARGEST images of each split", flush=True)
+    print("\n[4/7] one real step on the LARGEST images of each split", flush=True)
 
     def _batch(split, idxs):
         """Build a batch exactly the way TorchWrap+collate does."""
         samples = [ds[split][i] for i in idxs]
         tg = [torch.from_numpy(s["boxes"]).float().to(dev) for s in samples]
+        # A.2's C-way head needs the class of each GT; A/B ignore it.
+        tl = [torch.from_numpy(s["labels"]).long().to(dev) for s in samples]
         vh = [s["valid_h"] for s in samples]
         if split in caches:
             c = caches[split]
@@ -180,7 +176,7 @@ def main():
             tg, vh, kw = _batch(sp, ix)
             x_t, tt, _ = m.build_inputs(tg, N, vh)
             pb, lg = m(x_t, tt, **kw)
-            loss, st, _ = crit(pb, lg, tg)
+            loss, st, _ = crit(pb, lg, tg, labels=tl)
             if not torch.isfinite(loss):
                 raise ValueError(f"loss is not finite: {loss}")
             loss.backward()
@@ -190,7 +186,7 @@ def main():
         check(f"{split}: forward+backward on the {B} biggest images", _step)
 
     # ------------------------------------------------ the val loop that crashed
-    print("\n[5/6] the val loop (this is what died twice)", flush=True)
+    print("\n[5/7] the val loop (this is what died twice)", flush=True)
 
     def _val():
         tg, vh, kw = _batch("val", list(range(B)))
@@ -200,7 +196,7 @@ def main():
         with torch.no_grad():
             x_t, tt, _ = m.build_inputs(tg, N, vh, generator=g)
             pb, lg = m(x_t, tt, **kw)
-            _, st, _ = crit(pb, lg, tg)
+            _, st, _ = crit(pb, lg, tg, labels=tl)
         return f"val step OK, loss {st['loss']:.3f}, seeded generator on {dev.type}"
     check("seeded generator through build_inputs (device match)", _val)
 
@@ -213,7 +209,7 @@ def main():
             with torch.no_grad():
                 x_t, tt, _ = m.build_inputs(tg, N, vh, generator=g)
                 pb, lg = m(x_t, tt, **kw)
-                out.append(crit(pb, lg, tg)[1]["loss"])
+                out.append(crit(pb, lg, tg, labels=tl)[1]["loss"])
         if abs(out[0] - out[1]) > 1e-4:
             raise ValueError(f"same seed gave {out[0]:.6f} vs {out[1]:.6f} — val loss "
                              f"will not be comparable across epochs")
@@ -232,8 +228,91 @@ def main():
         return f"eval N={cfg['diffusion']['num_proposals_eval']} -> {tuple(b.shape)} in [0,1]"
     check("ddim_sample at eval N (used by eval.py)", _ddim)
 
+    # ------------------------------------------------- experiment-specific wiring
+    #
+    # These do not check that the code RUNS -- the sections above already did that.
+    # They check that it runs the experiment that was actually intended. Every one
+    # of them corresponds to a way a run could finish cleanly and answer the wrong
+    # question, which costs a full training budget to discover.
+    print("\n[6/7] experiment wiring", flush=True)
+
+    exp = str(cfg.get("experiment", "?"))
+    n_class = cfg["model"].get("n_class", 1)
+    use_text = cfg["model"].get("use_text", True)
+
+    def _wiring():
+        if (n_class > 1) != (not use_text):
+            raise ValueError(f"n_class={n_class} with use_text={use_text}: the class "
+                             f"would reach the model through both paths or neither")
+        if not use_text:
+            if m.encoder.text is not None or m.encoder.proj_text is not None:
+                raise ValueError("use_text=False but the text tower was still built")
+            if any("encoder.text" in k for k in m.state_dict()):
+                raise ValueError("text parameters present in state_dict")
+        return (f"experiment {exp}: n_class={n_class} use_text={use_text} "
+                f"roi_k={cfg['model'].get('roi_k', 0)}")
+    check("class pathway matches the config", _wiring)
+
+    def _text_ignored():
+        """A.2's central claim: the class never enters through the input."""
+        if use_text:
+            return "n/a (text conditioning is ON)"
+        px = torch.zeros(1, 3, cfg["data"]["image_size"], cfg["data"]["image_size"],
+                         device=dev)
+        m.eval()
+        with torch.no_grad():
+            a = m.encoder(px, ["dog"])
+            b2 = m.encoder(px, ["fire hydrant"])
+        if not torch.equal(a, b2):
+            raise ValueError("memory changed with the text -> A.2 is reading it")
+        return "two different texts -> identical memory"
+    check("A.2 truly ignores text", _text_ignored)
+
+    def _labels():
+        """Labels must be contiguous 0..n_class-1 and row-aligned with boxes. COCO's
+        own ids run 1..90 with gaps; indexing a head with those is out of range for
+        some and silently wrong for the rest."""
+        bad, seen = 0, set()
+        for split in ("train", "val"):
+            for i in range(0, len(ds[split]), max(len(ds[split]) // 200, 1)):
+                r = ds[split].__getitem__(i, need_image=False)
+                if len(r["labels"]) != len(r["boxes"]):
+                    bad += 1
+                if len(r["labels"]):
+                    lo, hi = int(r["labels"].min()), int(r["labels"].max())
+                    if lo < 0 or hi >= n_class:
+                        raise ValueError(f"label {lo}..{hi} outside 0..{n_class-1}")
+                    seen.update(r["labels"].tolist())
+        if bad:
+            raise ValueError(f"{bad} samples have labels not aligned with boxes")
+        if n_class > 1 and len(seen) < n_class * 0.6:
+            raise ValueError(f"only {len(seen)}/{n_class} classes seen in the sample "
+                             f"— the id mapping looks wrong")
+        return f"aligned, {len(seen)} distinct class(es) in 0..{n_class-1}"
+    check("labels aligned and in range", _labels)
+
+    def _same_mapping():
+        """A checkpoint trained on one split is evaluated on another. If the class
+        orderings differed, every predicted class would be wrong on eval and nothing
+        would crash."""
+        a2 = getattr(ds["train"], "cat_ids", None)
+        if not a2:
+            return "n/a (single-class dataset)"
+        if ds["train"].cat_ids != ds["val"].cat_ids:
+            raise ValueError("train and val disagree on the class index mapping")
+        return f"{len(a2)} ids identical across splits"
+    check("class mapping identical across splits", _same_mapping)
+
+    def _budget():
+        """A.1 and A.2 must see the same number of image-views, or the comparison
+        measures compute instead of conditioning."""
+        views = cfg["training"]["epochs"] * len(ds["train"])
+        return (f"{cfg['training']['epochs']} epochs x {len(ds['train'])} = "
+                f"{views:,} image-views")
+    check("training budget in image-views", _budget)
+
     # ------------------------------------------------------- memory + writability
-    print("\n[6/6] resources", flush=True)
+    print("\n[7/7] resources", flush=True)
     if dev.type == "cuda":
         def _mem():
             gb = torch.cuda.max_memory_allocated() / 1e9

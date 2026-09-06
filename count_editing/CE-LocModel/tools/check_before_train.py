@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""ONE command to run before committing GPU hours. Nothing here needs a GPU.
+
+    python3 tools/check_before_train.py
+
+It runs three things in order, cheapest first, and stops at the first failure:
+
+  1. the test suite                     (~2 min, CPU)
+  2. one real training step per config   (~1 min each, CPU, real data)
+  3. a cross-config comparison           (instant)
+
+WHY A SEPARATE SCRIPT FROM tools/preflight.py
+  preflight runs ON THE SERVER, needs the GPU, and answers "will this run survive
+  the next 4 hours". This runs on the LAPTOP before pushing, and answers "is this
+  the experiment I think it is". They overlap deliberately: the cheap one should
+  catch what it can before the expensive one is even reachable.
+
+STEP 2 EXISTS BECAUSE UNIT TESTS MISSED A REAL BUG. Every dataset test passed
+while training died immediately on `KeyError: 'labels'` in collate -- the dataset
+returned the key, the wrapper did not forward it, and nothing exercised the two
+together. Only an actual step through DataLoader -> collate -> model -> loss ->
+backward covers that seam, so that is what this does.
+"""
+
+import argparse
+import os
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+CONFIGS = ["config/experiment_a.yaml", "config/experiment_b.yaml",
+           "config/experiment_a1.yaml", "config/experiment_a2.yaml"]
+
+failures = []
+
+
+def head(title):
+    print("\n" + "=" * 78, flush=True)
+    print(f"  {title}", flush=True)
+    print("=" * 78, flush=True)
+
+
+def report(name, ok, detail=""):
+    print(f"  {'[ok]  ' if ok else '[FAIL]'} {name:46s} {detail}", flush=True)
+    if not ok:
+        failures.append(name)
+    return ok
+
+
+def run_tests(python):
+    head("1/3  test suite")
+    t0 = time.time()
+    r = subprocess.run([python, "-m", "pytest", "tests/", "-q", "--no-header"],
+                       capture_output=True, text=True)
+    tail = [l for l in r.stdout.strip().splitlines() if l.strip()][-1:]
+    ok = r.returncode == 0
+    report("pytest tests/", ok, f"{tail[0] if tail else ''}  ({time.time()-t0:.0f}s)")
+    if not ok:
+        for line in r.stdout.splitlines():
+            if line.startswith("FAILED") or line.startswith("ERROR"):
+                print(f"        {line}", flush=True)
+    return ok
+
+
+def one_step(cfg_path):
+    """A real batch through DataLoader -> collate -> model -> loss -> backward.
+
+    Deliberately NOT a hand-built tensor: the bug this catches lived in the seam
+    between the dataset and the training loop, which a synthetic batch skips.
+    """
+    import numpy as np
+    import torch
+    import yaml
+    from torch.utils.data import DataLoader
+
+    from data.factory import build_dataset
+    from models.criterion import SetCriterion
+    from models.detector import build_model
+    from train import TorchWrap, collate
+
+    with open(cfg_path) as f:
+        cfg = yaml.safe_load(f)
+
+    ds = build_dataset(cfg, "train", cfg["data"]["flip_prob"], seed=0)
+    n_total = len(ds)
+    ds.items = ds.items[:4]
+    loader = DataLoader(TorchWrap(ds), batch_size=2, collate_fn=collate, num_workers=0)
+    batch = next(iter(loader))
+    for k in ("boxes", "labels", "text", "valid_h", "image_id"):
+        if k not in batch:
+            raise KeyError(f"collate dropped {k!r}")
+
+    model = build_model(cfg)
+    model.train()
+    tg = [b for b in batch["boxes"]]
+    tl = [l for l in batch["labels"]]
+    for b_, l_ in zip(tg, tl):
+        if b_.shape[0] != l_.shape[0]:
+            raise ValueError(f"labels {l_.shape} not aligned with boxes {b_.shape}")
+
+    N = cfg["diffusion"]["num_proposals_train"]
+    x_t, tt, _ = model.build_inputs(tg, N, batch["valid_h"])
+    pb, lg = model(x_t, tt, pixel_values=batch["pixel_values"], texts=batch["text"])
+
+    n_class = cfg["model"].get("n_class", 1)
+    want = (2, N) if n_class == 1 else (2, N, n_class)
+    if tuple(lg.shape) != want:
+        raise ValueError(f"logits {tuple(lg.shape)}, expected {want}")
+    if not (torch.isfinite(pb).all() and (pb >= 0).all() and (pb <= 1).all()):
+        raise ValueError(f"boxes outside [0,1]: [{pb.min():.3f}, {pb.max():.3f}]")
+
+    crit = SetCriterion(cfg["matcher"]["method"])
+    loss, st, _ = crit(pb, lg, tg, labels=tl)
+    if not torch.isfinite(loss):
+        raise ValueError(f"loss is {loss}")
+    loss.backward()
+    grads = [p.grad for p in model.parameters() if p.requires_grad and p.grad is not None]
+    if not grads:
+        raise ValueError("backward produced no gradients")
+    if not all(torch.isfinite(g).all() for g in grads):
+        raise ValueError("non-finite gradient")
+
+    # Sanity on the class pathway, cheap and it catches a mis-wired config.
+    use_text = cfg["model"].get("use_text", True)
+    if not use_text and model.encoder.text is not None:
+        raise ValueError("use_text=false but the text tower was built")
+
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return (f"n={n_total:,} loss={float(loss):8.2f} matched={st['n_matched']:3d} "
+            f"iou={st['iou_matched']:.3f} params={trainable/1e6:.2f}M "
+            f"grads={len(grads)}")
+
+
+def compare_configs():
+    """The comparisons only mean something if the runs differ where intended and
+    nowhere else. Checked here rather than trusted to review."""
+    import yaml
+
+    head("3/3  cross-config comparison")
+    cfgs = {}
+    for p in CONFIGS:
+        with open(p) as f:
+            cfgs[os.path.basename(p)] = yaml.safe_load(f)
+    a, b = cfgs["experiment_a.yaml"], cfgs["experiment_b.yaml"]
+    a1, a2 = cfgs["experiment_a1.yaml"], cfgs["experiment_a2.yaml"]
+    D = {"n_class": 1, "use_text": True, "roi_k": 0}
+
+    def model_diff(x, y):
+        return {k for k in set(x["model"]) | set(y["model"])
+                if x["model"].get(k, D.get(k)) != y["model"].get(k, D.get(k))}
+
+    report("B differs from A only in roi_k", model_diff(a, b) == {"roi_k"},
+           str(model_diff(a, b)))
+    report("A.1 model identical to A", model_diff(a, a1) == set(),
+           str(model_diff(a, a1)) or "identical")
+    report("A.2 differs from A.1 only in the class pathway",
+           model_diff(a1, a2) == {"n_class", "use_text"}, str(model_diff(a1, a2)))
+    for s in ("diffusion", "loss", "matcher", "eval"):
+        report(f"{s} identical across all four", len({str(c[s]) for c in cfgs.values()}) == 1)
+
+    # Budget: A.1 has 73,531 samples, A.2 only 25,000. Equal EPOCHS would give A.1
+    # ~3x the compute, and the comparison would measure budget, not conditioning.
+    v1 = a1["training"]["epochs"] * 73531
+    v2 = a2["training"]["epochs"] * 25000
+    report("A.1 and A.2 matched in image-views", abs(v1 - v2) / v1 < 0.02,
+           f"{v1:,} vs {v2:,} ({100*abs(v1-v2)/v1:.1f}% apart)")
+    report("AMP off everywhere (project rule)",
+           not any(c["training"]["amp"] for c in cfgs.values()))
+    report("save_dirs are distinct",
+           len({c["training"]["save_dir"] for c in cfgs.values()}) == len(cfgs))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--python", default=sys.executable)
+    ap.add_argument("--skip-tests", action="store_true",
+                    help="skip step 1 (it is the slow one) — use while iterating")
+    ap.add_argument("--configs", nargs="*", default=CONFIGS)
+    a = ap.parse_args()
+
+    t0 = time.time()
+    if not a.skip_tests and not run_tests(a.python):
+        print("\nTests failed — fix them before looking at anything else.")
+        return 1
+
+    head("2/3  one real training step per config  (data -> collate -> loss -> backward)")
+    for p in a.configs:
+        if not os.path.exists(p):
+            report(os.path.basename(p), False, "config not found")
+            continue
+        try:
+            report(os.path.basename(p), True, one_step(p))
+        except Exception as e:                                    # noqa: BLE001
+            report(os.path.basename(p), False, f"{type(e).__name__}: {e}")
+
+    compare_configs()
+
+    print("\n" + "=" * 78)
+    if failures:
+        print(f"NOT READY — {len(failures)} check(s) failed:")
+        for f in failures:
+            print(f"  - {f}")
+        print("=" * 78)
+        return 1
+    print(f"ALL CHECKS PASSED in {time.time()-t0:.0f}s — push, then run "
+          f"tools/preflight.py on the server.")
+    print("=" * 78)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -35,7 +35,16 @@ __all__ = ["CLIPConditionEncoder"]
 
 class CLIPConditionEncoder(nn.Module):
     def __init__(self, model_name="openai/clip-vit-base-patch16", d_model=256,
-                 image_size=512, freeze=True):
+                 image_size=512, freeze=True, use_text=True):
+        """`use_text=False` is EXPERIMENT A.2: memory carries patches only and the
+        text tower is never built, so the model CANNOT read the class from its
+        input and must predict it from the image through an 80-way head instead.
+
+        The tower is dropped rather than merely ignored: leaving it in place would
+        register frozen parameters that appear in the checkpoint and in every
+        parameter count, making A.1 and A.2 look different for a reason that has
+        nothing to do with the experiment.
+        """
         super().__init__()
         from transformers import CLIPModel, CLIPTokenizer
 
@@ -54,8 +63,9 @@ class CLIPConditionEncoder(nn.Module):
                   "you OOM, lower batch_size or upgrade transformers >= 4.45.",
                   flush=True)
 
+        self.use_text = use_text
         self.vision = clip.vision_model
-        self.text = clip.text_model
+        self.text = clip.text_model if use_text else None
         self.image_size = image_size
         self.patch = self.vision.config.patch_size
         self.grid = image_size // self.patch
@@ -64,10 +74,11 @@ class CLIPConditionEncoder(nn.Module):
         if freeze:
             for p in self.vision.parameters():
                 p.requires_grad = False
-            for p in self.text.parameters():
-                p.requires_grad = False
             self.vision.eval()
-            self.text.eval()
+            if self.text is not None:
+                for p in self.text.parameters():
+                    p.requires_grad = False
+                self.text.eval()
         self.frozen = freeze
 
         self._resize_pos_embed()
@@ -76,11 +87,13 @@ class CLIPConditionEncoder(nn.Module):
         # an adapter (a transformer adapter on patch tokens is deliberately
         # deferred).
         d_vis = self.vision.config.hidden_size
-        d_txt = self.text.config.hidden_size
         self.proj_patch = nn.Linear(d_vis, d_model)
         # NO trailing Mish unlike the original — it distorts CLIP's semantic
         # space, exactly what must be preserved for zero-shot.
-        self.proj_text = nn.Linear(d_txt, d_model)
+        # Built only with the text tower, so A.2's parameter count reflects a model
+        # that genuinely has no text path rather than one carrying a dead layer.
+        self.proj_text = (nn.Linear(self.text.config.hidden_size, d_model)
+                          if self.text is not None else None)
 
     def _resize_pos_embed(self):
         """Interpolate the positional embedding 14x14 -> grid x grid (CLS kept)."""
@@ -124,13 +137,17 @@ class CLIPConditionEncoder(nn.Module):
 
     @torch.no_grad()
     def encode_text_raw(self, texts, device):
+        if self.text is None:
+            raise RuntimeError("encode_text_raw called with use_text=False "
+                               "(EXPERIMENT A.2 has no text tower)")
         """List[str] -> [B, 1, d_txt]. Input is a single word, so pooling loses nothing."""
         tok = self.tokenizer(texts, padding=True, truncation=True, return_tensors="pt").to(device)
         return self.text(**tok).pooler_output.unsqueeze(1)
 
     def forward(self, pixel_values=None, texts=None, patch_raw=None, text_raw=None,
                 return_patch_raw=False):
-        """Returns memory [B, 1 + num_patches, d_model] = [text; patches...].
+        """Returns memory [B, 1 + num_patches, d_model] = [text; patches...],
+        or [B, num_patches, d_model] when `use_text=False` (EXPERIMENT A.2).
 
         Accepts `patch_raw`/`text_raw` to use the CACHE (removing the per-epoch
         ViT cost entirely). The time token is prepended later by the model, not here.
@@ -141,11 +158,16 @@ class CLIPConditionEncoder(nn.Module):
         """
         if patch_raw is None:
             patch_raw = self.encode_image_raw(pixel_values)
-        if text_raw is None:
-            dev = patch_raw.device
-            text_raw = self.encode_text_raw(texts, dev)
-
         patch = self.proj_patch(patch_raw.to(self.proj_patch.weight.dtype))
+
+        if not self.use_text:
+            # `texts` is accepted and IGNORED here on purpose: the training loop
+            # stays identical across experiments, and A.2's whole claim is that the
+            # class never reaches the model through its input.
+            return (patch, patch_raw) if return_patch_raw else patch
+
+        if text_raw is None:
+            text_raw = self.encode_text_raw(texts, patch_raw.device)
         text = self.proj_text(text_raw.to(self.proj_text.weight.dtype))
         memory = torch.cat([text, patch], dim=1)
         return (memory, patch_raw) if return_patch_raw else memory
@@ -156,5 +178,6 @@ class CLIPConditionEncoder(nn.Module):
         super().train(mode)
         if self.frozen:
             self.vision.eval()
-            self.text.eval()
+            if self.text is not None:
+                self.text.eval()
         return self

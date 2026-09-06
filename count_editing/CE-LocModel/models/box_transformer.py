@@ -84,10 +84,17 @@ class SinusoidalTimeEmbedding(nn.Module):
 class BoxTransformer(nn.Module):
     def __init__(self, d_model=256, n_layer=6, n_head=8, coord_dim=64,
                  dim_feedforward=None, dropout=0.1, max_cond_len=1152,
-                 roi_k=0, roi_dim=768):
+                 roi_k=0, roi_dim=768, n_class=1):
         """`roi_k > 0` turns on EXPERIMENT B: each box additionally reads the frozen
         patch features sampled on a roi_k x roi_k grid INSIDE itself. roi_k=0 keeps
-        experiment A's behaviour exactly."""
+        experiment A's behaviour exactly.
+
+        `n_class > 1` turns on EXPERIMENT A.2: the score head predicts WHICH of
+        n_class categories the box holds, instead of "does this box match the one
+        text I was given". A.2 also drops the text token from memory, so the class
+        identity travels through the OUTPUT head rather than the INPUT text -- that
+        one swap is the whole experiment. n_class=1 keeps A/B untouched.
+        """
         super().__init__()
         self.d_model = d_model
         self.roi_k = roi_k
@@ -117,7 +124,11 @@ class BoxTransformer(nn.Module):
         self.ln_f = nn.LayerNorm(d_model)
 
         self.box_head = nn.Linear(d_model, 4)      # DIRECT coordinates (not a delta)
-        self.score_head = nn.Linear(d_model, 1)    # 1 dim: sigmoid == 2-dim softmax
+        # n_class=1 (A/B): sigmoid == a 2-dim softmax, "does this box match the text".
+        # n_class=80 (A.2): one logit per COCO category, background = every logit low
+        # -- exactly DiffusionDet's 80-not-81 convention.
+        self.n_class = n_class
+        self.score_head = nn.Linear(d_model, n_class)
 
         # EXPERIMENT B. Zero-initialised, so at step 0 this contributes nothing and
         # B is numerically identical to A -- the comparison changes one variable.
@@ -155,4 +166,7 @@ class BoxTransformer(nn.Module):
 
         # CHANGE (b): NO masks at all
         h = self.ln_f(self.decoder(tgt=tgt, memory=mem))
-        return self.box_head(h).sigmoid(), self.score_head(h).squeeze(-1)
+        logits = self.score_head(h)
+        # [B,N] for n_class=1 so A/B keep their exact tensor shapes; [B,N,C] for A.2.
+        return self.box_head(h).sigmoid(), (logits.squeeze(-1) if self.n_class == 1
+                                            else logits)

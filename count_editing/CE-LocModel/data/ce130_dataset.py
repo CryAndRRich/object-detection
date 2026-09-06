@@ -150,6 +150,11 @@ class CE130Detection:
         return {
             "image": canvas,                 # uint8 [512,512,3], CLIP-mean padded
             "boxes": boxes,                  # cxcywh [0,1] — CANONICAL
+            # Always class 0: CE-130 images hold exactly one class (3,598/3,598) and
+            # the model is conditioned on the text, not on a class index. Present so
+            # every dataset returns the same keys and the training loop needs no
+            # per-dataset branch.
+            "labels": np.zeros(len(boxes), dtype=np.int64),
             "text": it["text"],              # single-word category name
             "valid_h": valid_h,              # real-image boundary (bounds placeholders)
             "image_id": it["image_id"],

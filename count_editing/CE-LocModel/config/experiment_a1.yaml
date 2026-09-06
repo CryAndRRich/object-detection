@@ -1,0 +1,110 @@
+# EXPERIMENT A.1 — the CONTROL run: EXPERIMENT A's model, unchanged, on COCO.
+#
+# Only the DATA moves. Model, loss, matcher, diffusion, N: identical to A.
+# If a difference shows up, the data caused it -- that is the entire point, and
+# it is why nothing else here may be "improved" at the same time.
+#
+# WHAT IT ANSWERS
+#   A/B scored AP50 ~0.015 on CE-130 with four causes stacked and inseparable:
+#     (1) the code/design is wrong        <- A.1 isolates THIS
+#     (2) zero-shot (train 72 / test 28 classes, overlap ZERO)
+#     (3) 1,911 training images
+#     (4) tiny, very dense objects
+#   COCO removes (2) and (3): 80 classes shared train/eval, 73,531 samples.
+#
+# THRESHOLDS, FIXED BEFORE THE RUN (otherwise any number can be rationalised):
+#     AP50 < 0.05     the stack is broken -> stop CE-Loc work and fix it
+#     AP50 0.05-0.15  the stack works, the architecture is just small
+#     AP50 > 0.15     the stack is fine -> CE-130's score is the TASK, not a bug
+#   Reference: DiffusionDet R50 reaches ~30 AP on these same 25K images -- but
+#   with FPN, RoIAlign, 6 supervised stages and a trainable backbone. Listed to
+#   show the architectural gap, NOT as a target.
+#
+# READ AP50 ONLY, NOT RAW PRECISION. COCO holds 2.47 boxes per (image, class)
+# pair versus CE-130's 37.6, so with N=100 the structural precision ceiling
+# min(M,N)/N is ~0.01 here against ~0.376 there. AP is unaffected; raw precision
+# is not comparable across the two.
+
+experiment: "A.1"
+description: "EXPERIMENT A model, unchanged, on COCO-minitrain (80 shared classes, 73,531 image-class pairs)"
+
+data:
+  dataset: "coco"          # the ONLY line that differs in kind from A
+  root: "../../data"       # factory appends coco_minitrain/... and coco/...
+                           # train -> minitrain 25K (73,531 pairs)
+                           # val|test -> val2017 (14,631 pairs from 4,952 images)
+  image_size: 512          # same as A. COCO objects are larger (area median
+                           # 0.85 % vs CE-130's 0.41 %) so 512 is not required
+                           # here -- but changing it would add a second variable.
+  flip_prob: 0.5
+  num_workers: 8
+  min_boxes: 1             # keep every pair. Raising this to 3 (18,057 pairs,
+                           # mean 6.3 boxes) moves COCO towards CE-130's density
+                           # and is a SEPARATE experiment, not a tweak to this one.
+  per_class: true          # one sample per (image, class) -> 73,531 samples. Stated
+                           # explicitly rather than left to the default so the diff
+                           # against A.2 shows the choice instead of an absence.
+
+# ---- everything below is byte-identical to experiment_a.yaml ----------------
+
+model:
+  clip_name: "openai/clip-vit-base-patch16"
+  freeze_clip: true
+  d_model: 256
+  n_layer: 6
+  n_head: 8
+  dropout: 0.1
+  # NO roi_k: this is A's model, not B's.
+  n_class: 1               # 1-D score: "does this box match the text I was given".
+                           # A.2 sets 80 and drops the text; stated here so the
+                           # difference between the two is visible in the diff.
+  use_text: true
+
+diffusion:
+  num_timesteps: 1000
+  schedule: "cosine"
+  snr_scale: 2.0
+  sampling_steps: 4
+  num_proposals_train: 100 # UNCHANGED even though COCO averages 2.47 GT/pair and
+                           # 100 would be ~97 % placeholders. Lowering N would be
+                           # the sensible choice for scoring well on COCO, and
+                           # exactly the wrong choice for a control run.
+  num_proposals_eval: 300
+
+loss:
+  l1: 5.0
+  giou: 2.0
+  cls: 2.0
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+
+matcher:
+  method: "hungarian"
+  use_center_prior: false
+  center_radius: 2.5
+
+training:
+  batch_size: 32           # RAISED from A's 8, for time, not for quality. A.1 has
+                           # 73,531 samples against 1,911: at batch 8 one epoch is
+                           # 9,192 steps (~11-38 min). At 32 it is 2,298 (~3-10
+                           # min). Measured earlier on this stack, batch 32 is 18 %
+                           # cheaper PER IMAGE than batch 8. Memory is not the
+                           # constraint (decoder ~0.8 GB, CLIP ~1 GB with sdpa).
+  lr: 1.0e-4               # kept at A's value despite the 4x batch. The usual
+                           # linear-scaling rule would say 4e-4, but that changes
+                           # two things at once; if A.1 underperforms, re-running
+                           # with 4e-4 is the single-variable follow-up.
+  weight_decay: 1.0e-4
+  epochs: 20                # 20 x 73,531 = 1.47M sample-views = 2.6x what A saw in
+                           # ALL 300 of its epochs. Wall clock ~2-5 h on one A30.
+                           # NOT comparable to A epoch-for-epoch -- compare
+                           # sample-views, and say so when reporting.
+  save_dir: "checkpoints/experiment_a1/"
+  seed: 42
+  amp: false               # PROJECT RULE: never enable AMP
+
+eval:
+  topk: 100
+  nms_iou: 0.5
+  box_renewal: false
+  use_ensemble: false

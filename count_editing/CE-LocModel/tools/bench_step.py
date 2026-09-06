@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data.ce130_dataset import CE130Detection, PatchCache  # noqa: E402
 from models.criterion import SetCriterion  # noqa: E402
-from models.detector import CELocDetector  # noqa: E402
+from models.detector import build_model  # noqa: E402
 from train import TorchWrap, collate, model_inputs  # noqa: E402
 
 
@@ -107,13 +107,7 @@ def main():
     loader = DataLoader(TorchWrap(ds, cache), batch_size=B, shuffle=True,
                         drop_last=True, **dl_kw)
 
-    model = CELocDetector(
-        cfg["model"]["clip_name"], cfg["model"]["d_model"], cfg["model"]["n_layer"],
-        cfg["model"]["n_head"], cfg["data"]["image_size"],
-        cfg["diffusion"]["num_timesteps"], cfg["diffusion"]["snr_scale"],
-        cfg["diffusion"]["sampling_steps"], cfg["model"]["dropout"],
-        cfg["model"]["freeze_clip"],
-        roi_k=cfg["model"].get("roi_k", 0)).to(dev)
+    model = build_model(cfg, dropout=None).to(dev)
     model.train()
     crit = SetCriterion(cfg["matcher"]["method"])
     trainable = [p for p in model.parameters() if p.requires_grad]
@@ -131,6 +125,7 @@ def main():
 
         with T("2 batch -> gpu"):
             tg = [b.to(dev, non_blocking=True) for b in batch["boxes"]]
+            tl = [l.to(dev, non_blocking=True) for l in batch["labels"]]
             kw = model_inputs(batch, dev)
 
         with T("3 build_inputs (diffusion)"):
@@ -145,7 +140,7 @@ def main():
             pb, lg = model.decoder(decode_diffusion(x_t, model.snr_scale), tt, mem)
 
         with T("6 criterion (matcher, CPU)"):
-            loss, st, _ = crit(pb, lg, tg)
+            loss, st, _ = crit(pb, lg, tg, labels=tl)
 
         with T("7 backward"):
             opt.zero_grad(set_to_none=True)

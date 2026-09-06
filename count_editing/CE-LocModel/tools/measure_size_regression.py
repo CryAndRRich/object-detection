@@ -71,8 +71,9 @@ import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from data.ce130_dataset import CE130Detection, normalize_for_clip  # noqa: E402
-from models.detector import CELocDetector  # noqa: E402
+from data.ce130_dataset import normalize_for_clip  # noqa: E402
+from data.factory import build_dataset  # noqa: E402
+from models.detector import build_model  # noqa: E402
 from utils.box_ops_np import box_iou, cxcywh_to_xyxy  # noqa: E402
 from eval import nms_class_agnostic  # noqa: E402
 
@@ -144,7 +145,7 @@ def main():
     N = a.num_proposals or cfg["diffusion"]["num_proposals_eval"]
     out_path = a.out or (os.path.splitext(a.ckpt)[0] + f"_sizecheck_{a.split}.json")
 
-    ds = CE130Detection(cfg["data"]["root"], a.split, cfg["data"]["image_size"])
+    ds = build_dataset(cfg, a.split)
     if a.limit:
         ds.items = ds.items[: a.limit]
 
@@ -162,13 +163,7 @@ def main():
         print(f"  {k:22s} {v}", flush=True)
     print("=" * 78, flush=True)
 
-    model = CELocDetector(
-        cfg["model"]["clip_name"], cfg["model"]["d_model"], cfg["model"]["n_layer"],
-        cfg["model"]["n_head"], cfg["data"]["image_size"],
-        cfg["diffusion"]["num_timesteps"], cfg["diffusion"]["snr_scale"],
-        cfg["diffusion"]["sampling_steps"], 0.0, cfg["model"]["freeze_clip"],
-        roi_k=cfg["model"].get("roi_k", 0),
-    ).to(dev)
+    model = build_model(cfg, dropout=0.0).to(dev)
     sd = torch.load(a.ckpt, map_location=dev)
     w = sd["model"] if "model" in sd else sd
     missing, unexpected = model.load_state_dict(w, strict=False)

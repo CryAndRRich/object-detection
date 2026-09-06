@@ -58,12 +58,23 @@ class CELocDetector(nn.Module):
     def __init__(self, clip_name="openai/clip-vit-base-patch16", d_model=256,
                  n_layer=6, n_head=8, image_size=512, num_timesteps=1000,
                  snr_scale=2.0, sampling_steps=4, dropout=0.1, freeze_clip=True,
-                 roi_k=0):
+                 roi_k=0, n_class=1, use_text=True):
+        """`n_class`/`use_text` select EXPERIMENT A.2 (n_class=80, use_text=False):
+        the class reaches the model through an 80-way OUTPUT head instead of the
+        INPUT text. Defaults keep A/B byte-identical."""
         super().__init__()
-        self.encoder = CLIPConditionEncoder(clip_name, d_model, image_size, freeze_clip)
+        if (n_class > 1) != (not use_text):
+            raise ValueError(
+                f"n_class={n_class} and use_text={use_text} disagree. A/B are "
+                f"(n_class=1, use_text=True); A.2 is (n_class=80, use_text=False). "
+                f"A mix would leave the class reachable through BOTH paths (or "
+                f"neither), which measures nothing.")
+        self.n_class = n_class
+        self.encoder = CLIPConditionEncoder(clip_name, d_model, image_size,
+                                            freeze_clip, use_text=use_text)
         self.decoder = BoxTransformer(
             d_model, n_layer, n_head, dropout=dropout, roi_k=roi_k,
-            roi_dim=self.encoder.vision.config.hidden_size)
+            roi_dim=self.encoder.vision.config.hidden_size, n_class=n_class)
 
         self.num_timesteps = num_timesteps
         self.snr_scale = snr_scale
@@ -150,3 +161,23 @@ class CELocDetector(nn.Module):
                    + sigma * torch.randn(img.shape, device=dev, generator=generator))
 
         return boxes, logits
+
+
+def build_model(cfg, dropout=None):
+    """Config -> CELocDetector. ONE construction site for every entry point.
+
+    Six scripts were each spelling out the same eleven arguments; adding
+    EXPERIMENT A.2's `n_class`/`use_text` to all of them by hand is exactly how a
+    tool ends up quietly building a DIFFERENT model than the one being trained.
+
+    `dropout=0.0` is passed by eval/visualise/measure tools; training passes None
+    to take the config's value.
+    """
+    m = cfg["model"]
+    return CELocDetector(
+        m["clip_name"], m["d_model"], m["n_layer"], m["n_head"],
+        cfg["data"]["image_size"], cfg["diffusion"]["num_timesteps"],
+        cfg["diffusion"]["snr_scale"], cfg["diffusion"]["sampling_steps"],
+        m["dropout"] if dropout is None else dropout,
+        m["freeze_clip"], roi_k=m.get("roi_k", 0),
+        n_class=m.get("n_class", 1), use_text=m.get("use_text", True))
