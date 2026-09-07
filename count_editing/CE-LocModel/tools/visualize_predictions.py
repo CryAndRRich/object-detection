@@ -42,15 +42,21 @@ from data.ce130_dataset import normalize_for_clip  # noqa: E402
 from data.factory import build_dataset  # noqa: E402
 from models.detector import build_model  # noqa: E402
 from utils.box_ops_np import box_iou, cxcywh_to_xyxy  # noqa: E402
-from eval import nms_class_agnostic  # noqa: E402
+from eval import nms_class_agnostic, scores_and_classes  # noqa: E402
 
 GREEN, ORANGE, RED, YELLOW = (0, 230, 60), (255, 150, 0), (235, 40, 40), (255, 255, 0)
 
 
-def draw_one(img_u8, gt_xyxy, pred_xyxy, scores, iou_thr=0.5, show_score=True):
+def draw_one(img_u8, gt_xyxy, pred_xyxy, scores, iou_thr=0.5, show_score=True,
+             pred_cls=None, gt_cls=None):
     """Return (PIL image, n_hit). A prediction is a 'hit' if it takes a GT at iou_thr,
     matched greedily by score — the same rule eval.py scores with, so the picture
-    and the number agree."""
+    and the number agree.
+
+    `pred_cls`/`gt_cls` are set for EXPERIMENT A.2's 80-way head: a box then has to
+    name the right class too, exactly as eval.py's per-class split requires. Left
+    None for the 1-D head (A/B/A.1), where the class comes from the input text and
+    every box is implicitly of that one class."""
     img = Image.fromarray(img_u8).convert("RGB")
     dr = ImageDraw.Draw(img)
 
@@ -62,6 +68,11 @@ def draw_one(img_u8, gt_xyxy, pred_xyxy, scores, iou_thr=0.5, show_score=True):
         used = np.zeros(len(gt_xyxy), dtype=bool)
         for i in np.argsort(-scores):                     # greedy by score, as in eval
             iou = box_iou(pred_xyxy[i:i + 1], gt_xyxy)[0][0]
+            if pred_cls is not None and gt_cls is not None:
+                # A GT of another class is not a candidate at all -- masking the IoU
+                # rather than filtering afterwards keeps `used` and the greedy order
+                # identical to the class-agnostic path.
+                iou = np.where(np.asarray(gt_cls) == pred_cls[i], iou, -1.0)
             j = int(np.argmax(iou))
             if iou[j] >= iou_thr and not used[j]:
                 used[j] = True
@@ -139,13 +150,21 @@ def main():
         px = torch.from_numpy(normalize_for_clip(m["image"])).unsqueeze(0).to(dev)
         boxes, logits = model.ddim_sample(N, pixel_values=px, texts=[m["text"]])
         b = boxes[0].cpu().numpy()
-        s = torch.sigmoid(logits[0]).cpu().numpy()
+        # SAME reader as eval.py: 1-D head -> sigmoid; C-way head (A.2) -> the best
+        # class's confidence plus its index. Taking sigmoid() directly on a [N,C]
+        # tensor leaves a 2-D array, argsort then returns 2-D indices and NMS dies
+        # with "only integer scalar arrays can be converted to a scalar index".
+        s, cls = scores_and_classes(logits[0])
         keep = np.argsort(-s)[:topk]
         p = cxcywh_to_xyxy(b[keep]) * cfg["data"]["image_size"]
         sc = s[keep]
         k2 = nms_class_agnostic(p, sc, nms_iou)
         gt = cxcywh_to_xyxy(m["boxes"]) * cfg["data"]["image_size"]
-        return m, gt, p[k2], sc[k2]
+        # Class-aware for A.2: a box is only drawn as a hit when it also names the
+        # right class, matching how eval.py scores it. Without this the pictures
+        # would look better than the AP and the two would disagree.
+        pc = None if cls is None else cls[keep][k2]
+        return m, gt, p[k2], sc[k2], pc, m.get("labels")
 
     # pass 1: score a scan window so the sample can be chosen by behaviour
     n_scan = min(a.scan, len(ds))
@@ -154,8 +173,8 @@ def main():
     stats = []
     print(f"[scan] scoring {len(idxs)} images to pick a spread...", flush=True)
     for c, i in enumerate(idxs):
-        m, gt, p, sc = run(i)
-        _, n_hit = draw_one(m["image"], gt, p, sc)
+        m, gt, p, sc, pc, gc = run(i)
+        _, n_hit = draw_one(m["image"], gt, p, sc, pred_cls=pc, gt_cls=gc)
         stats.append({"idx": i, "image_id": m["image_id"], "class": m["text"],
                       "n_gt": len(gt), "n_pred": len(p),
                       "n_hit": n_hit,
@@ -171,8 +190,8 @@ def main():
           f"{'hit':>5s} {'recall':>7s} {'prec':>7s}", flush=True)
     rows = []
     for bucket, s in chosen:
-        m, gt, p, sc = run(s["idx"])
-        img, n_hit = draw_one(m["image"], gt, p, sc)
+        m, gt, p, sc, pc, gc = run(s["idx"])
+        img, n_hit = draw_one(m["image"], gt, p, sc, pred_cls=pc, gt_cls=gc)
         nh = int(round(m["valid_h"] * cfg["data"]["image_size"]))
         if nh < cfg["data"]["image_size"] - 1:
             ImageDraw.Draw(img).line([(0, nh), (cfg["data"]["image_size"], nh)],

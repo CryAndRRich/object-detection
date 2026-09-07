@@ -75,7 +75,7 @@ from data.ce130_dataset import normalize_for_clip  # noqa: E402
 from data.factory import build_dataset  # noqa: E402
 from models.detector import build_model  # noqa: E402
 from utils.box_ops_np import box_iou, cxcywh_to_xyxy  # noqa: E402
-from eval import nms_class_agnostic  # noqa: E402
+from eval import nms_class_agnostic, scores_and_classes  # noqa: E402
 
 
 def describe(x, name):
@@ -190,7 +190,11 @@ def main():
         px = torch.from_numpy(normalize_for_clip(m["image"])).unsqueeze(0).to(dev)
         boxes, logits = model.ddim_sample(N, pixel_values=px, texts=[m["text"]])
         b = boxes[0].cpu().numpy()                      # cxcywh [0,1]
-        s = torch.sigmoid(logits[0]).cpu().numpy()
+        # SAME reader as eval.py. A raw sigmoid on A.2's [N,80] leaves a 2-D array
+        # and NMS then fails on 2-D indices. The size statistics below are
+        # class-agnostic by design -- they describe box GEOMETRY, which does not
+        # depend on what the box is called -- so only the score is needed here.
+        s, _ = scores_and_classes(logits[0])
 
         keep = np.argsort(-s)[:topk]
         b_k, s_k = b[keep], s[keep]
