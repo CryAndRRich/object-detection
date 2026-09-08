@@ -1,0 +1,44 @@
+_BASE_: "Base-Kaggle-T4x2.yaml"
+# EXPERIMENT D.2 — DiffusionDet R50 trên CE-130, closed-set 72 class.
+#
+# CHỈ chạy khi D.1 (diffdet.ce130.res50.yaml) để lại câu hỏi cần giải thích thêm.
+# D.2 KHÔNG so được với D.1/A/B/C — những cái đó chạy trên test 28-class ZERO-SHOT
+# (train∩test = 0 class, cố ý, kế thừa split FSC-147). D.2 chỉ so được với CHÍNH D.1
+# đo lại trên cùng train72/val72 này (đo bằng cách trỏ D.1 sang 2 dataset dưới đây và
+# so sánh internal, KHÔNG so trực tiếp con số D.2 với con số D.1 gốc trên test 28-class).
+#
+# Giá trị của D.2: tách câu hỏi "phần khó của CE-130 là ĐỊNH VỊ hay ZERO-SHOT?"
+#   D.2 >> D.1(test 28-class)  -> khó là NHẬN DẠNG CLASS CHƯA THẤY, không phải định vị
+#   D.2 ≈ D.1(test 28-class)   -> class index không giúp gì, khó nằm ở ĐỊNH VỊ
+#
+# train72/val72 do tools/convert_ce130.py --mode closed-set --split train sinh ra —
+# CHIA LẠI NỘI BỘ 72 class của split train gốc (stratified theo class, không phải theo
+# ảnh — random theo ảnh từng đo được làm category(train) != category(val), phá bài
+# toán). KHÔNG dùng split test/val gốc (28 class, giao = 0 với train).
+#
+# Chạy trước:
+#   python tools/convert_ce130.py --ce130-root ../data/all_phase2_V2 --mode closed-set --split train
+#
+# ⚠️ Converter dựng bảng category_id MỘT LẦN từ toàn bộ 72 class rồi dùng chung cho cả
+# train72 lẫn val72 (build_cat_id_map). Đừng sinh 2 file bằng 2 lần chạy độc lập với bảng
+# id riêng — id sẽ trỏ sang tên class khác nhau giữa 2 file và AP về 0 mà không có lỗi nào
+# hiện ra (xem README mục EXPERIMENT D, bẫy #2).
+#
+# ⚠️ SỐ BOX LÚC EVAL: giống D.1 — NUM_PROPOSALS=300 (kế thừa Base) chỉ dùng cho TRAIN.
+# val72 lấy từ split train gốc nên cũng rất dày (train gốc 37,6 box/ảnh, max 501). Khi đo
+# kết quả cuối phải quét NUM_PROPOSALS 300/1000/2000/3000, đừng đọc số ở 300.
+MODEL:
+  WEIGHTS: "detectron2://ImageNetPretrained/torchvision/R-50.pkl"
+  DiffusionDet:
+    NUM_CLASSES: 72
+  ROI_HEADS:
+    NUM_CLASSES: 72
+DATASETS:
+  TRAIN: ("ce130_closedset_train72",)
+  TEST: ("ce130_closedset_val72",)
+SOLVER:
+  MAX_ITER: 6000
+  STEPS: (4500, 5500)
+TEST:
+  EVAL_PERIOD: 2000
+OUTPUT_DIR: "output/ce130_closedset_res50"

@@ -23,6 +23,20 @@ Dataset đăng ký:
     voc_2007_trainval / voc_2012_trainval / voc_2007_test        20 class
     crowdhuman_fbox_train / crowdhuman_fbox_val      1 class (full body)
     crowdhuman_vbox_train / crowdhuman_vbox_val      1 class (visible body)
+    ce130_agnostic_{train,val,test}                  1 class  (EXPERIMENT D.1)
+    ce130_closedset_{train72,val72}                  72 class (EXPERIMENT D.2)
+
+CE-130 (D.1/D.2, xem docs/thiet-ke-experiment-d-diffusiondet-ce130.md) cần chạy
+``tools/convert_ce130.py`` trước để sinh json — layout mong đợi::
+
+    $OBJDET_DATA_ROOT/
+    ├── all_phase2_V2/{train,val,test}/{id}_b{N}/    ảnh gốc + annotation CE-130
+    └── ce130_coco/                                  json do convert_ce130.py sinh
+        ├── ce130_agnostic_{train,val,test}.json     D.1
+        └── ce130_closedset_{train72,val72}.json     D.2
+
+``file_name`` trong json là đường dẫn TƯƠNG ĐỐI so với ``all_phase2_V2/`` (vd
+``test/4499_b1/ground_truth.jpg``), nên image_root khi đăng ký phải là thư mục đó.
 """
 
 import os
@@ -43,6 +57,11 @@ _NUM_CLASSES = {
     "crowdhuman_fbox_val": 1,
     "crowdhuman_vbox_train": 1,
     "crowdhuman_vbox_val": 1,
+    "ce130_agnostic_train": 1,
+    "ce130_agnostic_val": 1,
+    "ce130_agnostic_test": 1,
+    "ce130_closedset_train72": 72,
+    "ce130_closedset_val72": 72,
 }
 
 
@@ -144,6 +163,65 @@ def _register_crowdhuman(root):
             )
 
 
+def ce130_ann_dir(root=None):
+    """Nơi chứa json CE-130 do ``tools/convert_ce130.py`` sinh ra.
+
+    Mặc định ``$OBJDET_DATA_ROOT/ce130_coco`` — tức **bên trong** ``data/``, cạnh
+    ``all_phase2_V2/`` (xem ``data/README.md`` §8), khớp đúng chỗ converter ghi ra khi
+    chạy ``--ce130-root ../data/all_phase2_V2`` (mặc định của nó là
+    ``<ce130-root>/../ce130_coco``). Trên Kaggle ``/kaggle/input`` read-only nên trỏ chỗ
+    ghi được::
+
+        OBJDET_CE130_ANN_DIR=/kaggle/working/ce130_ann
+    """
+    root = root or DATA_ROOT
+    return os.environ.get("OBJDET_CE130_ANN_DIR", os.path.join(root, "ce130_coco"))
+
+
+def ce130_image_root(root=None):
+    """Thư mục ảnh gốc CE-130 — mặc định ``$OBJDET_DATA_ROOT/all_phase2_V2``.
+
+    ``file_name`` trong json do ``convert_ce130.py`` sinh là đường dẫn TƯƠNG ĐỐI so với
+    thư mục này (vd ``test/4499_b1/ground_truth.jpg``), KHÔNG phải so với ``ann_dir``.
+    Ghi đè bằng ``OBJDET_CE130_IMAGE_ROOT`` nếu ảnh nằm chỗ khác json.
+    """
+    root = root or DATA_ROOT
+    return os.environ.get("OBJDET_CE130_IMAGE_ROOT",
+                          os.path.join(root, "all_phase2_V2"))
+
+
+def _register_ce130(root):
+    """CE-130 — EXPERIMENT D (đối chứng cho CE-LocModel A/B/C, không phải cải tiến).
+
+    D.1 (class-agnostic, LÀM TRƯỚC): 3 split gốc, mỗi ảnh 1 class nên "mọi vật trong
+    ảnh" == "vật thuộc category ảnh đó" (đã đo: 3.598/3.598) — hợp lệ làm đối chứng.
+    D.2 (closed-set, LÀM SAU): chỉ 2 dataset train72/val72, chia LẠI nội bộ split train
+    gốc (72 class) — KHÔNG so được với D.1/A/B/C chạy trên test 28-class zero-shot,
+    chỉ so được với chính D.1 trên cùng split train72/val72 này.
+
+    Json chưa sinh thì đăng ký vẫn không lỗi (giống crowdhuman) nhưng load sẽ báo lỗi
+    file không tồn tại — chạy ``tools/convert_ce130.py`` trước.
+    """
+    ann_dir = ce130_ann_dir(root)
+    img_root = ce130_image_root(root)
+
+    for split in ("train", "val", "test"):
+        register_coco_instances(
+            f"ce130_agnostic_{split}",
+            {},
+            os.path.join(ann_dir, f"ce130_agnostic_{split}.json"),
+            img_root,
+        )
+
+    for split in ("train72", "val72"):
+        register_coco_instances(
+            f"ce130_closedset_{split}",
+            {},
+            os.path.join(ann_dir, f"ce130_closedset_{split}.json"),
+            img_root,
+        )
+
+
 def register_all(root=None):
     """Đăng ký tất cả. Gọi nhiều lần an toàn (bỏ qua dataset đã đăng ký).
 
@@ -163,4 +241,6 @@ def register_all(root=None):
         _register_voc(root)
     if "crowdhuman_fbox_train" not in already:
         _register_crowdhuman(root)
+    if "ce130_agnostic_train" not in already:
+        _register_ce130(root)
     return root

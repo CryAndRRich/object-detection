@@ -73,5 +73,10 @@ def main():
     print("TẤT CẢ ĐẠT")
 
 
+def test_mmr():
+    """Wrapper cho pytest — xem ghi chú trong test_convert_ce130.py."""
+    main()
+
+
 if __name__ == "__main__":
     main()

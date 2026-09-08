@@ -9,11 +9,16 @@ Code model lấy từ [repo gốc của DiffusionDet](https://github.com/ShoufaC
 (CC-BY-NC 4.0, xem [../LICENSE](../LICENSE)) và đã sửa để chạy với thư viện phiên bản mới —
 xem [§ Sửa gì so với repo gốc](#sửa-gì-so-với-repo-gốc).
 
-**Đã train/eval xong, không chạy lại.** Toàn bộ train/eval thật đã chạy qua notebook Kaggle
-— xem [`../../notebooks/README.md`](../../notebooks/README.md), giữ lại làm bằng chứng tái lập
-số liệu, không còn dùng để chạy nữa. Kết quả đã đo đầy đủ (data, config, số liệu, so baseline
-có venue) nằm ở [`../../RESULTS.md`](../../RESULTS.md). Tài liệu ở đây vẫn đúng cho việc hiểu
-code/cấu hình, và cho việc kiểm import/mismatch nếu cấu trúc thư mục thay đổi.
+**3 dataset gốc (COCO-minitrain/VOC/CrowdHuman) đã train/eval xong, không chạy lại.** Toàn bộ
+train/eval thật đã chạy qua notebook Kaggle — xem
+[`../../notebooks/README.md`](../../notebooks/README.md), giữ lại làm bằng chứng tái lập số
+liệu. Kết quả đã đo đầy đủ (data, config, số liệu, so baseline có venue) nằm ở
+[`../../RESULTS.md`](../../RESULTS.md).
+
+**Ngoại lệ: EXPERIMENT D dùng lại đúng code này cho CE-130 — xem
+[§ EXPERIMENT D](#experiment-d--đối-chứng-trên-ce-130), chưa chạy, chỉ mới implement
+converter/dataset/config/metric.** Tài liệu ở trên vẫn đúng cho việc hiểu code/cấu hình 3
+dataset gốc, và cho việc kiểm import/mismatch nếu cấu trúc thư mục thay đổi.
 
 ## Mục lục
 
@@ -25,6 +30,7 @@ code/cấu hình, và cho việc kiểm import/mismatch nếu cấu trúc thư m
 - [Sửa gì so với repo gốc](#sửa-gì-so-với-repo-gốc)
 - [Cấu trúc repo](#cấu-trúc-repo)
 - [Những chỗ dễ sai](#những-chỗ-dễ-sai)
+- [EXPERIMENT D — đối chứng trên CE-130](#experiment-d--đối-chứng-trên-ce-130)
 
 ## Dữ liệu
 
@@ -76,11 +82,20 @@ pip install --no-build-isolation 'git+https://github.com/facebookresearch/detect
 Dùng nhánh `main` chứ không phải tag `v0.6`: v0.6 (11/2021) còn `PIL.Image.LINEAR` đã bị
 xoá ở Pillow 10, nhánh main đã sửa.
 
-Kiểm tra nhanh phần không cần GPU:
+Kiểm tra nhanh phần không cần GPU (chạy được ở máy không có torch/detectron2):
 
 ```bash
+python -m pytest tests/ -q          # cả 4 bộ
+# hoặc chạy từng file trực tiếp:
 python tests/test_mmr.py
+python tests/test_convert_ce130.py
+python tests/test_ce130_paths.py
+python tests/test_measure_box_quality_ce130.py
 ```
+
+Mỗi file test vừa là script `main()` vừa có wrapper `test_*` cho pytest. Không có wrapper
+đó thì `pytest tests/` báo *"no tests ran"* nhưng **exit 0** — nhìn qua tưởng pass trong
+khi chưa chạy gì (đã bị nhầm một lần).
 
 ## Chạy
 
@@ -191,19 +206,28 @@ Từng có 2 chỗ sửa nữa (buffer diffusion float32, `apply_deltas` tính f
 ```
 diffusiondet/            model DiffusionDet (copy từ repo gốc + 4 chỗ sửa ở trên)
 objdet/
-├── datasets.py          đăng ký 3 dataset với detectron2
-├── mmr.py               metric mMR/Recall/AP50 — numpy thuần, test được độc lập
-└── crowdhuman_eval.py   evaluator CrowdHuman cho detectron2
+├── datasets.py              đăng ký dataset với detectron2 (3 dataset gốc + CE-130 EXPERIMENT D)
+├── mmr.py                   metric mMR/Recall/AP50 — numpy thuần, test được độc lập
+├── box_quality_metrics.py   oracle_recall/mean_bestIoU/score_AUC — numpy thuần (EXPERIMENT D)
+└── crowdhuman_eval.py       evaluator CrowdHuman cho detectron2
 configs/
 ├── Base-DiffusionDet.yaml    y nguyên bản gốc
 ├── Base-Kaggle-T4x2.yaml     batch/LR/AMP/checkpoint đã dùng khi train trên Kaggle
-└── diffdet.{minitrain,voc,crowdhuman}.res50.yaml
+├── diffdet.{minitrain,voc,crowdhuman}.res50.yaml
+└── diffdet.ce130{,_coco,_72cls}.res50.yaml    EXPERIMENT D (D.1 ImageNet/D.1 COCO/D.2)
 tools/
-├── train_net.py            train + eval
-├── convert_crowdhuman.py   odgt → COCO json
-└── summarize.py            bảng so sánh với baseline
+├── train_net.py                    train + eval
+├── convert_crowdhuman.py           odgt → COCO json
+├── convert_ce130.py                all_phase2_V2/ → COCO json (EXPERIMENT D)
+├── visualize_ce130_coco.py         vẽ box từ json CE-130 lên ảnh — CỬA CHẶN trước khi train
+├── measure_box_quality_ce130.py    oracle_recall/mean_bestIoU trên CE-130 (EXPERIMENT D)
+└── summarize.py                    bảng so sánh với baseline
 baselines/baselines.yaml    số baseline đã công bố
-tests/test_mmr.py           self-test metric (không cần GPU/detectron2)
+tests/                                   (đều KHÔNG cần GPU/detectron2)
+├── test_mmr.py                          metric mMR/Recall/AP50 của CrowdHuman
+├── test_convert_ce130.py                converter CE-130: dedupe, xyxy→xywh, category_id
+├── test_ce130_paths.py                  đường dẫn converter GHI RA == datasets.py ĐỌC VÀO
+└── test_measure_box_quality_ce130.py    oracle_recall/mean_bestIoU/score_AUC
 ```
 
 Checkpoint (`../weights/diffusiondet/`, không push git):
@@ -286,6 +310,238 @@ hưởng tới các số đã đo trong `RESULTS.md` (đó là hành vi thật c
 gây hiểu lầm nếu tự viết code visualize/debug per-step mà không biết điều này (xem
 [`../../notebooks/README.md`](../../notebooks/README.md), mục
 `diffusiondet_diffusion_trace.ipynb`).
+
+## EXPERIMENT D — đối chứng trên CE-130
+
+Đặc tả đầy đủ: [`../../docs/thiet-ke-experiment-d-diffusiondet-ce130.md`](../../docs/thiet-ke-experiment-d-diffusiondet-ce130.md).
+**KHÔNG phải cải tiến của CE-LocModel A/B/C** — là đối chứng: đặt một detector chuẩn đã
+kiểm chứng (COCO/VOC/CrowdHuman) lên đúng dữ liệu CE-130 để biết TRẦN THỰC TẾ của bài
+toán định vị. Không có D thì `AP50 0,0152` của A/B/C lơ lửng: không biết thấp vì kiến
+trúc hay vì dữ liệu.
+
+**Trạng thái: code đã implement, CHƯA CHẠY THẬT trên GPU.** Converter đã chạy thử và
+kiểm mắt (xem dưới), nhưng chưa train.
+
+### Chạy
+
+```bash
+export OBJDET_DATA_ROOT=../data     # cùng biến môi trường như 3 dataset gốc
+
+# 1. Sinh json COCO — D.1 (class-agnostic, LÀM TRƯỚC)
+python tools/convert_ce130.py --ce130-root ../data/all_phase2_V2 --mode class-agnostic
+
+# 2. CỬA CHẶN bắt buộc — nhìn bằng mắt trước khi train (bài học docs/bai-hoc-ce-loc-detection.md
+#    §5: visualize bắt được lỗi mà test + review code bỏ sót)
+python tools/visualize_ce130_coco.py \
+    --json ../data/ce130_coco/ce130_agnostic_train.json \
+    --image-root ../data/all_phase2_V2 --out /tmp/ce130_viz --n 12
+
+# 3. Train D.1 (ImageNet pretrain — so công bằng với A/B/C)
+python tools/train_net.py --num-gpus 1 --config-file configs/diffdet.ce130.res50.yaml
+
+# 4. Train D.1 (COCO pretrain — trần trên; chênh lệch với bước 3 = "cần bao nhiêu pretrain")
+python tools/train_net.py --num-gpus 1 --config-file configs/diffdet.ce130_coco.res50.yaml
+
+# 5. Đo — KHÔNG dùng AP làm kết luận chính, dùng oracle_recall/mean_bestIoU.
+#    PHẢI quét số box: CE-130 có 48,5 vật/ảnh nên 300 chặn trần recall (xem mục dưới).
+for N in 300 1000 2000 3000; do
+  python tools/measure_box_quality_ce130.py --config-file configs/diffdet.ce130.res50.yaml \
+      --num-proposals $N MODEL.WEIGHTS output/ce130_agnostic_res50/model_final.pth
+done
+
+# 6. (CHỈ khi bước 5 để lại câu hỏi chưa trả lời được) D.2 closed-set
+python tools/convert_ce130.py --ce130-root ../data/all_phase2_V2 --mode closed-set --split train
+python tools/train_net.py --num-gpus 1 --config-file configs/diffdet.ce130_72cls.res50.yaml
+```
+
+### D.1 vs D.2
+
+**D.1 (class-agnostic, `NUM_CLASSES=1`, LÀM TRƯỚC, phép đo chính).** Hợp lệ vì CE-130 mỗi
+ảnh chỉ có đúng 1 class (3.598/3.598, đã đo) — "detect mọi vật trong ảnh" và "detect vật
+thuộc category ảnh đó" là CÙNG một tập box trên bộ này. D.1 không có đường text (khác
+A/B/C dùng CLIP text) nên nếu D.1 > A/B/C thì kết luận là "điều kiện hoá text đang cản
+trở", KHÔNG PHẢI "DiffusionDet giỏi hơn CE-Loc".
+
+**D.2 (closed-set, `NUM_CLASSES=72`, LÀM SAU, chỉ khi D.1 để lại câu hỏi).** Chia LẠI nội
+bộ split train gốc (72 class) thành `train72`/`val72` — KHÔNG dùng split test/val gốc (28
+class, giao = 0 với train, chạy thẳng sẽ cho AP ≈ 0 vì head phân loại theo index chưa
+từng thấy). D.2 chỉ so được với chính D.1 đo lại trên cùng `train72`/`val72`, KHÔNG so
+trực tiếp với D.1/A/B/C trên test 28-class zero-shot.
+
+**Hai bẫy của D.2 đã mắc rồi sửa — đều là loại "json vẫn hợp lệ, train vẫn chạy, không
+assert nào bắt được, AP về 0 vì lý do không liên quan model":**
+
+1. **Chia split theo random thuần trên ảnh** làm category(train) ≠ category(val) — đo thử
+   với `val_frac=0.15`: train còn 71 category, val 57, **không phải tập con của nhau**.
+   Nguyên nhân: 72 class trải rất lệch trên 1.911 ảnh, class hiếm bị ngẫu nhiên đẩy hết
+   sang một bên. Sửa: **stratified theo class** (`split_train_72`) — mỗi class tự góp tỉ
+   lệ `val_frac` ảnh của chính nó, giữ ≥1 ảnh ở train. Đo lại: 72/72 train, 67/72 val,
+   val ⊆ train (5 class chỉ có 1 ảnh nên đúng là không thể có ở val, không phải bug).
+
+2. **`category_id` đánh số độc lập cho từng file.** `build_coco` từng tự dựng bảng id từ
+   chính `items` được truyền vào, nên train72 (72 class) và val72 (67 class) đánh số lệch
+   nhau — **54/72 id trỏ sang tên class khác**:
+
+   ```
+   id 19:  train='cartridge'  val='cement bag'
+   id 20:  train='cassette'   val='cereal'
+   ```
+
+   Model học "id 19 = cartridge" rồi bị chấm bằng "id 19 = cement bag". Sửa:
+   `build_cat_id_map()` dựng bảng **một lần từ toàn bộ 72 class trước khi chia**, truyền
+   vào cả hai lần gọi; `categories` trong json liệt kê **đủ 72** ở cả hai file (kể cả
+   class vắng mặt) để metadata detectron2 khớp nhau. Verify lại trên dữ liệu thật: bảng
+   id giống hệt nhau, 0 id lệch, `n_categories_present` 72 (train) / 67 (val).
+   `tests/test_convert_ce130.py` có test riêng cho việc này, **kèm kiểm chứng ngược**
+   (dựng bảng riêng từng file thì test phải FAIL) để chắc test có hiệu lực thật.
+   D.1 không dính lỗi này (chỉ 1 category).
+
+### ⚠️ Số box lúc eval — 300 CHẶN TRẦN recall trên CE-130
+
+CE-130 dày hơn mọi dataset đã chạy trước đó:
+
+| split | box/ảnh TB | max | số ảnh > 300 box |
+|---|---|---|---|
+| test | 48,5 | 505 | 7 |
+| val | 42,2 | 1.229 | 9 |
+
+`RESULTS.md` §4 đã đo trên 3 dataset: **số box tối ưu bám mật độ vật thể** — VOC (2,43
+vật/ảnh) đỉnh ở 1000; COCO (7,36) bão hoà 2000; CrowdHuman (22,76) **vẫn còn tăng ở
+3000** (300→3000 cho `Recall` +12,33, `AP50` +9,23, không train thêm gì). CE-130 có 48,5
+vật/ảnh — **đông gấp đôi CrowdHuman** — nên để 300 là tự chặn trần recall bằng cấu trúc,
+kể cả khi model hoàn hảo.
+
+`NUM_PROPOSALS: 300` trong config **chỉ dành cho lúc TRAIN** (đúng config paper;
+DiffusionDet không có tham số nào phụ thuộc số box nên train 300 rồi eval 3000 là dùng
+đúng thiết kế *dynamic boxes*, xem `RESULTS.md` §2.1). `EVAL_PERIOD` giữa chừng cũng chạy
+ở 300 — **chỉ để theo dõi đường cong, đừng đọc như kết quả**. Kết quả cuối phải quét:
+
+```bash
+for N in 300 1000 2000 3000; do
+  python tools/measure_box_quality_ce130.py --config-file configs/diffdet.ce130.res50.yaml \
+      --num-proposals $N MODEL.WEIGHTS output/ce130_agnostic_res50/model_final.pth
+done
+```
+
+`measure_box_quality_ce130.py` tự đếm số ảnh có nhiều GT hơn số box và **in cảnh báo**
+nếu số box đang chặn trần — để không ai đọc nhầm "recall thấp = model kém".
+
+### ⚠️ Hai vấn đề CHẤT LƯỢNG DỮ LIỆU phát hiện khi rà (không sửa, phải biết khi đọc số)
+
+Cả hai đều là tính chất của dữ liệu CE-130, không phải bug converter. **Không tự lọc** —
+giữ nguyên để số liệu còn so được với CE-LocModel A/B/C (chúng đọc cùng dữ liệu này).
+
+**1. Các branch cùng một ảnh BẤT ĐỒNG về GT.** Kiểm toàn bộ (không lấy mẫu):
+`ground_truth.jpg` giống hệt nhau giữa mọi branch (md5 khớp **100 %**) và
+`annotation.json` cũng nhất quán tuyệt đối (0 cặp lệch ở cả 3 split) — nhưng
+`fixed_annotation.json` **lệch ở 1.410 cặp val / 1.079 cặp test**, vì mỗi branch chỉnh
+riêng box mà chính nó sắp inpaint. Hệ quả: **86,5 % ảnh val và 79,7 % ảnh test** có các
+branch bất đồng, chọn branch nào ảnh hưởng tới toạ độ (lệch tối đa **374 px** ở một box).
+Ảnh hưởng lên *số lượng* box thì rất nhỏ (chênh 11 box val / 10 box test, ~0,03 %) — khác
+biệt gần như hoàn toàn là toạ độ, và vẽ ra thì hai bản chất lượng tương đương, không bản
+nào sai rõ ràng.
+
+Converter chọn **branch có chỉ số nhỏ nhất** (tất định, khớp hành vi `ce130_dataset.py`
+gốc nên vẫn so được với A/B/C) và **in ra số ảnh bất đồng** mỗi lần chạy để con số này
+không bị quên.
+
+**2. Split test có một lô annotation HỎNG.** Đếm box chiếm > 50 % diện tích ảnh (vật điển
+hình CE-130 chỉ ~0,4 %):
+
+| split | box > 50 % ảnh | ảnh có ≥ 5 box như vậy |
+|---|---|---|
+| train | 0 | 0 |
+| val | 0 | 0 |
+| **test** | **855** | **16** |
+
+15/16 ảnh đó có id dạng `62xx` liên tiếp — một lô lỗi. Ảnh `6261`: **325 box mà 293 box
+bao gần trọn ảnh**, chồng khít lên nhau, không box nào bao một quả táo. Tổng GT của 16
+ảnh này là **1.594/37.812 = 4,2 % GT của split test** — tức 4,2 % "GT" mà không detector
+nào có thể khớp đúng, kéo mọi chỉ số trên test xuống, cho **cả D lẫn A/B/C**.
+
+Xem tận mắt: `python tools/visualize_ce130_coco.py --json .../ce130_agnostic_test.json
+--image-root ../data/all_phase2_V2 --out /tmp/viz --suspect-only`. Converter cũng in
+`n_box_over_half_image` / `n_images_suspect_annotation` trong stats mỗi lần chạy.
+
+### Đối chiếu số liệu converter với `ce130_dataset.py` (bản đã verify của CE-LocModel)
+
+`tools/convert_ce130.py` port lại đúng 3 quy tắc của `count_editing/CE-LocModel/data/ce130_dataset.py`
+(KHÔNG import — hai stack khác nhau hoàn toàn: detectron2/COCO-json ở đây so với
+numpy-dict/CLIP-cache bên kia): dedupe theo ảnh gốc, giữ nguyên `all_bboxes` (không trừ
+`inpainted_bboxes`), fallback `fixed_annotation.json` → `annotation.json`. Chạy thật và so
+trực tiếp với `CE130Detection.stats()`, khớp **chính xác từng số**:
+
+| | train | val | test |
+|---|---|---|---|
+| n_images | 1.911 | 908 | 779 |
+| box thô trong `all_bboxes` | 71.852 | 38.289 | 37.812 |
+| degenerate bị lọc (w hoặc h ≤ 0) | 85 | 0 | 0 |
+| **`n_annotations` trong json** (= thô − degenerate) | **71.767** | **38.289** | **37.812** |
+
+⚠️ Hai con số dễ lẫn ở split train: **71.852** là box thô, **71.767** là số annotation
+thật trong json. Val/test bằng nhau vì không có box degenerate. Khi đối chiếu trên server
+thì so **71.767 / 38.289 / 37.812** (đó là cái converter in ra ở `n_annotations`).
+
+Lưu ý: con số "14/37.110 box degenerate" trong docstring của `filter_degenerate`
+(`CE-LocModel/utils/box_ops_np.py`) là số đo ở MỘT THỜI ĐIỂM DỮ LIỆU KHÁC (trước khi sửa
+"không trừ `inpainted_bboxes`" — khi đó tổng box ít hơn nhiều). Số hiện hành, đo lại
+2026-09-08, là **85 degenerate / 71.852 box thô**, khớp cả 2 cách tính độc lập (converter
+riêng và gọi thẳng `filter_degenerate`). `data/README.md` §8 **đã cập nhật**.
+
+### Cửa chặn kiểm mắt — ĐÃ CHẠY, ĐẠT
+
+`tools/visualize_ce130_coco.py` chạy trên `ce130_agnostic_train.json` thật (không phải dữ
+liệu giả), 6 ảnh ngẫu nhiên bao gồm 1 ảnh mật độ cao (220 box, chim trên dây điện, đĩa xếp
+chồng, cà chua trong rổ) — box khớp chính xác vật thể thật, không lệch trục, không dịch
+chuyển, kể cả ở mật độ 220 box/ảnh.
+
+### Bug đường dẫn: converter ghi một chỗ, `datasets.py` đọc một chỗ khác
+
+`objdet/datasets.py` từng dùng `os.path.join(root, "..", "ce130_coco")` trong khi
+converter ghi vào `<ce130-root>/../ce130_coco`. Với `OBJDET_DATA_ROOT=../data` (đúng như
+README hướng dẫn ở § Dữ liệu) thì:
+
+```
+converter ghi json vào :  object-detection/data/ce130_coco     ← đúng
+datasets.py tìm json ở :  object-detection/ce130_coco          ← thừa một ".."
+datasets.py tìm ảnh ở  :  object-detection/all_phase2_V2       ← cũng thừa một ".."
+```
+
+Lệch đúng một cấp thư mục, cho **cả json lẫn ảnh**. `all_phase2_V2/` và `ce130_coco/` nằm
+**bên trong** `data/`, không phải cạnh nó. Bug này chỉ lộ khi thật sự chạy trên GPU
+(crash *file not found* lúc load) — tức sau khi đã đẩy code lên server và xếp hàng chờ
+GPU. `tests/test_ce130_paths.py` giờ so trực tiếp "đường dẫn converter ghi ra" với
+"đường dẫn `datasets.py` đọc vào" nên bắt được ở máy local, không cần detectron2.
+
+### `measure_box_quality_ce130.py` phải dựng config y hệt `train_net.py`
+
+Tool tự dựng `cfg` bằng `get_cfg() + add_diffusiondet_config()` là **chưa đủ**:
+`train_net.py:277-281` còn gọi `add_model_ema_configs()` và `add_kaggle_configs()`. Cái
+sau định nghĩa `SOLVER.CHECKPOINT_MAX_TO_KEEP`, mà `Base-Kaggle-T4x2.yaml` — config gốc
+của **cả 3** config CE-130 — có set key đó, nên thiếu nó thì `merge_from_file` vỡ ngay
+với *"Non-existent config key"*. Tool giờ **import thẳng `add_kaggle_configs` và
+`check_num_classes` từ `train_net.py`** thay vì chép lại, để hai bên không lệch nhau; và
+gọi luôn `check_num_classes` vì số class sai không crash mà chỉ cho kết quả rác.
+
+### Vì sao `DiffusionDetDatasetMapper(is_train=False)` không dùng được để lấy GT
+
+Bug đã bắt được khi viết `measure_box_quality_ce130.py` (trước khi chạy GPU, không phải
+sau): `dataset_mapper.py` có `if not self.is_train: dataset_dict.pop("annotations",
+None); return dataset_dict` — **mapper lúc eval xoá sạch GT**, không tạo `Instances`. Đọc
+`inp["instances"]` ở mapper eval sẽ luôn `None`, khiến mọi `n_gt=0` một cách câm lặng.
+Phải đọc GT trực tiếp từ `DatasetCatalog.get(dataset_name)` (COCO json gốc), khớp theo
+`image_id`, độc lập hoàn toàn với mapper.
+
+### Việc còn lại trước khi có số
+
+1. Chạy converter D.1 thật trên server (đã chạy local để kiểm — số liệu ở trên), rồi
+   `visualize_ce130_coco.py` lại lần nữa trên đúng máy sẽ train (phòng trường hợp đường
+   dẫn ảnh khác).
+2. Train D.1 (ImageNet), ~6.000 iter, < 1 giờ trên A30 theo ước tính trong đặc tả.
+3. `measure_box_quality_ce130.py` trên test split, so `oracle_recall`/`mean_bestIoU` trực
+   tiếp với số đã có của A/B/C.
+4. Train D.1 (COCO pretrain) nếu D.1 (ImageNet) cho số cần so sánh thêm.
+5. D.2 chỉ nếu bước 3 để lại câu hỏi chưa trả lời được.
 
 ## Ghi công
 

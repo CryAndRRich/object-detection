@@ -1,0 +1,18 @@
+_BASE_: "diffdet.ce130.res50.yaml"
+# EXPERIMENT D.1 (mức pretrain thứ 2) — khởi động từ checkpoint DiffusionDet đã train
+# xong trên COCO-minitrain (80 class) thay vì chỉ ImageNet, để đo TRẦN TRÊN: "cần bao
+# nhiêu pretrain-vào-detect" thì mới định vị tốt trên CE-130. Chênh lệch so với
+# diffdet.ce130.res50.yaml (chỉ ImageNet) CHÍNH LÀ kết quả đo — không phải baseline phụ.
+#
+# NUM_CLASSES đổi 80 -> 1 nên đầu phân loại (score head, `class_logits` trong head.py)
+# mismatch shape với checkpoint. detectron2 DetectionCheckpointer tự phát hiện và BỎ QUA
+# (không crash) các tensor lệch shape khi load, kèm log "Skip loading parameter ...
+# shape ... in the model but shape ... in the checkpoint" — PHẢI đọc log này khi chạy
+# thật để xác nhận đúng những key nào bị bỏ (chỉ nên là các tensor liên quan tới số
+# class, KHÔNG phải backbone/FPN/box-regression) — đừng để nó lọt qua trong im lặng.
+#
+# Cần checkpoint COCO-minitrain đã có sẵn trong weights/diffusiondet/ (không cần train
+# lại) — xem RESULTS.md để biết checkpoint này đã đạt AP bao nhiêu, kèm iteration/batch.
+MODEL:
+  WEIGHTS: "../weights/diffusiondet/minicoco_model_final.pth"
+OUTPUT_DIR: "output/ce130_agnostic_res50_from_coco"

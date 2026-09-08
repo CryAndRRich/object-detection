@@ -1,0 +1,63 @@
+_BASE_: "Base-Kaggle-T4x2.yaml"
+# EXPERIMENT D.1 — DiffusionDet R50 trên CE-130, class-agnostic (NUM_CLASSES=1).
+#
+# KHÔNG phải cải tiến của CE-LocModel A/B/C — là ĐỐI CHỨNG: một detector chuẩn, đã
+# kiểm chứng trên COCO/VOC/CrowdHuman, đặt lên đúng dữ liệu CE-130 để biết TRẦN THỰC TẾ.
+# Đặc tả đầy đủ: docs/thiet-ke-experiment-d-diffusiondet-ce130.md
+#
+# Vì sao class-agnostic: CE-130 mỗi ảnh chỉ có ĐÚNG 1 class (3.598/3.598, đã đo trong
+# ce130_dataset.py) -> "detect mọi vật trong ảnh" và "detect vật thuộc category ảnh đó"
+# là CÙNG một tập box trên bộ này. D.1 không có đường text (khác A/B/C dùng CLIP text),
+# nên nếu D.1 > A/B/C thì kết luận là "điều kiện hoá text đang cản trở", KHÔNG PHẢI
+# "DiffusionDet giỏi hơn CE-Loc" — đọc kỹ §4 của tài liệu thiết kế trước khi báo cáo.
+#
+# BẮT BUỘC finetune, KHÔNG train from scratch: CE-130 detect chỉ 1.911 ảnh train, nhỏ
+# hơn CrowdHuman (bộ nhỏ nhất đã chạy, 15.000 ảnh) 8 lần.
+#
+# Chạy trước:
+#   python tools/convert_ce130.py --ce130-root ../data/all_phase2_V2 --mode class-agnostic
+#   python tools/visualize_ce130_coco.py --json ../data/ce130_coco/ce130_agnostic_train.json \
+#       --image-root ../data/all_phase2_V2 --out /tmp/ce130_viz   # CỬA CHẶN, xem bằng mắt trước khi train
+#
+# Đo bằng oracle_recall/mean_bestIoU (tools/measure_box_quality_ce130.py), KHÔNG bằng
+# AP làm kết luận chính — A/B/C có score_AUC=0,512 (~ngẫu nhiên) nên AP của chúng lẫn cả
+# chất lượng ranking lẫn chất lượng box; so AP trực tiếp là so hai thứ không cùng loại.
+#
+# ⚠️ SỐ BOX LÚC EVAL — KHÔNG ĐƯỢC để mặc định 300 khi đo kết quả cuối.
+# CE-130 rất dày: test 48,5 vật/ảnh (val 42,2), max 505 (val 1.229) — 7 ảnh test và 9 ảnh
+# val có > 300 box. Với NUM_PROPOSALS=300, recall bị chặn trần ngay từ cấu trúc, kể cả
+# khi model hoàn hảo. RESULTS.md §4 đã đo: số box tối ưu BÁM MẬT ĐỘ vật thể —
+# VOC 2,43 vật/ảnh -> đỉnh ở 1000; COCO 7,36 -> bão hoà 2000; CrowdHuman 22,76 -> vẫn
+# tăng ở 3000 (300->3000 cho Recall +12,33, AP50 +9,23). CE-130 đông gấp ~2 lần
+# CrowdHuman, nên phải quét ÍT NHẤT tới 3000.
+#
+# NUM_PROPOSALS: 300 dưới đây CHỈ áp dụng cho lúc TRAIN (đúng config paper, và
+# DiffusionDet không có tham số nào phụ thuộc số box — RESULTS.md §2.1: train 300 rồi
+# eval 3000 là dùng đúng thiết kế dynamic boxes, không phải lách giao thức). EVAL_PERIOD
+# giữa chừng cũng chạy ở 300 — chỉ dùng để theo dõi đường cong, ĐỪNG đọc nó như kết quả.
+# Kết quả cuối phải quét:
+#   for N in 300 1000 2000 3000; do
+#     python tools/train_net.py --num-gpus 1 --config-file configs/diffdet.ce130.res50.yaml \
+#       --eval-only MODEL.WEIGHTS output/ce130_agnostic_res50/model_final.pth \
+#       MODEL.DiffusionDet.NUM_PROPOSALS $N
+#   done
+# và tools/measure_box_quality_ce130.py cũng phải chạy ở N cao tương ứng.
+#
+# Ngân sách: 1.911 ảnh, batch 4 -> ~478 iter/epoch. 6.000 iter ~ 12,5 epoch (cùng bậc với
+# CrowdHuman 13,3 epoch đã chạy) -> < 1 giờ trên 1 GPU A30.
+MODEL:
+  WEIGHTS: "detectron2://ImageNetPretrained/torchvision/R-50.pkl"
+  DiffusionDet:
+    NUM_CLASSES: 1
+  ROI_HEADS:
+    NUM_CLASSES: 1
+DATASETS:
+  TRAIN: ("ce130_agnostic_train",)
+  TEST: ("ce130_agnostic_test",)
+SOLVER:
+  MAX_ITER: 6000
+  STEPS: (4500, 5500)
+TEST:
+  # 779 ảnh test, eval nhanh -> 3 lần trong run để thấy đường cong.
+  EVAL_PERIOD: 2000
+OUTPUT_DIR: "output/ce130_agnostic_res50"
