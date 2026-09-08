@@ -58,7 +58,7 @@ class CELocDetector(nn.Module):
     def __init__(self, clip_name="openai/clip-vit-base-patch16", d_model=256,
                  n_layer=6, n_head=8, image_size=512, num_timesteps=1000,
                  snr_scale=2.0, sampling_steps=4, dropout=0.1, freeze_clip=True,
-                 roi_k=0, n_class=1, use_text=True):
+                 roi_k=0, n_class=1, use_text=True, refine_rounds=0):
         """`n_class`/`use_text` select EXPERIMENT A.2 (n_class=80, use_text=False):
         the class reaches the model through an 80-way OUTPUT head instead of the
         INPUT text. Defaults keep A/B byte-identical."""
@@ -74,7 +74,9 @@ class CELocDetector(nn.Module):
                                             freeze_clip, use_text=use_text)
         self.decoder = BoxTransformer(
             d_model, n_layer, n_head, dropout=dropout, roi_k=roi_k,
-            roi_dim=self.encoder.vision.config.hidden_size, n_class=n_class)
+            roi_dim=self.encoder.vision.config.hidden_size, n_class=n_class,
+            refine_rounds=refine_rounds)
+        self.refine_rounds = refine_rounds
 
         self.num_timesteps = num_timesteps
         self.snr_scale = snr_scale
@@ -109,7 +111,12 @@ class CELocDetector(nn.Module):
 
     def forward(self, x_t, timesteps, pixel_values=None, texts=None,
                 patch_raw=None, text_raw=None):
-        """x_t [B,N,4] in diffusion space -> (boxes in [0,1], logits)."""
+        """x_t [B,N,4] in diffusion space -> (boxes in [0,1], logits).
+
+        With `refine_rounds > 0` (EXPERIMENT C1) this returns a LIST of that many
+        (boxes, logits) pairs instead — one per refinement round, oldest first.
+        The criterion supervises all of them; `ddim_sample` uses only the last.
+        """
         need_raw = self.decoder.roi is not None
         out = self.encoder(pixel_values, texts, patch_raw, text_raw,
                            return_patch_raw=need_raw)
@@ -121,12 +128,17 @@ class CELocDetector(nn.Module):
 
     @torch.no_grad()
     def ddim_sample(self, num_proposals, pixel_values=None, texts=None,
-                    patch_raw=None, text_raw=None, eta=1.0, generator=None):
+                    patch_raw=None, text_raw=None, eta=1.0, generator=None,
+                    return_all_rounds=False):
         """Generate N boxes from pure noise.
 
         x_T ~ N(0, I) with std 1.0 — NOT scaled by snr_scale (round 1's bug 3).
         Each step: predict x_start -> CLAMP -> RECOMPUTE pred_noise from the
         clamped version.
+
+        `return_all_rounds=True` hands back every refinement round of the FINAL
+        DDIM step instead of just the last one — used by
+        tools/measure_box_quality.py to answer "does iterating help?".
 
         `eta=1.0` is DiffusionDet's default (`detector.py:97`) — DDIM degenerates
         into DDPM. A measured consequence, NOT a bug: on the first step
@@ -144,10 +156,21 @@ class CELocDetector(nn.Module):
         img = torch.randn(B, num_proposals, 4, device=dev, generator=generator)
         boxes = logits = None
 
+        rounds = None
         for t, t_next in ddim_time_pairs(self.num_timesteps, self.sampling_steps):
             tb = torch.full((B,), t, dtype=torch.long, device=dev)
-            boxes, logits = self.decoder(decode_diffusion(img, self.snr_scale), tb,
-                                         memory, patch_raw=praw)
+            out = self.decoder(decode_diffusion(img, self.snr_scale), tb,
+                               memory, patch_raw=praw)
+            # C1 returns a list of rounds. The LAST one is the prediction, exactly
+            # as V-DETR does (`outputs = intermediate[-1]`, vdetr_transformer.py:445);
+            # the earlier rounds exist for deep supervision during training.
+            # Taking outs[0] by mistake would still produce valid boxes and only a
+            # slightly worse AP -- no assertion would catch it, hence the test.
+            if isinstance(out, list):
+                rounds = out
+                boxes, logits = out[-1]
+            else:
+                boxes, logits = out
 
             x_start = encode_diffusion(boxes, self.snr_scale)          # already in range
             if t_next < 0:
@@ -160,6 +183,11 @@ class CELocDetector(nn.Module):
             img = (x_start * a_next.sqrt() + c * pred_noise
                    + sigma * torch.randn(img.shape, device=dev, generator=generator))
 
+        if return_all_rounds:
+            if rounds is None:
+                raise ValueError("return_all_rounds=True but the model has no "
+                                 "refinement rounds (refine_rounds=0)")
+            return rounds
         return boxes, logits
 
 
@@ -180,4 +208,5 @@ def build_model(cfg, dropout=None):
         cfg["diffusion"]["snr_scale"], cfg["diffusion"]["sampling_steps"],
         m["dropout"] if dropout is None else dropout,
         m["freeze_clip"], roi_k=m.get("roi_k", 0),
-        n_class=m.get("n_class", 1), use_text=m.get("use_text", True))
+        n_class=m.get("n_class", 1), use_text=m.get("use_text", True),
+        refine_rounds=m.get("refine_rounds", 0))

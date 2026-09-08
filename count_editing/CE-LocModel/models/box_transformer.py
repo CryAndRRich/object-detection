@@ -29,6 +29,21 @@ THREE MANDATORY CHANGES from the original `transformer_for_diffusion.py`:
       (300). Possible precisely because index-based pos_emb is gone. `cond_pos_emb`
       is KEPT (memory IS ordered: patch 500 is always the same image region).
 
+  (d) EXPERIMENT C1, `refine_rounds > 0`: the decoder stops being a closed block.
+      `nn.TransformerDecoder` IS a loop over `.layers` (verified: identical output
+      to running the loop by hand), so C1 adds NO attention layer and no attention
+      cost — it opens that loop to read a box after EVERY layer, and supervises all
+      of them. `refine_rounds=0` keeps experiment A/B behaviour exactly.
+
+      Two variables that must not be confused (silent bug — the model still runs,
+      boxes stay in [0,1], loss still falls):
+        anchor  the regression origin. FIXED for all rounds.
+        box     the latest round's output. Only used to compute the RPE (C2).
+      V-DETR assigns `proposal_center_normalized` ONCE before the loop
+      (`vdetr_transformer.py:387`) and every layer regresses from that same origin,
+      so errors do not compound across rounds. Our boxes start from PURE NOISE, so
+      compounding six rounds from a random start is a real risk.
+
 WHY SINUSOIDAL PE RATHER THAN A RAW Linear(4->D): Linear is linear, so position
 enters the network as MAGNITUDE — a box at x=0.4 gives twice the vector of one at
 x=0.2. Sinusoidal gives each position a SIGNATURE whose dot product decays with
@@ -45,7 +60,38 @@ import torch.nn as nn
 
 from models.roi_sampler import RoIFeatureSampler
 
-__all__ = ["BoxTransformer", "SinusoidalCoordEmbedding"]
+__all__ = ["BoxTransformer", "SinusoidalCoordEmbedding", "update_box"]
+
+MIN_WH = 0.005          # smallest real box in CE-130 is 0.0059 wide
+
+
+def update_box(anchor, delta):
+    """OBJECT-NORMALIZED update, exactly V-DETR's (`vdetr_transformer.py:271,278`):
+
+        cx' = cx + d_cx * w          w' = w * exp(d_w)
+        cy' = cy + d_cy * h          h' = h * exp(d_h)
+
+    The centre shift is expressed in UNITS OF THE BOX'S OWN SIZE, so a small box is
+    nudged gently and a large one can move far; the size is multiplicative, so it can
+    never go negative and needs no clamping to stay positive. V-DETR measures +3.9
+    AP50 for this over the plain version (Table 7).
+
+    Chosen over `sigmoid(logit(box) + delta)`, which was the first draft: CE-130's
+    median width is 0.069 -> logit -2.60, and its smallest box 0.0059 -> the
+    derivative of logit is 1/(x(1-x)) = 170 right where the data is densest. That
+    parameterisation has no counterpart in V-DETR either (a 3-D scene has no hard
+    [0,1] border), so it would have been an untested invention inside an experiment
+    that already has enough new parts.
+
+    delta == 0 returns `anchor` EXACTLY (exp(0)=1, 0*w=0) — this is what makes
+    C1 step 0 bit-identical to A.
+    """
+    cx, cy, w, h = anchor.unbind(-1)
+    d_cx, d_cy, d_w, d_h = delta.unbind(-1)
+    w2 = (w * d_w.exp()).clamp(min=MIN_WH)
+    h2 = (h * d_h.exp()).clamp(min=MIN_WH)
+    return torch.stack([(cx + d_cx * w).clamp(0.0, 1.0),
+                        (cy + d_cy * h).clamp(0.0, 1.0), w2, h2], dim=-1)
 
 
 class SinusoidalCoordEmbedding(nn.Module):
@@ -84,7 +130,7 @@ class SinusoidalTimeEmbedding(nn.Module):
 class BoxTransformer(nn.Module):
     def __init__(self, d_model=256, n_layer=6, n_head=8, coord_dim=64,
                  dim_feedforward=None, dropout=0.1, max_cond_len=1152,
-                 roi_k=0, roi_dim=768, n_class=1):
+                 roi_k=0, roi_dim=768, n_class=1, refine_rounds=0):
         """`roi_k > 0` turns on EXPERIMENT B: each box additionally reads the frozen
         patch features sampled on a roi_k x roi_k grid INSIDE itself. roi_k=0 keeps
         experiment A's behaviour exactly.
@@ -94,6 +140,10 @@ class BoxTransformer(nn.Module):
         text I was given". A.2 also drops the text token from memory, so the class
         identity travels through the OUTPUT head rather than the INPUT text -- that
         one swap is the whole experiment. n_class=1 keeps A/B untouched.
+
+        `refine_rounds > 0` turns on EXPERIMENT C1: read a box after every decoder
+        layer instead of only after the last one, and supervise all of them.
+        Must equal n_layer (one read per layer); 0 keeps A/B untouched.
         """
         super().__init__()
         self.d_model = d_model
@@ -130,6 +180,7 @@ class BoxTransformer(nn.Module):
         self.n_class = n_class
         self.score_head = nn.Linear(d_model, n_class)
 
+
         # EXPERIMENT B. Zero-initialised, so at step 0 this contributes nothing and
         # B is numerically identical to A -- the comparison changes one variable.
         #
@@ -139,6 +190,41 @@ class BoxTransformer(nn.Module):
         # branch. Verified by tests/test_roi.py.
         self.roi = (RoIFeatureSampler(roi_dim, d_model, roi_k, dropout)
                     if roi_k > 0 else None)
+
+        # EXPERIMENT C1. Built AFTER `self.roi` for the same reason `self.roi` is
+        # built after the heads: `nn.Linear.__init__` CONSUMES RNG draws even when
+        # the weights are zeroed straight afterwards (verified), so constructing
+        # this earlier would shift every module built after it and "C1 step 0 ==
+        # A" would be false for a reason unrelated to the experiment.
+        self.refine_rounds = refine_rounds
+        if refine_rounds:
+            if refine_rounds != n_layer:
+                raise ValueError(
+                    f"refine_rounds ({refine_rounds}) must equal n_layer ({n_layer}): "
+                    f"C1 reads a box after each EXISTING layer, it adds none")
+            # SEPARATE head per round, as V-DETR does (`mlp_sep` defaults to True;
+            # `vdetr_transformer.py:232` clones the heads num_layers+1 times).
+            # Counted: 6 shared-vs-separate heads differ by 6,425 parameters =
+            # 0.09 % of the 7.54M model, while EXPERIMENT B's 787K (10.4 %) is what
+            # actually caused overfitting -- 102x apart, so "save parameters" is not
+            # a reason here. Measured on a toy 6-round refine task, separate heads
+            # also converge better (0.00087 vs 0.00134), and the features reaching
+            # the head shift distribution across rounds (norm 1.44 -> 0.48), which a
+            # single head would have to serve with one function.
+            self.box_delta = nn.ModuleList([nn.Linear(d_model, 4)
+                                            for _ in range(refine_rounds)])
+            self.round_score = nn.ModuleList([nn.Linear(d_model, n_class)
+                                              for _ in range(refine_rounds)])
+            # ZERO-INIT the box heads (V-DETR `:170-173`). With object-normalized
+            # updates delta=0 gives exp(0)=1 and cx + 0*w = cx, so round 1 returns
+            # the anchor EXACTLY -> C1 at step 0 is bit-identical to A.
+            # `round_score` is NOT zero-initialised: it takes no part in the update,
+            # and zeroing it would make every score identical at step 0.
+            for h in self.box_delta:
+                nn.init.zeros_(h.weight)
+                nn.init.zeros_(h.bias)
+        else:
+            self.box_delta = self.round_score = None
 
     def forward(self, boxes_norm, timesteps, memory, patch_raw=None):
         """
@@ -164,9 +250,31 @@ class BoxTransformer(nn.Module):
                 f"{self.cond_pos_emb.shape[1]}; raise max_cond_len")
         mem = mem + self.cond_pos_emb[:, : mem.shape[1]]
 
+        if self.refine_rounds:
+            return self._forward_refine(tgt, mem, boxes_norm)
+
         # CHANGE (b): NO masks at all
         h = self.ln_f(self.decoder(tgt=tgt, memory=mem))
         logits = self.score_head(h)
         # [B,N] for n_class=1 so A/B keep their exact tensor shapes; [B,N,C] for A.2.
         return self.box_head(h).sigmoid(), (logits.squeeze(-1) if self.n_class == 1
                                             else logits)
+
+    def _forward_refine(self, h, mem, anchor):
+        """EXPERIMENT C1 — read a box after every layer. Returns a LIST of
+        `refine_rounds` (boxes, logits) pairs, oldest first.
+
+        `anchor` is the regression origin and NEVER changes; `box` is only what the
+        latest round produced. Writing `box = update(box, delta)` instead would
+        compound errors across six rounds from a purely random start — and nothing
+        would flag it, which is why tests/test_refine.py checks that a CONSTANT
+        non-zero delta yields six IDENTICAL outputs.
+        """
+        outs = []
+        for r, layer in enumerate(self.decoder.layers):
+            h = layer(h, mem)                       # the SAME 6 layers as A
+            hn = self.ln_f(h)
+            box = update_box(anchor, self.box_delta[r](hn))
+            logits = self.round_score[r](hn)
+            outs.append((box, logits.squeeze(-1) if self.n_class == 1 else logits))
+        return outs

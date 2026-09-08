@@ -30,7 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.ce130_dataset import normalize_for_clip  # noqa: E402
 from data.factory import build_dataset  # noqa: E402
 from models.detector import build_model  # noqa: E402
-from models.criterion import SetCriterion  # noqa: E402
+from models.criterion import SetCriterion, loss_from_output  # noqa: E402
 
 
 def main():
@@ -81,8 +81,8 @@ def main():
         dt_clip = time.time() - t1
 
         x_t, tt, _ = model.build_inputs(tg, N, vh)
-        pb, lg = model(x_t, tt, patch_raw=patch_raw, text_raw=text_raw)
-        loss, st, _ = crit(pb, lg, tg, labels=tl)
+        out = model(x_t, tt, patch_raw=patch_raw, text_raw=text_raw)
+        loss, st, _, lg = loss_from_output(crit, out, tg, labels=tl)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()

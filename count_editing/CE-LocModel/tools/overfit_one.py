@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.ce130_dataset import normalize_for_clip  # noqa: E402
 from data.factory import build_dataset  # noqa: E402
 from models.detector import build_model  # noqa: E402
-from models.criterion import SetCriterion  # noqa: E402
+from models.criterion import SetCriterion, loss_from_output  # noqa: E402
 from utils.diffusion_math import prepare_diffusion_concat  # noqa: E402
 
 
@@ -73,8 +73,8 @@ def main():
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=a.steps)
     first_loss, history = None, []
     for i in range(a.steps):
-        pb, lg = model(x_t, tt, patch_raw=patch_raw, text_raw=text_raw)
-        loss, st, _ = crit(pb, lg, [gt], labels=[lab])
+        out = model(x_t, tt, patch_raw=patch_raw, text_raw=text_raw)
+        loss, st, _, lg = loss_from_output(crit, out, [gt], labels=[lab])
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()

@@ -131,17 +131,29 @@ def write_json(save_dir, env, cfg, history, best, ds_train, ds_val):
     # Compute best FROM history, not from the `best` argument — this function is
     # called BEFORE the training loop updates `best`, so using it would be off by
     # one epoch.
-    top = min(history, key=lambda e: e["val"]["loss"]) if history else None
+    # `select_loss` is the loss of the round inference actually uses (C1) and falls
+    # back to `val.loss` for A/B/A.1/A.2 — the SAME rule the checkpoint block uses,
+    # so history.json's "best" always names the epoch that was actually saved.
+    sel = lambda e: e.get("select_loss", e["val"]["loss"])          # noqa: E731
+    top = min(history, key=sel) if history else None
     summary = {
         "epochs_completed": len(history),
-        "best_val_loss": top["val"]["loss"] if top else None,
+        "best_val_loss": sel(top) if top else None,
+        "best_val_loss_mean_over_rounds": top["val"]["loss"] if top else None,
         "best_epoch": top["epoch"] if top else None,
         "total_time": fmt_time(history[-1]["elapsed_sec"]) if history else "0s",
         "epochs_with_warnings": [e["epoch"] for e in history if e["warnings"]],
     }
     if len(history) >= 2:
-        v = [e["val"]["loss"] for e in history]
+        # Same quantity the checkpoint is chosen on: for C1 that is the LAST
+        # refinement round (what ddim_sample returns), not the mean over six.
+        # Reading `val.loss` here would make the overfitting signal track a number
+        # no forward pass ever produces.
+        v = [e.get("select_loss", e["val"]["loss"]) for e in history]
         summary["val_loss_first_last"] = [v[0], v[-1]]
+        summary["select_loss_is"] = ("last refinement round"
+                                     if history[-1].get("val_loss_final") is not None
+                                     else "single forward")
         summary["val_rising_streak"] = sum(
             1 for i in range(len(v) - 1, 0, -1) if v[i] > v[i - 1]) if v[-1] > v[-2] else 0
 
@@ -177,7 +189,14 @@ def run_val(model, loader, crit, N, dev):
     epochs comparable (a random t makes val loss noisy and the trend unreadable)."""
     model.eval()
     keys = ["loss", "loss_l1", "loss_giou", "loss_ce", "iou_matched", "n_matched"]
+    # EXPERIMENT C1 adds per-round stats. They must survive into `val`, because the
+    # round that INFERENCE uses is the last one -- `loss` here is the mean over six
+    # rounds, of which round 1 regresses straight from the noisy anchor and is always
+    # bad. Measured on a controlled example: mean 6.22 vs final 3.95 (1.58x), and
+    # IoU mean 0.732 vs final 0.990. Dropping the per-round keys would leave the
+    # checkpoint chosen, and A compared, on a number no forward pass ever produces.
     total, nb, scores = {k: 0.0 for k in keys}, 0, []
+    extra, per_round = {}, {}
     t0 = time.time()
     # The generator MUST be on the same device as the tensors it creates
     # (torch.randn(device='cuda', generator=<cpu gen>) -> RuntimeError). GT is
@@ -187,10 +206,23 @@ def run_val(model, loader, crit, N, dev):
         tg = [b.to(dev) for b in batch["boxes"]]
         tl = [l.to(dev) for l in batch["labels"]]
         x_t, tt, _ = model.build_inputs(tg, N, batch["valid_h"], generator=g)
-        pb, lg = model(x_t, tt, **model_inputs(batch, dev))
-        _, st, _ = crit(pb, lg, tg, labels=tl)
+        out = model(x_t, tt, **model_inputs(batch, dev))
+        if isinstance(out, list):
+            _, st, _ = crit(out, tg, labels=tl)
+            lg = out[-1][1]
+        else:
+            pb, lg = out
+            _, st, _ = crit(pb, lg, tg, labels=tl)
         for k in keys:
             total[k] += st[k]
+        for k, v in st.items():
+            if k.endswith("_final"):
+                extra[k] = extra.get(k, 0.0) + v
+            elif k.endswith("_per_round"):
+                if k not in per_round:
+                    per_round[k] = [0.0] * len(v)
+                for r, x in enumerate(v):
+                    per_round[k][r] += x
         # A.2's logits are [B,N,C]: take the max over classes so the reported
         # distribution keeps meaning "confidence that this slot holds an object",
         # comparable with A/B's 1-D score rather than diluted by 79 negatives.
@@ -199,6 +231,8 @@ def run_val(model, loader, crit, N, dev):
         nb += 1
     model.train()
     out = {k: v / max(nb, 1) for k, v in total.items()}
+    out.update({k: v / max(nb, 1) for k, v in extra.items()})
+    out.update({k: [x / max(nb, 1) for x in v] for k, v in per_round.items()})
     out["score"] = array_stats(np.concatenate(scores)) if scores else {}
     out["seconds"] = time.time() - t0
     return out
@@ -327,6 +361,7 @@ def main():
                  "iou_matched": 0.0, "n_matched": 0}
         labels_now, scores, nb = {}, [], 0
         grad_norms, n_gt, t_batch = [], [], []
+        tr_iou_round = []                    # C1: mean IoU of each refinement round
 
         for batch in loader:
             t_b = time.time()
@@ -334,8 +369,14 @@ def main():
             tl = [l.to(dev) for l in batch["labels"]]
 
             x_t, tt, _ = model.build_inputs(tg, N, batch["valid_h"])
-            pb, lg = model(x_t, tt, **model_inputs(batch, dev))
-            loss, st, idx = crit(pb, lg, tg, labels=tl)
+            out = model(x_t, tt, **model_inputs(batch, dev))
+            # C1 returns a list of rounds; criterion dispatches on that.
+            if isinstance(out, list):
+                loss, st, idx = crit(out, tg, labels=tl)
+                lg = out[-1][1]                   # the round eval.py will use
+            else:
+                pb, lg = out
+                loss, st, idx = crit(pb, lg, tg, labels=tl)
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -344,6 +385,14 @@ def main():
 
             for k in total:
                 total[k] += st[k]
+            # EXPERIMENT C1: the per-round IoU curve is THE metric — a flat curve
+            # means iterating buys nothing, and that has to be visible before C2 is
+            # built on top of it.
+            if "iou_matched_per_round" in st:
+                if not tr_iou_round:
+                    tr_iou_round.extend([0.0] * len(st["iou_matched_per_round"]))
+                for r, v in enumerate(st["iou_matched_per_round"]):
+                    tr_iou_round[r] += v
             nb += 1
             grad_norms.append(float(gn))
             n_gt += [len(b) for b in batch["boxes"]]
@@ -377,6 +426,12 @@ def main():
         train_sec = time.time() - t0
 
         val = run_val(model, val_loader, crit, N, dev)
+        # The loss of the round inference actually uses. For A/B/A.1/A.2 there is
+        # only one round, so this IS `val["loss"]`; for C1 it is the last of six,
+        # because `ddim_sample` returns `outs[-1]`. Everything downstream --
+        # console log, history, checkpoint selection, val_rising_streak -- reads
+        # THIS, so all four agree on one quantity.
+        val_sel = val.get("loss_final", val["loss"])
         epoch_sec = time.time() - t0
         elapsed = time.time() - t_start
         remaining = cfg["training"]["epochs"] - (ep + 1)
@@ -394,6 +449,22 @@ def main():
               f"GT/img {np.mean(n_gt):.1f} | label_stability {stability:.3f} | "
               f"lr {opt.param_groups[0]['lr']:.2e} | grad {np.mean(grad_norms):.3f}",
               flush=True)
+        if tr_iou_round:
+            pr = [v / max(nb, 1) for v in tr_iou_round]
+            vr = val.get("iou_matched_per_round")
+            print(f"           IoU/round tr " + " ".join(f"{v:.3f}" for v in pr) +
+                  (("  va " + " ".join(f"{v:.3f}" for v in vr)) if vr else ""),
+                  flush=True)
+            # The VAL curve is the one that matters: it is what the checkpoint is
+            # chosen on, and C1's whole question ("does iterating help?") has to be
+            # answered on data the model did not train on.
+            d_tr = pr[-1] - pr[0]
+            d_va = (vr[-1] - vr[0]) if vr else d_tr
+            print(f"           round1->{len(pr)}  train {d_tr:+.3f}  val {d_va:+.3f}"
+                  f" | val loss mean {val['loss']:.4f} final {val_sel:.4f}"
+                  f"{'   [!] FLAT on val: iterating is not helping' if abs(d_va) < 0.005 else ''}"
+                  f"{'   [!] DECREASING on val: later rounds undo earlier ones' if d_va < -0.005 else ''}",
+                  flush=True)
         roi_norm = roi.branch_norm() if roi is not None else None
         if roi_norm is not None:
             print(f"           roi_branch_norm {roi_norm:.4f}"
@@ -442,6 +513,14 @@ def main():
             "val": val,
             "label_stability": stability,
             "roi_branch_norm": roi_norm,
+            # BOTH curves: train tells whether the mechanism works, val whether it
+            # generalises -- and val is what the checkpoint is chosen on.
+            "iou_per_round": [v / max(nb, 1) for v in tr_iou_round] if tr_iou_round else None,
+            "val_iou_per_round": val.get("iou_matched_per_round"),
+            "val_loss_per_round": val.get("loss_per_round"),
+            "val_loss_final": val.get("loss_final"),
+            "val_iou_final": val.get("iou_matched_final"),
+            "select_loss": val_sel,
             "lr": opt.param_groups[0]["lr"],
             "epoch_sec": epoch_sec,
             "elapsed_sec": elapsed,
@@ -451,9 +530,20 @@ def main():
         })
         write_json(save_dir, env, cfg, history, best, ds, ds_val)
 
-        # pick best by VAL loss, not train loss
-        if val["loss"] < best:
-            best = val["loss"]
+        # Pick best by the VAL loss OF THE ROUND INFERENCE ACTUALLY USES.
+        #
+        # For C1 `val["loss"]` is the mean over six refinement rounds, but
+        # `ddim_sample` returns only the last one, and round 1 regresses straight
+        # from the noisy anchor so it is always poor. Measured: mean 6.22 vs final
+        # 3.95 (1.58x apart). Selecting on the mean can therefore save the WRONG
+        # checkpoint -- a model with rounds [9.5,7.0,6.4,5.6,4.8,2.0] (final 2.0)
+        # loses on the mean to one with [4.0,...,3.5] (final 3.5), even though the
+        # first is strictly better at inference.
+        #
+        # It also makes "C1 val_loss 2.9 vs A's 2.51" a comparison of two different
+        # quantities. `select_loss` is the like-for-like one.
+        if val_sel < best:
+            best = val_sel
             # Save ONLY the TRAINABLE parameters (~8.3M). Saving frozen CLIP too
             # made the checkpoint 698 MB, of which 98 % is weights re-downloadable
             # from HuggingFace, and it would force an exact CLIP version match at
@@ -470,11 +560,25 @@ def main():
     print(f"DONE — EXPERIMENT {exp_name} — {fmt_time(total_time)} ({len(history)} epochs, "
           f"{fmt_time(total_time/max(len(history),1))}/epoch)", flush=True)
     if history:
-        top = min(history, key=lambda e: e["val"]["loss"])
-        print(f"  best: epoch {top['epoch']} | val_loss {top['val']['loss']:.4f} | "
-              f"val_IoU {top['val']['iou_matched']:.4f}", flush=True)
-        print(f"  val_loss: {history[0]['val']['loss']:.4f} -> "
-              f"{history[-1]['val']['loss']:.4f}", flush=True)
+        # SAME rule as write_json and the checkpoint block: `select_loss` is the
+        # round inference actually uses. These three lines are the only thing most
+        # people read when a job ends, so if they used the six-round MEAN they would
+        # name a different epoch than the one `best.pth` holds -- and the "not
+        # saturated" warning below, computed from `top`, would fire on the wrong
+        # epoch too. That warning matters: round 1 of this project hit it four times
+        # in a row.
+        sel_of = lambda e: e.get("select_loss", e["val"]["loss"])      # noqa: E731
+        iou_of = lambda e: e["val"].get("iou_matched_final",           # noqa: E731
+                                        e["val"]["iou_matched"])
+        top = min(history, key=sel_of)
+        print(f"  best: epoch {top['epoch']} | val_loss {sel_of(top):.4f} | "
+              f"val_IoU {iou_of(top):.4f}", flush=True)
+        print(f"  val_loss: {sel_of(history[0]):.4f} -> "
+              f"{sel_of(history[-1]):.4f}", flush=True)
+        if history[-1].get("val_loss_final") is not None:
+            print(f"  (val_loss is the LAST refinement round, the one ddim_sample "
+                  f"returns; the 6-round mean was {top['val']['loss']:.4f})",
+                  flush=True)
         if top["epoch"] == len(history):
             print("  [!] best landed on the LAST epoch — not saturated yet, train longer "
                   "(round 1 hit this 4 times in a row)", flush=True)

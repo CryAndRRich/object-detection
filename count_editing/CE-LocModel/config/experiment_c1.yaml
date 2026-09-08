@@ -1,0 +1,127 @@
+# EXPERIMENT C1 — open the decoder into 6 supervised refinement rounds.
+# Design: docs/vdetr-va-thiet-ke-experiment-c.md §5bis
+#
+# ONE VARIABLE vs EXPERIMENT A: where the box is read. Nothing else moves --
+# same CLIP, same diffusion, same matcher, same loss weights, same N, same 6
+# attention layers.
+#
+# WHAT IT ANSWERS: "does iterating help?" EXPERIMENT B gave each box the frozen
+# CLIP features sampled INSIDE itself and did not improve (AP50 0.0152 -> 0.0144).
+# The hypothesis is that B read the image where the box ALREADY WAS, with no way
+# to correct a bad start. C1 gives six chances to re-predict.
+#
+# READ `IoU per round` IN THE LOG, NOT AP:
+#   rising 1->6      refinement works -> C2 (vertex-RPE) has a foundation
+#   FLAT             iterating buys nothing -> the diagnosis is wrong, stop and
+#                    rethink before building C2 on top
+#   rising then falling   later rounds undo earlier ones -> check `anchor` was not
+#                    confused with `box` (§4.3.2)
+#
+# AP alone cannot read this experiment: measured on B, score_AUC is 0.512 (a coin
+# flip), so AP reflects ranking as much as box quality. Use
+# tools/measure_box_quality.py -- oracle_recall and mean_bestIoU ignore the score
+# entirely.
+
+experiment: "C1"
+description: "EXPERIMENT A + 6 refinement rounds: read a box after EVERY decoder layer, supervise all of them"
+
+data:
+  root: "../../data/all_phase2_V2"
+  image_size: 512          # CE-130 objects are median 0.069x0.061 of the canvas ->
+                           # 2.20x1.95 patches at patch16. At 224 that is only
+                           # 0.96x0.85 -> smaller than ONE patch, leaving
+                           # cross-attention nothing to point at.
+  flip_prob: 0.5           # HORIZONTAL flips only. No rotation: 5-30 degrees
+                           # inflates boxes 1.20x-1.98x (far too much for tiny
+                           # objects); 90 degrees breaks the "padding is always at
+                           # the bottom" assumption (only 9.6 % of images are square).
+  num_workers: 8           # MEASURED, not guessed: with the cache, 4 workers cannot
+                           # keep up with 12.6 MB/batch of memmap reads and the step
+                           # spends 740 ms (89 %) waiting on the DataLoader
+                           # (std 1612 ms, max 5172 ms — classic worker starvation).
+                           # 8 workers: 740 ms -> 7.4 ms, whole step 1012 -> 91 ms.
+
+model:
+  clip_name: "openai/clip-vit-base-patch16"
+  freeze_clip: true        # MANDATORY, not optional: (1) 1,911 images cannot feed
+                           # 86M parameters; (2) the 3 splits' classes are COMPLETELY
+                           # disjoint -> the task is zero-shot, and finetuning would
+                           # destroy the very capability needed; (3) backward through
+                           # the ViT costs ~19 GB.
+  d_model: 256             # original CE-Loc used 256; smaller = less overfitting
+  n_layer: 6               # Diffusion Policy uses 8 (16-action sequences);
+                           # DiffusionDet uses 6 stages
+  n_head: 8
+  dropout: 0.1             # the paper notes transformer dropout "varies greatly
+                           # across tasks" -> the most sensitive hyperparameter,
+                           # sweep it later
+  refine_rounds: 6         # == n_layer. NO new attention layer: nn.TransformerDecoder
+                           # already IS a loop over its 6 layers (verified: identical
+                           # output to running the loop by hand). C1 opens that loop
+                           # to read a box after each one. Cost: 6 x Linear(256->4)
+                           # plus 6 x Linear(256->1) = 7,710 params (+0.10 %), against
+                           # EXPERIMENT B's 787K (+10.4 %) which is what overfitted.
+                           #
+                           # Per-round heads, not shared -- V-DETR's `mlp_sep`
+                           # defaults to True. Zero-init on box_delta makes round 1
+                           # return the anchor exactly, so C1 at step 0 is bit-
+                           # identical to A.
+                           #
+                           # Boxes regress from a FIXED anchor (x_0), never from the
+                           # previous round: V-DETR assigns the origin once before
+                           # the loop (vdetr_transformer.py:387), so errors cannot
+                           # compound -- and our boxes start from pure noise.
+
+diffusion:
+  num_timesteps: 1000      # original CE-Loc used 100 — too few for cosine
+  schedule: "cosine"       # measured 3.70x the AP of linear (linear leaves only
+                           # 5.8 % signal at t=749 -> the matcher assigns arbitrarily)
+  snr_scale: 2.0           # DiffusionDet's SNR_SCALE
+  sampling_steps: 4        # sweep 1/2/4/8 later
+  num_proposals_train: 100 # GT median is 20-30, mean 37.6-48.5 per image. N=300
+                           # would be 87 % placeholders. The transformer has NO
+                           # N%4 constraint (that belongs to ConditionalUnet1D and
+                           # its stride-2 convolutions).
+  num_proposals_eval: 300  # N=100 truncates GT on 8-11 % of images (test: 11.2 %).
+                           # Changeable because index-based pos_emb was removed.
+
+loss:
+  # Same as DiffusionDet (config.py:34-36,43-44). NO epsilon loss (meaningless
+  # under set matching), NO deep supervision (single-forward architecture).
+  l1: 5.0
+  giou: 2.0
+  cls: 2.0
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+
+matcher:
+  method: "hungarian"      # SimOTA degenerates to k=1 on CE-130 (objects are only
+                           # 0.41 % of the area -> IoU collapses fast), adding
+                           # complex code for no gain while the model is weak, and
+                           # it is less label-stable. Set "simota" to try it as a
+                           # single-variable intervention.
+  use_center_prior: false  # measured NOT to improve label stability (55 % -> 51 %)
+  center_radius: 2.5       # PROPORTIONAL to the GT's sqrt(w*h), not a constant in
+                           # FPN strides like DiffusionDet (we have no FPN)
+
+training:
+  batch_size: 8            # an A30 24GB has plenty of room (decoder ~0.8 GB +
+                           # CLIP ~1 GB); kept low for safety, raise it after
+                           # measuring real memory use
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  epochs: 300              # round 1's best landed on the last epoch 4 TIMES IN A
+                           # ROW — it never saturated, so train long from the start
+  save_dir: "checkpoints/experiment_c1/"
+  seed: 42
+  amp: false               # PROJECT RULE: never enable AMP
+
+eval:
+  # TOP-K, NOT an absolute 0.5 threshold: focal with a non-discriminating head
+  # converges to a constant (round 1: 0.263 < 0.5) -> every box gets filtered ->
+  # argmax keeps exactly 1 box.
+  topk: 100
+  nms_iou: 0.5
+  box_renewal: false       # needs a discriminating score head; round 1 measured
+                           # recall collapsing 11x
+  use_ensemble: false

@@ -31,7 +31,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 CONFIGS = ["config/experiment_a.yaml", "config/experiment_b.yaml",
-           "config/experiment_a1.yaml", "config/experiment_a2.yaml"]
+           "config/experiment_a1.yaml", "config/experiment_a2.yaml",
+           "config/experiment_c1.yaml"]
 
 failures = []
 
@@ -76,7 +77,7 @@ def one_step(cfg_path):
     from torch.utils.data import DataLoader
 
     from data.factory import build_dataset
-    from models.criterion import SetCriterion
+    from models.criterion import SetCriterion, loss_from_output
     from models.detector import build_model
     from train import TorchWrap, collate
 
@@ -102,17 +103,33 @@ def one_step(cfg_path):
 
     N = cfg["diffusion"]["num_proposals_train"]
     x_t, tt, _ = model.build_inputs(tg, N, batch["valid_h"])
-    pb, lg = model(x_t, tt, pixel_values=batch["pixel_values"], texts=batch["text"])
+    out = model(x_t, tt, pixel_values=batch["pixel_values"], texts=batch["text"])
+
+    # C1 returns a LIST of (boxes, logits), one per refinement round.
+    rounds = cfg["model"].get("refine_rounds", 0)
+    if rounds:
+        if not isinstance(out, list) or len(out) != rounds:
+            raise ValueError(f"refine_rounds={rounds} but forward returned "
+                             f"{type(out).__name__} of len "
+                             f"{len(out) if isinstance(out, list) else 'n/a'}")
+        pairs = out
+    else:
+        if isinstance(out, list):
+            raise ValueError("model returned rounds but refine_rounds=0 in config")
+        pairs = [out]
 
     n_class = cfg["model"].get("n_class", 1)
     want = (2, N) if n_class == 1 else (2, N, n_class)
-    if tuple(lg.shape) != want:
-        raise ValueError(f"logits {tuple(lg.shape)}, expected {want}")
-    if not (torch.isfinite(pb).all() and (pb >= 0).all() and (pb <= 1).all()):
-        raise ValueError(f"boxes outside [0,1]: [{pb.min():.3f}, {pb.max():.3f}]")
+    for r, (pb, lg) in enumerate(pairs):
+        if tuple(lg.shape) != want:
+            raise ValueError(f"round {r}: logits {tuple(lg.shape)}, expected {want}")
+        if not (torch.isfinite(pb).all() and (pb >= 0).all() and (pb <= 1).all()):
+            raise ValueError(f"round {r}: boxes outside [0,1]: "
+                             f"[{pb.min():.3f}, {pb.max():.3f}]")
+    pb, lg = pairs[-1]
 
     crit = SetCriterion(cfg["matcher"]["method"])
-    loss, st, _ = crit(pb, lg, tg, labels=tl)
+    loss, st, _, lg = loss_from_output(crit, out, tg, labels=tl)
     if not torch.isfinite(loss):
         raise ValueError(f"loss is {loss}")
     loss.backward()
@@ -128,7 +145,9 @@ def one_step(cfg_path):
         raise ValueError("use_text=false but the text tower was built")
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    return (f"n={n_total:,} loss={float(loss):8.2f} matched={st['n_matched']:3d} "
+    # `n_matched` is an int for A/B but a MEAN over rounds for C1 -- format it as a
+    # float so a valid C1 run does not fail the check with "Unknown format code 'd'".
+    return (f"n={n_total:,} loss={float(loss):8.2f} matched={float(st['n_matched']):5.1f} "
             f"iou={st['iou_matched']:.3f} params={trainable/1e6:.2f}M "
             f"grads={len(grads)}")
 
@@ -190,7 +209,8 @@ def compare_configs():
             cfgs[os.path.basename(p)] = yaml.safe_load(f)
     a, b = cfgs["experiment_a.yaml"], cfgs["experiment_b.yaml"]
     a1, a2 = cfgs["experiment_a1.yaml"], cfgs["experiment_a2.yaml"]
-    D = {"n_class": 1, "use_text": True, "roi_k": 0}
+    c1 = cfgs.get("experiment_c1.yaml")
+    D = {"n_class": 1, "use_text": True, "roi_k": 0, "refine_rounds": 0}
 
     def model_diff(x, y):
         return {k for k in set(x["model"]) | set(y["model"])
@@ -202,6 +222,13 @@ def compare_configs():
            str(model_diff(a, a1)) or "identical")
     report("A.2 differs from A.1 only in the class pathway",
            model_diff(a1, a2) == {"n_class", "use_text"}, str(model_diff(a1, a2)))
+    if c1:
+        report("C1 differs from A only in refine_rounds",
+               model_diff(a, c1) == {"refine_rounds"}, str(model_diff(a, c1)))
+        # One read per EXISTING layer: C1 adds no attention layer.
+        report("C1 refine_rounds == n_layer",
+               c1["model"]["refine_rounds"] == c1["model"]["n_layer"],
+               f"{c1['model']['refine_rounds']} vs {c1['model']['n_layer']}")
     for s in ("diffusion", "loss", "matcher", "eval"):
         report(f"{s} identical across all four", len({str(c[s]) for c in cfgs.values()}) == 1)
 

@@ -30,7 +30,7 @@ from torch.utils.data import DataLoader
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data.ce130_dataset import CE130Detection, PatchCache  # noqa: E402
-from models.criterion import SetCriterion  # noqa: E402
+from models.criterion import SetCriterion, loss_from_output  # noqa: E402
 from models.detector import build_model  # noqa: E402
 from train import TorchWrap, collate, model_inputs  # noqa: E402
 
@@ -137,10 +137,10 @@ def main():
 
         with T("5 decoder forward"):
             from utils.box_ops import decode_diffusion
-            pb, lg = model.decoder(decode_diffusion(x_t, model.snr_scale), tt, mem)
+            out = model.decoder(decode_diffusion(x_t, model.snr_scale), tt, mem)
 
         with T("6 criterion (matcher, CPU)"):
-            loss, st, _ = crit(pb, lg, tg, labels=tl)
+            loss, st, _, lg = loss_from_output(crit, out, tg, labels=tl)
 
         with T("7 backward"):
             opt.zero_grad(set_to_none=True)

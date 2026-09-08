@@ -1,4 +1,15 @@
-# CE-Loc — EXPERIMENT A, B, A.1, A.2
+# CE-Loc — EXPERIMENT A, B, A.1, A.2, C
+
+> **EXPERIMENT C (THIẾT KẾ, chưa implement)** — đặc tả đầy đủ ở
+> [`../../../docs/vdetr-va-thiet-ke-experiment-c.md`](../../../docs/vdetr-va-thiet-ke-experiment-c.md).
+> Mở khối `nn.TransformerDecoder` kín thành **6 vòng refine**, mỗi vòng cho box **uốn
+> attention** bằng bias hình học tính từ **4 góc của chính nó** (`Â = Softmax(QKᵀ + R)`) —
+> cơ chế **V-DETR** (`refs/pdfs/VDETR.pdf`, code `refs/repos/V-DETR/`).
+> Thứ tự một-biến: **C1** (chỉ refine) → **C2** (+ vertex-RPE) → **C3** (+ object-normalized).
+> Chỉ thêm **~3.588 tham số** (ít hơn B **219×**).
+> **Cửa chặn Bước 0 ĐÃ CHẠY, ĐẠT**: `python3 tools/check_vertex_rpe.py`, kết quả ở
+> `viz_rpe_gate/`. `log_scale` phải **~1,0**, KHÔNG phải 512 của V-DETR.
+
 
 ## EXPERIMENT A (2026-09-05) — ĐÃ CHẠY XONG, KẾT QUẢ THẤP
 

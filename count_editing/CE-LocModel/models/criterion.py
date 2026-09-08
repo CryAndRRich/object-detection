@@ -35,12 +35,75 @@ W_L1, W_GIOU, W_CLASS = 5.0, 2.0, 2.0
 ALPHA, GAMMA = 0.25, 2.0
 
 
+def loss_from_output(crit, out, targets, labels=None):
+    """Call the criterion on whatever `model.forward` returned.
+
+    A/B/A.1/A.2 return a (boxes, logits) tuple; C1 returns a LIST of those, one per
+    refinement round. Every tool that calls the model directly needs this branch, and
+    four of them were found unpacking the tuple unconditionally -- which raises on C1
+    only when that tool is actually run, i.e. on the server.
+
+    Returns (loss, stats, indices, logits_of_the_round_eval_uses).
+    """
+    if isinstance(out, list):
+        loss, st, idx = crit(out, targets, labels=labels)
+        return loss, st, idx, out[-1][1]
+    boxes, logits = out
+    loss, st, idx = crit(boxes, logits, targets, labels=labels)
+    return loss, st, idx, logits
+
+
 class SetCriterion:
     def __init__(self, matcher_method="hungarian", **matcher_kw):
         self.method = matcher_method
         self.matcher_kw = matcher_kw
 
-    def __call__(self, pred_boxes, pred_logits, targets, labels=None):
+    def __call__(self, pred_boxes, pred_logits, targets=None, labels=None):
+        """Two call shapes, dispatched on the first argument:
+
+            crit(boxes, logits, targets, labels)      A / B / A.1 / A.2
+            crit(rounds, targets, labels=...)         C1 — `rounds` is a LIST of
+                                                      (boxes, logits) pairs
+
+        In the list form the second positional argument IS `targets`, so the call
+        site reads naturally; the loss is the MEAN over rounds, keeping its scale
+        comparable to A/B so the configured weights keep their meaning.
+        """
+        if isinstance(pred_boxes, list):
+            if targets is not None and labels is None:
+                labels = targets                 # crit(rounds, targets, labels)
+            return self._forward_rounds(pred_boxes, pred_logits, labels)
+        if targets is None:
+            raise TypeError("crit(boxes, logits, targets) needs `targets`")
+        return self._forward_one(pred_boxes, pred_logits, targets, labels)
+
+    def _forward_rounds(self, rounds, targets, labels=None):
+        """Mean over rounds. Per-round stats are kept: `iou_matched_per_round` is
+        THE metric for C1 -- a flat curve means iterating buys nothing, and that
+        verdict has to be visible before C2 is built on top.
+
+        The matcher runs again every round because the boxes changed, so the pairs
+        genuinely differ. That is 6x the matcher, which was already 24 % of a step
+        in A -- measure before committing to a long run.
+        """
+        total, per_round, indices = 0.0, [], None
+        for boxes, logits in rounds:
+            L, st, idx = self._forward_one(boxes, logits, targets, labels)
+            total = total + L
+            per_round.append(st)
+            indices = idx                       # keep the LAST round's assignment
+        n = len(rounds)
+        stats = {k: sum(st[k] for st in per_round) / n for k in per_round[0]}
+        stats["n_rounds"] = n
+        for k in ("loss", "iou_matched", "n_matched"):
+            stats[f"{k}_per_round"] = [st[k] for st in per_round]
+        # The headline numbers describe the round that is actually used at
+        # inference (`outs[-1]`), so the log matches what eval.py will report.
+        for k in ("loss", "iou_matched", "n_matched", "loss_l1", "loss_giou", "loss_ce"):
+            stats[f"{k}_final"] = per_round[-1][k]
+        return total / n, stats, indices
+
+    def _forward_one(self, pred_boxes, pred_logits, targets, labels=None):
         """
         pred_boxes  : [B, N, 4] cxcywh [0,1]
         pred_logits : [B, N]   (A/B, 1-D score) or [B, N, C] (A.2, C-way class head)

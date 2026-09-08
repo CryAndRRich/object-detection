@@ -125,6 +125,13 @@ def main():
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--device", default=None)
     ap.add_argument("--num-proposals", type=int, default=None)
+    ap.add_argument("--round", type=int, default=None,
+                    help="EXPERIMENT C1 only: evaluate refinement round R (1-based) "
+                         "instead of the last one. The default matches inference "
+                         "(`ddim_sample` returns outs[-1], as V-DETR does with "
+                         "`intermediate[-1]`); this flag exists to measure whether "
+                         "AP actually improves round by round, which the per-round "
+                         "IoU in the training log cannot show on its own.")
     a = ap.parse_args()
 
     with open(a.config) as f:
@@ -151,6 +158,9 @@ def main():
     print("-" * 78, flush=True)
     for k, v in env.items():
         print(f"  {k:22s} {v}", flush=True)
+    if a.round is not None:
+        print(f"  {'round':22s} {a.round} (NOT the inference default — that is the "
+              f"last round)", flush=True)
     print(f"  {'split':22s} {a.split} | N={N} | topk={cfg['eval']['topk']} "
           f"| nms={cfg['eval']['nms_iou']} | sampling_steps={cfg['diffusion']['sampling_steps']}",
           flush=True)
@@ -178,7 +188,14 @@ def main():
         t_i = time.time()
         m = ds[i]
         px = torch.from_numpy(normalize_for_clip(m["image"])).unsqueeze(0).to(dev)
-        boxes, logits = model.ddim_sample(N, pixel_values=px, texts=[m["text"]])
+        if a.round is None:
+            boxes, logits = model.ddim_sample(N, pixel_values=px, texts=[m["text"]])
+        else:
+            rounds = model.ddim_sample(N, pixel_values=px, texts=[m["text"]],
+                                       return_all_rounds=True)
+            if not 1 <= a.round <= len(rounds):
+                raise ValueError(f"--round {a.round} outside 1..{len(rounds)}")
+            boxes, logits = rounds[a.round - 1]
 
         b = boxes[0].cpu().numpy()
         s, cls = scores_and_classes(logits[0])
@@ -312,7 +329,8 @@ def main():
         print(f"  [!] {w}", flush=True)
     print("=" * 78, flush=True)
 
-    out_path = os.path.splitext(a.ckpt)[0] + f"_eval_{a.split}_N{N}.json"
+    out_path = (os.path.splitext(a.ckpt)[0] + f"_eval_{a.split}_N{N}"
+                + (f"_round{a.round}" if a.round else "") + ".json")
     with open(out_path, "w") as f:
         json.dump({
             "summary": {**res, "AP_coco": ap_coco, "precision_ceiling": ceiling,

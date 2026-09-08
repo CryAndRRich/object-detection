@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data.ce130_dataset import PatchCache, normalize_for_clip  # noqa: E402
 from data.factory import build_dataset  # noqa: E402
-from models.criterion import SetCriterion  # noqa: E402
+from models.criterion import SetCriterion, loss_from_output  # noqa: E402
 from models.detector import build_model  # noqa: E402
 
 OK, BAD = "[ok]", "[FAIL]"
@@ -190,8 +190,8 @@ def main():
         def _step(sp=split, ix=idxs, nm=n_max):
             tg, tl, vh, kw = _batch(sp, ix)
             x_t, tt, _ = m.build_inputs(tg, N, vh)
-            pb, lg = m(x_t, tt, **kw)
-            loss, st, _ = crit(pb, lg, tg, labels=tl)
+            out = m(x_t, tt, **kw)
+            loss, st, _, lg = loss_from_output(crit, out, tg, labels=tl)
             if not torch.isfinite(loss):
                 raise ValueError(f"loss is not finite: {loss}")
             loss.backward()
@@ -210,8 +210,8 @@ def main():
         g = torch.Generator(device=dev).manual_seed(1234)   # exactly as run_val does
         with torch.no_grad():
             x_t, tt, _ = m.build_inputs(tg, N, vh, generator=g)
-            pb, lg = m(x_t, tt, **kw)
-            _, st, _ = crit(pb, lg, tg, labels=tl)
+            out = m(x_t, tt, **kw)
+            _, st, _, lg = loss_from_output(crit, out, tg, labels=tl)
         return f"val step OK, loss {st['loss']:.3f}, seeded generator on {dev.type}"
     check("seeded generator through build_inputs (device match)", _val)
 
@@ -223,8 +223,8 @@ def main():
             g = torch.Generator(device=dev).manual_seed(1234)
             with torch.no_grad():
                 x_t, tt, _ = m.build_inputs(tg, N, vh, generator=g)
-                pb, lg = m(x_t, tt, **kw)
-                out.append(crit(pb, lg, tg, labels=tl)[1]["loss"])
+                out.append(loss_from_output(crit, m(x_t, tt, **kw), tg,
+                                            labels=tl)[1]["loss"])
         if abs(out[0] - out[1]) > 1e-4:
             raise ValueError(f"same seed gave {out[0]:.6f} vs {out[1]:.6f} — val loss "
                              f"will not be comparable across epochs")
