@@ -130,10 +130,23 @@ class SinusoidalTimeEmbedding(nn.Module):
 class BoxTransformer(nn.Module):
     def __init__(self, d_model=256, n_layer=6, n_head=8, coord_dim=64,
                  dim_feedforward=None, dropout=0.1, max_cond_len=1152,
-                 roi_k=0, roi_dim=768, n_class=1, refine_rounds=0):
-        """`roi_k > 0` turns on EXPERIMENT B: each box additionally reads the frozen
-        patch features sampled on a roi_k x roi_k grid INSIDE itself. roi_k=0 keeps
-        experiment A's behaviour exactly.
+                 roi_k=0, roi_dim=768, n_class=1, refine_rounds=0,
+                 roi_to_tgt=True, score_roi=False):
+        """`roi_k > 0` builds the RoI sampler. What is DONE with it is controlled
+        separately, because EXPERIMENT B and EXPERIMENT E1 use the same sampler for
+        two different purposes and must not be conflated:
+
+          roi_to_tgt=True,  score_roi=False -> EXPERIMENT B: the RoI feature is
+              ADDED to the decoder INPUT, and the score head still reads the token
+              that comes out after all n_layer layers.
+          roi_to_tgt=False, score_roi=True  -> EXPERIMENT E1: the decoder input is
+              untouched (so the boxes are bit-identical to A), and the score head
+              instead reads the RoI feature of the box the model PREDICTED.
+
+        Leaving both on would be B+E1 at once -- two variables, unreadable. The
+        flags default to B's behaviour so every existing config keeps its meaning.
+
+        roi_k=0 keeps experiment A's behaviour exactly.
 
         `n_class > 1` turns on EXPERIMENT A.2: the score head predicts WHICH of
         n_class categories the box holds, instead of "does this box match the one
@@ -148,6 +161,22 @@ class BoxTransformer(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.roi_k = roi_k
+        self.roi_to_tgt = roi_to_tgt
+        self.score_roi = score_roi
+        if score_roi and roi_k <= 0:
+            raise ValueError("score_roi=True needs roi_k > 0: the score head is "
+                             "supposed to read the RoI feature, and with roi_k=0 "
+                             "there is no sampler to read it from (EXPERIMENT E1)")
+        if score_roi and refine_rounds:
+            # `forward` returns from the refine branch BEFORE reaching the E1 head,
+            # so this combination would train happily and silently ignore score_roi
+            # -- the run would be labelled E1 and be plain C1. Refuse it instead.
+            # Combining the two is a deliberate future experiment (E1 + refine), and
+            # it needs `_forward_refine` to build the head per round, not this flag.
+            raise ValueError(
+                "score_roi=True with refine_rounds>0 is not implemented: the refine "
+                "branch has its own per-round score heads (`round_score`) and would "
+                "IGNORE score_roi silently. Run E1 on top of A (refine_rounds=0).")
 
         self.coord_emb = SinusoidalCoordEmbedding(coord_dim)          # CHANGE (a)
         self.box_proj = nn.Linear(4 * coord_dim, d_model)
@@ -178,6 +207,14 @@ class BoxTransformer(nn.Module):
         # n_class=80 (A.2): one logit per COCO category, background = every logit low
         # -- exactly DiffusionDet's 80-not-81 convention.
         self.n_class = n_class
+        # Built for every experiment (not only the ones that use it) so that the
+        # RNG stream, and therefore every weight after this point, is identical
+        # across A/B/C1/E1. E1 leaves it UNUSED -- see `score_roi` below -- and
+        # `named_parameters` still lists it; that is 257 dead parameters kept on
+        # purpose, because dropping them conditionally would shift the RNG and
+        # break "E1's boxes are bit-exact to A's", the invariant the whole
+        # experiment is read on. They receive no gradient, so they cannot affect
+        # training; they only inflate the parameter count by 0.003 %.
         self.score_head = nn.Linear(d_model, n_class)
 
 
@@ -198,10 +235,12 @@ class BoxTransformer(nn.Module):
         # A" would be false for a reason unrelated to the experiment.
         self.refine_rounds = refine_rounds
         if refine_rounds:
-            if refine_rounds != n_layer:
+            if refine_rounds != n_layer and refine_rounds != 1:
                 raise ValueError(
-                    f"refine_rounds ({refine_rounds}) must equal n_layer ({n_layer}): "
-                    f"C1 reads a box after each EXISTING layer, it adds none")
+                    f"refine_rounds ({refine_rounds}) must equal n_layer ({n_layer}) "
+                    f"or 1: C1 reads a box after each EXISTING layer, it adds none. "
+                    f"refine_rounds=1 (EXPERIMENT C1b) still runs all {n_layer} "
+                    f"layers and reads a box only after the last one.")
             # SEPARATE head per round, as V-DETR does (`mlp_sep` defaults to True;
             # `vdetr_transformer.py:232` clones the heads num_layers+1 times).
             # Counted: 6 shared-vs-separate heads differ by 6,425 parameters =
@@ -226,6 +265,51 @@ class BoxTransformer(nn.Module):
         else:
             self.box_delta = self.round_score = None
 
+        # EXPERIMENT E1. Built LAST, after `self.roi` and after C1's heads, for the
+        # reason documented above: `nn.Linear.__init__` consumes RNG draws even when
+        # the weights are zeroed immediately afterwards, so any module constructed
+        # before this one would be shifted and "E1's boxes are bit-exact to A's"
+        # would be false for a reason that has nothing to do with the experiment.
+        #
+        # Input is `cat([tok, roi_feat])`, hence d_model * 2. Measured on real CLIP
+        # features over 669 real CE-130 GT boxes vs 669 perturbed ones (linear probe
+        # AUC, an upper bound on what a 1-layer head can extract):
+        #     roi_feat alone              0.8880
+        #     box coordinates alone       0.7230   (a proxy for what `tok` carries)
+        #     both concatenated           0.8946
+        #     centre point only (1x1)     0.5187
+        # So roi_feat carries almost all of it, but the two are COMPLEMENTARY rather
+        # than redundant: split by error type, coordinates are blind to a box that
+        # sits in the wrong place (AUC 0.4878 = a coin flip) yet BEAT roi_feat on a
+        # box of the wrong size (0.8881 vs 0.8630). Concatenating costs 256 extra
+        # parameters and keeps both. For reference, A/B/C1 all measure score_AUC
+        # ~0.497 in practice, i.e. the head currently extracts none of this.
+        if score_roi:
+            self.score_from_roi = nn.Linear(d_model * 2, n_class)
+            # DEFAULT (random) INIT -- deliberately NOT zeroed, unlike every other
+            # module added by B/C1/E1. Zeroing it deadlocks the RoI branch:
+            #
+            #   rf = roi.out(...)          roi.out.weight is zero-init (B's design)
+            #   logits = W @ [tok, rf]
+            #
+            #   dL/dW[:, d_model:]  proportional to  rf        = 0
+            #   dL/d(roi.out)       proportional to  W[:, d_model:] = 0
+            #
+            # Each needs the other to be non-zero first, so both stay at exactly
+            # zero forever. MEASURED over 3 SGD steps: the token half of W moves
+            # (0.0499) while the RoI half and roi.out never leave 0.00000000. E1
+            # would then train for 7 hours as plain A with a constant 0.5 score --
+            # loss decreasing, no warning, and a completely wrong conclusion.
+            # Exactly one of the two may be zero-initialised; `roi.out` already is
+            # (and its `branch_norm()` is logged every epoch as the early read on
+            # whether the RoI signal is being used), so this one must not be.
+            #
+            # Consequence: E1's SCORES differ from A's at step 0. Only the BOXES
+            # are bit-exact, and that is the invariant the experiment rests on --
+            # it is what proves the score path cannot have moved them.
+        else:
+            self.score_from_roi = None
+
     def forward(self, boxes_norm, timesteps, memory, patch_raw=None):
         """
         boxes_norm : [B, N, 4] cxcywh in [0,1]
@@ -238,9 +322,14 @@ class BoxTransformer(nn.Module):
 
         if self.roi is not None:
             if patch_raw is None:
-                raise ValueError("roi_k > 0 needs patch_raw (the raw CLIP patch "
-                                 "tokens); the model was built for experiment B")
-            tgt = tgt + self.roi(patch_raw, boxes_norm)               # EXPERIMENT B
+                raise ValueError(
+                    "roi_k > 0 needs patch_raw (the raw CLIP patch tokens); the "
+                    "model was built for experiment B or E1")
+            if self.roi_to_tgt:
+                # EXPERIMENT B: sampled at the INPUT box (x_t, still noisy), added
+                # to the decoder input. E1 deliberately skips this so its boxes stay
+                # bit-identical to A's -- see the class docstring.
+                tgt = tgt + self.roi(patch_raw, boxes_norm)
 
         t_tok = self.time_mlp(self.time_emb(timesteps)).unsqueeze(1)  # [B,1,D]
         mem = torch.cat([t_tok, memory], dim=1)                       # CHANGE (c): dynamic
@@ -255,10 +344,34 @@ class BoxTransformer(nn.Module):
 
         # CHANGE (b): NO masks at all
         h = self.ln_f(self.decoder(tgt=tgt, memory=mem))
-        logits = self.score_head(h)
+        box = self.box_head(h).sigmoid()
+
+        if self.score_roi:
+            # EXPERIMENT E1. The score head stops being a SIBLING of the box head
+            # and becomes its CONSUMER: it is asked "is there an object inside THIS
+            # box", about the box the model just predicted, and it answers by
+            # looking at the image there.
+            #
+            # `.detach()` is load-bearing. Without it the score loss would flow back
+            # through the sampling coordinates into box_head, letting the network
+            # MOVE BOXES to wherever scoring is easiest instead of where objects
+            # are. That is the score<->coordinate feedback loop measured in
+            # docs/bai-hoc-ce-loc-detection.md §4 (label stability collapsed to
+            # ~55 %, i.e. over half the Hungarian assignments changed every epoch).
+            # DiffusionDet does not have this problem because its RoI is sampled at
+            # the PREVIOUS cascade stage's box, which is a constant w.r.t. the
+            # current stage. We have one forward pass, so detach is the equivalent.
+            #
+            # It also keeps the E1 invariant exact: with no gradient path from the
+            # score into the box, `oracle_recall` MUST come out equal to A's 0.1197.
+            # If it does not, the implementation is wrong -- not interesting.
+            rf = self.roi(patch_raw, box.detach())
+            logits = self.score_from_roi(torch.cat([h, rf], dim=-1))
+        else:
+            logits = self.score_head(h)
+
         # [B,N] for n_class=1 so A/B keep their exact tensor shapes; [B,N,C] for A.2.
-        return self.box_head(h).sigmoid(), (logits.squeeze(-1) if self.n_class == 1
-                                            else logits)
+        return box, (logits.squeeze(-1) if self.n_class == 1 else logits)
 
     def _forward_refine(self, h, mem, anchor):
         """EXPERIMENT C1 — read a box after every layer. Returns a LIST of
@@ -270,11 +383,21 @@ class BoxTransformer(nn.Module):
         would flag it, which is why tests/test_refine.py checks that a CONSTANT
         non-zero delta yields six IDENTICAL outputs.
         """
+        # WHICH layers get a box read off them. With refine_rounds == n_layer that
+        # is every layer (C1). With refine_rounds == 1 (C1b) it is the LAST layer
+        # only -- the decoder still runs all `n_layer` layers, so depth is NOT the
+        # variable under test; the number of supervised rounds is.
+        n_layers = len(self.decoder.layers)
+        read_at = ({n_layers - 1} if self.refine_rounds == 1
+                   else set(range(n_layers)))
         outs = []
         for r, layer in enumerate(self.decoder.layers):
             h = layer(h, mem)                       # the SAME 6 layers as A
+            if r not in read_at:
+                continue
             hn = self.ln_f(h)
-            box = update_box(anchor, self.box_delta[r](hn))
-            logits = self.round_score[r](hn)
+            i = len(outs)                           # head index, not layer index
+            box = update_box(anchor, self.box_delta[i](hn))
+            logits = self.round_score[i](hn)
             outs.append((box, logits.squeeze(-1) if self.n_class == 1 else logits))
         return outs

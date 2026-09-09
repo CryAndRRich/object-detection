@@ -36,6 +36,7 @@ from data.ce130_dataset import PatchCache, normalize_for_clip  # noqa: E402
 from data.factory import build_dataset  # noqa: E402
 from models.detector import build_model  # noqa: E402
 from models.criterion import SetCriterion  # noqa: E402
+from utils.box_ops import box_iou, cxcywh_to_xyxy  # noqa: E402
 
 
 class TorchWrap(Dataset):
@@ -136,9 +137,17 @@ def write_json(save_dir, env, cfg, history, best, ds_train, ds_val):
     # so history.json's "best" always names the epoch that was actually saved.
     sel = lambda e: e.get("select_loss", e["val"]["loss"])          # noqa: E731
     top = min(history, key=sel) if history else None
+    # With select_metric=oracle_recall (C1c) `select_loss` holds the NEGATED
+    # coverage so that "lower is better" still holds for min()/val_rising_streak.
+    # Report it un-negated so nobody reads "best_val_loss: -0.133" as a loss.
+    sel_name = (history[-1].get("select_metric", "loss_final") if history
+                else "loss_final")
+    is_gain = sel_name == "oracle_recall"
     summary = {
         "epochs_completed": len(history),
-        "best_val_loss": sel(top) if top else None,
+        "select_metric": sel_name,
+        "best_score": (-sel(top) if is_gain else sel(top)) if top else None,
+        "best_val_loss": (None if is_gain else (sel(top) if top else None)),
         "best_val_loss_mean_over_rounds": top["val"]["loss"] if top else None,
         "best_epoch": top["epoch"] if top else None,
         "total_time": fmt_time(history[-1]["elapsed_sec"]) if history else "0s",
@@ -150,7 +159,8 @@ def write_json(save_dir, env, cfg, history, best, ds_train, ds_val):
         # Reading `val.loss` here would make the overfitting signal track a number
         # no forward pass ever produces.
         v = [e.get("select_loss", e["val"]["loss"]) for e in history]
-        summary["val_loss_first_last"] = [v[0], v[-1]]
+        summary["val_loss_first_last"] = ([-v[0], -v[-1]] if is_gain
+                                          else [v[0], v[-1]])
         summary["select_loss_is"] = ("last refinement round"
                                      if history[-1].get("val_loss_final") is not None
                                      else "single forward")
@@ -183,6 +193,34 @@ def model_inputs(batch, dev):
 
 
 @torch.no_grad()
+def oracle_recall(pred_cxcywh, gt_cxcywh, iou_thr=0.5):
+    """Fraction of GT covered by AT LEAST ONE predicted box, ignoring the score
+    entirely and ignoring the matcher entirely.
+
+    This is the quantity `loss_final` cannot see. `iou_matched` only averages over
+    the pairs Hungarian already chose (a fixed 268.2 of them every round), so a
+    round that tightens the boxes it already had while LOSING coverage of other GT
+    scores BETTER on the loss and WORSE in reality. Measured on C1's test set that
+    is exactly what happens: iou_matched rises 0.3426 -> 0.3528 over the six rounds
+    while oracle_recall falls 0.138 -> 0.133.
+
+    Same definition as tools/measure_box_quality.py::quality so the numbers printed
+    here are directly comparable with the ones that tool reports.
+    """
+    # Return n_gt even when there are NO predictions: those GT are uncovered, not
+    # absent. Returning 0 would shrink the denominator and report coverage as if
+    # the hard images had never been in the split.
+    if gt_cxcywh.numel() == 0:
+        return 0.0, 0
+    if pred_cxcywh.numel() == 0:
+        return 0.0, int(gt_cxcywh.shape[0])
+    iou = box_iou(cxcywh_to_xyxy(pred_cxcywh), cxcywh_to_xyxy(gt_cxcywh))  # [P,G]
+    if isinstance(iou, tuple):
+        iou = iou[0]
+    best = iou.max(dim=0).values                       # best over predictions, per GT
+    return float((best >= iou_thr).sum()), int(gt_cxcywh.shape[0])
+
+
 def run_val(model, loader, crit, N, dev):
     """Validation loss — with 1,911 images and 3 splits whose classes are DISJOINT,
     without val you cannot tell when overfitting starts. A fixed seed for `t` makes
@@ -197,6 +235,11 @@ def run_val(model, loader, crit, N, dev):
     # checkpoint chosen, and A compared, on a number no forward pass ever produces.
     total, nb, scores = {k: 0.0 for k in keys}, 0, []
     extra, per_round = {}, {}
+    # SCORE-FREE, MATCHER-FREE coverage, accumulated as raw counts (hits, n_gt) and
+    # divided ONCE at the end. Averaging per-batch ratios instead would weight a
+    # 3-GT image the same as a 500-GT one, which on CE-130 (1..1229 GT per image)
+    # is a different number entirely.
+    orec_hits, orec_tot = {}, 0
     t0 = time.time()
     # The generator MUST be on the same device as the tensors it creates
     # (torch.randn(device='cuda', generator=<cpu gen>) -> RuntimeError). GT is
@@ -210,9 +253,19 @@ def run_val(model, loader, crit, N, dev):
         if isinstance(out, list):
             _, st, _ = crit(out, tg, labels=tl)
             lg = out[-1][1]
+            rounds = [r[0] for r in out]
         else:
             pb, lg = out
             _, st, _ = crit(pb, lg, tg, labels=tl)
+            rounds = [pb]
+        # Coverage per round. `rounds[r][i]` is [N,4] cxcywh for image i.
+        for r, br in enumerate(rounds):
+            h = orec_hits.setdefault(r, 0.0)
+            for i, gt in enumerate(tg):
+                hit, _n = oracle_recall(br[i], gt)
+                h += hit
+            orec_hits[r] = h
+        orec_tot += int(sum(int(g.shape[0]) for g in tg))
         for k in keys:
             total[k] += st[k]
         for k, v in st.items():
@@ -233,6 +286,12 @@ def run_val(model, loader, crit, N, dev):
     out = {k: v / max(nb, 1) for k, v in total.items()}
     out.update({k: v / max(nb, 1) for k, v in extra.items()})
     out.update({k: [x / max(nb, 1) for x in v] for k, v in per_round.items()})
+    if orec_tot:
+        oc = [orec_hits[r] / orec_tot for r in sorted(orec_hits)]
+        out["oracle_recall_per_round"] = oc
+        out["oracle_recall_final"] = oc[-1]
+        out["oracle_recall_best_round"] = int(np.argmax(oc)) + 1
+        out["oracle_recall_max"] = max(oc)
     out["score"] = array_stats(np.concatenate(scores)) if scores else {}
     out["seconds"] = time.time() - t0
     return out
@@ -332,9 +391,16 @@ def main():
           f"/ total {sum(p.numel() for p in model.parameters())/1e6:.1f}M", flush=True)
     roi = model.decoder.roi
     if roi is not None:
-        print(f"[roi  ] EXPERIMENT B active: {roi.k}x{roi.k} grid inside each box, "
+        # The SAME sampler serves B and E1; only where its output goes differs, so
+        # the banner must say which one is running or a log reader will mislabel
+        # the run. E1 = score head consumes it; B = decoder input consumes it.
+        which = ("EXPERIMENT E1 (score head reads the PREDICTED box)"
+                 if model.decoder.score_roi
+                 else "EXPERIMENT B (RoI added to the decoder input)")
+        print(f"[roi  ] {which}: {roi.k}x{roi.k} grid inside each box, "
               f"{sum(p.numel() for p in roi.parameters())/1e6:.3f}M params, "
-              f"zero-init (branch_norm {roi.branch_norm():.4f} -> B == A at step 0)",
+              f"zero-init (branch_norm {roi.branch_norm():.4f} -> "
+              f"{'boxes == A exactly' if model.decoder.score_roi else 'B == A at step 0'})",
               flush=True)
     else:
         print("[roi  ] no RoI branch (experiment A behaviour)", flush=True)
@@ -432,6 +498,22 @@ def main():
         # console log, history, checkpoint selection, val_rising_streak -- reads
         # THIS, so all four agree on one quantity.
         val_sel = val.get("loss_final", val["loss"])
+        # SELECTION CRITERION. Default stays `loss_final` so every earlier run
+        # (A/B/A.1/A.2/C1) keeps meaning exactly what it meant.
+        #
+        # `oracle_recall` is offered because on C1 the two disagree: `loss_final`
+        # improved monotonically for 300 epochs while coverage of GT went DOWN over
+        # the six rounds. Loss is computed only over Hungarian-matched pairs, so it
+        # is blind to GT that no box reaches at all -- which is the failure mode
+        # here. Selecting on coverage optimises the quantity C2 is supposed to move.
+        #
+        # NOTE it is a GAIN, not a loss: the comparison direction flips.
+        sel_metric = cfg["training"].get("select_metric", "loss_final")
+        if sel_metric == "oracle_recall":
+            if "oracle_recall_final" not in val:
+                raise ValueError("select_metric=oracle_recall but run_val produced no "
+                                 "oracle_recall_final (no GT in the val split?)")
+            val_sel = -val["oracle_recall_final"]   # negate -> lower is still better
         epoch_sec = time.time() - t0
         elapsed = time.time() - t_start
         remaining = cfg["training"]["epochs"] - (ep + 1)
@@ -464,6 +546,16 @@ def main():
                   f" | val loss mean {val['loss']:.4f} final {val_sel:.4f}"
                   f"{'   [!] FLAT on val: iterating is not helping' if abs(d_va) < 0.005 else ''}"
                   f"{'   [!] DECREASING on val: later rounds undo earlier ones' if d_va < -0.005 else ''}",
+                  flush=True)
+        # COVERAGE per round -- the metric `loss_final` is blind to. On C1 this line
+        # would have shown coverage FALLING across the six rounds for 300 epochs
+        # while every loss number rose.
+        oc = val.get("oracle_recall_per_round")
+        if oc:
+            print("           oracle_recall/round " + " ".join(f"{v:.4f}" for v in oc) +
+                  f" | best round {int(np.argmax(oc)) + 1}/{len(oc)}" +
+                  ("   [!] LAST round is not the best -- inference uses the last one"
+                   if int(np.argmax(oc)) != len(oc) - 1 else ""),
                   flush=True)
         roi_norm = roi.branch_norm() if roi is not None else None
         if roi_norm is not None:
@@ -521,6 +613,9 @@ def main():
             "val_loss_final": val.get("loss_final"),
             "val_iou_final": val.get("iou_matched_final"),
             "select_loss": val_sel,
+            "select_metric": sel_metric,
+            "oracle_recall_per_round": val.get("oracle_recall_per_round"),
+            "oracle_recall_final": val.get("oracle_recall_final"),
             "lr": opt.param_groups[0]["lr"],
             "epoch_sec": epoch_sec,
             "elapsed_sec": elapsed,
@@ -553,7 +648,8 @@ def main():
             torch.save({"epoch": ep, "model": trainable_sd, "optimizer": opt.state_dict(),
                         "loss": best, "cfg": cfg, "trainable_only": True},
                        os.path.join(save_dir, "best.pth"))
-            print(f"  -> saved best (val_loss {best:.4f})", flush=True)
+            print(f"  -> saved best ({sel_metric} "
+                  f"{-best if sel_metric == 'oracle_recall' else best:.4f})", flush=True)
 
     total_time = time.time() - t_start
     print("=" * 78, flush=True)

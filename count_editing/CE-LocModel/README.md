@@ -186,6 +186,89 @@ không được tính.
 1,47M; A.2 **59** epoch × 25.000 = 1,475M (lệch 0,3 %). Bằng epoch thì A.1 được
 gấp 3 lần compute và phép so đo ngân sách chứ không đo điều kiện hoá.
 
+## EXPERIMENT E1 — ĐÃ CODE, CHƯA TRAIN (2026-09-09)
+
+**Một biến so với A: score head đọc gì.** Đường sinh box — CLIP, memory, 6 layer
+decoder, `box_head` — không đổi một dòng, nên box của E1 **bit-exact bằng A**
+(đã verify end-to-end với CLIP thật: `max|diff| = 0.0`).
+
+**Vì sao.** EXPERIMENT D (DiffusionDet trên đúng dữ liệu này, class-agnostic,
+**không có text**) tách được chỗ thua thành hai lỗi độc lập:
+
+| | oracle_recall | score_AUC | AP50 |
+|---|---|---|---|
+| A | 0,1197 | 0,4988 | 1,52 |
+| B | 0,1201 | 0,4950 | 1,44 |
+| C1 | 0,1384 | 0,4965 | 1,51 |
+| **D.1 (N=300)** | **0,6734** | **0,9371** | **58,13** |
+| D.1 (N=3000) | 0,8349 | 0,9489 | 65,22 |
+
+`score_AUC` 0,497 là **tung đồng xu**: A/B/C1 phủ được 12–14 % GT rồi xếp hạng
+ngẫu nhiên, nên AP vứt gần hết. Cơ chế của D nằm ngay trong code: class head của D
+đọc `roi_features` — pixel pool từ **trong chính box** (`diffusiondet/head.py:245-282`),
+còn của ta đọc token đã qua 6 layer attention.
+
+**Tín hiệu đã có sẵn trong feature frozen của chính ta.** Đo trên 669 box GT
+CE-130 thật vs 669 box nhiễu (linear probe AUC = trần trên của head 1 lớp):
+
+| nguồn | AUC | ghi chú |
+|---|---|---|
+| `roi_feat` 3×3 | **0,8880** | gánh gần hết |
+| toạ độ box | 0,7230 | proxy cho `tok` |
+| cả hai (concat) | 0,8946 | +0,007 |
+| chỉ tâm (1×1) | **0,5187** | vô dụng — cùng vector cho mọi kích thước |
+
+Tách theo loại lỗi thì hai nguồn **bổ sung nhau**: toạ độ **mù** với box lệch tâm
+(0,4878) nhưng **mạnh hơn** `roi_feat` với box sai kích thước (0,8881 vs 0,8630)
+→ concat, tốn 256 tham số.
+
+**KHÁC EXPERIMENT B** (cũng lấy RoI mà không ăn): B cộng vào **đầu vào** decoder
+tại box **nhiễu** (`box_transformer.py:245`) rồi vẫn để score head đọc token sau 6
+layer. E1 lấy mẫu tại box **dự đoán** và nối **thẳng** vào score head. Khác cả điểm
+lấy mẫu lẫn nơi tiêu thụ. Hai cờ tách riêng (`roi_to_tgt`, `score_roi`) để không
+bao giờ chạy B+E1 cùng lúc mà tưởng là E1.
+
+**`.detach()` là bắt buộc**: không có thì score loss chảy qua toạ độ lấy mẫu vào
+`box_head`, mạng sẽ **dịch box** tới chỗ dễ chấm điểm — đúng vòng phản hồi
+score↔toạ độ ở `bai-hoc-ce-loc-detection.md` §4 (label stability sụp ~55 %). D không
+gặp vì RoI của nó lấy ở box của stage **trước**, là hằng số với stage hiện tại.
+
+### Đọc kết quả: dự đoán viết TRƯỚC khi train
+
+| chỉ số | A | E1 dự đoán | sai thì nghĩa là |
+|---|---|---|---|
+| `oracle_recall` | 0,1197 | **0,1197 ± 0,003** | **BUG**, không phải phát hiện — gradient score đã lọt vào đường box |
+| `mean_bestIoU` | 0,1740 | 0,1740 ± 0,005 | như trên |
+| `score_AUC` | 0,4988 | **> 0,65** | RoI không tới head, hoặc nhãn Hungarian đổi quá nhiều (xem `label_stability`) |
+| AP50 | 1,52 | > 5 | — |
+
+### Rủi ro đã biết
+
+- **+787K tham số (+10,9 %) — ĐÚNG BẰNG B**, vì dùng chung `RoIFeatureSampler`.
+  Đây chính là lượng đã làm B overfit (best epoch 266 → **87**). E1 rất có thể cũng
+  overfit sớm; `best.pth` chọn theo val nên vẫn lấy được điểm tốt nhất, nhưng
+  **phải nhìn `best_epoch`** khi báo cáo, đừng chỉ nhìn AP.
+- **Trần 0,888 đo trên box GT**, positive là GT chính xác còn box thật của A chỉ
+  `mean_bestIoU` 0,174 → trần thật thấp hơn.
+- **Nhãn Hungarian ~55 % ổn định** → score head học từ nhãn nhiễu.
+
+### Lỗi đã bắt khi rà (chạy SGD, không phải đọc code)
+
+**Deadlock zero-init.** `roi.out` vốn zero-init (thiết kế của B). Nếu
+`score_from_roi` **cũng** zero-init thì hai cái khoá nhau ở 0 vĩnh viễn:
+`dL/dW[:, d:] ∝ rf = 0` và `dL/d(roi.out) ∝ W[:, d:] = 0`. Đo 3 bước SGD: nửa token
+của W chạy tới 0,0499 còn nửa RoI và `roi.out` **đứng nguyên 0,00000000**. E1 sẽ
+train 7 giờ như A thuần với score hằng 0,5, loss vẫn giảm, **không cảnh báo nào**.
+→ Chỉ **một** trong hai được zero-init; giữ `roi.out` (vì `branch_norm()` đã được
+log mỗi epoch làm cảnh báo sớm), `score_from_roi` dùng init mặc định.
+
+Kèm 2 test bịt lỗi này, và **4 test âm bản đã kiểm chứng ngược** (sửa code cho sai
+rồi xác nhận test FAIL): bỏ `.detach()`, lấy mẫu ở `x_t`, bỏ qua `roi_to_tgt`,
+zero-init lại head. Ba test đầu ban đầu **pass giả** vì zero-init làm gradient/rf
+bằng 0 — phải un-zero trong test mới có sức bắt lỗi.
+
+**177/177 test pass.**
+
 ## Thay đổi cốt lõi
 
 Memory của decoder từ **2 token** → **1026 token có vị trí**. Vòng 1 đo được: với 2 token thì cả N

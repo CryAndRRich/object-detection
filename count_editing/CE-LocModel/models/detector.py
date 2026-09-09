@@ -58,7 +58,8 @@ class CELocDetector(nn.Module):
     def __init__(self, clip_name="openai/clip-vit-base-patch16", d_model=256,
                  n_layer=6, n_head=8, image_size=512, num_timesteps=1000,
                  snr_scale=2.0, sampling_steps=4, dropout=0.1, freeze_clip=True,
-                 roi_k=0, n_class=1, use_text=True, refine_rounds=0):
+                 roi_k=0, n_class=1, use_text=True, refine_rounds=0,
+                 roi_to_tgt=True, score_roi=False):
         """`n_class`/`use_text` select EXPERIMENT A.2 (n_class=80, use_text=False):
         the class reaches the model through an 80-way OUTPUT head instead of the
         INPUT text. Defaults keep A/B byte-identical."""
@@ -75,7 +76,8 @@ class CELocDetector(nn.Module):
         self.decoder = BoxTransformer(
             d_model, n_layer, n_head, dropout=dropout, roi_k=roi_k,
             roi_dim=self.encoder.vision.config.hidden_size, n_class=n_class,
-            refine_rounds=refine_rounds)
+            refine_rounds=refine_rounds,
+            roi_to_tgt=roi_to_tgt, score_roi=score_roi)
         self.refine_rounds = refine_rounds
 
         self.num_timesteps = num_timesteps
@@ -209,4 +211,8 @@ def build_model(cfg, dropout=None):
         m["dropout"] if dropout is None else dropout,
         m["freeze_clip"], roi_k=m.get("roi_k", 0),
         n_class=m.get("n_class", 1), use_text=m.get("use_text", True),
-        refine_rounds=m.get("refine_rounds", 0))
+        refine_rounds=m.get("refine_rounds", 0),
+        # Default True keeps every pre-E1 config (A, B, A.1, A.2, C1) meaning
+        # exactly what it meant: with roi_k>0 that is EXPERIMENT B.
+        roi_to_tgt=m.get("roi_to_tgt", True),
+        score_roi=m.get("score_roi", False))

@@ -32,7 +32,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 CONFIGS = ["config/experiment_a.yaml", "config/experiment_b.yaml",
            "config/experiment_a1.yaml", "config/experiment_a2.yaml",
-           "config/experiment_c1.yaml"]
+           "config/experiment_c1.yaml", "config/experiment_c1b.yaml",
+           "config/experiment_c1c.yaml", "config/experiment_e1.yaml"]
 
 failures = []
 
@@ -210,6 +211,7 @@ def compare_configs():
     a, b = cfgs["experiment_a.yaml"], cfgs["experiment_b.yaml"]
     a1, a2 = cfgs["experiment_a1.yaml"], cfgs["experiment_a2.yaml"]
     c1 = cfgs.get("experiment_c1.yaml")
+    c1b, c1c = cfgs.get("experiment_c1b.yaml"), cfgs.get("experiment_c1c.yaml")
     D = {"n_class": 1, "use_text": True, "roi_k": 0, "refine_rounds": 0}
 
     def model_diff(x, y):
@@ -229,8 +231,46 @@ def compare_configs():
         report("C1 refine_rounds == n_layer",
                c1["model"]["refine_rounds"] == c1["model"]["n_layer"],
                f"{c1['model']['refine_rounds']} vs {c1['model']['n_layer']}")
+    if c1 and c1b:
+        # C1b must differ ONLY in how many rounds are read. If it also changed
+        # n_layer, a worse result would be explained by lost depth instead.
+        report("C1b differs from C1 only in refine_rounds",
+               model_diff(c1, c1b) == {"refine_rounds"}, str(model_diff(c1, c1b)))
+        report("C1b keeps C1's decoder depth",
+               c1b["model"]["n_layer"] == c1["model"]["n_layer"],
+               f"{c1b['model']['n_layer']} vs {c1['model']['n_layer']}")
+        report("C1b reads exactly 1 round", c1b["model"]["refine_rounds"] == 1,
+               str(c1b["model"]["refine_rounds"]))
+    if c1 and c1c:
+        # C1c changes NO model field at all -- only which epoch gets saved.
+        report("C1c model identical to C1", model_diff(c1, c1c) == set(),
+               str(model_diff(c1, c1c)) or "identical")
+        report("C1c selects on oracle_recall",
+               c1c["training"].get("select_metric") == "oracle_recall",
+               str(c1c["training"].get("select_metric")))
+        report("C1/C1b still select on loss_final (unchanged)",
+               all(c["training"].get("select_metric", "loss_final") == "loss_final"
+                   for c in (c1, c1b)))
+    e1 = cfgs.get("experiment_e1.yaml")
+    if e1:
+        # E1 must differ from A in exactly the three RoI/score fields. In
+        # particular `roi_to_tgt: false` is what separates it from B -- with it
+        # true, E1 would silently be B+E1 and measure two variables.
+        report("E1 differs from A only in the score-path fields",
+               model_diff(a, e1) == {"roi_k", "roi_to_tgt", "score_roi"},
+               str(model_diff(a, e1)))
+        report("E1 does NOT add RoI to tgt (that would be B)",
+               e1["model"]["roi_to_tgt"] is False,
+               str(e1["model"].get("roi_to_tgt")))
+        report("E1 has score_roi on and roi_k>0",
+               e1["model"]["score_roi"] is True and e1["model"]["roi_k"] > 0)
+        report("E1 keeps refine_rounds off (score_roi+refine is refused)",
+               e1["model"].get("refine_rounds", 0) == 0)
+        report("B still adds RoI to tgt (unchanged)",
+               b["model"].get("roi_to_tgt", True) is True)
     for s in ("diffusion", "loss", "matcher", "eval"):
-        report(f"{s} identical across all four", len({str(c[s]) for c in cfgs.values()}) == 1)
+        report(f"{s} identical across all configs",
+               len({str(c[s]) for c in cfgs.values()}) == 1)
 
     # Budget: A.1 has 73,531 samples, A.2 only 25,000. Equal EPOCHS would give A.1
     # ~3x the compute, and the comparison would measure budget, not conditioning.
