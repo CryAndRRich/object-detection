@@ -25,7 +25,44 @@ from data.ce130_dataset import normalize_for_clip  # noqa: E402
 from data.factory import build_dataset  # noqa: E402
 from models.detector import build_model  # noqa: E402
 from models.criterion import SetCriterion, loss_from_output  # noqa: E402
+from utils.box_ops import box_iou, cxcywh_to_xyxy  # noqa: E402
 from utils.diffusion_math import prepare_diffusion_concat  # noqa: E402
+
+
+def score_auc(boxes, logits, gt, iou_thr=0.5):
+    """Can a reader tell the good boxes from the bad ones USING THE SCORE ALONE?
+
+    0.5 = a coin flip, and that is not a figure of speech here: A, B and C1 all
+    measured score_AUC ~0.497 on the real test set while covering 12-14 % of the
+    GT, so AP threw most of their boxes away on random ranking. It is the single
+    number EXPERIMENT E1 exists to move, and `loss`/`iou_matched` cannot see it --
+    they are computed only over pairs the matcher already chose.
+
+    Same definition as tools/measure_box_quality.py::roc_auc so the numbers are
+    directly comparable: a prediction counts as positive if it clears iou_thr on
+    ANY GT, ties get average ranks.
+    """
+    if gt.numel() == 0 or boxes.numel() == 0:
+        return float("nan")
+    m = box_iou(cxcywh_to_xyxy(boxes), cxcywh_to_xyxy(gt))[0]      # [P,G]
+    y = (m.max(dim=1).values >= iou_thr).to(torch.float64).cpu().numpy()
+    sc = logits.detach().to(torch.float64).cpu().numpy()
+    if y.sum() == 0 or y.sum() == len(y):
+        return float("nan")                                        # one class only
+    order = np.argsort(sc, kind="mergesort")
+    sv = sc[order]
+    rank = np.empty(len(sv), dtype=np.float64)
+    i = 0
+    while i < len(sv):                                              # average ranks
+        j = i
+        while j + 1 < len(sv) and sv[j + 1] == sv[i]:
+            j += 1
+        rank[i:j + 1] = (i + j) / 2.0 + 1.0
+        i = j + 1
+    yo = y[order]
+    n1 = yo.sum()
+    n0 = len(yo) - n1
+    return float((rank[yo == 1].sum() - n1 * (n1 + 1) / 2) / (n1 * n0))
 
 
 def main():
@@ -79,13 +116,21 @@ def main():
         loss.backward()
         opt.step()
         sched.step()
-        history.append((st["loss"], st["iou_matched"]))
+        with torch.no_grad():
+            bx = out[-1][0][0] if isinstance(out, list) else out[0][0]
+            sc = lg[0] if lg.dim() == 2 else lg[0].max(-1).values
+            auc = score_auc(bx, sc, gt)
+        history.append((st["loss"], st["iou_matched"], auc))
         if first_loss is None:
             first_loss = st["loss"]
         if i % max(a.steps // 10, 1) == 0 or i == a.steps - 1:
+            bn = (model.decoder.roi.branch_norm()
+                  if model.decoder.roi is not None else None)
             print(f"  [{i:4d}] loss {st['loss']:7.4f} | l1 {st['loss_l1']:.4f} "
                   f"giou {st['loss_giou']:.4f} ce {st['loss_ce']:.4f} | "
-                  f"IoU {st['iou_matched']:.4f}", flush=True)
+                  f"IoU {st['iou_matched']:.4f} | score_AUC {auc:.4f}"
+                  + (f" | roi_branch_norm {bn:.4f}" if bn is not None else ""),
+                  flush=True)
 
     # Judge by the BEST IoU and the mean of the last 10 steps, NOT by the single
     # final step: with a fixed LR the final step is just a random sample of the
@@ -94,11 +139,22 @@ def main():
     best_iou = max(x[1] for x in history)
     iou_last10 = float(np.mean([x[1] for x in history[-10:]]))
     loss_last10 = float(np.mean([x[0] for x in history[-10:]]))
+    aucs = [x[2] for x in history if not np.isnan(x[2])]
+    best_auc = max(aucs) if aucs else float("nan")
+    auc_last10 = float(np.mean(aucs[-10:])) if aucs else float("nan")
     ratio = loss_last10 / max(first_loss, 1e-9)
 
     print(f"\nloss {first_loss:.4f} -> {loss_last10:.4f} "
           f"({100*ratio:.1f} % remaining, mean of last 10 steps)")
     print(f"IoU_matched: best {best_iou:.4f} | last 10 steps {iou_last10:.4f}")
+    print(f"score_AUC:   best {best_auc:.4f} | last 10 steps {auc_last10:.4f}"
+          f"   (0.5 = coin flip; A/B/C1 measured ~0.497 on the real test set)")
+
+    roi = model.decoder.roi
+    score_roi = getattr(model.decoder, "score_roi", False)
+    if roi is not None:
+        print(f"roi_branch_norm: {roi.branch_norm():.4f}"
+              f"   ({'E1: score head reads it' if score_roi else 'B: added to decoder input'})")
 
     if best_iou > 0.6 and ratio < 0.35:
         print("[PASS] matcher and loss work correctly, safe to continue training")
@@ -110,6 +166,38 @@ def main():
         print("  run tools/visualize_data.py to see whether GT boxes bound the objects.")
     else:
         print("[FAIL] the matcher or the loss is broken. STOP, do not train long.")
+
+    # ---- EXPERIMENT E1 gate -------------------------------------------------
+    # The checks above judge the BOX path, and they pass for A, B, C1 and E1
+    # alike -- E1's boxes are bit-identical to A's by construction, so they say
+    # nothing about the one thing E1 changes. Without the two checks below this
+    # tool would print [PASS] on a completely dead RoI branch, which is exactly
+    # the failure that the zero-init deadlock produced (score frozen at a
+    # constant, loss still falling, no warning anywhere).
+    if score_roi:
+        print()
+        bn = roi.branch_norm() if roi is not None else 0.0
+        if bn <= 1e-6:
+            print("[E1 FAIL] roi_branch_norm is still ~0: the RoI branch never "
+                  "learned, so the score head is reading a dead input. STOP -- "
+                  "training would reproduce EXPERIMENT A with a constant score.")
+        elif np.isnan(best_auc):
+            print("[E1 SKIP] score_AUC is undefined (no box cleared IoU 0.5 on "
+                  "this image, or all did). Try --index on a different image.")
+        elif best_auc > 0.90:
+            print(f"[E1 PASS] score_AUC {best_auc:.4f} on one image: the score "
+                  f"head can separate good boxes from bad using the image inside "
+                  f"them. Train for real.")
+        elif best_auc > 0.70:
+            print(f"[E1 PARTIAL] score_AUC {best_auc:.4f}. Above chance, but on a "
+                  f"SINGLE overfitted image it should be near 1.0. Worth training, "
+                  f"but expect a modest gain.")
+        else:
+            print(f"[E1 FAIL] score_AUC {best_auc:.4f} — barely above the 0.5 coin "
+                  f"flip even when overfitting ONE image, where the head has every "
+                  f"advantage. The RoI signal is not reaching the score. STOP: a "
+                  f"linear probe on these same frozen features reaches 0.888, so "
+                  f"this is a wiring problem, not a capacity limit.")
 
 
 if __name__ == "__main__":
