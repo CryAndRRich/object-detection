@@ -80,7 +80,7 @@ def one_step(cfg_path):
     from data.factory import build_dataset
     from models.criterion import SetCriterion, loss_from_output
     from models.detector import build_model
-    from train import TorchWrap, collate
+    from train import TorchWrap, collate, run_val
 
     with open(cfg_path) as f:
         cfg = yaml.safe_load(f)
@@ -145,12 +145,27 @@ def one_step(cfg_path):
     if not use_text and model.encoder.text is not None:
         raise ValueError("use_text=false but the text tower was built")
 
+    # A REAL VALIDATION PASS, for the same reason step 2 runs a real training step.
+    # run_val is a separate seam: it calls the model under `no_grad`, reads the
+    # per-round stats, and converts logits with `.numpy()`. None of that is touched
+    # by the training step above. It went untested once and E1 died three minutes
+    # into its first GPU run -- `run_val` had lost its @torch.no_grad() to a
+    # function inserted above it, so `.numpy()` hit a tensor carrying a graph.
+    # Called with grad ENABLED on purpose: that is the state train.py is in, and a
+    # missing decorator only shows up from there.
+    with torch.enable_grad():
+        v = run_val(model, loader, crit, N, torch.device("cpu"))
+    for k in ("loss", "iou_matched", "oracle_recall_final", "score"):
+        if k not in v:
+            raise KeyError(f"run_val dropped {k!r}")
+    model.train()
+
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     # `n_matched` is an int for A/B but a MEAN over rounds for C1 -- format it as a
     # float so a valid C1 run does not fail the check with "Unknown format code 'd'".
     return (f"n={n_total:,} loss={float(loss):8.2f} matched={float(st['n_matched']):5.1f} "
             f"iou={st['iou_matched']:.3f} params={trainable/1e6:.2f}M "
-            f"grads={len(grads)}")
+            f"grads={len(grads)} val_orec={v['oracle_recall_final']:.3f}")
 
 
 def compile_and_import_tools(python):

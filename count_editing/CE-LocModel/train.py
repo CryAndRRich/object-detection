@@ -221,6 +221,11 @@ def oracle_recall(pred_cxcywh, gt_cxcywh, iou_thr=0.5):
     return float((best >= iou_thr).sum()), int(gt_cxcywh.shape[0])
 
 
+# `no_grad` belongs HERE, on run_val -- not only on oracle_recall above.
+# It was lost once by inserting a new decorated function directly above this
+# one: the decorator stayed with the new function and run_val silently kept
+# building a graph, which crashed at `.numpy()` and held the activations.
+@torch.no_grad()
 def run_val(model, loader, crit, N, dev):
     """Validation loss — with 1,911 images and 3 splits whose classes are DISJOINT,
     without val you cannot tell when overfitting starts. A fixed seed for `t` makes
