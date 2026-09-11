@@ -15,9 +15,10 @@ train/eval thật đã chạy qua notebook Kaggle — xem
 liệu. Kết quả đã đo đầy đủ (data, config, số liệu, so baseline có venue) nằm ở
 [`../../RESULTS.md`](../../RESULTS.md).
 
-**Ngoại lệ: EXPERIMENT D dùng lại đúng code này cho CE-130 — xem
-[§ EXPERIMENT D](#experiment-d--đối-chứng-trên-ce-130), chưa chạy, chỉ mới implement
-converter/dataset/config/metric.** Tài liệu ở trên vẫn đúng cho việc hiểu code/cấu hình 3
+**Ngoại lệ: EXPERIMENT D dùng lại đúng code này cho CE-130** — xem
+[§ EXPERIMENT D](#experiment-d--đối-chứng-trên-ce-130). D.1 đã train + eval xong
+(AP50 58,13 @300 box); phần thêm vào chỉ là converter/dataset/config/metric,
+**không đụng một dòng code model nào**. Tài liệu ở trên vẫn đúng cho việc hiểu code/cấu hình 3
 dataset gốc, và cho việc kiểm import/mismatch nếu cấu trúc thư mục thay đổi.
 
 ## Mục lục
@@ -319,8 +320,31 @@ kiểm chứng (COCO/VOC/CrowdHuman) lên đúng dữ liệu CE-130 để biết
 toán định vị. Không có D thì `AP50 0,0152` của A/B/C lơ lửng: không biết thấp vì kiến
 trúc hay vì dữ liệu.
 
-**Trạng thái: code đã implement, CHƯA CHẠY THẬT trên GPU.** Converter đã chạy thử và
-kiểm mắt (xem dưới), nhưng chưa train.
+**Trạng thái: D.1 ĐÃ TRAIN + EVAL XONG (2026-09-09).**
+
+**Cấu hình thật**: finetune ImageNet `R-50.pkl`, **12.000 iteration**, **batch 2**, LR
+**8,84e-6** (= 1,25e-5 × √(2/4)), `STEPS (9000,11000)` = **12,6 epoch**, **1 GPU A30**,
+**~1h07m**, `max_mem 4248M`, class-agnostic `NUM_CLASSES=1`.
+
+| N | oracle_recall | mean_bestIoU | score_AUC | AP | AP50 |
+|---|---|---|---|---|---|
+| **300** | **0,6734** | 0,5974 | **0,9371** | 34,22 | **58,13** |
+| 1000 | 0,7853 | 0,6763 | 0,9483 | 37,43 | 63,65 |
+| 2000 | 0,8187 | 0,6972 | 0,9486 | 38,06 | 64,60 |
+| 3000 | 0,8349 | 0,7062 | 0,9489 | 38,27 | 65,22 |
+
+AP50 theo iteration: 40,6 → 51,5 → 54,6 → 56,4 → 57,9 → **58,1** (gần bão hoà).
+`n_images_over_num_proposals = 7` ở N=300 — đúng như cảnh báo "trần recall" đã dự đoán.
+
+**Cùng test set, cùng 37.812 GT, cùng N=300**: CE-Loc A `0,1197 / 0,4988 / 1,52`;
+B `0,1201 / 0,4950 / 1,44`; C1 `0,1384 / 0,4965 / 1,51`. → trần thực tế cao **38×** mức
+CE-Loc đang đạt, và chỗ thua tách làm **hai**: box (**4,9×**) và ranking (`score_AUC` 0,497
+= tung đồng xu). **D.1 hoàn toàn không có text** (grep `text|clip|bert|tokenizer|language|
+prompt|caption` chỉ ra `torch.clip`/`clip_denoised`; json `categories: [{'id':1,'name':
+'object'}]`, cả 37.812 annotation `category_id=1`) → zero-shot **không** phải nút thắt.
+
+**D-coco và D.2 chưa chạy, không còn ưu tiên** — D.1 đã trả lời xong câu hỏi chính.
+Đọc mọi số test kèm cảnh báo lô annotation hỏng (4,2 % GT test) ở mục cuối.
 
 ### Chạy
 

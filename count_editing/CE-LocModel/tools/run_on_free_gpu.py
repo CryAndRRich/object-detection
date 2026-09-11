@@ -8,8 +8,8 @@ wraps ANY Python script passed to it, because CE-LocModel has several entry
 points that need to run on the server (train.py, eval.py, tools/*.py).
 
   1. Query nvidia-smi for every GPU: free memory + utilization.
-  2. Pick the FREEST GPU: prefer GPUs not busy computing (utilization below a
-     threshold); within that group, take the one with the most free memory.
+  2. Pick the GPU with the MOST FREE MEMORY. That is the ONLY criterion --
+     utilization is printed for context but never affects the choice.
   3. Set CUDA_VISIBLE_DEVICES=<chosen gpu> and run the given Python script with
      all remaining arguments.
 
@@ -47,8 +47,6 @@ import subprocess
 import time
 import sys
 
-UTIL_BUSY_THRESHOLD = 50  # percent; a GPU above this is considered busy computing
-
 
 def query_gpus():
     """``[(index, free_mib, total_mib, util_percent), ...]`` from nvidia-smi.
@@ -78,15 +76,23 @@ def query_gpus():
 
 
 def pick_gpu(gpus):
-    """The freest GPU: ``(gpu, had_idle)``.
+    """The GPU with the MOST FREE MEMORY. One criterion, nothing else.
 
-    Prefers compute-idle GPUs (``utilization < UTIL_BUSY_THRESHOLD``); within the
-    chosen group, takes the one with the most free memory. No GPU is ever excluded
-    for lack of memory — see the module docstring.
+    An earlier version filtered on utilization first (keep only GPUs below 50 %
+    busy, then take the most free memory within that group). That inverted the
+    whole point on 2026-09-11: GPU 0 had 1,238 MiB free at 0 % utilization while
+    GPU 2 had 15,842 MiB free at 72 %. The utilization filter shrank the pool to
+    GPU 0 alone, so `max(... free memory)` had nothing left to choose from and the
+    job went to the gpu with the LEAST free memory — the opposite of "freest".
+
+    Utilization is a snapshot of the last sampling period, not a claim on memory.
+    A GPU at 72 % with 15 GB free runs the job fine; one at 0 % with 1.2 GB free
+    OOMs immediately. Memory is what jobs actually run out of.
+
+    Utilization is still PRINTED (useful context when reading the log) but must
+    never influence the choice again.
     """
-    idle = [g for g in gpus if g[3] < UTIL_BUSY_THRESHOLD]
-    pool = idle if idle else gpus
-    return max(pool, key=lambda g: g[1]), bool(idle)
+    return max(gpus, key=lambda g: g[1])
 
 
 def main():
@@ -173,13 +179,9 @@ def _pick_and_run(args, cmd, repo_root):
         print("current GPU state:", flush=True)
         for idx, free, total, util in gpus:
             print(f"  GPU {idx}: free {free:6d} MiB / {total} MiB, utilization {util:3d}%")
-        (chosen_index, free, total, util), had_idle = pick_gpu(gpus)
-        if had_idle:
-            print(f"chose GPU {chosen_index} (free {free} MiB, utilization {util}%)", flush=True)
-        else:
-            print(f"chose GPU {chosen_index} (free {free} MiB, utilization {util}%) -- EVERY GPU "
-                  f"is busy computing (>{UTIL_BUSY_THRESHOLD}%), so the job will contend for "
-                  f"resources and run slower, but it will run.", flush=True)
+        chosen_index, free, total, util = pick_gpu(gpus)
+        print(f"chose GPU {chosen_index} (free {free} MiB, utilization {util}%) -- most free "
+              f"memory", flush=True)
 
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(chosen_index)

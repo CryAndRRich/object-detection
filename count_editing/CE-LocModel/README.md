@@ -116,7 +116,7 @@ split. Giả thuyết "kích thước hằng số" chỉ **PARTIAL** (`size_rati
 → **Không rebalance loss về w,h.** Model không định vị được từng vật, chứ không
 phải định vị được rồi vẽ hộp lệch.
 
-## EXPERIMENT A.1 / A.2 — CHƯA TRAIN
+## EXPERIMENT A.1 / A.2 — ĐÃ CHẠY XONG (trên COCO-minitrain)
 
 Sau A và B, AP thấp còn **4 nguyên nhân chồng lên nhau, không tách được**:
 
@@ -186,7 +186,51 @@ không được tính.
 1,47M; A.2 **59** epoch × 25.000 = 1,475M (lệch 0,3 %). Bằng epoch thì A.1 được
 gấp 3 lần compute và phép so đo ngân sách chứ không đo điều kiện hoá.
 
-## EXPERIMENT E1 — ĐÃ CODE, CHƯA TRAIN (2026-09-09)
+## EXPERIMENT C1 — ĐÃ CHẠY XONG (2026-09-09), REFINE KHÔNG GIÚP
+
+`refine_rounds: 6` — mở `nn.TransformerDecoder` thành vòng lặp đọc box sau **mỗi**
+layer + deep supervision. Không thêm layer attention nào; head refine riêng mỗi
+vòng, zero-init → C1 step 0 ≡ A bit-exact.
+
+**Sáu vòng đo TỆ DẦN trên mọi chỉ số không dùng score:**
+
+| vòng | `oracle_recall` | `mean_bestIoU` | AP50 |
+|---|---|---|---|
+| 1 | **0,1384** | **0,2314** | **0,0168** |
+| 3 | — | — | 0,0162 |
+| 6 | 0,1328 | 0,2157 | 0,0151 |
+
+**Nhưng `iou_matched` — thứ `loss_final` nhìn — lại TĂNG** 0,3426 → 0,3528. Đây là
+phát hiện quan trọng nhất của C1, và nó **không nói về refine**, nó nói về **cách
+chọn checkpoint**:
+
+`iou_matched` chỉ trung bình trên **cặp Hungarian đã khớp** (đúng 268,2 cặp mỗi
+vòng) → **mù hoàn toàn với GT không box nào chạm tới**. Một vòng siết chặt box nó
+đã có trong khi **mất phủ** GT khác sẽ **ghi điểm tốt hơn** trên loss và **tệ hơn**
+trong thực tế. Đúng chuyện đã xảy ra.
+
+→ Đã thêm `oracle_recall` vào `run_val` (**không score, không matcher**: tỉ lệ GT
+được **ít nhất một** box phủ ở IoU ≥ 0,5) và cờ `select_metric` trong config.
+**Cộng dồn thô `(hits, n_gt)` rồi chia MỘT lần** — trung bình tỉ lệ từng ảnh sẽ cân
+ảnh 3 GT ngang ảnh 500 GT, mà CE-130 có 1..1229 GT/ảnh (ví dụ 2 ảnh: 0,4510 vs
+0,0196, khác hẳn).
+
+**Bài học dùng lại được: chọn checkpoint bằng chỉ số mà matcher không nhìn thấy.**
+
+## EXPERIMENT C1b / C1c — ĐÃ CODE, CHƯA TRAIN
+
+Tách hai nghi vấn của C1, mỗi cái đúng một biến:
+
+- **C1b** (`config/experiment_c1b.yaml`): `refine_rounds: 1` — một vòng có bằng sáu
+  không. **Giữ nguyên 6 layer decoder**: `refine_rounds=1` làm ngây thơ sẽ khiến
+  `_forward_refine` đọc sau layer 0 rồi dừng, tức **cắt decoder còn 1 layer** và
+  trộn lẫn hai biến (số vòng giám sát vs độ sâu). Đã sửa bằng tập `read_at` chỉ đọc
+  ở layer cuối, khoá bằng `test_one_round_still_runs_every_layer`.
+- **C1c** (`config/experiment_c1c.yaml`): model **y hệt C1**, đổi **đúng một thứ** —
+  `select_metric: oracle_recall`. Trả lời "C1 có thật sự tệ hơn A không, hay chỉ là
+  ta chọn nhầm checkpoint".
+
+## EXPERIMENT E1 — CỬA CHẶN OVERFIT ĐẠT, ĐANG TRAIN (2026-09-10)
 
 **Một biến so với A: score head đọc gì.** Đường sinh box — CLIP, memory, 6 layer
 decoder, `box_head` — không đổi một dòng, nên box của E1 **bit-exact bằng A**
@@ -242,6 +286,47 @@ gặp vì RoI của nó lấy ở box của stage **trước**, là hằng số 
 | `score_AUC` | 0,4988 | **> 0,65** | RoI không tới head, hoặc nhãn Hungarian đổi quá nhiều (xem `label_stability`) |
 | AP50 | 1,52 | > 5 | — |
 
+### Cửa chặn overfit-1-ảnh — ĐÃ CHẠY, ĐẠT (2026-09-10)
+
+Chạy E1 **và A** trên cùng ảnh (`1074 'buffalo'`, 6 GT, N=32, t=50), cùng seed,
+300 step. Chạy A cùng lúc là **có chủ ý**: nếu E1 và A cho `score_AUC` như nhau thì
+nhánh RoI vô tác dụng, dù `[PASS]` vẫn hiện.
+
+| | E1 | A |
+|---|---|---|
+| `score_AUC` (10 step cuối) | **0,9082** | 0,6686 |
+| `IoU_matched` cuối | 0,9420 | 0,9123 |
+| `roi_branch_norm` | 0,77 → **3,65** | — |
+
+`roi_branch_norm` tăng 4,8× ⇒ nhánh RoI **thật sự học** (deadlock zero-init đã được
+gỡ đúng). `score_AUC` hơn A **0,24** trên cùng ảnh/seed/step — bằng chứng trực tiếp
+cho giả thuyết E1.
+
+`tools/overfit_one.py` trước đó **không thể** kiểm được E1: nó chỉ in loss và IoU
+(grep `branch_norm|roi|score` không ra gì), tức sẽ in `[PASS]` trên một nhánh RoI
+chết hoàn toàn. Đã thêm `score_auc()` (cùng định nghĩa với
+`tools/measure_box_quality.py::roc_auc`, trung bình hạng khi hoà, `nan` khi chỉ có
+một lớp — đã kiểm 4 ca có đáp án biết trước: đúng→1,0, đảo→0,0, hằng→0,5, một
+lớp→nan), theo dõi `roi_branch_norm` mỗi bước, và khối phán quyết
+`[E1 PASS/PARTIAL/FAIL/SKIP]`.
+
+### Lỗi `no_grad` — decorator bị "cướp" (2026-09-10)
+
+`run_val` trong `train.py` vốn có `@torch.no_grad()`. Khi thêm hàm `oracle_recall`
+**ngay phía trên** nó, decorator dính vào hàm mới còn `run_val` thành trần → val
+build graph → vỡ ở `.numpy()` **sau 3 phút train**, trên GPU, retry đủ 3 lần
+(~15 phút GPU). **Không liên quan E1** — A/B/C1 chạy lại lúc đó cũng vỡ y hệt.
+
+Nguyên nhân gốc ở **cửa chặn**: `check_before_train.py` chạy train step thật, chạy
+`preflight.py`, import mọi tool — nhưng **không thứ nào gọi `run_val`**, vốn là một
+seam riêng (gọi model dưới `no_grad`, đọc stat per-round, đổi logits bằng `.numpy()`).
+
+Đã sửa: trả `no_grad` về `run_val`; `check_before_train.py` giờ chạy **một vòng
+`run_val` thật** bao trong `torch.enable_grad()` (đúng trạng thái `train.py` đang ở —
+thiếu decorator chỉ lộ từ đó) và báo thêm cột `val_orec`; 2 test trong
+`tests/test_refine.py`. **Kiểm chứng ngược**: bỏ decorator → 2 test fail **và**
+preflight fail với **đúng traceback đã gặp trên server**, trong 56 giây tại local.
+
 ### Rủi ro đã biết
 
 - **+787K tham số (+10,9 %) — ĐÚNG BẰNG B**, vì dùng chung `RoIFeatureSampler`.
@@ -267,7 +352,7 @@ rồi xác nhận test FAIL): bỏ `.detach()`, lấy mẫu ở `x_t`, bỏ qua 
 zero-init lại head. Ba test đầu ban đầu **pass giả** vì zero-init làm gradient/rf
 bằng 0 — phải un-zero trong test mới có sức bắt lỗi.
 
-**177/177 test pass.**
+**179/179 test pass.**
 
 ## Thay đổi cốt lõi
 
@@ -296,9 +381,11 @@ utils/box_ops.py     diffusion_math.py  matcher.py    <- port cơ học sang tor
 data/ce130_dataset.py                                 <- dedupe, pad CLIP mean, flip
 models/clip_encoder.py  box_transformer.py            <- CLIP frozen + decoder
 models/detector.py  criterion.py                      <- ghép + loss
-train.py  eval.py  config/experiment_a.yaml
+train.py  eval.py
+config/experiment_{a,b,a1,a2,c1,c1b,c1c,e1}.yaml       <- 8 config, mỗi cái đổi 1 biến
 tools/visualize_data.py  profile_and_memory.py  build_cache.py  overfit_one.py
-tests/  (6 file, 78 test — .gitignore, chỉ có ở máy dev)
+tools/check_before_train.py                            <- CỬA CHẶN local trước khi push
+tests/  (12 file, 179 test — .gitignore, chỉ có ở máy dev)
 ```
 
 **Vì sao tách numpy/torch**: vòng 1 chôn logic toán trong module torch nên chỉ verify được trên
@@ -322,7 +409,12 @@ python3 tools/check_before_train.py
 #      chuyển tiếp. Mọi test dataset pass, train chết ngay bước đầu.
 #    - `NameError: tl` trong 4 callback của preflight.py: py_compile chỉ bắt
 #      SyntaxError, tên trong hàm chỉ resolve khi hàm CHẠY. Lọt tới server.
-#    Cả hai đều có test âm bản: tái tạo lỗi -> check phải đỏ.
+#    - `run_val` mất @torch.no_grad() (decorator bị hàm chèn phía trên chiếm):
+#      vỡ ở `.numpy()` SAU 3 PHÚT train, trên GPU, retry 3 lần. Train step không
+#      chạm tới `run_val` -> giờ cửa chặn chạy luôn MỘT VÒNG run_val thật.
+#    Cả ba đều có test âm bản: tái tạo lỗi -> check phải đỏ.
+#    LƯU Ý: --configs nhận ĐƯỜNG DẪN ĐẦY ĐỦ, không phải tên rút gọn:
+#      python3 tools/check_before_train.py --configs config/experiment_e1.yaml
 
 # 1. Test riêng (nếu chỉ muốn phần này), ~2 phút
 python3 -m pytest tests/ -q
@@ -384,7 +476,47 @@ nó đúng bằng **80×** giá trị 1 chiều (đo được 520 vs 6,5). Focal
 đầu run lớn nên clipping quan trọng hơn, và **`loss_ce` không so được** giữa A.1
 và A.2 — so AP và IoU.
 
-## Ba chỉ số phải nhìn khi train
+### C1 / C1b / C1c / E1
+
+```bash
+# CỬA CHẶN 1 — overfit 1 ảnh, vài phút. CHẠY CẢ MỐC ĐỐI CHIẾU (A) cùng lúc:
+# nếu E1 và A cho score_AUC như nhau thì nhánh RoI vô tác dụng, dù [PASS] vẫn hiện.
+nohup bash -c '
+python3 tools/run_on_free_gpu.py -- tools/overfit_one.py \
+    --config config/experiment_e1.yaml --steps 300 --num-proposals 32
+python3 tools/run_on_free_gpu.py -- tools/overfit_one.py \
+    --config config/experiment_a.yaml  --steps 300 --num-proposals 32
+' > /mnt/disk1/aiotlab/haitn/log/e1_overfit.log 2>&1 & echo "PID=$!"
+#   [E1 PASS] score_AUC > 0,90        -> train thật
+#   [E1 FAIL] roi_branch_norm ~ 0     -> DỪNG, deadlock: score head đọc input chết
+#   [E1 FAIL] score_AUC <= 0,70       -> DỪNG, probe trên chính feature này đạt
+#                                        0,888 nên đây là lỗi NỐI DÂY, không phải
+#                                        thiếu sức chứa
+#   roi_branch_norm phải TĂNG DẦN (đo được 0,77 -> 3,65)
+
+# CỬA CHẶN 2 — train thật, ~7h (A mất 6h58m cùng cấu hình: 300 epoch, batch 8, N=100)
+nohup python3 tools/run_on_free_gpu.py -- train.py --config config/experiment_e1.yaml \
+    > /mnt/disk1/aiotlab/haitn/log/e1_train.log 2>&1 & echo "PID=$!"
+# Trong log nhìn 3 thứ:
+#   - dòng [roi ] phải ghi "EXPERIMENT E1 (score head reads the PREDICTED box)".
+#     Ghi "EXPERIMENT B" nghĩa là cờ roi_to_tgt sai.
+#   - roi_branch_norm mỗi epoch phải > 0
+#   - best_epoch: E1 mang +787K tham số ĐÚNG BẰNG B, mà B tụt 266 -> 87
+
+# eval
+nohup bash -c '
+python3 tools/run_on_free_gpu.py -- eval.py --config config/experiment_e1.yaml \
+    --ckpt checkpoints/experiment_e1/best.pth --split test --num-proposals 300
+python3 tools/run_on_free_gpu.py -- tools/measure_box_quality.py \
+    --config config/experiment_e1.yaml --ckpt checkpoints/experiment_e1/best.pth \
+    --split test --num-proposals 300
+' > /mnt/disk1/aiotlab/haitn/log/e1_eval.log 2>&1 & echo "PID=$!"
+
+# C1b / C1c — cùng dạng lệnh, đổi config. C1c KHÔNG đổi model, chỉ đổi
+# select_metric: oracle_recall -> so trực tiếp với C1 là so cách CHỌN checkpoint.
+```
+
+## Bốn chỉ số phải nhìn khi train
 
 Quan trọng ngang loss — vòng 1 thiếu nên mù suốt 5 vòng sửa:
 
@@ -394,6 +526,7 @@ Quan trọng ngang loss — vòng 1 thiếu nên mù suốt 5 vòng sửa:
 | **std của `sigmoid(score)`** | < 0,05 → head kẹt ở hằng số (focal hội tụ về hằng số khi không phân biệt được) |
 | **IoU trung bình cặp matched** | tách khỏi loss, dễ đọc |
 | **val_loss** | best chọn theo val (không phải train) — 1.911 ảnh + class rời nhau thì overfit rất nhanh |
+| **`oracle_recall`** | **THÊM SAU C1**: không score, không matcher. `iou_matched` chỉ nhìn cặp đã khớp nên **mù với GT không box nào chạm** — C1 đo được `iou_matched` TĂNG trong khi `oracle_recall` GIẢM. Nếu hai cái đi ngược nhau, tin `oracle_recall`. |
 
 ## Log và số liệu
 
@@ -457,5 +590,7 @@ số box sau top-k và sau NMS, score min/max, thời gian) để tìm ảnh nà
 ## Chưa làm
 
 Adapter transformer trên patch token (hoãn có chủ đích — can thiệp một-biến nếu số kém);
-`box_renewal` / `use_ensemble` (cần score head chứng minh phân biệt được); SimOTA center prior;
+`box_renewal` / `use_ensemble` (**đang chờ E1**: điều kiện bật là score head chứng minh phân
+biệt được — A/B/C1 đo `score_AUC` ~0,497 tức tung đồng xu, nên bật lúc này chỉ gây hại; nếu E1
+đưa `score_AUC` lên thì đây là thứ đáng thử NGAY sau, không tốn train lại); SimOTA center prior;
 score head kiểu `box_feature · text_feature`; kiểm feature CLIP frozen @512 (nội suy 2,3×).
