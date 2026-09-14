@@ -1,7 +1,7 @@
 # CE-Loc — EXPERIMENT A, B, A.1, A.2, C
 
 > **EXPERIMENT C (THIẾT KẾ, chưa implement)** — đặc tả đầy đủ ở
-> [`../../../docs/vdetr-va-thiet-ke-experiment-c.md`](../../../docs/vdetr-va-thiet-ke-experiment-c.md).
+> [`../../../docs/04-thiet-ke.md`](../../../docs/04-thiet-ke.md).
 > Mở khối `nn.TransformerDecoder` kín thành **6 vòng refine**, mỗi vòng cho box **uốn
 > attention** bằng bias hình học tính từ **4 góc của chính nó** (`Â = Softmax(QKᵀ + R)`) —
 > cơ chế **V-DETR** (`refs/pdfs/VDETR.pdf`, code `refs/repos/V-DETR/`).
@@ -74,7 +74,7 @@ chính `patch_raw` đã cache, không phải build lại.
 này.** Bản read-only đầy đủ vẫn ở `refs/repos/Count-Editing/CE-LocModel/` nếu cần đọc lại.
 
 Thiết kế đầy đủ + toàn bộ số đo: [`../../../docs/thiet-ke-ce-loc-vong-2.md`](../../../docs/thiet-ke-ce-loc-vong-2.md).
-Lỗi vòng 1 (đọc TRƯỚC khi sửa gì): [`../../../docs/bai-hoc-ce-loc-detection.md`](../../../docs/bai-hoc-ce-loc-detection.md).
+Lỗi vòng 1 (đọc TRƯỚC khi sửa gì): [`../../../docs/02-du-lieu-ce130.md`](../../../docs/02-du-lieu-ce130.md).
 
 **Ràng buộc**: thân model là **Diffusion Policy transformer-based**, chỉ **mượn cơ chế sinh N box**
 của DiffusionDet.
@@ -173,7 +173,7 @@ Cùng ảnh, cùng annotation (181.475 box), cùng loss/matcher/diffusion/N.
 Đọc kết quả:
 - **A.2 ≈ A.1** → đường text hoạt động tốt ngang head trực tiếp. Tốt nhất cho CE-Loc.
 - **A.2 ≫ A.1** → đường text **là nút thắt** → khớp với mismatch không gian đã đo
-  ([docs/y-tuong-khong-gian-box-vs-anh.md](../../../docs/y-tuong-khong-gian-box-vs-anh.md)).
+  ([docs/01-bai-toan.md](../../../docs/01-bai-toan.md)).
 - **cả hai đều kém** → lỗi ở phần chung (diffusion/matcher/decoder).
 
 **A.2 đang giải bài DỄ HƠN** — 1 forward xong cả ảnh (7,26 box) thay vì ~2,94
@@ -230,7 +230,84 @@ Tách hai nghi vấn của C1, mỗi cái đúng một biến:
   `select_metric: oracle_recall`. Trả lời "C1 có thật sự tệ hơn A không, hay chỉ là
   ta chọn nhầm checkpoint".
 
-## EXPERIMENT E1 — CỬA CHẶN OVERFIT ĐẠT, ĐANG TRAIN (2026-09-10)
+## EXPERIMENT E1 — ĐÃ TRAIN + EVAL XONG (2026-09-11), CẢI THIỆN LỚN NHẤT TỪ TRƯỚC TỚI NAY
+
+**Kết quả (N=300, cùng checkpoint `best.pth` epoch 283):**
+
+| | A val | **E1 val** | A test | **E1 test** |
+|---|---|---|---|---|
+| `oracle_recall` | — | **0,2021** | 0,1197 | **0,2559** |
+| `mean_bestIoU` | — | 0,2787 | 0,1740 | **0,3086** |
+| `score_AUC` | 0,4988* | **0,7001** | 0,4988 | **0,6852** |
+| **AP50** | 0,0073 | **0,0371** | 0,0152 | **0,0636** |
+| AP_coco | 0,00128 | **0,00723** | 0,00281 | **0,01268** |
+| recall | 0,0904 | **0,1985** | 0,1171 | **0,2531** |
+
+\* A chưa đo `oracle_recall`/`score_AUC` trên val (train trước khi thêm hai chỉ số này);
+số 0,4988 là trên test.
+
+**AP50 gấp 5,09× trên val và 4,18× trên test.** A/B/C1 nằm trong khoảng 1,44–1,52
+(test) suốt ba thí nghiệm; E1 phá ra 6,36. **Cải thiện có trên CẢ HAI split với tỉ
+lệ recall gần như bằng nhau (2,20× val / 2,16× test)** → không phải hiệu ứng của
+phân bố test.
+
+**Dự đoán viết trước khi train — đối chiếu:**
+
+| dự đoán | thực tế | |
+|---|---|---|
+| `score_AUC` > 0,65 | 0,685 test / 0,700 val | ✅ |
+| AP50 > 5 | 6,36 | ✅ |
+| báo cáo `best_epoch` | **283**/300 | ✅ **KHÔNG** overfit sớm như B (87) |
+| `oracle_recall` = 0,1197 ± 0,003 | **0,2559** (2,14×) | ❌ **SAI** — xem dưới |
+
+### Dự đoán SAI về oracle_recall — đã kiểm, KHÔNG phải bug
+
+Tôi viết trước khi train: box của E1 phải bit-exact bằng A, nên `oracle_recall`
+lệch khỏi 0,1197 là **bug**. Thực tế 0,2559. Theo đúng tiêu chí đó phải coi là bug
+cho tới khi chứng minh ngược lại. Bốn phép kiểm:
+
+1. **Gradient score có rò vào box?** Đo trực tiếp: loss chỉ trên score →
+   `|grad box_head| = 0.0` (chính xác 0); loss trên box → 2907,7. `.detach()` đúng.
+2. **Config lệch ngoài 3 trường score-path?** Không — chỉ `roi_k` / `roi_to_tgt` /
+   `score_roi` (+ `save_dir`).
+3. **Box đổi khi tắt nhánh RoI của head?** `torch.equal(box, box2) = True` — không
+   đổi một bit.
+4. **A/B chạy `--cache` (fp16 patch token), E1 thì không.** Khác biệt duy nhất tìm
+   được, nhưng sai số fp16 trên patch token chỉ **0,018 %** — quá nhỏ cho 2,14×.
+
+**Giải thích còn lại** (chưa kiểm chứng trực tiếp được): score head tốt hơn → nhãn
+Hungarian ổn định hơn → nhánh box học tốt hơn. Đây là kênh ảnh hưởng **qua nhãn**,
+không qua gradient, nên `.detach()` không chặn — và không mâu thuẫn với phép kiểm 1.
+
+### Nhánh RoI thật sự được dùng — đo bằng ablation trên checkpoint đã train
+
+Tắt nửa RoI của `score_from_roi` (đặt `W[:, d_model:] = 0`) rồi forward lại:
+score đổi `|Δ| mean 0,214`, bằng **2,3× độ lệch chuẩn** của chính score (0,092).
+Box **không đổi một bit**. Nghĩa là nhánh RoI mang thông tin thật, dù `|W|` nửa RoI
+(0,0012) nhỏ hơn nửa token (0,0297) **26 lần** — trọng số nhỏ vì `roi.out` khởi tạo
+zero nên xuất phát sau, không phải vì vô dụng.
+
+### `iou_matched` lại ĐÁNH LỪA lần thứ hai
+
+Tại `best_epoch` của mỗi bên, trên val trong lúc train: A `iou_matched` **0,3449** >
+E1 **0,3401** — A trông tốt hơn. Nhưng eval trên **cùng** val cho AP50 E1 gấp **5,09×**.
+`n_matched` cố định **268,2** ở cả hai. Đúng cơ chế §5ter của
+`docs/02-du-lieu-ce130.md` đã ghi từ C1: `iou_matched` chỉ trung bình trên
+cặp Hungarian đã khớp nên **mù với GT không box nào chạm tới**. Lần này nó suýt
+khiến E1 bị đọc là "không cải thiện".
+
+### Điểm nghẽn đã DỊCH CHỖ
+
+`score_head_cost` = **0,0018** (test) / **0,0008** (val) — score head gần như không
+làm mất recall nữa (0,2559 đạt được vs 0,2541 thực lấy). Nó **hết là điểm nghẽn**.
+
+Điểm nghẽn giờ quay về **box**: `oracle_recall` 0,2559 vs **0,6734** của D.1 — vẫn
+kém **2,6×**. Và `score_AUC` 0,685 tuy đã xa mức tung đồng xu nhưng còn dưới trần
+probe 0,888 và dưới D.1 (0,9371).
+
+---
+
+## EXPERIMENT E1 — thiết kế (viết trước khi train)
 
 **Một biến so với A: score head đọc gì.** Đường sinh box — CLIP, memory, 6 layer
 decoder, `box_head` — không đổi một dòng, nên box của E1 **bit-exact bằng A**

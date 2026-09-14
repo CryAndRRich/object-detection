@@ -13,7 +13,7 @@ xem [§ Sửa gì so với repo gốc](#sửa-gì-so-với-repo-gốc).
 train/eval thật đã chạy qua notebook Kaggle — xem
 [`../../notebooks/README.md`](../../notebooks/README.md), giữ lại làm bằng chứng tái lập số
 liệu. Kết quả đã đo đầy đủ (data, config, số liệu, so baseline có venue) nằm ở
-[`../../RESULTS.md`](../../RESULTS.md).
+[`../../docs/06-benchmark-detector.md`](../../docs/06-benchmark-detector.md).
 
 **Ngoại lệ: EXPERIMENT D dùng lại đúng code này cho CE-130** — xem
 [§ EXPERIMENT D](#experiment-d--đối-chứng-trên-ce-130). D.1 đã train + eval xong
@@ -235,7 +235,7 @@ Checkpoint (`../weights/diffusiondet/`, không push git):
 
 | File | Vai trò |
 |---|---|
-| `minicoco_model_final.pth`, `voc_model_final.pth`, `crowdhuman_model_final.pth` | 3 checkpoint tự train, số liệu trong `../../RESULTS.md` |
+| `minicoco_model_final.pth`, `voc_model_final.pth`, `crowdhuman_model_final.pth` | 3 checkpoint tự train, số liệu trong `../../docs/06-benchmark-detector.md` |
 | `diffdet_coco_res50.pth`, `diffdet_coco_swinbase.pth`, `diffdet_lvis_res50.pth`, `diffdet_lvis_swinbase.pth` | 4 checkpoint pretrain gốc từ tác giả DiffusionDet, dùng làm điểm khởi tạo finetune |
 
 ## Những chỗ dễ sai
@@ -307,7 +307,7 @@ gián tiếp qua feature đã học, không phải qua so trực tiếp toạ đ
 `img = x_start; continue` **trước** khi tới đoạn `if self.use_ensemble: ensemble_coord.append(...)`
 — nghĩa là lần gọi head cuối cùng (dù vẫn tốn compute) **không được** gộp vào pool NMS cuối
 cùng. Với `SAMPLE_STEP=4`, kết quả hiển thị chỉ đến từ 3 bước đầu, không phải cả 4. Không ảnh
-hưởng tới các số đã đo trong `RESULTS.md` (đó là hành vi thật của model, đã đo đúng) — chỉ dễ
+hưởng tới các số đã đo trong `docs/06-benchmark-detector.md` (đó là hành vi thật của model, đã đo đúng) — chỉ dễ
 gây hiểu lầm nếu tự viết code visualize/debug per-step mà không biết điều này (xem
 [`../../notebooks/README.md`](../../notebooks/README.md), mục
 `diffusiondet_diffusion_trace.ipynb`).
@@ -354,7 +354,7 @@ export OBJDET_DATA_ROOT=../data     # cùng biến môi trường như 3 dataset
 # 1. Sinh json COCO — D.1 (class-agnostic, LÀM TRƯỚC)
 python tools/convert_ce130.py --ce130-root ../data/all_phase2_V2 --mode class-agnostic
 
-# 2. CỬA CHẶN bắt buộc — nhìn bằng mắt trước khi train (bài học docs/bai-hoc-ce-loc-detection.md
+# 2. CỬA CHẶN bắt buộc — nhìn bằng mắt trước khi train (bài học docs/02-du-lieu-ce130.md
 #    §5: visualize bắt được lỗi mà test + review code bỏ sót)
 python tools/visualize_ce130_coco.py \
     --json ../data/ce130_coco/ce130_agnostic_train.json \
@@ -429,7 +429,7 @@ CE-130 dày hơn mọi dataset đã chạy trước đó:
 | test | 48,5 | 505 | 7 |
 | val | 42,2 | 1.229 | 9 |
 
-`RESULTS.md` §4 đã đo trên 3 dataset: **số box tối ưu bám mật độ vật thể** — VOC (2,43
+`docs/06-benchmark-detector.md` §4 đã đo trên 3 dataset: **số box tối ưu bám mật độ vật thể** — VOC (2,43
 vật/ảnh) đỉnh ở 1000; COCO (7,36) bão hoà 2000; CrowdHuman (22,76) **vẫn còn tăng ở
 3000** (300→3000 cho `Recall` +12,33, `AP50` +9,23, không train thêm gì). CE-130 có 48,5
 vật/ảnh — **đông gấp đôi CrowdHuman** — nên để 300 là tự chặn trần recall bằng cấu trúc,
@@ -437,7 +437,7 @@ kể cả khi model hoàn hảo.
 
 `NUM_PROPOSALS: 300` trong config **chỉ dành cho lúc TRAIN** (đúng config paper;
 DiffusionDet không có tham số nào phụ thuộc số box nên train 300 rồi eval 3000 là dùng
-đúng thiết kế *dynamic boxes*, xem `RESULTS.md` §2.1). `EVAL_PERIOD` giữa chừng cũng chạy
+đúng thiết kế *dynamic boxes*, xem `docs/06-benchmark-detector.md` §2.1). `EVAL_PERIOD` giữa chừng cũng chạy
 ở 300 — **chỉ để theo dõi đường cong, đừng đọc như kết quả**. Kết quả cuối phải quét:
 
 ```bash

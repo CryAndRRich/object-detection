@@ -6,7 +6,7 @@ về CE-Loc), cái thứ ba là **chính CE-Loc**:
 
 | | Trạng thái | Chi tiết |
 |---|---|---|
-| [`diffusiondet/`](diffusiondet/README.md) | **Đã train/eval xong trên Kaggle, không chạy lại** — chỉ còn giữ để đối chiếu import khi cấu trúc thư mục đổi | Số liệu đầy đủ ở [`../RESULTS.md`](../RESULTS.md) |
+| [`diffusiondet/`](diffusiondet/README.md) | **Đã train/eval xong trên Kaggle, không chạy lại** — chỉ còn giữ để đối chiếu import khi cấu trúc thư mục đổi | Số liệu đầy đủ ở [`../docs/06-benchmark-detector.md`](../docs/06-benchmark-detector.md) |
 | [`diffu_grounding_dino/`](diffu_grounding_dino/README.md) | **Chưa train** — code đã verify đúng kiến trúc + checkpoint key-compat + 80 test (kể cả DDP 2-process), sắp finetune trên GPU server hoặc Kaggle 2×T4 | GroundingDINO + diffusion process trên reference point của decoder |
 | [`count_editing/`](count_editing/README.md) | **Chưa train thật trên server** — code CE-LocModel đã sửa/ablation xong cục bộ, mới chuyển vào đây từ `multi_condition/count_editing/` để đi chung git repo | CE-Loc/CE-Gen (Add One, Take One, NeurIPS 2026) — bài của chính người dùng dự án |
 
@@ -47,4 +47,4 @@ công/tham khảo trong [`diffu_grounding_dino/README.md`](diffu_grounding_dino/
 Count-Editing (CE-Loc/CE-Gen): bài NeurIPS 2026 của chính người dùng dự án — xem
 [`count_editing/CE-LocModel/README.md`](count_editing/CE-LocModel/README.md) cho README gốc
 (thư mục `count_editing/` hiện là bản copy nguyên vẹn của `refs/repos/Count-Editing/`, chưa có
-sửa đổi nào của dự án — xem `../docs/bai-hoc-ce-loc-detection.md` cho bài học vòng trước).
+sửa đổi nào của dự án — xem `../docs/02-du-lieu-ce130.md` cho bài học vòng trước).

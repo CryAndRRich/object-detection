@@ -17,7 +17,7 @@ cái nêu trong abstract: `diffu_dino/` (DiffuDINO — cái ta ghép ở đây) 
 này **không share code diffusion**, mỗi cái tự viết lại `q_sample`/beta-schedule riêng, chỉ
 dùng chung phần tiêm timestep-embedding (`layers_diffu_detr/transformer.py`).
 
-Đây là bước khảo sát tiếp theo của dự án sau DiffusionDet (xem [`../../RESULTS.md`](../../RESULTS.md)).
+Đây là bước khảo sát tiếp theo của dự án sau DiffusionDet (xem [`../../docs/06-benchmark-detector.md`](../../docs/06-benchmark-detector.md)).
 
 ## Trạng thái
 
@@ -224,7 +224,7 @@ python tools/check_checkpoint.py -c config/cfg_odvg_diffusion.py \
   --checkpoint ../weights/diffu_grounding_dino/groundingdino_swint_ogc.pth
 ```
 
-Ánh xạ sang [plan](../../docs/diffu-grounding-dino-plan.md) + 1 mục mới (verify multi-GPU,
+Ánh xạ sang plan (file đã gỡ) + 1 mục mới (verify multi-GPU,
 không có trong plan gốc vì lúc đó chưa tính tới việc đổi qua lại giữa server 1-GPU và Kaggle
 2-GPU):
 

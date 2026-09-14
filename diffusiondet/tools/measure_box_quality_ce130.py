@@ -218,7 +218,7 @@ def main():
     print(f"  NUM_PROPOSALS = {n_prop} | GT trung bình {gt_per_image:.1f}/ảnh | "
           f"{n_over}/{n_images} ảnh có nhiều GT hơn số box")
     if n_over > 0 or n_prop < 4 * gt_per_image:
-        print(f"  ⚠️ SỐ BOX CÓ THỂ ĐANG CHẶN TRẦN RECALL. RESULTS.md §4: số box tối ưu bám "
+        print(f"  ⚠️ SỐ BOX CÓ THỂ ĐANG CHẶN TRẦN RECALL. docs/06-benchmark-detector.md mục 2: số box tối ưu bám "
               f"mật độ vật thể\n"
               f"     (CrowdHuman 22,8 vật/ảnh vẫn tăng tới 3000 box). CE-130 dày hơn — "
               f"chạy lại với --num-proposals 1000/2000/3000 rồi so.")
