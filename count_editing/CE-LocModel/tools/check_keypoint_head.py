@@ -23,9 +23,19 @@ trong vòng 1 ô — trong khi box CE-130 chỉ rộng **2,4–4,4 ô** (lưới
 
 NGƯỠNG CHỐT TRƯỚC KHI CHẠY (không được đọc kết quả rồi mới đặt ngưỡng)
 ---------------------------------------------------------------------
+  ĐIỀU KIỆN TIÊN QUYẾT : số điểm PHÂN BIỆT >= K/2. Không đạt -> "KHÔNG ĐỌC ĐƯỢC",
+                         mọi chỉ số offset vô nghĩa (xem dưới).
   ĐẠT       : median_offset < 1,5 ô  VÀ  pct_within_1cell > 40 %
   KHÔNG ĐẠT : median_offset > 2,5 ô  (≈ không khá hơn baseline một cách có ý nghĩa)
   XÁM       : ở giữa — cần bàn, không tự quyết
+
+⚠️ LẦN CHẠY ĐẦU (2026-09-14) HỎNG VÌ LOSS SAI, ghi lại để không lặp:
+   Chamfer hai chiều không phạt việc các điểm TRÙNG NHAU -> nghiệm tối ưu là "cả 64 điểm
+   đứng cùng một chỗ", và model tìm đúng nghiệm đó (spread 0,28 ô ~ 4,5 px). Khi đó
+   median_offset 1,37 ô trông như gần ĐẠT, nhưng nó chỉ đo "một điểm cách vật gần nhất bao
+   xa" -- mà CE-130 có 20-30 vật/ảnh nên chỗ nào cũng gần một vật. Đã đổi sang Hungarian
+   (ghép 1-1, hai điểm không thể cùng nhận một GT) + repulsion hinge, và thêm cột "#rõ"
+   (số điểm phân biệt) làm điều kiện tiên quyết.
 
 ⚠️ Đo trên tập VAL (mặc định) — 28 class CHƯA HỀ THẤY lúc train, giao với 72 class train
    = 0, nên trả lời câu hỏi zero-shot y hệt test. Cache của EXPERIMENT A chỉ dựng train+val.
@@ -57,6 +67,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import yaml
+from scipy.optimize import linear_sum_assignment
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -110,28 +121,45 @@ class KeypointHead(nn.Module):
 # --------------------------------------------------------------------------- loss
 
 
-def chamfer_gt_to_pts(pts, centers):
-    """Mỗi tâm GT phải có ÍT NHẤT MỘT điểm gần nó (Chamfer một chiều GT -> pts).
+def hungarian_loss(pts, centers):
+    """Ghép 1-1 điểm <-> GT bằng Hungarian, rồi phạt khoảng cách trên các cặp đã ghép.
 
-    Cố ý KHÔNG phạt chiều ngược lại: K điểm nhiều hơn số vật ở một số ảnh là chuyện bình
-    thường, và ép mọi điểm phải bám một GT sẽ làm chúng dồn cục.
+    ⚠️ ĐÂY LÀ CHỖ BẢN CHẠY ĐẦU (2026-09-14) SAI, PHẢI SỬA. Bản đó dùng Chamfer hai chiều:
+
+        chamfer  : mỗi GT cần MỘT điểm gần nó   -> chỉ cần 1 điểm tốt là thoả
+        coverage : mỗi điểm cần gần MỘT GT      -> mọi điểm đứng CÙNG 1 vật đều thoả
+
+    Không thành phần nào phạt việc các điểm TRÙNG NHAU, nên nghiệm tối ưu của loss đó đúng
+    là "tất cả K điểm đứng ở chỗ tốt nhất" -- và model tìm đúng nghiệm đó: đo được
+    spread = 0,28 ô (64 điểm nằm gọn trong ~4,5 px = CÙNG MỘT ĐIỂM lặp 64 lần). Khi đó
+    median_offset 1,37 ô KHÔNG có nghĩa "mỗi vật có điểm riêng", chỉ có nghĩa "CE-130 đông
+    vật nên chỗ nào cũng gần một vật". Loss vẫn giảm đều (0,1375 -> 0,0494): model học tốt,
+    bài toán đặt sai.
+
+    Hungarian sửa đúng bản chất: mỗi GT chỉ được MỘT điểm "nhận", nên hai điểm không thể
+    cùng nhận một GT -> ép phân công thay vì ép xích lại gần. Cùng cơ chế matcher box của
+    dự án (utils/matcher.py:73).
+
+    Điểm/GT thừa không vào loss: ảnh có n_gt > K thì K điểm phủ K vật; n_gt < K thì các
+    điểm dư do `repulsion_loss` lo.
     """
     if centers.numel() == 0:
         return None
     d = torch.cdist(centers[None], pts[None])[0]        # [n_gt, K]
-    return d.min(dim=1).values.mean()
+    r, c = linear_sum_assignment(d.detach().cpu().numpy())
+    return d[r, c].mean()
 
 
-def coverage_loss(pts, centers):
-    """Chiều ngược lại, TRỌNG SỐ NHỎ: mỗi điểm nên nằm gần MỘT GT nào đó.
+def repulsion_loss(pts, min_dist):
+    """Phạt mỗi cặp điểm gần nhau hơn `min_dist`. Hinge, nên cặp đã đủ xa KHÔNG bị phạt.
 
-    Không có nó thì các điểm tự do trôi ra chỗ trống — vẫn đạt Chamfer một chiều nhưng memory
-    đầy điểm rác. Đây là biện pháp chống rủi ro R2 (K điểm không phân tán / dồn cục).
+    Hungarian một mình chưa đủ khi n_gt < K: các điểm dư không có GT nào để nhận, không ai
+    kéo chúng đi, nên vẫn dồn được. Đây là lớp phòng thủ thứ hai cho rủi ro R2.
     """
-    if centers.numel() == 0:
-        return None
-    d = torch.cdist(pts[None], centers[None])[0]        # [K, n_gt]
-    return d.min(dim=1).values.mean()
+    K = pts.shape[0]
+    d = torch.cdist(pts[None], pts[None])[0]
+    off = d[~torch.eye(K, dtype=torch.bool, device=d.device)]
+    return F.relu(min_dist - off).mean()
 
 
 # --------------------------------------------------------------------------- metric
@@ -147,6 +175,22 @@ def measure(pts, centers, grid):
         return np.empty(0)
     d = torch.cdist(centers[None], pts[None])[0]        # [n_gt, K], toạ độ [0,1]
     return (d.min(dim=1).values * grid).cpu().numpy()   # -> ô lưới
+
+
+@torch.no_grad()
+def n_distinct_points(pts, grid, tol_cells=1.0):
+    """Đếm số điểm THẬT SỰ phân biệt: gom cụm tham lam, hai điểm cách < tol_cells là một.
+
+    `spread` (trung vị khoảng cách từng cặp) có thể đánh lừa khi vài điểm tách ra còn phần
+    lớn dồn cục. Con số này trả lời thẳng: memory thực tế có bao nhiêu token hữu ích?
+    K=64 mà ra 1-2 thì memory chỉ là 1-2 token, bất kể median_offset đẹp cỡ nào.
+    """
+    p = pts.cpu().numpy() * grid
+    keep = []
+    for q in p:
+        if all(float(np.hypot(*(q - k))) >= tol_cells for k in keep):
+            keep.append(q)
+    return len(keep)
 
 
 @torch.no_grad()
@@ -214,7 +258,11 @@ def main():
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--temperature", type=float, default=1.0)
-    ap.add_argument("--w-coverage", type=float, default=0.2)
+    ap.add_argument("--w-repulsion", type=float, default=1.0)
+    ap.add_argument("--min-dist-cells", type=float, default=2.0,
+                    help="hai điểm gần hơn ngưỡng này (ô lưới) thì bị phạt. Mặc định 2,0 vì "
+                         "box CE-130 rộng 2,4-4,4 ô -> hai điểm cách < 2 ô gần như chắc "
+                         "chắn đang bám cùng một vật.")
     ap.add_argument("--eval-split", default="val", choices=["val", "test"],
                     help="MẶC ĐỊNH val: cache của EXPERIMENT A chỉ dựng train+val (train.py "
                          "chỉ cần 2 split đó). val cũng có 28 class GIAO=0 với 72 class "
@@ -279,9 +327,9 @@ def main():
             if c.numel() == 0:
                 continue
             pts, _ = head(Xtr[i][None].float().to(device), grid)
-            l_main = chamfer_gt_to_pts(pts[0], c)
-            l_cov = coverage_loss(pts[0], c)
-            loss = l_main + a.w_coverage * l_cov
+            l_main = hungarian_loss(pts[0], c)
+            l_rep = repulsion_loss(pts[0], a.min_dist_cells / grid)
+            loss = l_main + a.w_repulsion * l_rep
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -294,7 +342,7 @@ def main():
     head.eval()
     res = {}
     for name, X, C in (("train", Xtr, Ctr), (ev, Xte, Cte)):
-        offs, spreads, peaks = [], [], []
+        offs, spreads, peaks, distincts = [], [], [], []
         with torch.no_grad():
             for i in range(len(X)):
                 c = C[i].to(device)
@@ -303,6 +351,7 @@ def main():
                 pts, pk = head(X[i][None].float().to(device), grid)
                 offs.append(measure(pts[0], c, grid))
                 spreads.append(spread_of_points(pts[0]))
+                distincts.append(n_distinct_points(pts[0], grid))
                 peaks.append(float(pk.mean()))
         offs = np.concatenate(offs) if offs else np.empty(0)
         res[name] = {
@@ -312,22 +361,35 @@ def main():
             "pct_within_1cell": float((offs < 1.0).mean() * 100),
             "pct_within_2cells": float((offs < 2.0).mean() * 100),
             "median_point_spread_cells": float(np.median(spreads)),
+            "median_n_distinct_points": float(np.median(distincts)),
             "mean_peak_sharpness": float(np.mean(peaks)),
         }
 
     print()
-    print("  split |  n_gt  | median | trong 1 ô | trong 2 ô | spread | peak")
-    print("  ------+--------+--------+-----------+-----------+--------+------")
+    print("  split |  n_gt  | median | trong 1 ô | trong 2 ô | spread | #rõ | peak")
+    print("  ------+--------+--------+-----------+-----------+--------+-----+------")
     for k, v in res.items():
         print(f"  {k:5s} | {v['n_gt']:6d} | {v['median_offset_cells']:6.2f} | "
               f"{v['pct_within_1cell']:8.1f} % | {v['pct_within_2cells']:8.1f} % | "
-              f"{v['median_point_spread_cells']:6.2f} | {v['mean_peak_sharpness']:.3f}")
+              f"{v['median_point_spread_cells']:6.2f} | "
+              f"{v['median_n_distinct_points']:3.0f} | {v['mean_peak_sharpness']:.3f}")
     print()
     print("  BASELINE (CLIP cosine frozen, không train): median 3,60 ô | 11,7 % trong 1 ô")
     print()
 
     t = res[ev]
-    if t["median_offset_cells"] < 1.5 and t["pct_within_1cell"] > 40:
+    # ĐIỀU KIỆN TIÊN QUYẾT: K điểm phải PHÂN TÁN. Nếu chúng trùng nhau thì median_offset
+    # KHÔNG đọc được -- nó chỉ đo "một điểm cách vật gần nhất bao xa", mà CE-130 có 20-30
+    # vật/ảnh nên chỗ nào cũng gần một vật. Đây đúng là cách bản chạy đầu (spread 0,28 ô)
+    # cho median 1,37 ô trông như thành công.
+    n_ok = t["median_n_distinct_points"]
+    if n_ok < 0.5 * a.K:
+        verdict = "KHÔNG ĐỌC ĐƯỢC"
+        note = (f"K điểm SỤP MODE: chỉ {n_ok:.0f}/{a.K} điểm phân biệt (spread "
+                f"{t['median_point_spread_cells']:.2f} ô). Mọi chỉ số offset bên trên VÔ "
+                f"NGHĨA -- chúng đo một điểm duy nhất trên ảnh 20-30 vật. Tăng "
+                f"--w-repulsion hoặc --min-dist-cells rồi chạy lại.")
+    elif t["median_offset_cells"] < 1.5 and t["pct_within_1cell"] > 40:
         verdict = "ĐẠT"
         note = "Conv1x1 học được bản đồ có đỉnh trên vật -> hướng SỐNG, viết model tiếp."
     elif t["median_offset_cells"] > 2.5:
@@ -341,14 +403,12 @@ def main():
 
     gap = res["train"]["median_offset_cells"] - t["median_offset_cells"]
     if abs(gap) > 0.8:
-        print(f"  ⚠️ train↔test lệch {abs(gap):.2f} ô — Conv1x1 có thể học thuộc 72 class "
+        print(f"  ⚠️ train↔eval lệch {abs(gap):.2f} ô — Conv1x1 có thể học thuộc 72 class "
               f"train, MẤT zero-shot (rủi ro R4).")
-    if t["median_point_spread_cells"] < 3.0:
-        print(f"  ⚠️ K điểm dồn cục (spread {t['median_point_spread_cells']:.2f} ô) — "
-              f"rủi ro R2, memory ít token hữu ích hơn K.")
 
     res["_meta"] = {"eval_split": ev, "K": a.K, "epochs": a.epochs, "lr": a.lr, "n_param": n_param,
-                    "temperature": a.temperature, "w_coverage": a.w_coverage,
+                    "temperature": a.temperature, "w_repulsion": a.w_repulsion,
+                    "min_dist_cells": a.min_dist_cells,
                     "grid": grid, "verdict": verdict,
                     "baseline_median_cells": 3.60, "baseline_pct_within_1cell": 11.7}
     with open(a.out, "w") as f:
