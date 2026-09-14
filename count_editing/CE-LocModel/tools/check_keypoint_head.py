@@ -27,8 +27,9 @@ NGƯỠNG CHỐT TRƯỚC KHI CHẠY (không được đọc kết quả rồi m
   KHÔNG ĐẠT : median_offset > 2,5 ô  (≈ không khá hơn baseline một cách có ý nghĩa)
   XÁM       : ở giữa — cần bàn, không tự quyết
 
-⚠️ Đo trên tập TEST (28 class CHƯA HỀ THẤY lúc train — 3 split CE-130 giao class = 0).
-   Cột `train` chỉ để biết model có học được gì không; cột `test` mới là cột quyết định.
+⚠️ Đo trên tập VAL (mặc định) — 28 class CHƯA HỀ THẤY lúc train, giao với 72 class train
+   = 0, nên trả lời câu hỏi zero-shot y hệt test. Cache của EXPERIMENT A chỉ dựng train+val.
+   Cột `train` chỉ để biết model có học được gì không; cột eval mới là cột quyết định.
    Chênh lệch train↔test lớn = Conv1x1 học thuộc 72 class train, MẤT zero-shot (rủi ro R4).
 
 ⚠️ CHỈ SỐ NÀY ĐO ĐIỂM, KHÔNG ĐO VÙNG. Bài học docs/01-bai-toan.md mục 6.1: AUC 0,782 của
@@ -38,6 +39,7 @@ NGƯỠNG CHỐT TRƯỚC KHI CHẠY (không được đọc kết quả rồi m
 CHẠY (TRÊN SERVER, không chạy ở local)
 --------------------------------------
   python tools/check_keypoint_head.py --cache <thư-mục-cache> --epochs 30 --K 64
+  (mặc định --eval-split val, vì cache chỉ có train+val)
 
   ⚠️ PHẢI truyền --cache: cache patch token fp16 đã dựng sẵn từ EXPERIMENT A
      (tools/build_cache.py). Đó là lý do train chỉ mất ~2 giờ. Không truyền thì tool chạy
@@ -213,8 +215,14 @@ def main():
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--w-coverage", type=float, default=0.2)
+    ap.add_argument("--eval-split", default="val", choices=["val", "test"],
+                    help="MẶC ĐỊNH val: cache của EXPERIMENT A chỉ dựng train+val (train.py "
+                         "chỉ cần 2 split đó). val cũng có 28 class GIAO=0 với 72 class "
+                         "train nên trả lời câu hỏi zero-shot y hệt test, và val KHÔNG dính "
+                         "lô annotation rác của test (4,2 % GT — docs/02 mục 7.2). Chọn "
+                         "test thì phải dựng cache test trước.")
     ap.add_argument("--limit-train", type=int, default=0, help="0 = toàn bộ")
-    ap.add_argument("--limit-test", type=int, default=0)
+    ap.add_argument("--limit-eval", type=int, default=0)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="keypoint_gate.json")
     a = ap.parse_args()
@@ -230,14 +238,15 @@ def main():
 
     root = a.data_root or cfg["data"]["root"]
     size = cfg["data"]["image_size"]
+    ev = a.eval_split
     ds_tr = CE130Detection(root, "train", size)
-    ds_te = CE130Detection(root, "test", size)
-    print(f"[1/3] dữ liệu: train {len(ds_tr)} ảnh | test {len(ds_te)} ảnh", flush=True)
+    ds_te = CE130Detection(root, ev, size)
+    print(f"[1/3] dữ liệu: train {len(ds_tr)} ảnh | {ev} {len(ds_te)} ảnh", flush=True)
 
     encoder = None
     if a.cache:
         print(f"[2/3] đọc CACHE CÓ SẴN: {a.cache}", flush=True)
-        cache_tr, cache_te = PatchCache(a.cache, "train"), PatchCache(a.cache, "test")
+        cache_tr, cache_te = PatchCache(a.cache, "train"), PatchCache(a.cache, ev)
     else:
         print("[2/3] ⚠️ KHÔNG có --cache -> chạy CLIP tại chỗ (chậm). Cache của "
               "EXPERIMENT A đã có sẵn, nên truyền --cache.", flush=True)
@@ -248,7 +257,7 @@ def main():
 
     with torch.no_grad():
         Xtr, Ctr = load_split(ds_tr, cache_tr, encoder, device, a.limit_train)
-        Xte, Cte = load_split(ds_te, cache_te, encoder, device, a.limit_test)
+        Xte, Cte = load_split(ds_te, cache_te, encoder, device, a.limit_eval)
 
     n_tok = Xtr[0].shape[0]
     assert n_tok == grid * grid, (
@@ -284,7 +293,7 @@ def main():
     print("\n[đo]  — đơn vị Ô LƯỚI (baseline CLIP cosine frozen = 3,60 ô)", flush=True)
     head.eval()
     res = {}
-    for name, X, C in (("train", Xtr, Ctr), ("test", Xte, Cte)):
+    for name, X, C in (("train", Xtr, Ctr), (ev, Xte, Cte)):
         offs, spreads, peaks = [], [], []
         with torch.no_grad():
             for i in range(len(X)):
@@ -317,7 +326,7 @@ def main():
     print("  BASELINE (CLIP cosine frozen, không train): median 3,60 ô | 11,7 % trong 1 ô")
     print()
 
-    t = res["test"]
+    t = res[ev]
     if t["median_offset_cells"] < 1.5 and t["pct_within_1cell"] > 40:
         verdict = "ĐẠT"
         note = "Conv1x1 học được bản đồ có đỉnh trên vật -> hướng SỐNG, viết model tiếp."
@@ -338,7 +347,7 @@ def main():
         print(f"  ⚠️ K điểm dồn cục (spread {t['median_point_spread_cells']:.2f} ô) — "
               f"rủi ro R2, memory ít token hữu ích hơn K.")
 
-    res["_meta"] = {"K": a.K, "epochs": a.epochs, "lr": a.lr, "n_param": n_param,
+    res["_meta"] = {"eval_split": ev, "K": a.K, "epochs": a.epochs, "lr": a.lr, "n_param": n_param,
                     "temperature": a.temperature, "w_coverage": a.w_coverage,
                     "grid": grid, "verdict": verdict,
                     "baseline_median_cells": 3.60, "baseline_pct_within_1cell": 11.7}
