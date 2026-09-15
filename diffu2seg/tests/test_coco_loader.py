@@ -24,6 +24,26 @@ IMGS = os.path.join(ROOT, "coco", "val2017")
 CANVAS = 1120          # cấu hình paper
 N_CHECK = 200
 
+# SKIP Ở TẦNG MODULE, không phải trong main().
+#
+# main() có nhánh skip riêng, nhưng pytest KHÔNG gọi main() — nó gọi thẳng từng
+# hàm test_*, nên nhánh đó vô hiệu và cả 5 test fail với FileNotFoundError trên
+# máy không có dữ liệu (server chỉ có PACO, COCO chỉ ở local). Đã xảy ra thật
+# 2026-09-15.
+#
+# `pytest.importorskip` không dùng được (đây là dữ liệu, không phải module), và
+# `pytest` chỉ import được khi đang chạy dưới pytest — nên bọc try/except để
+# chạy trực tiếp `python tests/test_coco_loader.py` vẫn được.
+_HAVE_DATA = os.path.isfile(JSON) and os.path.isdir(IMGS)
+if not _HAVE_DATA:
+    try:
+        import pytest
+        pytestmark = pytest.mark.skip(
+            reason=f"chưa có COCO val2017 tại {os.path.normpath(ROOT)}/coco/ "
+                   f"(cần annotations/instances_val2017.json + val2017/)")
+    except ImportError:
+        pass
+
 
 def _ds(canvas=CANVAS):
     from data.coco_val import CocoVal

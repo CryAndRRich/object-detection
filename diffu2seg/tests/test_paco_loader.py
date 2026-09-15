@@ -25,6 +25,24 @@ IMGS = os.path.join(ROOT, "images")
 CANVAS = 1120
 N_CHECK = 60
 
+# SKIP Ở TẦNG MODULE — xem ghi chú dài trong test_coco_loader.py: pytest gọi
+# thẳng từng test_*, không qua main(), nên nhánh skip trong main() vô hiệu.
+_HAVE_DATA = os.path.isfile(JSON) and os.path.isdir(IMGS)
+try:
+    from pycocotools import mask as _mask_utils   # noqa: F401
+    _HAVE_PYCOCO = True
+except ImportError:
+    _HAVE_PYCOCO = False
+
+if not (_HAVE_DATA and _HAVE_PYCOCO):
+    try:
+        import pytest
+        _why = (f"chưa có PACO tại {os.path.normpath(ROOT)}" if not _HAVE_DATA
+                else "thiếu pycocotools (65,6 % annotation PACO là RLE nén)")
+        pytestmark = pytest.mark.skip(reason=_why)
+    except ImportError:
+        pass
+
 
 def _ds(canvas=CANVAS):
     from data.paco_val import PacoVal

@@ -3,6 +3,14 @@
 
     python tests/run_all.py
 
+⚠️ FILE NÀY KHÔNG THAY THẾ ĐƯỢC `python -m pytest tests/ -q`, VÀ ĐÃ CHỨNG MINH
+ĐIỀU ĐÓ. Nó gọi `main()` của từng suite, mà `main()` có nhánh skip riêng khi
+thiếu dữ liệu. pytest thì gọi THẲNG từng hàm `test_*`, bỏ qua `main()` hoàn
+toàn — nên 2026-09-15 file này báo 13/13 xanh ở local trong khi trên server
+`pytest` cho 5 FAILED (suite COCO, server không có `data/coco/`).
+
+Chạy CẢ HAI trước khi đẩy lên server. Nếu lệch nhau thì `pytest` đúng.
+
 Mỗi suite chạy trong một subprocess riêng, để một crash không kéo đổ phần còn
 lại và để output tách bạch được. Suite nào cần thứ có thể chưa có (dữ liệu
 CE-130) thì tự skip sạch bên trong.

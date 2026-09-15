@@ -230,12 +230,18 @@ rỗng do giải nén hỏng sẽ bị bắt ngay thay vì chết sau đó với
 ### Test trước (CPU, không cần GPU/SD)
 
 ```bash
-python tests/run_all.py          # 13 suite (suite cần dữ liệu tự skip)
-# hoặc
-python -m pytest tests/ -q
+python -m pytest tests/ -q       # ⭐ đây là phép thử CHÍNH
+python tests/run_all.py          # bản tóm tắt theo checklist, chạy THÊM
 ```
 
-⚠️ Dùng `python -m pytest`, **không** `pytest tests/` — xem cạm bẫy #9 của CLAUDE.md.
+⚠️ Dùng `python -m pytest`, **không** `pytest tests/` — cạm bẫy #9 của CLAUDE.md.
+
+⚠️ **`run_all.py` KHÔNG thay được `pytest`, và đã chứng minh.** Nó gọi `main()`
+của từng suite, mà `main()` có nhánh skip riêng khi thiếu dữ liệu; pytest gọi
+**thẳng** từng hàm `test_*`, bỏ qua `main()`. Ngày 2026-09-15 `run_all.py` báo
+13/13 xanh ở local trong khi `pytest` trên server cho **5 FAILED** — suite COCO,
+vì server không có `data/coco/`. Đã sửa bằng `pytestmark` ở tầng module, nhưng
+bài học giữ nguyên: **chạy cả hai, lệch nhau thì tin `pytest`**.
 
 > **Bộ test xanh KHÔNG có nghĩa là phương pháp chạy được.** Nó chạy trên affinity
 > giả lập, chỉ chứng minh phần toán và phần ghép nối đúng. SD2 thật có tách được
