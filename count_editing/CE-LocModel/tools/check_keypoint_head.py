@@ -87,16 +87,42 @@ from models.detector import build_model  # noqa: E402
 
 
 class KeypointHead(nn.Module):
-    """Conv1x1(768 → K) + SpatialSoftmax. Đây là TOÀN BỘ phần học được của giả thuyết.
+    """CLIP frozen -> [bottleneck] -> vài lớp conv -> K bản đồ -> SpatialSoftmax -> K toạ độ.
 
     SpatialSoftmax giữ nguyên công thức của CE-Loc gốc
     (refs/repos/Count-Editing/CE-LocModel/models/spatial_softmax.py): softmax trên H*W riêng
     từng kênh, rồi lấy KỲ VỌNG với lưới toạ độ. Đầu ra là TOẠ ĐỘ, không phải embedding.
+
+    ⚠️ VÌ SAO CÓ THAM SỐ `ksize`/`depth` — LỖ HỔNG TRONG KẾT LUẬN LẦN TRƯỚC.
+    Bản đầu chỉ có `Conv2d(768, K, kernel_size=1)`. Nó KHÔNG ĐẠT (hơn baseline lưới đều chỉ
+    +0,15 ô ở K=144), và đã suýt bị kết luận là "CLIP frozen không chứa thông tin tâm vật".
+    Kết luận đó VƯỢT QUÁ bằng chứng: cái đo được là "**tổ hợp tuyến tính 1x1** của CLIP frozen
+    không rút được tâm vật".
+
+    Conv 1x1 nhìn ĐÚNG MỘT ô lưới, không thấy ô lân cận. Nhưng "tâm vật" theo định nghĩa cần
+    lân cận -- phải thấy biên trái VÀ biên phải mới biết giữa ở đâu. Với box CE-130 rộng
+    trung vị 1,96 ô (ĐO ĐƯỢC, tools/check_data_facts.py), một kernel 3x3 đã phủ trọn vật.
+
+    Nên `--ksize 1 --depth 1` tái lập CHÍNH XÁC bản đã chạy, còn `--ksize 3 --depth 3` là
+    phép thử mới. So hai cái đó tách bạch được hai giả thuyết:
+      - CLIP frozen KHÔNG CÓ thông tin  -> cả hai đều thua lưới đều
+      - kiến trúc head quá nghèo        -> 3x3 vượt lên
     """
 
-    def __init__(self, d_in=768, K=64, temperature=1.0):
+    def __init__(self, d_in=768, K=64, temperature=1.0, ksize=3, depth=3, hidden=256):
         super().__init__()
-        self.conv = nn.Conv2d(d_in, K, kernel_size=1)
+        layers = []
+        c_in = d_in
+        if depth > 1:
+            # Bottleneck 1x1 hạ 768 -> hidden TRƯỚC khi vào conv không gian. Không có nó thì
+            # một lớp 3x3 trên 768 kênh tốn 768*hidden*9 tham số, lấn át phần còn lại và biến
+            # phép thử "thêm lân cận" thành phép thử "thêm sức chứa".
+            layers += [nn.Conv2d(d_in, hidden, 1), nn.GELU()]
+            c_in = hidden
+            for _ in range(depth - 2):
+                layers += [nn.Conv2d(hidden, hidden, ksize, padding=ksize // 2), nn.GELU()]
+        layers += [nn.Conv2d(c_in, K, ksize, padding=ksize // 2)]
+        self.net = nn.Sequential(*layers)
         self.K = K
         self.temperature = temperature
 
@@ -104,7 +130,7 @@ class KeypointHead(nn.Module):
         """patch_raw [B, grid*grid, 768] -> pts [B, K, 2] trong [0,1], peak [B, K]."""
         B = patch_raw.shape[0]
         x = patch_raw.transpose(1, 2).reshape(B, -1, grid, grid)   # [B,768,g,g]
-        maps = self.conv(x)                                        # [B,K,g,g]
+        maps = self.net(x)                                         # [B,K,g,g]
 
         flat = maps.reshape(B, self.K, -1)
         attn = F.softmax(flat / self.temperature, dim=-1)
@@ -124,6 +150,27 @@ class KeypointHead(nn.Module):
         # chẩn đoán — KHÔNG dùng trong loss.
         peak = flat.amax(-1) - flat.mean(-1)                        # [B,K]
         return pts, peak
+
+
+# --------------------------------------------------------------- cấu hình head
+
+# BA CẤU HÌNH, tách bạch hai biến. Bản chạy trước chỉ có cái đầu, nên khi nó KHÔNG ĐẠT thì
+# không phân biệt được "CLIP frozen không có thông tin" với "head quá nghèo".
+#
+#   1x1_shallow : TÁI LẬP bản đã chạy (49K @ K=64). Mốc so.
+#   1x1_deep    : sâu + rộng NHƯNG vẫn 1x1 -> thêm SỨC CHỨA, KHÔNG thêm lân cận.
+#   3x3_deep    : có lân cận, số tham số CỐ Ý khớp 1x1_deep (299.664 vs 281.424 @ K=144,
+#                 lệch 6 %) -> chênh lệch giữa hai cái này CHỈ có thể do lân cận.
+#
+# Đọc kết quả:
+#   cả ba đều thua lưới đều            -> CLIP frozen KHÔNG chứa thông tin tâm vật. Hướng chết.
+#   1x1_deep ≈ 1x1_shallow < 3x3_deep  -> thiếu LÂN CẬN. Hướng sống, đi tiếp.
+#   1x1_deep ≈ 3x3_deep > 1x1_shallow  -> chỉ là SỨC CHỨA, lân cận không giúp.
+HEAD_CONFIGS = {
+    "1x1_shallow": dict(ksize=1, depth=1, hidden=256),
+    "1x1_deep":    dict(ksize=1, depth=3, hidden=256),
+    "3x3_deep":    dict(ksize=3, depth=3, hidden=96),
+}
 
 
 # --------------------------------------------------------------------------- loss
@@ -356,9 +403,10 @@ def evaluate(head, X, C, grid, device, K):
     }
 
 
-def train_head(Xtr, Ctr, grid, device, K, a, tag):
+def train_head(Xtr, Ctr, grid, device, K, a, tag, hcfg):
     """Train MỘT head. Trả kèm lịch sử loss để biết đã bão hoà chưa."""
-    head = KeypointHead(d_in=Xtr[0].shape[-1], K=K, temperature=a.temperature).to(device)
+    head = KeypointHead(d_in=Xtr[0].shape[-1], K=K, temperature=a.temperature,
+                        **hcfg).to(device)
     n_param = sum(p.numel() for p in head.parameters())
     print(f"  [{tag}] {n_param:,} tham số (CLIP vẫn FROZEN)", flush=True)
     opt = torch.optim.Adam(head.parameters(), lr=a.lr)
@@ -402,6 +450,19 @@ def main():
                     help="60 chứ không phải 30: lần chạy trước loss vẫn giảm đều tới epoch "
                          "cuối (0,0453 -> 0,0374), CHƯA bão hoà.")
     ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--heads", default="1x1_shallow,1x1_deep,3x3_deep",
+                    help="Danh sách cấu hình head chạy trong CÙNG một lượt. Ba cái mặc định "
+                         "tách bạch được HAI biến (lân cận vs sức chứa) -- xem HEAD_CONFIGS. "
+                         "Truyền '' để dùng --ksize/--depth/--hidden đơn lẻ.")
+    ap.add_argument("--ksize", type=int, default=3,
+                    help="kernel không gian. 1 = tái lập bản đã chạy (KHÔNG ĐẠT); 3 = phép "
+                         "thử mới. Box CE-130 rộng trung vị 1,96 ô nên 3x3 phủ trọn vật.")
+    ap.add_argument("--depth", type=int, default=3,
+                    help="số lớp conv. depth=1 -> đúng một Conv2d(768,K,ksize), không "
+                         "bottleneck (tái lập bản cũ khi ksize=1).")
+    ap.add_argument("--hidden", type=int, default=256,
+                    help="bottleneck 1x1 hạ 768 -> hidden trước conv không gian, để phép thử "
+                         "đo 'thêm lân cận' chứ không phải 'thêm sức chứa'.")
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--w-repulsion", type=float, default=1.0)
     ap.add_argument("--min-dist-cells", type=float, default=1.0,
@@ -427,7 +488,8 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     Ks = [int(k) for k in a.K_sweep.split(",")]
     print(f"device={device}  K_sweep={Ks}  epochs={a.epochs}  lr={a.lr}  "
-          f"min_dist={a.min_dist_cells} ô", flush=True)
+          f"min_dist={a.min_dist_cells} ô  head=conv{a.ksize}x{a.ksize} "
+          f"depth={a.depth} hidden={a.hidden}", flush=True)
 
     with open(a.config) as f:
         cfg = yaml.safe_load(f)
@@ -469,48 +531,70 @@ def main():
     print("[3/4] baseline LƯỚI ĐỀU (không nhìn ảnh, không train)", flush=True)
     res = {"_baseline_uniform": {str(K): evaluate(None, Xte, Cte, grid, device, K) for K in Ks}}
 
-    print(f"[4/4] quét K = {Ks}", flush=True)
+    names = [h for h in a.heads.split(",") if h] or ["_custom"]
+    cfgs = {n: (HEAD_CONFIGS[n] if n in HEAD_CONFIGS
+                else dict(ksize=a.ksize, depth=a.depth, hidden=a.hidden)) for n in names}
+    print(f"[4/4] {len(names)} head x {len(Ks)} K", flush=True)
     res["_sweep"] = {}
-    for K in Ks:
-        head, n_param, hist = train_head(Xtr, Ctr, grid, device, K, a, f"K={K}")
-        head.eval()
-        tail = max(1, len(hist) // 10)
-        res["_sweep"][str(K)] = {
-            "train": evaluate(head, Xtr, Ctr, grid, device, K),
-            ev: evaluate(head, Xte, Cte, grid, device, K),
-            "n_param": n_param,
-            "loss_first": hist[0], "loss_last": hist[-1],
-            "loss_drop_last10pct": hist[-tail - 1] - hist[-1] if len(hist) > tail else 0.0,
-        }
+    for hname in names:
+        for K in Ks:
+            head, n_param, hist = train_head(Xtr, Ctr, grid, device, K, a,
+                                             f"{hname} K={K}", cfgs[hname])
+            head.eval()
+            tail = max(1, len(hist) // 10)
+            res["_sweep"][f"{hname}|{K}"] = {
+                "head": hname, "K": K, **cfgs[hname],
+                "train": evaluate(head, Xtr, Ctr, grid, device, K),
+                ev: evaluate(head, Xte, Cte, grid, device, K),
+                "n_param": n_param,
+                "loss_first": hist[0], "loss_last": hist[-1],
+                "loss_drop_last10pct": hist[-tail - 1] - hist[-1] if len(hist) > tail else 0.0,
+            }
 
     # ------------------------------------------------------------------ báo cáo
     print()
-    print(f"  === {ev} (28 class CHƯA THẤY lúc train) — dòng dưới mỗi K là LƯỚI ĐỀU ===")
-    print("    K | median | 1 ô  | 2 ô  | điểm∈box | GT ghép 1-1 | #rõ | ổn định | Δloss cuối")
-    print("  ----+--------+------+------+----------+-------------+-----+---------+-----------")
+    print()
+    print(f"  === {ev} (28 class CHƯA THẤY lúc train) ===")
+    print("        head    |   K | tham số | median | 1 ô  | điểm∈box | GT 1-1 | #rõ")
+    print("  --------------+-----+---------+--------+------+----------+--------+-----")
     for K in Ks:
         b = res["_baseline_uniform"][str(K)]
-        v = res["_sweep"][str(K)][ev]
-        print(f"  {K:3d} | {v['median_offset_cells']:6.2f} | {v['pct_within_1cell']:4.1f} | "
-              f"{v['pct_within_2cells']:4.1f} | {v['pct_points_in_box']:7.1f} % | "
-              f"{v['pct_gt_matched_1to1']:10.1f} % | {v['median_n_distinct_points']:3.0f} | "
-              f"{v['channel_stability_cells']:7.2f} | "
-              f"{res['_sweep'][str(K)]['loss_drop_last10pct']:+.4f}")
-        print(f"      | {b['median_offset_cells']:6.2f} | {b['pct_within_1cell']:4.1f} | "
-              f"{b['pct_within_2cells']:4.1f} | {b['pct_points_in_box']:7.1f} % | "
-              f"{b['pct_gt_matched_1to1']:10.1f} % |     |         |  <- lưới đều")
+        print(f"  {'LƯỚI ĐỀU':<13s} | {K:3d} |       0 | {b['median_offset_cells']:6.2f} | "
+              f"{b['pct_within_1cell']:4.1f} | {b['pct_points_in_box']:7.1f} % | "
+              f"{b['pct_gt_matched_1to1']:5.1f} % |    ")
+        for hname in names:
+            r = res["_sweep"][f"{hname}|{K}"]
+            v = r[ev]
+            print(f"  {hname:<13s} | {K:3d} | {r['n_param']:7,d} | "
+                  f"{v['median_offset_cells']:6.2f} | {v['pct_within_1cell']:4.1f} | "
+                  f"{v['pct_points_in_box']:7.1f} % | {v['pct_gt_matched_1to1']:5.1f} % | "
+                  f"{v['median_n_distinct_points']:3.0f}")
+        print("  " + "-" * 62)
     print()
     print("  Mốc khác — CLIP cosine frozen, không train: median 3,60 ô | 11,7 % trong 1 ô")
-    print("  ĐO ĐƯỢC: box CE-130 rộng trung vị 1,96 ô, cao 1,71 ô (train) -> bán kính ~1 ô,")
-    print("           nên 'trong 1 ô' ≈ 'điểm nằm trong box'.")
+    print("  ĐO ĐƯỢC: box CE-130 rộng trung vị 1,96 ô, cao 1,71 ô (train) -> bán kính ~1 ô.")
     print()
 
+    # So 1x1_deep vs 3x3_deep ở cùng K: CHỈ khác lân cận (tham số khớp ~6 %).
+    if "1x1_deep" in names and "3x3_deep" in names:
+        print("  === LÂN CẬN có giúp không? (tham số khớp, chỉ khác kernel) ===")
+        for K in Ks:
+            a1 = res["_sweep"][f"1x1_deep|{K}"][ev]["median_offset_cells"]
+            a3 = res["_sweep"][f"3x3_deep|{K}"][ev]["median_offset_cells"]
+            s0 = res["_sweep"][f"1x1_shallow|{K}"][ev]["median_offset_cells"] \
+                if "1x1_shallow" in names else float("nan")
+            print(f"    K={K:3d}:  1x1_shallow {s0:5.2f}  ->  1x1_deep {a1:5.2f}  "
+                  f"->  3x3_deep {a3:5.2f}   (lân cận: {a1-a3:+.2f} ô)")
+        print()
+
     # ------------------------------------------------------------------ verdict
-    best_K = min(Ks, key=lambda K: res["_sweep"][str(K)][ev]["median_offset_cells"])
-    t = res["_sweep"][str(best_K)][ev]
+    best_key = min(res["_sweep"], key=lambda k: res["_sweep"][k][ev]["median_offset_cells"])
+    best = res["_sweep"][best_key]
+    best_K = best["K"]
+    t = best[ev]
     b = res["_baseline_uniform"][str(best_K)]
     gain = b["median_offset_cells"] - t["median_offset_cells"]
-    print(f"  K tốt nhất = {best_K}  (hơn lưới đều {gain:+.2f} ô)")
+    print(f"  Tốt nhất: {best_key}  ({best['n_param']:,} tham số, hơn lưới đều {gain:+.2f} ô)")
 
     if t["median_n_distinct_points"] < 0.5 * best_K:
         verdict = "KHÔNG ĐỌC ĐƯỢC"
@@ -519,9 +603,11 @@ def main():
     elif gain < 0.3:
         verdict = "KHÔNG ĐẠT"
         note = (f"Chỉ hơn LƯỚI ĐỀU {gain:.2f} ô ({t['median_offset_cells']:.2f} vs "
-                f"{b['median_offset_cells']:.2f}) -> model KHÔNG thật sự đọc ảnh; con số đẹp "
-                f"là do CE-130 đông vật. Nhánh 'ảnh -> toạ độ' CHẾT, C3 (box<->box) là đường "
-                f"duy nhất còn lại.")
+                f"{b['median_offset_cells']:.2f}) -> head KHÔNG rút được tâm vật; con số "
+                f"median đẹp là do CE-130 đông vật (20-21/ảnh). ⚠️ ĐỌC KỸ TRƯỚC KHI KẾT "
+                f"LUẬN: xem khối 'LÂN CẬN có giúp không?' ở trên -- nếu 3x3 KHÔNG hơn 1x1 ở "
+                f"cùng số tham số thì mới kết luận được CLIP frozen không chứa thông tin; "
+                f"nếu 3x3 hơn rõ thì giới hạn nằm ở KIẾN TRÚC HEAD, còn thử tiếp được.")
     elif t["median_offset_cells"] < 1.5 and t["pct_within_1cell"] > 40:
         verdict = "ĐẠT"
         note = (f"Hơn lưới đều {gain:.2f} ô; {t['pct_points_in_box']:.0f} % điểm nằm TRONG "
@@ -532,19 +618,20 @@ def main():
                 f"Mang số về bàn, KHÔNG tự quyết.")
     print(f"  => {verdict}: {note}")
 
-    gap = res["_sweep"][str(best_K)]["train"]["median_offset_cells"] - t["median_offset_cells"]
+    gap = best["train"]["median_offset_cells"] - t["median_offset_cells"]
     if abs(gap) > 0.8:
         print(f"  ⚠️ train↔{ev} lệch {abs(gap):.2f} ô — có thể học thuộc 72 class train, "
               f"MẤT zero-shot (rủi ro R4).")
-    if res["_sweep"][str(best_K)]["loss_drop_last10pct"] > 0.002:
+    if best["loss_drop_last10pct"] > 0.002:
         print("  ⚠️ loss VẪN đang giảm ở cuối — chưa bão hoà, thử --epochs lớn hơn.")
     if t["pct_points_in_box"] < 50:
         print(f"  ⚠️ chỉ {t['pct_points_in_box']:.0f} % điểm nằm trong một box — quá nửa số "
               f"token memory sẽ trỏ vào chỗ TRỐNG. Cân nhắc giảm K.")
 
-    res["_meta"] = {"eval_split": ev, "K_sweep": Ks, "best_K": best_K, "epochs": a.epochs,
+    res["_meta"] = {"eval_split": ev, "K_sweep": Ks, "heads": names, "best": best_key, "epochs": a.epochs,
                     "lr": a.lr, "temperature": a.temperature, "w_repulsion": a.w_repulsion,
                     "min_dist_cells": a.min_dist_cells, "grid": grid, "verdict": verdict,
+                    "ksize": a.ksize, "depth": a.depth, "hidden": a.hidden,
                     "gain_over_uniform_cells": gain,
                     "baseline_clip_cosine_median_cells": 3.60,
                     "data_box_width_cells_median_train": 1.96}
