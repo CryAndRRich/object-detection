@@ -240,6 +240,30 @@ class Diffu2SegConfig:
     # Derived
     # ------------------------------------------------------------------
     @property
+    def peak_attention_gb(self) -> float:
+        """Bộ nhớ ĐỈNH của bước trích attention — KHÔNG phải cỡ của A.
+
+        A là (N, N) fp32 = 1,54 GB ở r=140, và tôi đã tính NHẦM đó là chi phí
+        chính. Thực tế chi phí nằm ở tensor TRUNG GIAN bên trong hook:
+
+            attn_weight (1, n_head, N, N) fp16   = 6,15 GB ở r=140, 8 head
+            + bộ đệm fp32 (N, N) trong callback  = 1,54 GB
+            + một head fp32 tạm (N, N)           = 1,54 GB
+
+        Bản gốc chép từ M2N2 dựng `x.float()` trên CẢ tensor (B, H, N, N) —
+        12,3 GB — cộng ba bản attn_weight chồng nhau, tổng ~31,5 GB. OOM trên
+        A30 24 GB ngay ảnh đầu (đo 2026-09-15: "Tried to allocate 11.45 GiB").
+        Ở r=64 của M2N2 cùng đoạn code chỉ tốn ~0,8 GB nên không ai thấy.
+
+        Sau khi sửa (in-place + cộng dồn từng head): ~9,2 GB, cộng SD1.5 fp16
+        ~1,9 GB là ~11,2 GB. Vừa A30 với biên rộng.
+
+        ⚠️ n_head = 8 cho SD 1.5, 5 cho SD2. Công thức dùng 8 (trường hợp xấu).
+        """
+        n = self.n_tokens
+        return (n * n * 8 * 2 + n * n * 4 * 2) / 1e9
+
+    @property
     def grid_r(self) -> int:
         """Latent grid side. canvas=512 -> r=64 -> N = 4096 tokens.
 
@@ -309,5 +333,6 @@ class Diffu2SegConfig:
         d = asdict(self)
         d.update(grid_r=self.grid_r, n_tokens=self.n_tokens,
                  prompt_stride_px=self.prompt_stride_px,
-                 model_source=self.model_source)
+                 model_source=self.model_source,
+                 peak_attention_gb=round(self.peak_attention_gb, 2))
         return d

@@ -157,6 +157,8 @@ def main():
     print(f"    layer w     : up_0 {cfg.w_up_0}  up_1 {cfg.w_up_1}  up_2 {cfg.w_up_2}")
     print(f"    A           : ({cfg.n_tokens}, {cfg.n_tokens}) fp32 = "
           f"{cfg.n_tokens ** 2 * 4 / 1e9:.2f} GB")
+    print(f"    VRAM đỉnh   : ~{cfg.peak_attention_gb:.1f} GB (attention trung gian) "
+          f"+ ~1,9 GB (SD fp16)  -> ~{cfg.peak_attention_gb + 1.9:.1f} GB")
     print("  BƯỚC 2a — lan truyền p-Laplacian (Algorithm 1)")
     print(f"    prompts     : lưới {n_side}x{n_side} = {n_side ** 2}, stride "
           f"{cfg.prompt_stride_cells} ô")

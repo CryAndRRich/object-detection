@@ -89,7 +89,11 @@ class AttnProcessor2_0Wrapper(AttnProcessor2_0):
     def scaled_dot_product_attention(self, query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None) -> torch.Tensor:
         L, S = query.size(-2), key.size(-2)
         scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
-        attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
+        # attn_bias chỉ cần khi có causal mask hoặc attn_mask. Dựng vô điều kiện
+        # tốn thêm (L, S) = 0,77 GB fp16 ở N=19600 cho một tensor toàn số 0.
+        attn_bias = None
+        if is_causal or attn_mask is not None:
+            attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
         if is_causal:
             assert attn_mask is None
             temp_mask = torch.ones(L, S, dtype=torch.bool).tril(diagonal=0)
@@ -102,16 +106,34 @@ class AttnProcessor2_0Wrapper(AttnProcessor2_0):
             else:
                 attn_bias += attn_mask
 
-        attn_weight = query @ key.transpose(-2, -1) * scale_factor
-        attn_weight += attn_bias
-        attn_weight = torch.softmax(attn_weight, dim=-1)
+        # ⚠️ BỘ NHỚ — ĐÂY LÀ CHỖ VỠ Ở r=140, KHÔNG PHẢI Ở A.
+        #
+        # Hook này thay scaled_dot_product_attention của PyTorch bằng bản viết
+        # tay, vì chỉ có thế mới chặn được tensor NGAY SAU softmax và TRƯỚC
+        # dropout. Cái giá là attn_weight (B, H, N, N) phải tồn tại tường minh,
+        # trong khi SDPA gốc của PyTorch không bao giờ dựng nó.
+        #
+        # Ở N=19600 (r=140), 8 head fp16: MỖI bản attn_weight là 6,1 GB. Bản
+        # gốc của M2N2 dựng bốn bản chồng nhau — matmul, +=, softmax, dropout —
+        # cộng bản fp32 12,3 GB trong callback. Trên A30 24 GB thì OOM ngay ảnh
+        # đầu tiên (đo 2026-09-15). Ở r=64 của M2N2 cùng đoạn code chỉ tốn
+        # 0,27 GB/bản nên không ai thấy vấn đề.
+        #
+        # Ba sửa đổi, tất cả đều IN-PLACE để không nhân bản:
+        attn_weight = query @ key.transpose(-2, -1)
+        attn_weight.mul_(scale_factor)          # thay `* scale_factor`
+        if attn_bias is not None:
+            attn_weight.add_(attn_bias)         # thay `+= attn_bias` (giống nhau, nêu cho rõ)
+        torch.softmax(attn_weight, dim=-1, out=attn_weight)   # thay bản mới
 
-        # Calling callback (we don't want dropout, so we do this before dropout is applied)
+        # Callback chạy TRƯỚC dropout -- đó là toàn bộ lý do hàm này tồn tại.
         if self.wrapper_callback_func is not None:
             attn_weight = self.wrapper_callback_func(self.path, attn_weight)
 
-        # Continue as normal
-        attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
+        # dropout_p = 0 ở suy luận, và torch.dropout vẫn cấp phát một bản 6,1 GB
+        # dù p=0. Bỏ qua hẳn khi không dropout.
+        if dropout_p > 0.0:
+            attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
         return attn_weight @ value
 
     def __call__(
@@ -363,17 +385,35 @@ class StableDiffusion2AttentionAggregator(object):
         if weight == 0:
             return x
 
-        # Average over heads and batch, then reshape (N, N) -> (h, w, h, w).
-        # .float() matters: the UNet runs in fp16, but g**(p-2) downstream has a
-        # NEGATIVE exponent and fp16's eps (~6e-8) would overflow it.
-        attn = torch.mean(torch.mean(x.float(), dim=1), dim=0)
-        width = int(round(sqrt(attn.shape[-1])))
-        attn = attn.reshape(width, width, width, width)
+        # Trung bình theo head và batch, rồi reshape (N, N) -> (h, w, h, w).
+        #
+        # ⚠️ KHÔNG dùng `x.float()` trên cả tensor. M2N2 viết
+        #     attn = torch.mean(torch.mean(x.float(), dim=1), dim=0)
+        # và ở r=64 (N=4096) bản fp32 chỉ tốn 0,5 GB nên không ai để ý. Ở
+        # r=140 của paper, x là (1, 8, 19600, 19600) fp16 và `.float()` dựng
+        # một bản fp32 **12,3 GB** — nhân 3 block attention. OOM trên A30 24 GB
+        # ngay ảnh đầu tiên (đo 2026-09-15: "Tried to allocate 11.45 GiB").
+        #
+        # Cộng dồn TỪNG HEAD vào một bộ đệm fp32 (N, N) = 1,54 GB thay vì dựng
+        # (B, H, N, N) fp32. fp32 vẫn bắt buộc: g**(p-2) có số mũ ÂM và eps của
+        # fp16 (~6e-8) sẽ tràn.
+        B, H = x.shape[0], x.shape[1]
+        acc = None
+        for b in range(B):
+            for h in range(H):
+                head = x[b, h].float()
+                acc = head if acc is None else acc.add_(head)
+        acc = acc.div_(float(B * H))
 
+        width = int(round(sqrt(acc.shape[-1])))
+        attn = acc.reshape(width, width, width, width)
+
+        # In-place: `a + b * w` dựng HAI tensor tạm, mỗi cái 1,54 GB ở r=140.
+        # `acc` đã là bộ đệm riêng của lần gọi này nên ghi đè nó là an toàn.
         if self.current_merged_tensor is None:
-            self.current_merged_tensor = attn * weight
+            self.current_merged_tensor = attn.mul_(weight)
         else:
-            self.current_merged_tensor = self.current_merged_tensor + attn * weight
+            self.current_merged_tensor.add_(attn.mul_(weight))
 
         return x
 
