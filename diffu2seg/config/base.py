@@ -12,6 +12,7 @@ A flat YAML would force the same constant to appear in two places, which is
 exactly where silent drift starts.
 """
 
+import os
 from dataclasses import dataclass, field, asdict
 
 VAE_STRIDE = 8          # SD2 VAE downsamples 8x; latent grid = canvas / 8
@@ -30,7 +31,45 @@ class Diffu2SegConfig:
     # ------------------------------------------------------------------
     # SD2 attention extraction
     # ------------------------------------------------------------------
-    hf_model_id: str = "stabilityai/stable-diffusion-2"
+    hf_model_id: str = "stable-diffusion-v1-5/stable-diffusion-v1-5"
+    # ⚠️ KHÔNG PHẢI SD2 NHƯ PAPER, và đây là lý do (đo 2026-09-15):
+    # cả dòng `stabilityai/stable-diffusion-2*` đã bị KHOÁ trên HuggingFace —
+    # `stable-diffusion-2`, `-2-base`, `-2-1`, `-2-1-base` đều trả HTTP 401
+    # "Invalid username or password" cho một repo từng công khai, đo từ BA máy
+    # khác nhau (local Mac, server aiotlab, và một máy thứ ba). 401 chứ không
+    # phải 404 nghĩa là repo còn tồn tại nhưng đã thành gated/private. Không
+    # phải lỗi mạng của ta, và token cũng không gỡ được nếu chưa xin quyền.
+    #
+    # SD 1.5 KHÁC SD2 Ở ĐÂU (đo từ unet/config.json của cả hai):
+    #   giống : sample_size 64 (input 512, lưới latent 64x64)
+    #           block_out_channels [320, 640, 1280, 1280]
+    #           up_block_types = 3x CrossAttnUpBlock2D
+    #           -> tên block `up_blocks.3.attentions.{0,1,2}` VẪN ĐÚNG
+    #   khác  : cross_attention_dim 768 (SD2: 1024)
+    #           attention_head_dim 8   (SD2: 5)
+    #
+    # Cả hai khác biệt đều KHÔNG chạm vào đường ta dùng: ta hook `attn1`
+    # (self-attention ảnh<->ảnh), không dùng cross-attention, và trung bình
+    # trên MỌI head nên số head không quan trọng. M2N2 cũng xác nhận: hai file
+    # aggregator SD1/SD2 của họ khác nhau ĐÚNG 2 chỗ — tên repo mặc định và
+    # attention_resolution mặc định — toàn bộ logic hook giống hệt.
+    #
+    # ⚠️ ĐIỀU PHẢI ĐO LẠI: `timestep=150` là giá trị Diffuse2Seg tinh chỉnh CHO
+    # SD2. Thang timestep của SD1.5 không nhất thiết đặt đặc trưng tốt nhất ở
+    # cùng chỗ. Cửa chặn 0 nên quét vài giá trị t trước khi chốt.
+
+    local_model_dir: str = "../weights/diffu2seg/stable-diffusion-v1-5"
+    # ...nhưng máy chạy thật thì KHÔNG ra được HuggingFace: server trả
+    #   401 Client Error / Repository Not Found / "Invalid username or password"
+    # cho một repo CÔNG KHAI, trong khi HF_TOKEN rỗng và không có file token nào
+    # (đo 2026-09-15). Không có credential nào để mà sai -> chặn ở tầng mạng.
+    #
+    # Nên SD2 tải ở local rồi đưa lên server theo đúng quy ước `weights/` của dự
+    # án (zip thủ công, không scp/rsync). Đường dẫn tương đối so với thư mục
+    # diffu2seg/, khớp với weights/ nằm cạnh nó.
+    #
+    # `model_source` dưới đây tự chọn: có thư mục local thì dùng, không thì rơi
+    # về tên repo. Không cần sửa config khi đổi máy.
     timesteps: tuple = (150,)
     # Paper uses t=150 (following M2N2, which used 100). STAGE 1 USES EXACTLY
     # ONE TIMESTEP: blending two (the paper's w1=0.85 / w2=0.15) is a SECOND
@@ -190,6 +229,23 @@ class Diffu2SegConfig:
         return self.canvas // VAE_STRIDE
 
     @property
+    def model_source(self) -> str:
+        """Đường dẫn local nếu có, ngược lại là tên repo HF.
+
+        Trả về local_model_dir khi thư mục đó tồn tại VÀ có model_index.json
+        (file mà StableDiffusionImg2ImgPipeline.from_pretrained đọc đầu tiên) --
+        chỉ kiểm tra thư mục có tồn tại là chưa đủ: một thư mục rỗng do giải nén
+        hỏng sẽ lọt qua rồi mới chết ở from_pretrained với thông báo khó hiểu.
+        """
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        path = self.local_model_dir
+        if not os.path.isabs(path):
+            path = os.path.normpath(os.path.join(base, path))
+        if os.path.isfile(os.path.join(path, "model_index.json")):
+            return path
+        return self.hf_model_id
+
+    @property
     def n_tokens(self) -> int:
         return self.grid_r * self.grid_r
 
@@ -216,5 +272,6 @@ class Diffu2SegConfig:
     def to_dict(self):
         d = asdict(self)
         d.update(grid_r=self.grid_r, n_tokens=self.n_tokens,
-                 prompt_stride_px=self.prompt_stride_px)
+                 prompt_stride_px=self.prompt_stride_px,
+                 model_source=self.model_source)
         return d

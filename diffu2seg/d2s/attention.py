@@ -1,4 +1,4 @@
-r"""SD2 self-attention extraction.
+r"""Stable Diffusion self-attention extraction (SD 1.5 / SD2).
 
 COPIED from refs/repos/m2n2/src/stable_diffusion_2_attention_aggregator.py
 (CVPR 2025, Karmann & Urfalioglu) and modified. That repo is read-only and
@@ -28,11 +28,27 @@ FOUR CHANGES from the original:
      paper's two-timestep blend is expressible. Stage 1 passes exactly one.
   4. main() removed; a bad processor type raises instead of calling exit().
 
+WORKS FOR BOTH SD1.5 AND SD2 UNCHANGED. Measured from their unet/config.json:
+both have sample_size 64 and block_out_channels [320, 640, 1280, 1280], and both
+end in three CrossAttnUpBlock2D -- so `up_blocks.3.attentions.{0,1,2}` names the
+same layers in each. They differ in cross_attention_dim (768 vs 1024) and
+attention_head_dim (8 vs 5), and NEITHER touches this path: we hook `attn1`
+(image<->image self-attention, never cross-attention) and average over all heads.
+M2N2 confirms it -- their SD1 and SD2 aggregators differ in exactly two lines,
+the default repo id and the default attention_resolution.
+
+⚠️ The project now defaults to SD 1.5 because every `stabilityai/stable-diffusion-2*`
+repo returns HTTP 401 (measured from three machines, 2026-09-15). See
+config/base.py for the evidence.
+
 DEFAULTS DIFFER from M2N2's, and each difference is a measurement:
-  timestep             100 -> 150   Diffuse2Seg's value.
+  timestep             100 -> 150   Diffuse2Seg's value, TUNED FOR SD2 -- the
+                                    SD1.5 timestep scale need not put the best
+                                    features at the same place. Gate 0 should
+                                    sweep a few values of t before this is fixed.
   attention_resolution 128 -> 64    A is N x N with N = r^2: 0.07 GB here
                                     versus 1.07 GB at r=128. r=64 also makes
-                                    the SD2 input exactly 512 px, the project's
+                                    the input exactly 512 px, the project's
                                     canonical canvas.
   up_block weights     unchanged at 0.5/0.5 -- M2N2 measured this (Table 1 on
                                     DAVIS: up_0 alone 6.90, up_1 alone 7.10,
@@ -41,6 +57,7 @@ DEFAULTS DIFFER from M2N2's, and each difference is a measurement:
 """
 
 import math
+import os
 from math import sqrt
 from typing import Optional
 
@@ -257,7 +274,7 @@ class StableDiffusion2AttentionAggregator(object):
                  weight_up_block_0=0.5,
                  weight_up_block_1=0.5,
                  weight_up_block_2=0.0,
-                 hugging_face_model_id="stabilityai/stable-diffusion-2",
+                 hugging_face_model_id="stable-diffusion-v1-5/stable-diffusion-v1-5",
                  prompt_text="",
                  device='cuda:0',
                  torch_dtype=torch.float16):
@@ -269,8 +286,54 @@ class StableDiffusion2AttentionAggregator(object):
         self.device = device
         self.torch_dtype = torch_dtype
 
-        self.pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
-            hugging_face_model_id, torch_dtype=torch_dtype).to(device)
+        # safety_checker / feature_extractor are DELIBERATELY None. They exist to
+        # screen GENERATED images; we generate nothing -- the UNet runs one step
+        # with a hook reading self-attention, and no image ever leaves the VAE.
+        # Loading them costs 1.2 GB for a component that is never called, so the
+        # local weights directory does not ship them at all. Passing None here is
+        # what makes that directory loadable.
+        #
+        # variant="fp16" picks *.fp16.safetensors / *.fp16.bin. The local dir
+        # keeps only fp16 files, so without this from_pretrained looks for the
+        # fp32 names and fails on a directory that is in fact complete.
+        load_kwargs = dict(torch_dtype=torch_dtype, safety_checker=None,
+                           feature_extractor=None, requires_safety_checker=False)
+        try:
+            try:
+                self.pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
+                    hugging_face_model_id, variant="fp16", **load_kwargs).to(device)
+            except Exception:
+                # A hub repo, or a local dir holding fp32 files, has no fp16
+                # variant; retry without it rather than making the caller know
+                # which kind of source they passed.
+                self.pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
+                    hugging_face_model_id, **load_kwargs).to(device)
+        except Exception as exc:
+            # The server cannot reach HuggingFace: a PUBLIC repo comes back as
+            # 401 / "Repository Not Found" / "Invalid username or password" even
+            # though HF_TOKEN is empty and no token file exists (measured
+            # 2026-09-15). There is no credential to be wrong, so the block is at
+            # the network layer -- a token would not help.
+            if os.path.isdir(hugging_face_model_id):
+                raise RuntimeError(
+                    f"Không load được SD2 từ thư mục local {hugging_face_model_id!r}. "
+                    f"Thư mục tồn tại nhưng from_pretrained thất bại — nhiều khả "
+                    f"năng thiếu file. Kiểm: model_index.json, tokenizer/, "
+                    f"scheduler/, và BA file trọng số fp16 —\n"
+                    f"  unet/diffusion_pytorch_model.fp16.safetensors\n"
+                    f"  vae/diffusion_pytorch_model.fp16.bin (hoặc .safetensors)\n"
+                    f"  text_encoder/model.fp16.safetensors\n"
+                    f"safety_checker/ và feature_extractor/ KHÔNG cần (đã truyền None).\n"
+                    f"Lỗi gốc: {exc}"
+                ) from exc
+            raise RuntimeError(
+                f"Không load được SD2 từ {hugging_face_model_id!r}.\n"
+                f"Nếu máy này không ra được HuggingFace (server aiotlab thì KHÔNG), "
+                f"hãy tải SD2 ở local rồi đưa lên theo quy ước weights/:\n"
+                f"    weights/diffu2seg/stable-diffusion-v1-5/\n"
+                f"config.local_model_dir trỏ sẵn vào đó; có thư mục là tự dùng, "
+                f"không cần token.\nLỗi gốc: {exc}"
+            ) from exc
         self.attention_wrappers = sd2_inject_attention_wrappers(
             self.pipe.unet, callback_func=self.collect_attention_tensors_callback)
 
@@ -291,7 +354,8 @@ class StableDiffusion2AttentionAggregator(object):
         if missing:
             raise RuntimeError(
                 f"expected SD2 attention blocks not found: {missing}. "
-                "The UNet layout differs from stabilityai/stable-diffusion-2."
+                "The UNet layout differs from the expected SD1.5/SD2 layout "
+                "(up_blocks.3.attentions.{0,1,2})."
             )
 
     def collect_attention_tensors_callback(self, path, x: torch.Tensor):

@@ -174,6 +174,11 @@ def main():
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--sigma-cells", type=float, default=2.5,
                     help="width of the blind distance baseline, in cells")
+    ap.add_argument("--timesteps", type=int, nargs="+", default=None,
+                    help="quét nhiều timestep trong MỘT lần chạy. Mặc định chỉ "
+                         "dùng cfg.timesteps[0]. t=150 là giá trị Diffuse2Seg "
+                         "tinh chỉnh CHO SD2; ta đang chạy SD1.5 nên thang có "
+                         "thể khác -> nên quét trước khi chốt.")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -188,9 +193,14 @@ def main():
                    os.path.join(root, "all_phase2_V2"), cfg.canvas)
 
     n = min(args.limit, len(ds))
-    print(f"CỬA CHẶN 0 — SD2 self-attention có tách được vùng trên CE-130?")
+    timesteps = args.timesteps or [cfg.timesteps[0]]
+
+    print(f"CỬA CHẶN 0 — self-attention có tách được vùng trên CE-130?")
+    print(f"  model   : {cfg.model_source}")
     print(f"  split={args.split}  n_images={n}  grid_r={cfg.grid_r}  "
-          f"t={cfg.timesteps[0]}  tau_att={cfg.tau_att}")
+          f"tau_att={cfg.tau_att}")
+    print(f"  timestep: {timesteps}"
+          f"{'   (quét — t=150 vốn tinh chỉnh cho SD2)' if len(timesteps) > 1 else ''}")
     print(f"  device={args.device}  prompt_text={cfg.prompt_text!r}")
     print(f"  NGƯỠNG (chốt trước): ĐẠT >= {PASS_AUC} và margin >= {PASS_MARGIN} | "
           f"KHÔNG ĐẠT < {FAIL_AUC} hoặc margin < {FAIL_MARGIN}\n")
@@ -198,53 +208,68 @@ def main():
     from d2s.attention import StableDiffusion2AttentionAggregator
     t0 = time.time()
     agg = StableDiffusion2AttentionAggregator(
-        timestep=cfg.timesteps[0],
+        timestep=timesteps[0],
         attention_resolution=cfg.grid_r,
         weight_down_block_0=cfg.w_down_0, weight_down_block_1=cfg.w_down_1,
         weight_up_block_0=cfg.w_up_0, weight_up_block_1=cfg.w_up_1,
         weight_up_block_2=cfg.w_up_2,
-        hugging_face_model_id=cfg.hf_model_id,
+        hugging_face_model_id=cfg.model_source,
         prompt_text=cfg.prompt_text,
         device=args.device,
         torch_dtype=torch.float16,
     )
-    print(f"  SD2 loaded in {time.time() - t0:.1f}s\n")
+    print(f"  model loaded in {time.time() - t0:.1f}s\n")
 
     blind = distance_affinity(cfg.grid_r, args.sigma_cells, device="cpu").numpy()
-    rng = np.random.default_rng(cfg.seed)
 
-    sd_aucs, blind_aucs, per_image = [], [], []
+    # AUC của baseline mù ảnh KHÔNG phụ thuộc timestep -> gom riêng, tính một lần.
+    blind_aucs = []
+    by_t = {t: [] for t in timesteps}
+    per_image = []
     prereq_failures = []
 
     for i in range(n):
         s = ds[i]
-        attn = agg.extract_attention(s["image"], timesteps=list(cfg.timesteps))[0]
-        A = to_affinity(attn, tau_att=cfg.tau_att, dtype=torch.float32)
-
-        # TIÊN QUYẾT: an unusable A makes every number below meaningless.
-        row = A.sum(dim=1)
-        if not torch.isfinite(A).all():
-            prereq_failures.append((s["file_name"], "A contains NaN/inf"))
-        elif not bool(((row > 0.99) & (row < 1.01)).all()):
-            prereq_failures.append(
-                (s["file_name"], f"row sums in [{row.min():.4f}, {row.max():.4f}]"))
-
-        A_np = A.float().cpu().numpy()
         cells = gt_cell_masks(s["gt_cxcywh"], cfg.grid_r, cfg.canvas)
 
-        a_sd, k = auc_for_image(A_np, cells, cfg.grid_r, args.seeds_per_image,
-                                np.random.default_rng(cfg.seed + i))
         a_bl, _ = auc_for_image(blind, cells, cfg.grid_r, args.seeds_per_image,
                                 np.random.default_rng(cfg.seed + i))
-
-        if not np.isnan(a_sd):
-            sd_aucs.append(a_sd)
         if not np.isnan(a_bl):
             blind_aucs.append(a_bl)
-        per_image.append({"file_name": s["file_name"], "n_gt": int(len(s["gt_cxcywh"])),
-                          "auc_sd2": a_sd, "auc_blind": a_bl, "n_seeds_used": k})
-        print(f"  [{i + 1:3d}/{n}] {s['file_name']:36s} n_gt={len(s['gt_cxcywh']):4d} "
-              f"AUC_sd2={a_sd:.4f}  AUC_blind={a_bl:.4f}")
+
+        # Một forward cho mỗi timestep; ảnh và seed giữ nguyên nên t là biến DUY NHẤT.
+        attns = agg.extract_attention(s["image"], timesteps=timesteps)
+        rec = {"file_name": s["file_name"], "n_gt": int(len(s["gt_cxcywh"])),
+               "auc_blind": a_bl}
+
+        for t, attn in zip(timesteps, attns):
+            A = to_affinity(attn, tau_att=cfg.tau_att, dtype=torch.float32)
+
+            # TIÊN QUYẾT: A hỏng thì mọi số dưới đây vô nghĩa.
+            row = A.sum(dim=1)
+            if not torch.isfinite(A).all():
+                prereq_failures.append((s["file_name"], f"t={t}: A có NaN/inf"))
+            elif not bool(((row > 0.99) & (row < 1.01)).all()):
+                prereq_failures.append(
+                    (s["file_name"],
+                     f"t={t}: tổng hàng trong [{row.min():.4f}, {row.max():.4f}]"))
+
+            a_sd, k = auc_for_image(A.float().cpu().numpy(), cells, cfg.grid_r,
+                                    args.seeds_per_image,
+                                    np.random.default_rng(cfg.seed + i))
+            if not np.isnan(a_sd):
+                by_t[t].append(a_sd)
+            rec[f"auc_t{t}"] = a_sd
+            rec["n_seeds_used"] = k
+
+        per_image.append(rec)
+        cols = "  ".join(f"t{t}={rec[f'auc_t{t}']:.4f}" for t in timesteps)
+        print(f"  [{i + 1:3d}/{n}] {s['file_name']:36s} "
+              f"n_gt={len(s['gt_cxcywh']):4d}  {cols}  mù={a_bl:.4f}")
+
+    # Timestep tốt nhất là cái được đem ra phán quyết.
+    best_t = max(timesteps, key=lambda t: np.mean(by_t[t]) if by_t[t] else -1)
+    sd_aucs = by_t[best_t]
 
     if prereq_failures:
         print("\n" + "=" * 70)
@@ -258,6 +283,15 @@ def main():
     margin = mean_sd - mean_bl
 
     print("\n" + "=" * 70)
+    if len(timesteps) > 1:
+        print("  AUC theo timestep (biến DUY NHẤT là t):")
+        for t in timesteps:
+            m = float(np.mean(by_t[t])) if by_t[t] else float("nan")
+            star = "  <- tốt nhất" if t == best_t else ""
+            print(f"    t={t:4d}: {m:.4f}   margin {m - mean_bl:+.4f}{star}")
+        print("  ⚠️ t=150 là giá trị Diffuse2Seg tinh chỉnh cho SD2; ta chạy SD1.5")
+        print("     nên nếu t khác thắng rõ thì cập nhật config trước khi sang cửa chặn 1.")
+        print()
     print(f"  SD2 attention   mean AUC = {mean_sd:.4f}   (n={len(sd_aucs)}, "
           f"median {np.median(sd_aucs):.4f})")
     print(f"  Lưới đều mù ảnh mean AUC = {mean_bl:.4f}   (sigma={args.sigma_cells} ô)")
@@ -284,6 +318,10 @@ def main():
             json.dump({"gate": "attention_separates", "split": args.split,
                        "n_images": n, "config": cfg.to_dict(),
                        "sigma_cells": args.sigma_cells,
+                       "timesteps": timesteps, "best_timestep": best_t,
+                       "mean_auc_by_timestep": {
+                           str(t): (float(np.mean(by_t[t])) if by_t[t] else None)
+                           for t in timesteps},
                        "mean_auc_sd2": mean_sd, "mean_auc_blind": mean_bl,
                        "margin": margin, "verdict": verdict,
                        "per_image": per_image}, f, indent=2)

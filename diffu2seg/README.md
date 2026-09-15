@@ -85,9 +85,59 @@ Cả bốn đều có test, kèm **negative control** (tắt guard thì test ph�
 
 ---
 
+## ⚠️ Checkpoint: SD 1.5, KHÔNG phải SD2 như paper
+
+Đo 2026-09-15: **cả dòng `stabilityai/stable-diffusion-2*` đã bị khoá trên HuggingFace.**
+`stable-diffusion-2`, `-2-base`, `-2-1`, `-2-1-base` đều trả **HTTP 401** *"Invalid username
+or password"* cho một repo từng công khai — đo từ **ba máy khác nhau** (Mac local, server
+aiotlab, và một máy thứ ba). `401` chứ không phải `404` nghĩa là repo còn tồn tại nhưng đã
+thành gated/private. Không phải lỗi mạng của ta, và thêm token cũng không gỡ được nếu chưa
+xin quyền.
+
+**SD 1.5 khác SD2 ở đâu** (đo từ `unet/config.json` của cả hai):
+
+| | SD 1.5 | SD2 | ảnh hưởng |
+|---|---|---|---|
+| `sample_size` | 64 | 64 | **giống** → input 512, lưới latent 64×64 |
+| `block_out_channels` | `[320,640,1280,1280]` | giống | **giống** |
+| `up_block_types` | 3× `CrossAttnUpBlock2D` | giống | **giống** → `up_blocks.3.attentions.{0,1,2}` vẫn đúng |
+| `cross_attention_dim` | **768** | 1024 | không chạm — ta hook `attn1`, không dùng cross-attn |
+| `attention_head_dim` | **8** | 5 | không chạm — ta trung bình trên mọi head |
+
+Nên `d2s/attention.py` chạy **không sửa một dòng nào**. M2N2 xác nhận điều này: hai file
+aggregator SD1/SD2 của họ khác nhau **đúng 2 chỗ** — tên repo mặc định và
+`attention_resolution` mặc định, toàn bộ logic hook giống hệt.
+
+⚠️ **Thứ PHẢI đo lại**: `t=150` là giá trị Diffuse2Seg tinh chỉnh **cho SD2**. Thang timestep
+của SD1.5 không nhất thiết đặt đặc trưng tốt nhất ở cùng chỗ → cửa chặn 0 có cờ `--timesteps`
+để quét, dùng nó trước khi chốt.
+
+### Tải checkpoint
+
+```bash
+# Ở LOCAL
+cd object-detection/weights
+hf download stable-diffusion-v1-5/stable-diffusion-v1-5 \
+  --local-dir diffu2seg/stable-diffusion-v1-5 \
+  --exclude "*.ckpt" "*.bin" "*.safetensors.index.json"
+
+ls diffu2seg/stable-diffusion-v1-5/
+# phải thấy: model_index.json  unet/  vae/  text_encoder/  tokenizer/  scheduler/
+```
+
+Rồi zip, tự upload lên server, giải nén vào
+`/mnt/disk1/aiotlab/haitn/object-detection/weights/diffu2seg/stable-diffusion-v1-5/` — đúng
+quy ước `weights/` của dự án (không `scp`/`rsync`).
+
+`config.local_model_dir` trỏ sẵn vào đó: **có thư mục hợp lệ thì tự dùng, không có thì rơi về
+tên repo HF**. Code kiểm `model_index.json` chứ không chỉ kiểm thư mục tồn tại — một thư mục
+rỗng do giải nén hỏng sẽ bị bắt ngay thay vì chết sau đó với thông báo khó hiểu.
+
+---
+
 ## Chạy
 
-### Test trước (CPU, không cần GPU/SD2)
+### Test trước (CPU, không cần GPU/SD)
 
 ```bash
 python tests/run_all.py          # 7 suite, 68 test
@@ -106,12 +156,14 @@ python -m pytest tests/ -q
 ```bash
 export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache
 LOG=/mnt/disk1/aiotlab/haitn/log/d2s_gate0_$(date +%Y%m%d_%H%M%S).log
-nohup python tools/check_attention_separates.py --split val --limit 30 \
+nohup python tools/run_on_free_gpu.py -- tools/check_attention_separates.py \
+    --split val --limit 30 --timesteps 50 150 300 500 \
     --out /mnt/disk1/aiotlab/haitn/log/d2s_gate0.json > "$LOG" 2>&1 &
 echo "PID $! -> $LOG"
 ```
 
-⚠️ Lần đầu tải SD2 ~5 GB — job "đứng im" vài phút là bình thường, xem log.
+`run_on_free_gpu.py` chọn GPU trống nhất (server có 3× A30 dùng chung). `--timesteps`
+quét t trong một lần chạy, ảnh và seed giữ nguyên nên **t là biến duy nhất**.
 
 | ngưỡng | |
 |---|---|

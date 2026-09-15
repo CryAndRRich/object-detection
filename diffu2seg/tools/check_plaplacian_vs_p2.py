@@ -135,7 +135,7 @@ def main():
         timestep=cfg.timesteps[0], attention_resolution=cfg.grid_r,
         weight_down_block_0=cfg.w_down_0, weight_down_block_1=cfg.w_down_1,
         weight_up_block_0=cfg.w_up_0, weight_up_block_1=cfg.w_up_1,
-        weight_up_block_2=cfg.w_up_2, hugging_face_model_id=cfg.hf_model_id,
+        weight_up_block_2=cfg.w_up_2, hugging_face_model_id=cfg.model_source,
         prompt_text=cfg.prompt_text, device=args.device, torch_dtype=torch.float16)
     print(f"  SD2 loaded in {time.time() - t0:.1f}s\n")
 

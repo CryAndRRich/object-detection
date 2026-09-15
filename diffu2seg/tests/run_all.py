@@ -36,6 +36,8 @@ SUITES = [
      "cộng dồn thô, ảnh rỗng trả n_gt, không có score_AUC"),
     ("test_ce130_loader.py",
      "COCO json thật: 908 ảnh / 38289 box, pad CLIP-mean ở dưới"),
+    ("test_model_source.py",
+     "chọn nguồn SD2: thư mục local weights/ nếu có, ngược lại tên repo HF"),
 ]
 
 
