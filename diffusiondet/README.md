@@ -75,13 +75,18 @@ export OBJDET_CROWDHUMAN_ANN_DIR=/path/ghi/được/ch_ann
 ## Cài đặt
 
 ```bash
-pip install -r requirements.txt
+# requirements đã gộp lên gốc repo (2026-09-15), dùng chung với CE-LocModel và diffu2seg.
+pip install -r ../requirements.txt
 # detectron2 phải build từ source cho khớp torch/CUDA đang có:
 pip install --no-build-isolation 'git+https://github.com/facebookresearch/detectron2.git'
 ```
 
 Dùng nhánh `main` chứ không phải tag `v0.6`: v0.6 (11/2021) còn `PIL.Image.LINEAR` đã bị
 xoá ở Pillow 10, nhánh main đã sửa.
+
+⚠️ **File gộp KHÔNG chứa các gói detectron2 cần** (`fvcore`, `iopath`, `pycocotools`,
+`yacs`, ...) và env `ce-locmodel` trên server hiện **không chạy được diffusiondet** — chi
+tiết + lệnh dựng lại ở [`../README.md`](../README.md) mục "Môi trường".
 
 Kiểm tra nhanh phần không cần GPU (chạy được ở máy không có torch/detectron2):
 

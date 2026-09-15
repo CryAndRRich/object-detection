@@ -1,0 +1,353 @@
+r"""SD2 self-attention extraction.
+
+COPIED from refs/repos/m2n2/src/stable_diffusion_2_attention_aggregator.py
+(CVPR 2025, Karmann & Urfalioglu) and modified. That repo is read-only and
+nothing here imports from it -- the file was copied into this sub-project and
+edited, which is what the project rules allow.
+
+WHY REUSE THIS PART RATHER THAN REWRITE IT: the hook is the fiddly bit. It
+subclasses AttnProcessor2_0, re-implements scaled_dot_product_attention by hand
+so it can intercept the tensor immediately AFTER torch.softmax and BEFORE
+dropout, and then returns x untouched so the UNet proceeds exactly as if nobody
+were listening. Getting the interception point wrong yields an attention matrix
+that looks plausible and is not the one the model used.
+
+WHAT A IS. Not a feature map. softmax(QK^T) is an (N, N) matrix over patch
+tokens, where A[i, j] reads "how much does token i attend to token j" and each
+row sums to 1. It is a GRAPH over the image, not a description of each point --
+which is precisely why it can be propagated over.
+
+FOUR CHANGES from the original:
+  1. cv2 -> PIL. cv2 appeared only twice (resize here, imread in main) and
+     dropping it removes a dependency the project does not otherwise need.
+  2. `prompt_text` is now a parameter instead of a hard-coded ''. Stage 1 still
+     passes '' (class-agnostic, as Diffuse2Seg specifies), but CE-130 ships a
+     caption per image and the wiring is ready for the day that becomes a
+     deliberate variable.
+  3. extract_attention takes a LIST of timesteps and returns a list, so the
+     paper's two-timestep blend is expressible. Stage 1 passes exactly one.
+  4. main() removed; a bad processor type raises instead of calling exit().
+
+DEFAULTS DIFFER from M2N2's, and each difference is a measurement:
+  timestep             100 -> 150   Diffuse2Seg's value.
+  attention_resolution 128 -> 64    A is N x N with N = r^2: 0.07 GB here
+                                    versus 1.07 GB at r=128. r=64 also makes
+                                    the SD2 input exactly 512 px, the project's
+                                    canonical canvas.
+  up_block weights     unchanged at 0.5/0.5 -- M2N2 measured this (Table 1 on
+                                    DAVIS: up_0 alone 6.90, up_1 alone 7.10,
+                                    together 6.72 NoC90; the down blocks are
+                                    far worse at 15.25 / 13.18).
+"""
+
+import math
+from math import sqrt
+from typing import Optional
+
+import numpy as np
+import torch
+from PIL import Image
+from diffusers import StableDiffusionImg2ImgPipeline
+from diffusers.models.attention_processor import Attention, AttnProcessor2_0
+from diffusers.utils import deprecate
+
+__all__ = ["StableDiffusion2AttentionAggregator", "sd2_inject_attention_wrappers"]
+
+
+class AttnProcessor2_0Wrapper(AttnProcessor2_0):
+    r"""
+    Processor for implementing scaled dot-product attention (enabled by default if you're using PyTorch 2.0).
+    """
+
+    def __init__(self, other, path=None, callback_func=None):
+        super().__init__()
+
+        # copy all members of the class we want to wrap
+        self.__dict__ = other.__dict__.copy()
+
+        # Adding our own members for tracking
+        self.path = path
+        self.wrapper_callback_func = callback_func
+
+    def scaled_dot_product_attention(self, query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None) -> torch.Tensor:
+        L, S = query.size(-2), key.size(-2)
+        scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
+        attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
+        if is_causal:
+            assert attn_mask is None
+            temp_mask = torch.ones(L, S, dtype=torch.bool).tril(diagonal=0)
+            attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
+            attn_bias.to(query.dtype)
+
+        if attn_mask is not None:
+            if attn_mask.dtype == torch.bool:
+                attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
+            else:
+                attn_bias += attn_mask
+
+        attn_weight = query @ key.transpose(-2, -1) * scale_factor
+        attn_weight += attn_bias
+        attn_weight = torch.softmax(attn_weight, dim=-1)
+
+        # Calling callback (we don't want dropout, so we do this before dropout is applied)
+        if self.wrapper_callback_func is not None:
+            attn_weight = self.wrapper_callback_func(self.path, attn_weight)
+
+        # Continue as normal
+        attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
+        return attn_weight @ value
+
+    def __call__(
+        self,
+        attn: Attention,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        temb: Optional[torch.Tensor] = None,
+        *args,
+        **kwargs,
+    ) -> torch.Tensor:
+        if len(args) > 0 or kwargs.get("scale", None) is not None:
+            deprecation_message = "The `scale` argument is deprecated and will be ignored. Please remove it, as passing it will raise an error in the future. `scale` should directly be passed while calling the underlying pipeline component i.e., via `cross_attention_kwargs`."
+            deprecate("scale", "1.0.0", deprecation_message)
+
+        residual = hidden_states
+        if attn.spatial_norm is not None:
+            hidden_states = attn.spatial_norm(hidden_states, temb)
+
+        input_ndim = hidden_states.ndim
+
+        if input_ndim == 4:
+            batch_size, channel, height, width = hidden_states.shape
+            hidden_states = hidden_states.view(batch_size, channel, height * width).transpose(1, 2)
+
+        batch_size, sequence_length, _ = (
+            hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
+        )
+
+        if attention_mask is not None:
+            attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
+            # scaled_dot_product_attention expects attention_mask shape to be
+            # (batch, heads, source_length, target_length)
+            attention_mask = attention_mask.view(batch_size, attn.heads, -1, attention_mask.shape[-1])
+
+        if attn.group_norm is not None:
+            hidden_states = attn.group_norm(hidden_states.transpose(1, 2)).transpose(1, 2)
+
+        query = attn.to_q(hidden_states)
+
+        if encoder_hidden_states is None:
+            encoder_hidden_states = hidden_states
+        elif attn.norm_cross:
+            encoder_hidden_states = attn.norm_encoder_hidden_states(encoder_hidden_states)
+
+        key = attn.to_k(encoder_hidden_states)
+        value = attn.to_v(encoder_hidden_states)
+
+        inner_dim = key.shape[-1]
+        head_dim = inner_dim // attn.heads
+
+        query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+
+        key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+
+        if attn.norm_q is not None:
+            query = attn.norm_q(query)
+        if attn.norm_k is not None:
+            key = attn.norm_k(key)
+
+        # the output of sdp = (batch, num_heads, seq_len, head_dim)
+        hidden_states = self.scaled_dot_product_attention(
+            query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
+        )
+
+        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
+        hidden_states = hidden_states.to(query.dtype)
+
+        # linear proj
+        hidden_states = attn.to_out[0](hidden_states)
+        # dropout
+        hidden_states = attn.to_out[1](hidden_states)
+
+        if input_ndim == 4:
+            hidden_states = hidden_states.transpose(-1, -2).reshape(batch_size, channel, height, width)
+
+        if attn.residual_connection:
+            hidden_states = hidden_states + residual
+
+        hidden_states = hidden_states / attn.rescale_output_factor
+
+        return hidden_states
+
+
+def sd2_inject_attention_wrappers(module, callback_func=None, path='', collect_wrappers=None) -> dict:
+    """
+    module: stable diffusion pipe.unet as input
+    callback_func: Will be called whenever the self attention is used. Parameters are (path: str, x: torch.Tensor) and expects to return a
+        torch.Tensor in the same shape, device and dtype as the given x. (to replace the current attention. Easiest is just to return original x to not modify)
+    """
+    if collect_wrappers is None:
+        collect_wrappers = dict()
+
+    if isinstance(module, Attention):
+        if not isinstance(module.processor, AttnProcessor2_0):
+            # M2N2 called exit() here. Raising instead: a hard exit inside a
+            # library call is untestable and kills a batch job with no context.
+            raise RuntimeError(
+                f"attention processor at {path!r} is "
+                f"{module.processor.__class__.__name__}, expected AttnProcessor2_0. "
+                "This usually means the installed diffusers version changed its "
+                "default processor; pin diffusers==0.31.0."
+            )
+        module.set_processor(AttnProcessor2_0Wrapper(module.processor, path=path, callback_func=callback_func))
+        collect_wrappers[path] = module.processor
+        return collect_wrappers
+    elif hasattr(module, 'children'):
+        for k, v in list(module.named_children()):
+            sd2_inject_attention_wrappers(v, callback_func, path + '.' + k, collect_wrappers)
+    return collect_wrappers
+
+
+def sd2_perform_single_image_diffusion_step(pipe, img: np.ndarray, timestep, device,
+                                            torch_dtype, prompt_text=""):
+    """One denoising step, run only for its side effect on the hooked attentions.
+
+    img: (H, W, 3) uint8, side divisible by 64.
+
+    NOTE the latent is NOT noised: vae.encode(...).latent_dist.mode() is the
+    clean encoding, and `timestep` only tells the UNet which noise level to
+    assume. That is what makes this a feature extractor rather than a generation
+    step -- the structure read out of the attentions is the structure of THIS
+    image, not of something being synthesised.
+
+    prompt_text: "" reproduces Diffuse2Seg's class-agnostic setting ("we omit
+    the text prompt and only pass null text embeddings"). CE-130 does carry a
+    per-image caption, so this is left as a parameter rather than hard-coded.
+    """
+    prompt_embeds, _ = pipe.encode_prompt(prompt_text, device, 1, False)
+    preprocessed_image = pipe.image_processor.preprocess(img / 255).to(torch_dtype).to(device)
+
+    init_latents = pipe.vae.config.scaling_factor * pipe.vae.encode(preprocessed_image).latent_dist.mode()
+
+    with torch.no_grad():
+        _ = pipe.unet(
+            init_latents,
+            timestep,
+            encoder_hidden_states=prompt_embeds,
+            timestep_cond=None,
+            cross_attention_kwargs=None,
+            added_cond_kwargs=None,
+            return_dict=False,
+        )[0]
+
+
+class StableDiffusion2AttentionAggregator(object):
+    """Runs one SD2 denoising step and returns the aggregated self-attention.
+
+    Defaults are Diffu2Seg's, not M2N2's -- see the module docstring for why
+    each one moved.
+    """
+
+    def __init__(self,
+                 timestep=150,
+                 attention_resolution=64,
+                 weight_down_block_0=0.0,
+                 weight_down_block_1=0.0,
+                 weight_up_block_0=0.5,
+                 weight_up_block_1=0.5,
+                 weight_up_block_2=0.0,
+                 hugging_face_model_id="stabilityai/stable-diffusion-2",
+                 prompt_text="",
+                 device='cuda:0',
+                 torch_dtype=torch.float16):
+        self.stable_diffusion_img_size = (8 * attention_resolution, 8 * attention_resolution)
+        self.attn_target_resolution = (attention_resolution, attention_resolution)
+        self.current_merged_tensor = None
+        self.timestep = timestep
+        self.prompt_text = prompt_text
+        self.device = device
+        self.torch_dtype = torch_dtype
+
+        self.pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
+            hugging_face_model_id, torch_dtype=torch_dtype).to(device)
+        self.attention_wrappers = sd2_inject_attention_wrappers(
+            self.pipe.unet, callback_func=self.collect_attention_tensors_callback)
+
+        # The five self-attention blocks at the two highest UNet resolutions.
+        # Everything else gets weight 0 and is skipped before any reshape.
+        self.path_to_weight_dict = dict()
+        named = {
+            '.down_blocks.0.attentions.0.transformer_blocks.0.attn1': weight_down_block_0,
+            '.down_blocks.0.attentions.1.transformer_blocks.0.attn1': weight_down_block_1,
+            '.up_blocks.3.attentions.0.transformer_blocks.0.attn1': weight_up_block_0,
+            '.up_blocks.3.attentions.1.transformer_blocks.0.attn1': weight_up_block_1,
+            '.up_blocks.3.attentions.2.transformer_blocks.0.attn1': weight_up_block_2,
+        }
+        for attn_key in self.attention_wrappers.keys():
+            self.path_to_weight_dict[attn_key] = named.get(attn_key, 0)
+
+        missing = [k for k in named if k not in self.attention_wrappers]
+        if missing:
+            raise RuntimeError(
+                f"expected SD2 attention blocks not found: {missing}. "
+                "The UNet layout differs from stabilityai/stable-diffusion-2."
+            )
+
+    def collect_attention_tensors_callback(self, path, x: torch.Tensor):
+        weight = self.path_to_weight_dict.get(path, 0)
+        if weight == 0:
+            return x
+
+        # Average over heads and batch, then reshape (N, N) -> (h, w, h, w).
+        # .float() matters: the UNet runs in fp16, but g**(p-2) downstream has a
+        # NEGATIVE exponent and fp16's eps (~6e-8) would overflow it.
+        attn = torch.mean(torch.mean(x.float(), dim=1), dim=0)
+        width = int(round(sqrt(attn.shape[-1])))
+        attn = attn.reshape(width, width, width, width)
+
+        if self.current_merged_tensor is None:
+            self.current_merged_tensor = attn * weight
+        else:
+            self.current_merged_tensor = self.current_merged_tensor + attn * weight
+
+        return x
+
+    def _resize(self, image: np.ndarray) -> np.ndarray:
+        """PIL instead of cv2. A no-op when the canvas is already 8 * r."""
+        target = self.stable_diffusion_img_size
+        if image.shape[:2] == (target[1], target[0]):
+            return image
+        return np.asarray(Image.fromarray(image).resize(target, Image.BILINEAR))
+
+    def extract_attention_at(self, image: np.ndarray, timestep) -> torch.Tensor:
+        """One timestep -> (h, w, h, w), last two axes summing to 1 per (i, j)."""
+        self.current_merged_tensor = None
+        sd2_perform_single_image_diffusion_step(
+            pipe=self.pipe,
+            img=self._resize(image),
+            timestep=timestep,
+            device=self.device,
+            torch_dtype=self.torch_dtype,
+            prompt_text=self.prompt_text,
+        )
+        merged = self.current_merged_tensor
+        if merged is None:
+            raise RuntimeError("no attention was captured; all block weights are 0")
+
+        h, w = self.attn_target_resolution[1], self.attn_target_resolution[0]
+        denom = torch.sum(merged.reshape(h, w, -1), dim=2)[:, :, None, None]
+        return merged / denom
+
+    def extract_attention(self, image: np.ndarray, timesteps=None):
+        """List of timesteps -> list of (h, w, h, w) tensors.
+
+        Returns a list even for one timestep so callers need no special case.
+        Stage 1 passes exactly one: blending two is a second variable, and the
+        project rule is one variable per step.
+        """
+        if timesteps is None:
+            timesteps = [self.timestep]
+        elif isinstance(timesteps, (int, float)):
+            timesteps = [timesteps]
+        return [self.extract_attention_at(image, t) for t in timesteps]

@@ -1,23 +1,48 @@
-# dữ liệu, weight, kết quả không đưa vào git (quá lớn, up thủ công lên server)
+# Gộp 2026-09-15 từ 3 file (gốc repo + count_editing/ + CE-LocModel/).
+# Ghi chú chi tiết: README.md mục "Môi trường".
+
+# dữ liệu lớn — không push git, up thủ công lên server
 weights/
-# CHỈ thư mục data/ ở gốc repo (dataset thật), KHÔNG phải mọi thư mục tên data/.
-# Không có dấu / đầu dòng thì rule này nuốt luôn package code
-# count_editing/CE-LocModel/data/ (dataset.py, ce130_detection_dataset.py) ->
-# server pull về sẽ thiếu và crash ngay ở `from data.dataset import ...`.
+# CHỈ data/ ở gốc repo. Không có dấu / đầu dòng thì rule này nuốt luôn package
+# code CE-LocModel/data/ và diffu2seg/data/ -> server pull về sẽ crash.
 /data/
 datasets/
+samples/
+samples_test/
+samples_real/
+
+# kết quả / model (dấu / cuối: chỉ khớp THƯ MỤC, không khớp tên file)
 output/
 outputs/
+checkpoints/
 *.pth
 *.pkl
+*.ckpt
+
+# môi trường
+.venv/
+.venv-cpu/
+venv/
+env/
+ENV/
+.python-version
 
 # python
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
 *.egg-info/
+*.egg
+build/
+dist/
+.eggs/
 .ipynb_checkpoints/
-.venv/
-venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
 # hệ điều hành / editor
 .DS_Store
@@ -26,3 +51,8 @@ venv/
 
 # secret
 .env
+.envrc
+
+# rác
+tmp.py
+*.log
