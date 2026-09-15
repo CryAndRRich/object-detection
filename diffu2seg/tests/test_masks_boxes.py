@@ -157,6 +157,35 @@ def test_padding_filter_uses_area_not_centre():
     assert kept[0][1] < valid_h
 
 
+def test_right_hand_padding_is_filtered_for_portrait_images():
+    """Same rule, applied to the WIDTH -- the COCO portrait case.
+
+    valid_w = 0.9152 (a 586x640 image). CE-130 can never produce this, so
+    without a test the width term would be dead code that looks correct.
+    """
+    valid_w = 0.9152
+    mostly_inside = [valid_w - 0.005, 0.5, 0.06, 0.05]
+    in_padding = [valid_w + 0.03, 0.5, 0.06, 0.05]
+
+    kept, info = filter_boxes(np.array([mostly_inside, in_padding]), R, CANVAS,
+                              valid_w=valid_w)
+    assert info["n_in_padding"] == 1
+    assert len(kept) == 1
+    assert kept[0][0] < valid_w
+
+
+def test_valid_w_default_leaves_ce130_filtering_unchanged():
+    """[NEGATIVE CONTROL] valid_w=1.0 must reproduce the CE-130 behaviour byte
+    for byte. If it does not, adding COCO support changed CE-130 results."""
+    valid_h = 0.9412
+    boxes = np.array([[0.5, valid_h - 0.005, 0.06, 0.05],
+                      [0.5, valid_h + 0.03, 0.06, 0.05],
+                      [0.2, 0.3, 0.10, 0.10]])
+    a, ia = filter_boxes(boxes, R, CANVAS, valid_h=valid_h)
+    b, ib = filter_boxes(boxes, R, CANVAS, valid_h=valid_h, valid_w=1.0)
+    assert np.array_equal(a, b) and ia == ib
+
+
 def test_dedup_removes_duplicates_keeps_neighbours():
     """441 prompts on ~21 objects: duplicates must go, true neighbours must not."""
     dup = [[0.30, 0.30, 0.10, 0.10]] * 5

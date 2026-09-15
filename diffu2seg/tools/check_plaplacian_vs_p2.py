@@ -83,7 +83,8 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config.base import Diffu2SegConfig          # noqa: E402
+from config.base import Diffu2SegConfig
+from utils.metrics import fmt_time          # noqa: E402
 from d2s.pipeline import build_affinity, segment_image  # noqa: E402
 from data.ce130_coco import CE130Coco            # noqa: E402
 from utils.metrics import quality_one_image, summarise  # noqa: E402
@@ -174,10 +175,10 @@ def main():
             if not out["converged"]:
                 a["n_not_converged"] += 1
 
-        if (i + 1) % 10 == 0 or i == n - 1:
-            el = time.time() - t_start
-            print(f"  [{i + 1:3d}/{n}] {el / (i + 1):.1f}s/img, "
-                  f"ETA {el / (i + 1) * (n - i - 1) / 60:.1f} min")
+        el = time.time() - t_start
+        print(f"  [{i + 1:3d}/{n} {100 * (i + 1) / n:5.1f}%] "
+              f"{el / (i + 1):5.1f}s/ảnh | elapsed {fmt_time(el)} | "
+              f"ETA {fmt_time(el / (i + 1) * (n - i - 1))}", flush=True)
 
     # ---------------- TIÊN QUYẾT ----------------
     print("\n" + "=" * 74)

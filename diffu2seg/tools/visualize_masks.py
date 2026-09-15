@@ -40,7 +40,15 @@ from utils.box_ops_np import box_iou, cxcywh_to_xyxy  # noqa: E402
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--dataset", default="ce130",
+                    choices=["ce130", "coco", "paco"],
+                    help="paco = PACO-LVIS val, bộ DUY NHẤT của bảng training-free "
+                         "lấy được; coco = COCO val2017 (không có trong bảng nào)")
     ap.add_argument("--split", default="val", choices=["train", "val", "test"])
+    ap.add_argument("--canvas", type=int, default=None,
+                    help="ghi đè canvas; mặc định 512 cho ce130, 1120 cho coco")
+    ap.add_argument("--stride", type=int, default=None,
+                    help="ghi đè prompt stride; mặc định 3 cho ce130, 6 cho coco")
     ap.add_argument("--limit", type=int, default=8)
     ap.add_argument("--start", type=int, default=0)
     ap.add_argument("--p", type=float, default=None)
@@ -54,14 +62,29 @@ def main():
     import matplotlib.pyplot as plt
     from matplotlib.patches import Rectangle
 
-    cfg = Diffu2SegConfig().validate()
+    paper_cfg = args.dataset in ("coco", "paco")
+    over = {}
+    over["canvas"] = args.canvas if args.canvas else (1120 if paper_cfg else 512)
+    over["prompt_stride_cells"] = args.stride if args.stride else (6 if paper_cfg else 3)
     if args.p is not None:
-        cfg = Diffu2SegConfig(**{**cfg.__dict__, "p": args.p}).validate()
+        over["p"] = args.p
+    cfg = Diffu2SegConfig(**{**Diffu2SegConfig().__dict__, **over}).validate()
 
     root = args.data_root or os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "data")
-    ds = CE130Coco(os.path.join(root, "ce130_coco", f"ce130_agnostic_{args.split}.json"),
-                   os.path.join(root, "all_phase2_V2"), cfg.canvas)
+    if args.dataset == "paco":
+        from data.paco_val import PacoVal
+        ds = PacoVal(os.path.join(root, "paco", "paco_lvis_v1_val.json"),
+                     os.path.join(root, "paco", "images"), canvas=cfg.canvas)
+    elif args.dataset == "coco":
+        from data.coco_val import CocoVal
+        ds = CocoVal(os.path.join(root, "coco", "annotations",
+                                  "instances_val2017.json"),
+                     os.path.join(root, "coco", "val2017"), canvas=cfg.canvas)
+    else:
+        ds = CE130Coco(
+            os.path.join(root, "ce130_coco", f"ce130_agnostic_{args.split}.json"),
+            os.path.join(root, "all_phase2_V2"), cfg.canvas)
     os.makedirs(args.out_dir, exist_ok=True)
 
     from d2s.attention import StableDiffusion2AttentionAggregator
@@ -76,7 +99,8 @@ def main():
     for i in range(args.start, end):
         s = ds[i]
         A = build_affinity(s["image"], cfg, agg)
-        out = segment_image(s["image"], s["valid_h"], cfg, A=A)
+        out = segment_image(s["image"], s["valid_h"], cfg, A=A,
+                            valid_w=s.get("valid_w", 1.0))
 
         gt, pred = s["gt_cxcywh"], out["boxes"]
         if len(pred) and len(gt):
@@ -113,6 +137,11 @@ def main():
         for ax in axes:
             y = s["valid_h"] * cfg.canvas
             ax.axhline(y, color="yellow", ls="--", lw=1.2)
+            # Ảnh dọc (COCO 427x640) pad ở PHẢI chứ không phải ở dưới -- vạch
+            # ngang một mình sẽ không cho thấy vùng pad nằm đâu.
+            vw = s.get("valid_w", 1.0)
+            if vw < 0.999:
+                ax.axvline(vw * cfg.canvas, color="yellow", ls="--", lw=1.2)
             ax.set_xlim(0, cfg.canvas)
             ax.set_ylim(cfg.canvas, 0)
             ax.axis("off")

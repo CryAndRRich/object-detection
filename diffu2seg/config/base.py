@@ -123,9 +123,12 @@ class Diffu2SegConfig:
 
     tau_prop: float = 1e-4
     max_iter: int = 200
-    # Paper gives tau_prop but no iteration cap. A cap is mandatory: without it
-    # one non-converging image hangs the whole job. n_iter is dumped per image
-    # so the gate can check convergence instead of assuming it.
+    # ⚠️ max_iter IS NOT A PAPER VALUE -- the paper gives tau_prop and no cap.
+    # A cap is mandatory or one non-converging image hangs the job. 200 was set
+    # for CE-130 at r=64; config/paper.py raises it to 1000, because at r=140 a
+    # prompt has to travel over five times as many tokens to cover the same
+    # fraction of the image. n_iter is dumped per image so the cap is visible
+    # rather than assumed.
 
     g_eps: float = 1e-8
     # NOT IN THE PAPER, and mandatory. g is exactly 0 on flat regions (common
@@ -201,12 +204,37 @@ class Diffu2SegConfig:
     seed: int = 0
 
     # ------------------------------------------------------------------
-    # Stage 2 only (unused while stage == 1)
+    # STAGE 2 -- Algorithm 2 of the paper (mask merging + NMS)
     # ------------------------------------------------------------------
     n_levels: int = 6
-    kl_thresholds: tuple = ()
-    nms_iou: float = 0.70
-    level_priority: str = "finest_first"
+    # §A.1: "L = 6 log-spaced thresholds". Their sweep (Fig. 6g) shows AR
+    # rising to 6 and flattening; §A.1 concludes "we therefore keep 6 levels".
+
+    kl_h_min: float = 0.186
+    kl_h_max: float = 2.99
+    # §A.1: "six thresholds in the range [0.186, 2.99] that are log-spaced to
+    # emphasize merges at lower thresholds". LOG-spaced, not linear: small h
+    # gives many clusters (small objects), large h gives few (whole objects),
+    # and the interesting structure is at the low end.
+
+    nms_iou: float = 0.9
+    # §A.1: "tau_IoU = 0.9, which worked best to preserve recall". DELIBERATELY
+    # PERMISSIVE -- the paper measured that 0.5 "reduces recall significantly by
+    # 3.1 p.p. in mAR", because adjacent granularity levels legitimately produce
+    # nested masks (a chair and its seat) that a strict NMS would delete.
+
+    min_area_px: int = 100
+    # §A.1: "We remove all masks containing fewer than 100 pixels to remove
+    # noise". In ORIGINAL IMAGE pixels, applied after upsampling.
+
+    max_masks: int = 1000
+    # §3.4: "at most Nmax complementary masks per image [...] set to 1000".
+    # The same 1000 that AR_1000 is named after.
+
+    kl_eps: float = 1e-12
+    # NOT IN THE PAPER. KL divergence takes log(p/q); a propagated map is zero
+    # over most of the image, and log(0) = -inf poisons the whole distance
+    # matrix. Same class of omission as g_eps.
 
     # ------------------------------------------------------------------
     # Derived
@@ -267,6 +295,14 @@ class Diffu2SegConfig:
         assert 0.0 < self.mask_quantile < 1.0
         assert self.math_dtype == "float32", \
             "p-Laplacian must run in fp32: g**(p-2) underflows in fp16"
+        if self.stage >= 2:
+            assert 0 < self.kl_h_min < self.kl_h_max, \
+                f"need 0 < kl_h_min < kl_h_max, got {self.kl_h_min}, {self.kl_h_max}"
+            assert self.n_levels >= 1
+            assert 0.0 < self.nms_iou <= 1.0
+            assert self.min_area_px >= 0
+            assert self.max_masks >= 1
+            assert self.kl_eps > 0, "log(0) in the KL distance without kl_eps"
         return self
 
     def to_dict(self):

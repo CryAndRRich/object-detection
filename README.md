@@ -75,6 +75,18 @@ driver, rồi mới chạy file requirements.
 `accelerate` (nó **không** cần `opencv` — `d2s/attention.py` đã thay `cv2.resize` bằng PIL;
 cũng **không** cần `numba` — thay flood-fill JIT của M2N2 bằng `scipy.ndimage.label`).
 
+#### ⚠️ `huggingface_hub` phải `< 1.0` — đã vỡ env một lần
+
+`pip install -U "huggingface_hub[cli]"` (để lấy lệnh `hf download`) kéo lên **1.31.0**, và
+`transformers` bản đang cài đòi `huggingface-hub>=0.23.2,<1.0`. Hậu quả: **mọi** `import
+diffusers` chết với `RuntimeError: Failed to import ... pipeline_stable_diffusion_img2img`.
+Traceback trỏ vào `diffusers`, nhưng nguyên nhân nằm ở `transformers` — dễ đi sai hướng.
+
+Sửa: `pip install -U "huggingface_hub>=0.34,<1.0"` (server đang dùng **0.36.2**). Không nâng
+`transformers` — CE-LocModel đã train xong với bản hiện tại, đổi là mất tính so sánh.
+
+⚠️ Bản `0.x` dùng lệnh `huggingface-cli download`, **không** có lệnh `hf`.
+
 ### ⚠️ `diffusiondet/` hiện KHÔNG chạy được trên env này
 
 Đo 2026-09-15: `import detectron2` → `ModuleNotFoundError`; `import fvcore` → cũng vậy;

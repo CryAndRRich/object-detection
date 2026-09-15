@@ -38,6 +38,16 @@ SUITES = [
      "COCO json thật: 908 ảnh / 38289 box, pad CLIP-mean ở dưới"),
     ("test_model_source.py",
      "chọn nguồn SD2: thư mục local weights/ nếu có, ngược lại tên repo HF"),
+    ("test_coco_loader.py",
+     "COCO val2017: pad hai chiều (ảnh dọc pad PHẢI), loại crowd, trần r=140"),
+    ("test_ar_metrics.py",
+     "AR_1000 của paper: IoU 0,5-0,95, cap 1000, ghép MỘT-MỘT, nâng mask giữ trục"),
+    ("test_paco_loader.py",
+     "PACO val: polygon (OBJECT) + RLE (PART), mask ở độ phân giải ảnh gốc"),
+    ("test_merging.py",
+     "Algorithm 2: KL khai triển == ngây thơ, argmax cho PHÂN HOẠCH, NMS 0,9"),
+    ("test_stage2_pipeline.py",
+     "toàn mạch GĐ2 trên affinity giả lập; GĐ1 không đổi hành vi"),
 ]
 
 
@@ -77,8 +87,10 @@ def main() -> int:
     if n_ok == len(results):
         print("\nBước tiếp theo (TRÊN SERVER, người dùng tự chạy):")
         print("  export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache")
-        print("  python tools/check_attention_separates.py --split val --limit 30")
-        print("     ^ CỬA CHẶN 0, ~5 phút, có thể kết luận sớm cả hướng")
+        print("  python tools/run_on_free_gpu.py -- tools/run_paper.py \\")
+        print("      --dataset paco --limit 50 --out <log>/d2s_paper_paco.json")
+        print("     ^ Diffuse2Seg training-free ĐẦY ĐỦ, cấu hình paper, đo AR_1000")
+        print("       mốc paper trên PACO: 13,6")
         print("\n⚠️ Bộ test xanh KHÔNG có nghĩa là phương pháp chạy được — nó chỉ")
         print("   nói phần toán và phần ghép nối đúng. Cửa chặn mới trả lời.")
     return 0 if n_ok == len(results) else 1

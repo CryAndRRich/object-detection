@@ -40,7 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config.base import Diffu2SegConfig          # noqa: E402
 from d2s.pipeline import build_affinity, segment_image  # noqa: E402
 from data.ce130_coco import CE130Coco            # noqa: E402
-from utils.metrics import quality_one_image, summarise  # noqa: E402
+from utils.metrics import fmt_time, quality_one_image, summarise  # noqa: E402
 
 
 def main():
@@ -131,14 +131,16 @@ def main():
             rec["boxes"] = out["boxes"].tolist()
         per_image.append(rec)
 
-        if (i + 1) % 25 == 0 or i == n - 1:
-            el = time.time() - t_start
-            print(f"  [{i + 1:4d}/{n}] {el / (i + 1):5.2f}s/img  "
-                  f"ETA {el / (i + 1) * (n - i - 1) / 60:6.1f} min  "
-                  f"running oracle_recall={hits / max(n_gt_total, 1):.4f}")
-            if i == 0 and torch.cuda.is_available() and args.device.startswith("cuda"):
-                print(f"         max_memory_allocated = "
-                      f"{torch.cuda.max_memory_allocated() / 1e9:.2f} GB")
+        el = time.time() - t_start
+        print(f"  [{i + 1:4d}/{n} {100 * (i + 1) / n:5.1f}%] {s['file_name']:28s} "
+              f"n_gt={n_gt:3d} n_pred={out['n_boxes']:4d} n_iter={out['n_iter']:3d} | "
+              f"oracle_recall={hits / max(n_gt_total, 1):.4f} | "
+              f"{el / (i + 1):5.2f}s/ảnh | elapsed {fmt_time(el)} | "
+              f"ETA {fmt_time(el / (i + 1) * (n - i - 1))}", flush=True)
+        if i == 0 and torch.cuda.is_available() and args.device.startswith("cuda"):
+            print(f"         max_memory_allocated = "
+                  f"{torch.cuda.max_memory_allocated() / 1e9:.2f} GB "
+                  f"| n_prompts={out['n_prompts']}", flush=True)
 
     res = summarise(best_all, hits, n_gt_total,
                     n_pred_total=n_pred_total, n_images=n)
@@ -151,7 +153,9 @@ def main():
     print(f"  mean_bestIoU   : {res['mean_bestIoU']:.4f}")
     print(f"  median_bestIoU : {res['median_bestIoU']:.4f}")
     print(f"  box/ảnh        : {n_pred_total / max(n, 1):.1f}")
-    print(f"  thời lượng     : {elapsed / 60:.1f} phút ({elapsed / max(n, 1):.2f}s/ảnh)")
+    print(f"  thời lượng     : {fmt_time(elapsed)} ({elapsed / max(n, 1):.2f}s/ảnh)")
+    if n < len(ds):
+        print(f"  ngoại suy {len(ds)} ảnh: {fmt_time(elapsed / max(n, 1) * len(ds))}")
 
     print("\nCHẨN ĐOÁN")
     conv = 1.0 - n_not_conv / max(n, 1)

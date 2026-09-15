@@ -37,7 +37,8 @@ import torch
 __all__ = ["build_prompt_grid", "f0_onehot", "cells_to_canvas_xy"]
 
 
-def build_prompt_grid(grid_r, stride_cells, valid_h=1.0, min_valid_frac=1.0):
+def build_prompt_grid(grid_r, stride_cells, valid_h=1.0, min_valid_frac=1.0,
+                     valid_w=1.0):
     """Regular grid of seed cells, with padding cells dropped.
 
     Args:
@@ -46,6 +47,13 @@ def build_prompt_grid(grid_r, stride_cells, valid_h=1.0, min_valid_frac=1.0):
         valid_h:        fraction of canvas height that is real image.
         min_valid_frac: how much of a cell must be inside the real image.
                         1.0 = the whole cell.
+        valid_w:        fraction of canvas WIDTH that is real image. Defaults to
+                        1.0, which is exactly right for CE-130: every image
+                        there is 384 tall and at least that wide, so W >= H and
+                        padding only ever lands at the bottom. COCO has portrait
+                        images too (427x640 is common), where padding lands on
+                        the RIGHT instead -- without this, seeds would be
+                        planted on flat grey and propagate into one huge mask.
 
     Returns:
         (K, 2) int array of (row, col) cell indices.
@@ -59,12 +67,14 @@ def build_prompt_grid(grid_r, stride_cells, valid_h=1.0, min_valid_frac=1.0):
     cols = np.arange(off, grid_r, stride_cells)
 
     # A cell spans rows [r, r+1) in cell units; require enough of it inside.
-    valid_rows_px = valid_h * grid_r
-    keep = (rows + min_valid_frac) <= valid_rows_px + 1e-9
-    rows = rows[keep]
+    keep_r = (rows + min_valid_frac) <= valid_h * grid_r + 1e-9
+    keep_c = (cols + min_valid_frac) <= valid_w * grid_r + 1e-9
+    rows, cols = rows[keep_r], cols[keep_c]
 
     if len(rows) == 0:                       # degenerate aspect ratio
         rows = np.array([0])
+    if len(cols) == 0:
+        cols = np.array([0])
 
     rr, cc = np.meshgrid(rows, cols, indexing="ij")
     return np.stack([rr.ravel(), cc.ravel()], axis=1).astype(np.int64)

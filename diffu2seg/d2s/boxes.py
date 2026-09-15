@@ -57,7 +57,7 @@ def masks_to_boxes(masks, grid_r, canvas=512):
 
 
 def filter_boxes(boxes, grid_r, canvas=512, min_box_cells=0.5,
-                 max_area_frac=0.25, valid_h=1.0):
+                 max_area_frac=0.25, valid_h=1.0, valid_w=1.0):
     """Drop degenerate, oversized, and padding-region boxes.
 
     Returns (kept_boxes, info) where `info` counts each rejection reason.
@@ -68,10 +68,14 @@ def filter_boxes(boxes, grid_r, canvas=512, min_box_cells=0.5,
     The count is reported: a large one means the padding logic is broken, not
     that the images contain huge objects.
 
-    Padding rejection uses the FRACTION OF BOX AREA above valid_h, not the box
-    centre. A real object sitting near the bottom of the image can have its
-    centre below valid_h while most of it is still inside -- testing the centre
-    alone would throw those away.
+    Padding rejection uses the FRACTION OF BOX AREA inside the real region, not
+    the box centre. A real object sitting near the bottom of the image can have
+    its centre below valid_h while most of it is still inside -- testing the
+    centre alone would throw those away.
+
+    `valid_w` defaults to 1.0, which is exact for CE-130 (W >= H always, so
+    padding is only ever at the bottom). COCO portrait images pad on the right,
+    and there the width term is the one that matters.
     """
     boxes = np.asarray(boxes, dtype=np.float64).reshape(-1, 4)
     if len(boxes) == 0:
@@ -84,10 +88,14 @@ def filter_boxes(boxes, grid_r, canvas=512, min_box_cells=0.5,
     degenerate = (boxes[:, 2] < min_side) | (boxes[:, 3] < min_side)
     too_large = (boxes[:, 2] * boxes[:, 3]) > max_area_frac
 
-    y1, y2 = xyxy[:, 1], xyxy[:, 3]
+    x1, y1, x2, y2 = xyxy[:, 0], xyxy[:, 1], xyxy[:, 2], xyxy[:, 3]
     height = np.clip(y2 - y1, 1e-12, None)
-    inside = np.clip(np.minimum(y2, valid_h) - y1, 0.0, None) / height
-    in_padding = inside < 0.5
+    width = np.clip(x2 - x1, 1e-12, None)
+    inside_h = np.clip(np.minimum(y2, valid_h) - y1, 0.0, None) / height
+    inside_w = np.clip(np.minimum(x2, valid_w) - x1, 0.0, None) / width
+    # Area fraction inside the real region, as the product of the two 1-D
+    # overlaps -- the box is a rectangle, so this is exact, not an approximation.
+    in_padding = (inside_h * inside_w) < 0.5
 
     keep = ~(degenerate | too_large | in_padding)
     info = {

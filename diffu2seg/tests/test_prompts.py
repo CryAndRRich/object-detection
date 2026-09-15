@@ -102,6 +102,37 @@ def test_cells_to_canvas_xy_is_cell_centre():
     assert np.allclose(xy[1], [2 * 8 + 4, 1 * 8 + 4])
 
 
+def test_valid_w_drops_right_hand_padding():
+    """A PORTRAIT image pads on the RIGHT, and those columns must lose seeds.
+
+    CE-130 never exercises this (every image is 384 tall and at least that
+    wide, so W >= H and padding is always at the bottom), which is exactly why
+    it needs a test: the bug would only ever appear on COCO, where 427x640 is
+    common, and it would appear as one enormous mask rather than as a crash.
+    """
+    full = build_prompt_grid(R, 3, valid_h=1.0, valid_w=1.0)
+    # 586x640 -> valid_w = 0.915; the rightmost ~8.5 % of columns are grey.
+    narrow = build_prompt_grid(R, 3, valid_h=1.0, valid_w=0.915)
+    assert len(narrow) < len(full), "right-hand padding must remove seeds"
+    assert narrow[:, 1].max() + 1.0 <= 0.915 * R + 1e-9, \
+        "a surviving seed still sits in the padding"
+    # And rows must be untouched: only the width is padded here.
+    assert set(narrow[:, 0].tolist()) == set(full[:, 0].tolist())
+
+
+def test_valid_w_default_leaves_ce130_unchanged():
+    """[NEGATIVE CONTROL] Adding valid_w must not move a single CE-130 seed.
+
+    The parameter defaults to 1.0 precisely so that every number already
+    measured on CE-130 (96.6 % coverage at stride 3) still describes the code
+    that runs. If this fails, the COCO change silently altered CE-130 results.
+    """
+    for vh in (1.0, 0.9412, 0.6652, 0.2):
+        a = build_prompt_grid(R, 3, valid_h=vh)
+        b = build_prompt_grid(R, 3, valid_h=vh, valid_w=1.0)
+        assert np.array_equal(a, b), f"valid_w=1.0 changed the grid at valid_h={vh}"
+
+
 def test_stride_must_fit_the_grid():
     try:
         build_prompt_grid(R, R + 1)

@@ -63,7 +63,8 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config.base import Diffu2SegConfig          # noqa: E402
+from config.base import Diffu2SegConfig
+from utils.metrics import fmt_time          # noqa: E402
 from d2s.affinity import to_affinity             # noqa: E402
 from data.ce130_coco import CE130Coco            # noqa: E402
 from utils.box_ops_np import cxcywh_to_xyxy      # noqa: E402
@@ -228,6 +229,8 @@ def main():
     per_image = []
     prereq_failures = []
 
+    t_loop = time.time()
+
     for i in range(n):
         s = ds[i]
         cells = gt_cell_masks(s["gt_cxcywh"], cfg.grid_r, cfg.canvas)
@@ -264,8 +267,11 @@ def main():
 
         per_image.append(rec)
         cols = "  ".join(f"t{t}={rec[f'auc_t{t}']:.4f}" for t in timesteps)
-        print(f"  [{i + 1:3d}/{n}] {s['file_name']:36s} "
-              f"n_gt={len(s['gt_cxcywh']):4d}  {cols}  mù={a_bl:.4f}")
+        el = time.time() - t_loop
+        print(f"  [{i + 1:3d}/{n} {100 * (i + 1) / n:5.1f}%] {s['file_name']:36s} "
+              f"n_gt={len(s['gt_cxcywh']):4d}  {cols}  mù={a_bl:.4f} | "
+              f"{el / (i + 1):4.1f}s/ảnh | elapsed {fmt_time(el)} | "
+              f"ETA {fmt_time(el / (i + 1) * (n - i - 1))}", flush=True)
 
     # Timestep tốt nhất là cái được đem ra phán quyết.
     best_t = max(timesteps, key=lambda t: np.mean(by_t[t]) if by_t[t] else -1)
@@ -301,12 +307,16 @@ def main():
     print(f"    score_AUC A/B/C1 sau train      0,4965–0,4988")
     print(f"    AUC vùng CLIP frozen (exemplar) 0,7820")
 
+    # EXIT CODE 0 CHO MỌI PHÁN QUYẾT. "KHÔNG ĐẠT" là một KẾT QUẢ, không phải
+    # lỗi chạy. Trả 1 ở đây từng làm run_on_free_gpu.py tưởng job hỏng và chạy
+    # lại 3 lần một cửa chặn đã xong (2026-09-15). Chỉ khối tiên quyết ở trên
+    # mới trả 1, vì khi đó A hỏng thật và không có số nào để đọc.
     if np.isnan(mean_sd) or mean_sd < FAIL_AUC or margin < FAIL_MARGIN:
-        verdict, code = "KHÔNG ĐẠT — dừng, KHÔNG viết tiếp GĐ1", 1
+        verdict = "KHÔNG ĐẠT"
     elif mean_sd >= PASS_AUC and margin >= PASS_MARGIN:
-        verdict, code = "ĐẠT", 0
+        verdict = "ĐẠT"
     else:
-        verdict, code = "XÁM — mang số về bàn, KHÔNG tự quyết", 0
+        verdict = "XÁM — mang số về bàn, KHÔNG tự quyết"
 
     print(f"\n  => {verdict}")
     print("\n  ⚠️ Đo VÙNG, không đo ĐIỂM. AUC cao KHÔNG chứng minh tách được hai")
@@ -327,7 +337,7 @@ def main():
                        "per_image": per_image}, f, indent=2)
         print(f"  -> {args.out}")
 
-    return code
+    return 0
 
 
 if __name__ == "__main__":

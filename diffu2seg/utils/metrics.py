@@ -30,7 +30,7 @@ import numpy as np
 
 from .box_ops_np import box_iou, cxcywh_to_xyxy
 
-__all__ = ["quality_one_image", "summarise"]
+__all__ = ["quality_one_image", "summarise", "fmt_time"]
 
 
 def quality_one_image(pred_cxcywh, gt_cxcywh, size=512, iou_thr=0.5):
@@ -77,3 +77,14 @@ def summarise(best_all, hits, n_gt, n_pred_total=0, n_images=0, extra=None):
     if extra:
         out.update(extra)
     return out
+
+
+def fmt_time(seconds):
+    """3661 -> '1h01m01s'. Dùng cho cả elapsed lẫn ETA.
+
+    COPIED (không import chéo) từ count_editing/CE-LocModel/train.py:96, giữ
+    nguyên định dạng để log của hai sub-project đọc giống nhau.
+    """
+    seconds = int(max(seconds, 0))
+    h, m, s = seconds // 3600, (seconds % 3600) // 60, seconds % 60
+    return f"{h}h{m:02d}m{s:02d}s" if h else (f"{m}m{s:02d}s" if m else f"{s}s")
