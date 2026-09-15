@@ -19,7 +19,7 @@ MÀU: xanh lá = GT | cam = box dự đoán hit (IoU>=0.5) | đỏ = box trượ
 CHẠY (TRÊN SERVER):
     export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache
     python tools/visualize_masks.py --split val --limit 8 \
-        --out-dir /mnt/disk1/aiotlab/haitn/log/d2s_viz
+        --out-dir /mnt/disk1/aiotlab/haitn/output/d2s_viz
 """
 
 import argparse

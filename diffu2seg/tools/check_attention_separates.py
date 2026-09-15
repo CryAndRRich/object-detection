@@ -49,7 +49,7 @@ annotation hỏng chiếm 4,2 % GT.
 CHẠY (TRÊN SERVER — xem README):
     export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache
     python tools/check_attention_separates.py --split val --limit 30 \
-        --out /mnt/disk1/aiotlab/haitn/log/d2s_gate0.json
+        --out /mnt/disk1/aiotlab/haitn/output/d2s_gate0.json
 """
 
 import argparse

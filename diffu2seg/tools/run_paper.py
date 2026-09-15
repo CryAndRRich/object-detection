@@ -56,7 +56,7 @@ CHẠY (TRÊN SERVER):
     LOG=/mnt/disk1/aiotlab/haitn/log/d2s_paper_$(date +%Y%m%d_%H%M%S).log
     nohup python tools/run_on_free_gpu.py -- tools/run_paper.py \
         --dataset paco --limit 50 \
-        --out /mnt/disk1/aiotlab/haitn/log/d2s_paper_paco.json > "$LOG" 2>&1 &
+        --out /mnt/disk1/aiotlab/haitn/output/d2s_paper_paco.json > "$LOG" 2>&1 &
     echo "PID $! -> $LOG"
 """
 
@@ -117,6 +117,9 @@ def main():
     ap.add_argument("--nms-iou", type=float, default=None, help="paper: 0.9")
     ap.add_argument("--min-area", type=int, default=None, help="paper: 100")
     ap.add_argument("--timestep", type=int, default=None, help="paper: 150")
+    ap.add_argument("--w1", type=float, default=None,
+                    help="trọng số up_blocks.3.attentions.0 (paper: 0.85); "
+                         "w2 = 1 - w1 tự tính")
     args = ap.parse_args()
 
     from config.paper import cfg as paper_cfg
@@ -132,6 +135,11 @@ def main():
     if args.timestep is not None:
         deviations.append(f"timestep: paper {over['timesteps'][0]} -> {args.timestep}")
         over["timesteps"] = (args.timestep,)
+    if args.w1 is not None:
+        deviations.append(f"w_up_0/w_up_1: paper {over['w_up_0']}/{over['w_up_1']} "
+                          f"-> {args.w1}/{round(1.0 - args.w1, 4)}")
+        over["w_up_0"] = args.w1
+        over["w_up_1"] = round(1.0 - args.w1, 4)
     cfg = Diffu2SegConfig(**over).validate()
 
     root = args.data_root or os.path.join(

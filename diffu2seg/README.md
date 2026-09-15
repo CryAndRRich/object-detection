@@ -66,6 +66,57 @@ nên CE-130 không đụng tới).
 
 ---
 
+## KẾT QUẢ ĐẦU TIÊN — PACO val, 50 ảnh (2026-09-15)
+
+`run_paper.py --dataset paco --limit 50`, **cấu hình paper không lệch một tham số nào**,
+SD 1.5, A30, 16m37s (20,0 s/ảnh).
+
+| | ta | paper | các baseline của paper |
+|---|---|---|---|
+| **AR₁₀₀₀** | **10,36** | **13,6** | CutLER 10,7 · DiffSeg 9,8 · M2N2 9,6 · UnSAM 9,3 |
+| AR_S / AR_M / AR_L | 5,13 / 21,46 / 33,94 | — | |
+| recall@0,50 / @0,75 | 25,94 / 7,20 | — | |
+
+**Đạt 76 % con số của paper, và vượt cả ba baseline training-free của họ** (M2N2,
+DiffSeg, UnSAM) dù chạy SD 1.5 thay SD2. Đây là 50/2410 ảnh nên còn sai số lấy mẫu.
+
+### Chẩn đoán — sáu mức granularity CÓ hoạt động
+
+```
+   height   cụm/ảnh  mask/ảnh
+    0.186      78.7     214.0
+    0.324      58.1     182.1
+    0.565      40.9     145.2
+    0.984      26.7     110.5
+    1.716      16.0      69.5
+    2.990       8.5      37.6
+```
+
+Số cụm giảm đều 78,7 → 8,5 qua 6 mức. **Dải `[0,186 ; 2,99]` của paper khớp tốt với
+thang KL của SD 1.5** — đây là rủi ro lớn nhất khi đổi model, và nó đã không xảy ra.
+
+Hội tụ **100 %** (n_iter trung vị 25/1000). Trần độ phân giải 93,2 %.
+
+### Ba chỗ mất điểm, theo thứ tự đáng làm
+
+1. **PART kém hơn OBJECT 2,2×**: AR 8,40 (n=455) vs 18,79 (n=239). Mà 65,6 % mục tiêu
+   của PACO là part — đây là phần lớn khoảng cách tới 13,6.
+2. **Vật nhỏ**: AR_S 5,13 vs AR_L 33,94, **6,6×**. 497/694 GT là small.
+3. **IoU cao sụp nhanh**: recall 25,94 ở IoU 0,5 → 0,43 ở IoU 0,9. Biên mask thô —
+   đúng chỗ **CascadePSP** (paper gọi là optional, ta bỏ) sinh ra để sửa.
+
+`⚠️ 121 mask bị cắt vì chạm cap N_max=1000` trên 2/50 ảnh — chưa đáng lo, nhưng
+nếu tăng số mức thì phải để ý.
+
+### Biến đáng quét tiếp, theo thứ tự
+
+1. **`t < 150`** — §5 của paper: *"recall degrades across timesteps"*, và 150 được chọn
+   để tối đa **mAP**, không phải AR. Ta chỉ đo AR. Đây là biến rẻ nhất và có cơ sở nhất.
+2. **CascadePSP** — nhắm thẳng vào chỗ mất điểm #3.
+3. **`--limit` lớn hơn** — 50 ảnh có sai số lấy mẫu; cả tập 2410 ảnh mất ~13h21m.
+
+---
+
 ## Cơ chế trong 30 giây
 
 ```
@@ -254,7 +305,7 @@ export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache
 LOG=/mnt/disk1/aiotlab/haitn/log/d2s_paper_$(date +%Y%m%d_%H%M%S).log
 nohup python tools/run_on_free_gpu.py -- tools/run_paper.py \
     --dataset paco --limit 50 \
-    --out /mnt/disk1/aiotlab/haitn/log/d2s_paper_paco.json > "$LOG" 2>&1 &
+    --out /mnt/disk1/aiotlab/haitn/output/d2s_paper_paco.json > "$LOG" 2>&1 &
 echo "PID $! -> $LOG"
 ```
 
@@ -266,7 +317,7 @@ Nhìn hình trước khi tin số:
 
 ```bash
 python tools/run_on_free_gpu.py -- tools/visualize_masks.py \
-    --dataset paco --limit 8 --out-dir /mnt/disk1/aiotlab/haitn/log/d2s_paco_viz
+    --dataset paco --limit 8 --out-dir /mnt/disk1/aiotlab/haitn/output/d2s_paco_viz
 ```
 
 Mốc in sẵn trong log: **Diffuse2Seg 13,6 | CutLER 10,7 | DiffSeg 9,8 | M2N2 9,6 |
@@ -278,7 +329,7 @@ UnSAM 9,3** — tất cả đều **có** multi-granularity.
 export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache
 LOG=/mnt/disk1/aiotlab/haitn/log/d2s_coco_$(date +%Y%m%d_%H%M%S).log
 nohup python tools/run_on_free_gpu.py -- tools/run_coco.py --limit 50 \
-    --out /mnt/disk1/aiotlab/haitn/log/d2s_coco.json > "$LOG" 2>&1 &
+    --out /mnt/disk1/aiotlab/haitn/output/d2s_coco.json > "$LOG" 2>&1 &
 echo "PID $! -> $LOG"
 ```
 
@@ -286,7 +337,7 @@ Nhìn hình trước khi tin số:
 
 ```bash
 python tools/run_on_free_gpu.py -- tools/visualize_masks.py \
-    --dataset coco --limit 8 --out-dir /mnt/disk1/aiotlab/haitn/log/d2s_coco_viz
+    --dataset coco --limit 8 --out-dir /mnt/disk1/aiotlab/haitn/output/d2s_coco_viz
 ```
 
 **Chi phí**: `A` là (19600, 19600) fp32 = **1,54 GB** (so với 0,07 GB ở `grid_r=64`),
@@ -322,7 +373,7 @@ export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache
 LOG=/mnt/disk1/aiotlab/haitn/log/d2s_gate0_$(date +%Y%m%d_%H%M%S).log
 nohup python tools/run_on_free_gpu.py -- tools/check_attention_separates.py \
     --split val --limit 30 --timesteps 50 150 300 500 \
-    --out /mnt/disk1/aiotlab/haitn/log/d2s_gate0.json > "$LOG" 2>&1 &
+    --out /mnt/disk1/aiotlab/haitn/output/d2s_gate0.json > "$LOG" 2>&1 &
 echo "PID $! -> $LOG"
 ```
 
@@ -344,7 +395,7 @@ export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache
 LOG=/mnt/disk1/aiotlab/haitn/log/d2s_gate1_p_$(date +%Y%m%d_%H%M%S).log
 nohup python tools/check_plaplacian_vs_p2.py --split val --limit 100 \
     --p-values 2.0 1.8 1.6 1.4 \
-    --out /mnt/disk1/aiotlab/haitn/log/d2s_gate1_p.json > "$LOG" 2>&1 &
+    --out /mnt/disk1/aiotlab/haitn/output/d2s_gate1_p.json > "$LOG" 2>&1 &
 echo "PID $! -> $LOG"
 ```
 
@@ -358,7 +409,7 @@ quả hợp lệ**, không phải thất bại.
 export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache
 LOG=/mnt/disk1/aiotlab/haitn/log/d2s_stage1_val_$(date +%Y%m%d_%H%M%S).log
 nohup python tools/run_stage1.py --split val \
-    --out /mnt/disk1/aiotlab/haitn/log/d2s_stage1_val.json > "$LOG" 2>&1 &
+    --out /mnt/disk1/aiotlab/haitn/output/d2s_stage1_val.json > "$LOG" 2>&1 &
 echo "PID $! -> $LOG"
 ```
 
@@ -366,7 +417,7 @@ echo "PID $! -> $LOG"
 
 ```bash
 python tools/visualize_masks.py --split val --limit 8 \
-    --out-dir /mnt/disk1/aiotlab/haitn/log/d2s_viz
+    --out-dir /mnt/disk1/aiotlab/haitn/output/d2s_viz
 ```
 
 Bài học §5 của `docs/02`: visualize bắt được **2 lỗi lớn mà toàn bộ test và 3
@@ -393,6 +444,78 @@ quả — nếu `oracle_recall` sát trần thì nút thắt là **độ phân g
 
 ⚠️ **D.1 (DiffusionDet, AP50 58,13) là trần của DỮ LIỆU, KHÔNG phải mục tiêu nên
 nhắm** — xem `docs/01-bai-toan.md` mục 4.3.
+
+---
+
+## Quét tham số — `t` và `w1`
+
+Cả hai đều được paper chọn để tối ưu **mAP**, mà ta **chỉ đo AR**:
+
+| | paper | lý do paper chọn | hướng quét |
+|---|---|---|---|
+| `t` | 150 | *"maximizes mAP while keeping strong mAR"*; §5: *"recall degrades across timesteps"* | **t nhỏ hơn** |
+| `w1` | 0,85 | §A.1: *"lies on the **precision** plateau"* | cả hai phía |
+
+⚠️ `0,85/0,15` **không phải "giá trị của SD2"** — đó là số Diffuse2Seg tự đo trên
+SA-1B holdout (M2N2 dùng 0,5/0,5). Nhưng phép đo đó làm trên SD2, ta chạy SD 1.5.
+
+```bash
+export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache
+LOG=/mnt/disk1/aiotlab/haitn/log/d2s_sweep_$(date +%Y%m%d_%H%M%S).log
+nohup python tools/run_on_free_gpu.py -- tools/sweep_t_w1.py \
+    --limit 20 --timesteps 50 100 150 300 --w1 1.0 0.85 0.5 0.15 \
+    --out /mnt/disk1/aiotlab/haitn/output/d2s_sweep.json > "$LOG" 2>&1 &
+echo "PID $! -> $LOG"
+```
+
+**Vì sao quét được**: đo thật cho thấy SD chỉ chiếm **11,5 %** thời gian (2,3 s/ảnh),
+còn lan truyền + Algorithm 2 chiếm 82,9 %. Nên `t` phải chạy lại SD, nhưng `w1`
+thì **không** — tool trích từng layer riêng một lần (`extract_per_layer`) rồi trộn
+ngoài. 16 cấu hình × 20 ảnh ≈ **1 giờ 40 phút**.
+
+⚠️ **Thứ tự chuẩn hoá quan trọng**: đường chạy thật trộn layer **trước** rồi chuẩn
+hoá tổng **một lần**. Chuẩn hoá từng layer rồi mới trộn cho kết quả **khác** (đo:
+max diff 7,8e-3) — nên `extract_per_layer` trả tensor **thô**. Đã kiểm khớp tuyệt
+đối (diff = 0) ở 4 giá trị `w1`.
+
+⚠️ **20 ảnh để CHỌN, không để BÁO số.** Chọn cấu hình trên cùng tập dùng để đánh
+giá là overfit tập đó — xác nhận lại bằng `--start` khác trước khi tin.
+
+## Nhìn ảnh — `visualize_best.py`
+
+```bash
+python tools/run_on_free_gpu.py -- tools/visualize_best.py \
+    --from-json /mnt/disk1/aiotlab/haitn/output/d2s_paper_paco.json \
+    --limit 30 --pick spread \
+    --out-dir /mnt/disk1/aiotlab/haitn/output/d2s_viz
+```
+
+Đọc `per_image` của JSON, xếp ảnh theo `recall@50`, rồi lấy `--pick`:
+
+| | |
+|---|---|
+| `spread` | đều khắp dải — **mặc định**, trung vị khớp cả tập (kiểm: 0,27 vs 0,27) |
+| `best` | 30 ảnh tốt nhất — trung vị 0,49, **gần gấp đôi cả tập** |
+| `worst` | 30 ảnh tệ nhất — để tìm chỗ hỏng |
+
+⚠️ `best` là **mẫu chọn lọc thiên vị**: 30 ảnh tốt nhất trong 50 luôn trông thuyết
+phục, kể cả khi trung vị thật chỉ 0,27. Tool in cả hai trung vị lên đầu log và
+ghi recall vào **tên file**, nên `ls` đã là bảng xếp hạng.
+
+Ba panel mỗi ảnh: ảnh gốc | mask pred (mỗi instance một màu) | box pred so GT
+(lá đậm = GT tìm thấy, lá nhạt đứt nét = trượt, cam = pred khớp, đỏ = pred thừa).
+
+---
+
+## Nơi ghi file trên server
+
+| loại | thư mục |
+|---|---|
+| **log** của job nền (`> "$LOG"`) | `/mnt/disk1/aiotlab/haitn/log/` |
+| **kết quả** — `.json`, ảnh visualize (`--out`, `--out-dir`) | `/mnt/disk1/aiotlab/haitn/output/` |
+
+Tách hai thứ vì chúng có vòng đời khác nhau: log là thứ đọc khi job đang chạy
+hoặc khi nó vỡ, còn `.json` là kết quả cần giữ và đối chiếu về sau.
 
 ---
 

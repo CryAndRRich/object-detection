@@ -69,7 +69,7 @@ CHẠY (TRÊN SERVER — xem README):
     export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache
     python tools/check_plaplacian_vs_p2.py --split val --limit 100 \
         --p-values 2.0 1.8 1.6 1.4 \
-        --out /mnt/disk1/aiotlab/haitn/log/d2s_gate1_p.json
+        --out /mnt/disk1/aiotlab/haitn/output/d2s_gate1_p.json
 """
 
 import argparse

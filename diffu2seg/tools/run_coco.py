@@ -30,7 +30,7 @@ CHẠY (TRÊN SERVER):
     export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache
     LOG=/mnt/disk1/aiotlab/haitn/log/d2s_coco_$(date +%Y%m%d_%H%M%S).log
     nohup python tools/run_on_free_gpu.py -- tools/run_coco.py --limit 50 \
-        --out /mnt/disk1/aiotlab/haitn/log/d2s_coco.json > "$LOG" 2>&1 &
+        --out /mnt/disk1/aiotlab/haitn/output/d2s_coco.json > "$LOG" 2>&1 &
     echo "PID $! -> $LOG"
 """
 

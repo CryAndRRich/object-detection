@@ -443,6 +443,47 @@ class StableDiffusion2AttentionAggregator(object):
         denom = torch.sum(merged.reshape(h, w, -1), dim=2)[:, :, None, None]
         return merged / denom
 
+    def extract_per_layer(self, image: np.ndarray, timestep, paths=None):
+        """Trích attention TỪNG layer, CHƯA chuẩn hoá. -> {path: (h,w,h,w)}
+
+        VÌ SAO CẦN: `w1/w2` được áp TRONG callback, nên quét `w1` theo cách
+        thường phải chạy lại SD cho mỗi giá trị — mà SD chiếm 2,3 s/ảnh. Trích
+        một lần rồi trộn ngoài cho phép quét `w1` gần như miễn phí.
+
+        ⚠️ TỐN BỘ NHỚ: giữ 2 tensor (h,w,h,w) fp32 cùng lúc = 3,1 GB ở r=140,
+        thay vì 1,54 GB khi trộn ngay. Vẫn vừa A30 sau khi sửa OOM, nhưng đây
+        là lý do hàm này KHÔNG phải đường mặc định.
+        """
+        if paths is None:
+            paths = [k for k, w in self.path_to_weight_dict.items() if w != 0]
+
+        saved = dict(self.path_to_weight_dict)
+        out = {}
+        try:
+            for path in paths:
+                for k in self.path_to_weight_dict:
+                    self.path_to_weight_dict[k] = 1.0 if k == path else 0.0
+                # ⚠️ KHÔNG dùng extract_attention_at: nó CHUẨN HOÁ kết quả.
+                #
+                # Đường chạy thật trộn các layer TRƯỚC rồi chuẩn hoá TỔNG một
+                # lần. Nếu ở đây chuẩn hoá từng layer rồi mới trộn, hai phép
+                # không giao hoán và kết quả lệch (đo: max diff 7,8e-3 trên
+                # tensor ngẫu nhiên) — bảng quét sẽ không so được với
+                # run_paper.py. Nên trả về tensor THÔ, để người gọi trộn rồi
+                # tự chuẩn hoá đúng thứ tự.
+                self.current_merged_tensor = None
+                sd2_perform_single_image_diffusion_step(
+                    pipe=self.pipe, img=self._resize(image), timestep=timestep,
+                    device=self.device, torch_dtype=self.torch_dtype,
+                    prompt_text=self.prompt_text)
+                if self.current_merged_tensor is None:
+                    raise RuntimeError(f"không bắt được attention ở {path}")
+                out[path] = self.current_merged_tensor
+                self.current_merged_tensor = None
+        finally:
+            self.path_to_weight_dict = saved
+        return out
+
     def extract_attention(self, image: np.ndarray, timesteps=None):
         """List of timesteps -> list of (h, w, h, w) tensors.
 
