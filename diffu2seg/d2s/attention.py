@@ -220,16 +220,52 @@ class AttnProcessor2_0Wrapper(AttnProcessor2_0):
         return hidden_states
 
 
-def sd2_inject_attention_wrappers(module, callback_func=None, path='', collect_wrappers=None) -> dict:
+def _list_attention_paths(module, path='', out=None) -> set:
+    """Mọi path Attention trong UNet, KHÔNG wrap gì cả.
+
+    Dùng để kiểm layout: sd2_inject_attention_wrappers giờ chỉ wrap các block
+    có trọng số khác 0, nên collect_wrappers không còn đủ để xác nhận rằng
+    các block ta mong đợi thật sự tồn tại.
+    """
+    if out is None:
+        out = set()
+    if isinstance(module, Attention):
+        out.add(path)
+    elif hasattr(module, 'children'):
+        for k, v in list(module.named_children()):
+            _list_attention_paths(v, path + '.' + k, out)
+    return out
+
+
+def sd2_inject_attention_wrappers(module, callback_func=None, path='', collect_wrappers=None,
+                                  active_paths=None) -> dict:
     """
     module: stable diffusion pipe.unet as input
     callback_func: Will be called whenever the self attention is used. Parameters are (path: str, x: torch.Tensor) and expects to return a
         torch.Tensor in the same shape, device and dtype as the given x. (to replace the current attention. Easiest is just to return original x to not modify)
+    active_paths: nếu khác None, CHỈ wrap những path nằm trong tập này; mọi
+        module khác giữ nguyên AttnProcessor2_0 gốc của PyTorch.
+
+    ⚠️ BỘ NHỚ — vì sao active_paths tồn tại.
+    Wrapper thay SDPA của PyTorch bằng bản viết tay, và bản viết tay BẮT BUỘC
+    phải dựng attn_weight (B, H, N, N) tường minh (xem ghi chú ở
+    scaled_dot_product_attention). SDPA gốc (flash attention) không bao giờ
+    dựng tensor đó.
+
+    UNet SD1.5 có 32 module Attention. Ở canvas 1120 (r=140):
+      down_blocks.0 / up_blocks.3 : N = 19600 -> 6,15 GB mỗi bản fp16 8-head
+      down_blocks.1 / up_blocks.2 : N =  4900 -> 0,38 GB
+      các tầng còn lại            : không đáng kể
+    Ta chỉ DÙNG 2 module (up_blocks.3.attentions.{0,1}). Wrap hết nghĩa là
+    down_blocks.0.attentions.{0,1} và up_blocks.3.attentions.2 mỗi cái vẫn
+    dựng 6,15 GB rồi bị callback vứt đi vì weight == 0.
     """
     if collect_wrappers is None:
         collect_wrappers = dict()
 
     if isinstance(module, Attention):
+        if active_paths is not None and path not in active_paths:
+            return collect_wrappers
         if not isinstance(module.processor, AttnProcessor2_0):
             # M2N2 called exit() here. Raising instead: a hard exit inside a
             # library call is untestable and kills a batch job with no context.
@@ -244,7 +280,8 @@ def sd2_inject_attention_wrappers(module, callback_func=None, path='', collect_w
         return collect_wrappers
     elif hasattr(module, 'children'):
         for k, v in list(module.named_children()):
-            sd2_inject_attention_wrappers(v, callback_func, path + '.' + k, collect_wrappers)
+            sd2_inject_attention_wrappers(v, callback_func, path + '.' + k, collect_wrappers,
+                                          active_paths=active_paths)
     return collect_wrappers
 
 
@@ -299,7 +336,8 @@ class StableDiffusion2AttentionAggregator(object):
                  hugging_face_model_id="stable-diffusion-v1-5/stable-diffusion-v1-5",
                  prompt_text="",
                  device='cuda:0',
-                 torch_dtype=torch.float16):
+                 torch_dtype=torch.float16,
+                 extra_active_paths=None):
         self.stable_diffusion_img_size = (8 * attention_resolution, 8 * attention_resolution)
         self.attn_target_resolution = (attention_resolution, attention_resolution)
         self.current_merged_tensor = None
@@ -356,12 +394,8 @@ class StableDiffusion2AttentionAggregator(object):
                 f"config.local_model_dir trỏ sẵn vào đó; có thư mục là tự dùng, "
                 f"không cần token.\nLỗi gốc: {exc}"
             ) from exc
-        self.attention_wrappers = sd2_inject_attention_wrappers(
-            self.pipe.unet, callback_func=self.collect_attention_tensors_callback)
-
         # The five self-attention blocks at the two highest UNet resolutions.
         # Everything else gets weight 0 and is skipped before any reshape.
-        self.path_to_weight_dict = dict()
         named = {
             '.down_blocks.0.attentions.0.transformer_blocks.0.attn1': weight_down_block_0,
             '.down_blocks.0.attentions.1.transformer_blocks.0.attn1': weight_down_block_1,
@@ -369,10 +403,30 @@ class StableDiffusion2AttentionAggregator(object):
             '.up_blocks.3.attentions.1.transformer_blocks.0.attn1': weight_up_block_1,
             '.up_blocks.3.attentions.2.transformer_blocks.0.attn1': weight_up_block_2,
         }
+
+        # ⚠️ Wrap CHỈ những block thực sự có trọng số khác 0. Một block bị wrap
+        # là một tensor (B, H, N, N) tường minh, 6,15 GB ở r=140 cho các tầng
+        # 19600 token — kể cả khi callback vứt nó đi ngay vì weight == 0.
+        # extract_per_layer() cần từng layer riêng nên phải tính theo `named`,
+        # không theo trọng số đang dùng của lần chạy này.
+        active = {k for k, w in named.items() if w != 0}
+        if extra_active_paths:
+            active |= set(extra_active_paths)
+        self._active_paths = active
+
+        self.attention_wrappers = sd2_inject_attention_wrappers(
+            self.pipe.unet, callback_func=self.collect_attention_tensors_callback,
+            active_paths=active)
+
+        self.path_to_weight_dict = dict()
         for attn_key in self.attention_wrappers.keys():
             self.path_to_weight_dict[attn_key] = named.get(attn_key, 0)
 
-        missing = [k for k in named if k not in self.attention_wrappers]
+        # Kiểm tra layout trên TOÀN BỘ UNet, không chỉ các path đang wrap.
+        # Nếu chỉ kiểm active thì một diffusers đổi cách đặt tên sẽ lọt câm
+        # lặng: active toàn bộ tồn tại, còn block ta tưởng đang dùng thì không.
+        all_attn_paths = _list_attention_paths(self.pipe.unet)
+        missing = [k for k in named if k not in all_attn_paths]
         if missing:
             raise RuntimeError(
                 f"expected SD2 attention blocks not found: {missing}. "
@@ -456,6 +510,18 @@ class StableDiffusion2AttentionAggregator(object):
         """
         if paths is None:
             paths = [k for k, w in self.path_to_weight_dict.items() if w != 0]
+
+        # Chỉ block ĐANG ĐƯỢC WRAP mới gọi callback. Đặt weight=1.0 cho một
+        # path không wrap sẽ không bắt được gì và hàm trả về thiếu layer trong
+        # im lặng — dạng lỗi âm thầm đúng nghĩa. Bắt sớm, kèm cách sửa.
+        not_wrapped = [p for p in paths if p not in self.attention_wrappers]
+        if not_wrapped:
+            raise RuntimeError(
+                f"các block này không được wrap nên không trích được: {not_wrapped}.\n"
+                f"Aggregator chỉ wrap block có trọng số khác 0 (để tiết kiệm "
+                f"6,15 GB mỗi block ở r=140). Muốn trích thêm, truyền "
+                f"extra_active_paths={not_wrapped!r} khi khởi tạo."
+            )
 
         saved = dict(self.path_to_weight_dict)
         out = {}

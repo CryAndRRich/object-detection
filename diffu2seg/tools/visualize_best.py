@@ -229,6 +229,16 @@ def main():
         fig.savefig(path, dpi=100, bbox_inches="tight")
         plt.close(fig)
 
+        # ⚠️ Giải phóng GIỮA các ảnh. A là (h,w,h,w) fp32 = 1,54 GB ở r=140 và
+        # current_merged_tensor là một bản nữa. Không xoá thì cả hai sống qua
+        # vòng lặp sau, đúng lúc SD đang dựng tensor 6,15 GB cho ảnh kế tiếp.
+        # empty_cache() trả phần đã giải phóng về driver — cần trên GPU dùng
+        # chung, nơi phần trống thật sự có thể chỉ còn ~18 GB.
+        del A, out, pred
+        agg.current_merged_tensor = None
+        if torch.cuda.is_available() and args.device.startswith("cuda"):
+            torch.cuda.empty_cache()
+
         el = time.time() - t_start
         print(f"  [{j + 1:3d}/{len(chosen)}] {os.path.basename(path):40s} "
               f"n_gt={len(s['gt_masks']):3d} n_pred={len(pred):4d} recall={rec:.2f} | "
