@@ -120,21 +120,72 @@ class AttnProcessor2_0Wrapper(AttnProcessor2_0):
         # 0,27 GB/bản nên không ai thấy vấn đề.
         #
         # Ba sửa đổi, tất cả đều IN-PLACE để không nhân bản:
-        attn_weight = query @ key.transpose(-2, -1)
-        attn_weight.mul_(scale_factor)          # thay `* scale_factor`
-        if attn_bias is not None:
-            attn_weight.add_(attn_bias)         # thay `+= attn_bias` (giống nhau, nêu cho rõ)
-        torch.softmax(attn_weight, dim=-1, out=attn_weight)   # thay bản mới
+        #
+        # ⚠️ TỪNG HEAD MỘT khi tensor lớn. Bản cũ dựng cả (B, H, N, N) cùng lúc
+        # = 6,15 GB fp16 ở N=19600, H=8, và bản đó còn SỐNG suốt lúc callback
+        # chạy (callback được gọi từ trong hàm này). Cộng bộ đệm fp32 của
+        # callback thì đỉnh vượt 13,7 GB — quá nhiều khi GPU dùng chung chỉ
+        # còn ~17 GB (đo 2026-09-16: OOM ở "Tried to allocate 1.43 GiB").
+        #
+        # Vòng theo head giữ đúng MỘT (N, N) fp16 sống mỗi lúc = 0,77 GB.
+        # Kết quả GIỐNG HỆT: softmax chạy trên dim cuối nên độc lập theo head,
+        # và `attn_weight @ value` cũng tách được theo head. Không phải xấp xỉ.
+        #
+        # Ngưỡng 4e8 phần tử ~ N=20000 một head: dưới mức đó đường cũ nhanh hơn
+        # (một matmul lớn) và bộ nhớ không thành vấn đề, nên giữ nguyên.
+        B, H, L_q = query.shape[0], query.shape[1], query.shape[-2]
+        big = (B * H * L_q * key.shape[-2]) > 4e8
 
-        # Callback chạy TRƯỚC dropout -- đó là toàn bộ lý do hàm này tồn tại.
-        if self.wrapper_callback_func is not None:
-            attn_weight = self.wrapper_callback_func(self.path, attn_weight)
+        if not big:
+            attn_weight = query @ key.transpose(-2, -1)
+            attn_weight.mul_(scale_factor)      # thay `* scale_factor`
+            if attn_bias is not None:
+                attn_weight.add_(attn_bias)     # thay `+= attn_bias`
+            torch.softmax(attn_weight, dim=-1, out=attn_weight)   # thay bản mới
 
-        # dropout_p = 0 ở suy luận, và torch.dropout vẫn cấp phát một bản 6,1 GB
-        # dù p=0. Bỏ qua hẳn khi không dropout.
-        if dropout_p > 0.0:
-            attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
-        return attn_weight @ value
+            # Callback chạy TRƯỚC dropout -- đó là toàn bộ lý do hàm này tồn tại.
+            if self.wrapper_callback_func is not None:
+                attn_weight = self.wrapper_callback_func(self.path, attn_weight)
+
+            # dropout_p = 0 ở suy luận, và torch.dropout vẫn cấp phát một bản
+            # 6,1 GB dù p=0. Bỏ qua hẳn khi không dropout.
+            if dropout_p > 0.0:
+                attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
+            result = attn_weight @ value
+            self._finish_layer_if_any()
+            return result
+
+        out = torch.empty(B, H, L_q, value.shape[-1],
+                          dtype=query.dtype, device=query.device)
+        for b in range(B):
+            for h in range(H):
+                w = query[b, h] @ key[b, h].transpose(-2, -1)   # (N, N) fp16
+                w.mul_(scale_factor)
+                if attn_bias is not None:
+                    w.add_(attn_bias)
+                torch.softmax(w, dim=-1, out=w)
+
+                # Callback nhận (1, 1, N, N) để giữ nguyên hợp đồng (B, H, N, N).
+                if self.wrapper_callback_func is not None:
+                    w = self.wrapper_callback_func(self.path, w[None, None])[0, 0]
+
+                if dropout_p > 0.0:
+                    w = torch.dropout(w, dropout_p, train=True)
+                out[b, h] = w @ value[b, h]
+                del w
+        self._finish_layer_if_any()
+        return out
+
+    def _finish_layer_if_any(self):
+        """Báo cho aggregator rằng layer này đã chạy xong hết các head.
+
+        Aggregator cộng dồn tổng thô qua nhiều lần gọi callback (một lần cho cả
+        tensor, hay một lần mỗi head), nên chỉ nó mới biết lúc nào chia trung
+        bình. Wrapper biết ranh giới layer; aggregator biết phép tính.
+        """
+        fin = getattr(self.wrapper_callback_func, "__self__", None)
+        if fin is not None and hasattr(fin, "_finish_layer"):
+            fin._finish_layer()
 
     def __call__(
         self,
@@ -341,6 +392,10 @@ class StableDiffusion2AttentionAggregator(object):
         self.stable_diffusion_img_size = (8 * attention_resolution, 8 * attention_resolution)
         self.attn_target_resolution = (attention_resolution, attention_resolution)
         self.current_merged_tensor = None
+        # Bộ đệm thô của layer đang chạy — xem collect_attention_tensors_callback.
+        self._raw_acc = None
+        self._raw_heads = 0
+        self._raw_weight = 0.0
         self.timestep = timestep
         self.prompt_text = prompt_text
         self.device = device
@@ -451,25 +506,47 @@ class StableDiffusion2AttentionAggregator(object):
         # Cộng dồn TỪNG HEAD vào một bộ đệm fp32 (N, N) = 1,54 GB thay vì dựng
         # (B, H, N, N) fp32. fp32 vẫn bắt buộc: g**(p-2) có số mũ ÂM và eps của
         # fp16 (~6e-8) sẽ tràn.
+        # ⚠️ Callback có thể được gọi MỘT LẦN cho cả (B, H, N, N), hoặc TỪNG
+        # HEAD một với (1, 1, N, N) khi SDPA chạy đường tiết kiệm bộ nhớ. Không
+        # thể chia cho B*H của riêng lần gọi này: gọi từng head thì B*H == 1 và
+        # kết quả sẽ gấp 8 lần.
+        #
+        # Nên cộng dồn TỔNG THÔ vào bộ đệm và đếm số head đã cộng; phép chia
+        # trung bình + nhân trọng số dời sang finish_layer(), gọi sau khi UNet
+        # chạy xong. Hai đường cho ra con số y hệt.
         B, H = x.shape[0], x.shape[1]
-        acc = None
         for b in range(B):
             for h in range(H):
                 head = x[b, h].float()
-                acc = head if acc is None else acc.add_(head)
-        acc = acc.div_(float(B * H))
+                if self._raw_acc is None:
+                    self._raw_acc = head
+                else:
+                    self._raw_acc.add_(head)
+                    del head
+                self._raw_heads += 1
+                self._raw_weight = weight
+        return x
 
+    def _finish_layer(self):
+        """Chốt bộ đệm thô -> trung bình theo head, nhân trọng số, cộng vào tổng.
+
+        Tách khỏi callback vì callback không biết nó nhận cả tensor hay từng
+        head. Gọi sau mỗi lần UNet chạy xong một block có trọng số.
+        """
+        if self._raw_acc is None:
+            return
+        acc = self._raw_acc.div_(float(self._raw_heads))
         width = int(round(sqrt(acc.shape[-1])))
         attn = acc.reshape(width, width, width, width)
 
         # In-place: `a + b * w` dựng HAI tensor tạm, mỗi cái 1,54 GB ở r=140.
-        # `acc` đã là bộ đệm riêng của lần gọi này nên ghi đè nó là an toàn.
+        # `acc` đã là bộ đệm riêng nên ghi đè nó là an toàn.
         if self.current_merged_tensor is None:
-            self.current_merged_tensor = attn.mul_(weight)
+            self.current_merged_tensor = attn.mul_(self._raw_weight)
         else:
-            self.current_merged_tensor.add_(attn.mul_(weight))
-
-        return x
+            self.current_merged_tensor.add_(attn.mul_(self._raw_weight))
+        self._raw_acc = None
+        self._raw_heads = 0
 
     def _resize(self, image: np.ndarray) -> np.ndarray:
         """PIL instead of cv2. A no-op when the canvas is already 8 * r."""
