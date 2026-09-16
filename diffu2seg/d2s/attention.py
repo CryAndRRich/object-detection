@@ -520,15 +520,22 @@ class StableDiffusion2AttentionAggregator(object):
         # Nên cộng dồn TỔNG THÔ vào bộ đệm và đếm số head đã cộng; phép chia
         # trung bình + nhân trọng số dời sang finish_layer(), gọi sau khi UNet
         # chạy xong. Hai đường cho ra con số y hệt.
+        # ⚠️ `.float()` chỉ SAO CHÉP khi dtype đổi. Nếu x đã là fp32 thì nó trả
+        # về VIEW, và `self._raw_acc = head` khiến bộ đệm TRỎ THẲNG vào x. Các
+        # head sau cộng vào bộ đệm là ghi đè lên x[0,0], rồi SDPA dùng chính x
+        # đó cho `attn_weight @ value` -> head 0 sai, head khác đúng.
+        # Đo 2026-09-16: output lệch 4.97 ở phần tử đầu, trùng khít ở phần tử
+        # cuối. Trên đường chạy thật x là fp16 nên `.float()` có sao chép và
+        # lỗi bị che — chỉ lộ ra khi test chạy fp32.
+        # `.to(torch.float32, copy=True)` sao chép trong MỌI trường hợp.
         B, H = x.shape[0], x.shape[1]
         for b in range(B):
             for h in range(H):
-                head = x[b, h].float()
                 if self._raw_acc is None:
-                    self._raw_acc = head
+                    self._raw_acc = x[b, h].to(torch.float32, copy=True)
                 else:
-                    self._raw_acc.add_(head)
-                    del head
+                    # add_ nhận trực tiếp view fp16, không cần bản fp32 tạm.
+                    self._raw_acc.add_(x[b, h])
                 self._raw_heads += 1
                 self._raw_weight = weight
         return x

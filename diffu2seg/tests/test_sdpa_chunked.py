@@ -48,14 +48,15 @@ class _Collector:
         self._raw_weight = 0.0
 
     def callback(self, path, x):
+        # Phải giống hệt collect_attention_tensors_callback, kể cả copy=True:
+        # `.float()` trên tensor fp32 trả về VIEW, khiến bộ đệm alias vào x.
         B, H = x.shape[0], x.shape[1]
         for b in range(B):
             for h in range(H):
-                head = x[b, h].float()
                 if self._raw_acc is None:
-                    self._raw_acc = head
+                    self._raw_acc = x[b, h].to(torch.float32, copy=True)
                 else:
-                    self._raw_acc.add_(head)
+                    self._raw_acc.add_(x[b, h])
                 self._raw_heads += 1
                 self._raw_weight = self.weight
         return x
@@ -142,6 +143,32 @@ def test_chunked_branch_actually_taken():
     assert n_chunked == H, f"nhánh từng-head phải gọi {H} lần, đo {n_chunked}"
 
 
+def test_callback_does_not_mutate_input():
+    """[NEGATIVE CONTROL] callback không được sửa x tại chỗ.
+
+    SDPA dùng LẠI chính tensor đó cho `attn_weight @ value` sau khi callback
+    trả về. Nếu bộ đệm alias vào x (ví dụ `.float()` trên tensor đã fp32 trả
+    về view), các head sau ghi đè lên head 0 và output sai — nhưng chỉ ở head
+    0, nên nhìn qua rất giống nhiễu số học.
+
+    Đo 2026-09-16: lệch 4.97, và đường chạy thật (fp16) KHÔNG lộ vì đổi dtype
+    thì `.float()` có sao chép. Test này ép fp32 để bắt.
+    """
+    q, k, v = _make()
+    col = _Collector()
+    w = _wrapper(col.callback)
+    w.CHUNK_THRESHOLD_ELEMS = float("inf")
+
+    sf = 1.0 / (q.shape[-1] ** 0.5)
+    attn = torch.softmax(q @ k.transpose(-2, -1) * sf, dim=-1)
+    before = attn.clone()
+
+    col.callback(".t", attn)
+
+    assert torch.equal(attn, before), \
+        f"callback đã sửa x tại chỗ: lệch tối đa {(attn - before).abs().max()}"
+
+
 def test_per_head_division_would_be_8x_wrong():
     """[NEGATIVE CONTROL] chia B*H của từng lần gọi -> gấp H lần.
 
@@ -170,5 +197,6 @@ def test_per_head_division_would_be_8x_wrong():
 if __name__ == "__main__":
     test_chunked_matches_single_pass()
     test_chunked_branch_actually_taken()
+    test_callback_does_not_mutate_input()
     test_per_head_division_would_be_8x_wrong()
     print("OK")
