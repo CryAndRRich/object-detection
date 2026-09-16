@@ -76,6 +76,12 @@ class AttnProcessor2_0Wrapper(AttnProcessor2_0):
     Processor for implementing scaled dot-product attention (enabled by default if you're using PyTorch 2.0).
     """
 
+    # Trên ngưỡng này thì SDPA chạy từng head một (xem
+    # scaled_dot_product_attention). Là thuộc tính lớp chứ không phải hằng số
+    # viết thẳng, để test hạ được ngưỡng và chạy ĐÚNG nhánh chunked thay vì
+    # chép lại vòng lặp — bản chép lại không bắt được lỗi trong code thật.
+    CHUNK_THRESHOLD_ELEMS = 4e8
+
     def __init__(self, other, path=None, callback_func=None):
         super().__init__()
 
@@ -134,7 +140,7 @@ class AttnProcessor2_0Wrapper(AttnProcessor2_0):
         # Ngưỡng 4e8 phần tử ~ N=20000 một head: dưới mức đó đường cũ nhanh hơn
         # (một matmul lớn) và bộ nhớ không thành vấn đề, nên giữ nguyên.
         B, H, L_q = query.shape[0], query.shape[1], query.shape[-2]
-        big = (B * H * L_q * key.shape[-2]) > 4e8
+        big = (B * H * L_q * key.shape[-2]) > self.CHUNK_THRESHOLD_ELEMS
 
         if not big:
             attn_weight = query @ key.transpose(-2, -1)
