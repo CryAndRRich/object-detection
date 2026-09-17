@@ -57,9 +57,25 @@ def build_dataset(name, root, canvas, split="val"):
         # Chỉ dùng để XEM mask trông thế nào trên dữ liệu của dự án.
         # file_name trong json là đường dẫn tương đối so với all_phase2_V2/.
         from data.ce130_coco import CE130Coco
-        return CE130Coco(
-            os.path.join(root, "ce130_coco", f"ce130_agnostic_{split}.json"),
-            os.path.join(root, "all_phase2_V2"), canvas=canvas)
+        js = os.path.join(root, "ce130_coco", f"ce130_agnostic_{split}.json")
+        imgs = os.path.join(root, "all_phase2_V2")
+        # Báo lỗi CÓ NỘI DUNG thay vì FileNotFoundError trần. Trên server dùng
+        # chung, thiếu dữ liệu là nguyên nhân thường gặp hơn lỗi code, và
+        # run_on_free_gpu sẽ retry 3 lần vô ích nếu không nói rõ.
+        missing = [p for p in (js, imgs) if not os.path.exists(p)]
+        if missing:
+            raise FileNotFoundError(
+                "thiếu dữ liệu CE-130:\n  "
+                + "\n  ".join(os.path.normpath(m) for m in missing)
+                + f"\n\nĐã tìm dưới data-root: {os.path.normpath(root)}\n"
+                "CE-130 cần HAI thứ, và cả hai lên server qua zip người dùng "
+                "tự upload (không scp/rsync):\n"
+                "  data/ce130_coco/       (~40 MB, 5 file json)\n"
+                "  data/all_phase2_V2/    (~14 GB, thư mục ảnh)\n"
+                "Kiểm nhanh:  ls "
+                + os.path.normpath(os.path.join(root, "ce130_coco")) + "\n"
+                "Nếu data/ nằm chỗ khác, truyền --data-root <đường dẫn>.")
+        return CE130Coco(js, imgs, canvas=canvas)
     from data.coco_val import CocoVal
     return CocoVal(os.path.join(root, "coco", "annotations",
                                 "instances_val2017.json"),

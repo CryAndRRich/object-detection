@@ -84,6 +84,38 @@ PAPER_AR = {"paco": 13.6, "sa1b": 20.7, "ade20k": 22.5,
 PACO_BASELINES = "Diffuse2Seg 13,6 | CutLER 10,7 | DiffSeg 9,8 | M2N2 9,6 | UnSAM 9,3"
 
 
+def _ckpt_path(out):
+    """Checkpoint nằm cạnh file kết quả, hậu tố .ckpt.json."""
+    return (out or "d2s_run") + ".ckpt.json"
+
+
+def _ckpt_save(path, state):
+    """Ghi NGUYÊN TỬ: ghi file tạm rồi os.replace.
+
+    Ghi thẳng thì một lần chết giữa chừng để lại JSON cụt, và lần --resume sau
+    sẽ hỏng ở chỗ khó hiểu. os.replace là atomic trên cùng filesystem.
+    """
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f)
+    os.replace(tmp, path)
+
+
+def _to_jsonable(o):
+    """numpy -> python thuần, để json.dump không nghẹn."""
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    if isinstance(o, dict):
+        return {k: _to_jsonable(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_to_jsonable(v) for v in o]
+    if isinstance(o, (np.integer,)):
+        return int(o)
+    if isinstance(o, (np.floating,)):
+        return float(o)
+    return o
+
+
 def build_dataset(name, root, canvas):
     if name == "paco":
         from data.paco_val import PacoVal
@@ -106,6 +138,14 @@ def main():
     ap.add_argument("--data-root", default=None)
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--checkpoint-every", type=int, default=0,
+                    help="ghi trạng thái tạm mỗi N ảnh để --resume nối tiếp "
+                         "được. 0 = tắt. Job dài (cả PACO ~11 giờ) NÊN bật: "
+                         "GPU dùng chung bị chiếm giữa chừng -> OOM -> "
+                         "run_on_free_gpu retry -> chạy lại TỪ ẢNH ĐẦU.")
+    ap.add_argument("--resume", action="store_true",
+                    help="nếu có file checkpoint (<out>.ckpt.json) thì đọc và "
+                         "chạy tiếp từ ảnh dở dang.")
     ap.add_argument("--save-masks", default=None,
                     help="thư mục lưu mask .npz mỗi ảnh (lớn; chỉ khi cần xem lại)")
     # Ghi đè — mặc định LÀ GIÁ TRỊ PAPER, chỉ dùng khi cố ý lệch khỏi paper.
@@ -225,6 +265,51 @@ def main():
     level_clusters = np.zeros(cfg.n_levels, dtype=np.int64)
     nms_in = nms_kept = nms_cap = 0
     per_image = []
+    resume_from = args.start
+    prior_elapsed = 0.0
+
+    # --- RESUME: đọc lại trạng thái cộng dồn nếu có checkpoint ---
+    ckpt = _ckpt_path(args.out)
+    # --resume mà không --checkpoint-every thì lần chạy này KHÔNG ghi gì: hỏng
+    # giữa chừng là mất sạch, đúng thứ cờ này sinh ra để tránh. Bật hộ.
+    if args.resume and not args.checkpoint_every:
+        args.checkpoint_every = 25
+        print("--resume kèm --checkpoint-every=0; tự bật checkpoint mỗi 25 ảnh.",
+              flush=True)
+    if args.resume and os.path.isfile(ckpt):
+        with open(ckpt) as f:
+            st = json.load(f)
+        # Checkpoint chỉ dùng được khi CÙNG cấu hình và CÙNG lát cắt dữ liệu;
+        # nếu không, các tổng cộng dồn sẽ trộn hai lần chạy khác nhau mà không
+        # có gì báo -- đúng loại sai âm thầm.
+        same = (st.get("config") == cfg.to_dict()
+                and st.get("dataset") == args.dataset
+                and st.get("start") == args.start
+                and st.get("end") == end)
+        if not same:
+            raise SystemExit(
+                f"checkpoint {ckpt} thuộc một lần chạy KHÁC (khác config hoặc "
+                f"khác --dataset/--start/--limit). Xoá nó, hoặc bỏ --resume, "
+                f"hoặc đổi --out.")
+        hits = np.array(st["hits"], dtype=np.int64)
+        band_hits = {k: np.array(v, dtype=np.int64)
+                     for k, v in st["band_hits"].items()}
+        band_n = {k: int(v) for k, v in st["band_n"].items()}
+        part_hits = np.array(st["part_hits"], dtype=np.int64)
+        obj_hits = np.array(st["obj_hits"], dtype=np.int64)
+        n_part, n_obj = st["n_part"], st["n_obj"]
+        n_gt_total, n_pred_total = st["n_gt_total"], st["n_pred_total"]
+        n_not_conv, n_iters, ceilings = st["n_not_conv"], st["n_iters"], st["ceilings"]
+        level_masks = np.array(st["level_masks"], dtype=np.int64)
+        level_clusters = np.array(st["level_clusters"], dtype=np.int64)
+        nms_in, nms_kept, nms_cap = st["nms_in"], st["nms_kept"], st["nms_cap"]
+        per_image = st["per_image"]
+        t_sd_0, t_prop_0, t_merge_0, t_eval_0 = st["stage_times"]
+        prior_elapsed = st["elapsed_sec"]
+        resume_from = st["next_index"]
+        print(f"RESUME từ {ckpt}: đã xong {resume_from - args.start}/{n} ảnh, "
+              f"{fmt_time(prior_elapsed)} trước đó\n", flush=True)
+
     t_start = time.time()
 
     # Đồng hồ TÁCH THEO KHÂU. Một con số "s/ảnh" duy nhất không nói được nút
@@ -232,8 +317,10 @@ def main():
     # ảnh: SD gần như hằng số, p-Laplacian phụ thuộc số vòng lặp, Algorithm 2
     # phụ thuộc số cụm (đo được: NMS 3000 mask = 80 s).
     t_sd = t_prop = t_merge = t_eval = 0.0
+    if resume_from > args.start:
+        t_sd, t_prop, t_merge, t_eval = t_sd_0, t_prop_0, t_merge_0, t_eval_0
 
-    for i in range(args.start, end):
+    for i in range(resume_from, end):
         s = ds[i]
         _t = time.time()
         A = build_affinity(s["image"], cfg, agg)
@@ -303,7 +390,8 @@ def main():
 
         done = i - args.start + 1
         run_ar = (hits / max(n_gt_total, 1)).mean()
-        el = time.time() - t_start
+        # elapsed GỘP cả phần trước khi resume, nếu không ETA sẽ lạc quan giả.
+        el = prior_elapsed + (time.time() - t_start)
         eta = el / done * (n - done)
         print(f"  [{done:4d}/{n} {100 * done / n:5.1f}%] {s['file_name']:20s} "
               f"{s['W']:4d}x{s['H']:<4d} "
@@ -320,8 +408,29 @@ def main():
                 print(f"         max_memory_allocated = "
                       f"{torch.cuda.max_memory_allocated() / 1e9:.2f} GB", flush=True)
 
+        # --- CHECKPOINT: ghi trạng thái cộng dồn để --resume nối tiếp được ---
+        if args.checkpoint_every and (done % args.checkpoint_every == 0
+                                      or i == end - 1):
+            _ckpt_save(ckpt, _to_jsonable({
+                "config": cfg.to_dict(), "dataset": args.dataset,
+                "start": args.start, "end": end, "next_index": i + 1,
+                "hits": hits, "band_hits": band_hits, "band_n": band_n,
+                "part_hits": part_hits, "obj_hits": obj_hits,
+                "n_part": n_part, "n_obj": n_obj,
+                "n_gt_total": n_gt_total, "n_pred_total": n_pred_total,
+                "n_not_conv": n_not_conv, "n_iters": n_iters,
+                "ceilings": ceilings,
+                "level_masks": level_masks, "level_clusters": level_clusters,
+                "nms_in": nms_in, "nms_kept": nms_kept, "nms_cap": nms_cap,
+                "per_image": per_image,
+                "stage_times": [t_sd, t_prop, t_merge, t_eval],
+                "elapsed_sec": el,
+            }))
+
     res = summarise_ar(hits, n_gt_total, band_hits, band_n)
-    elapsed = time.time() - t_start
+    # GỘP thời gian của các lần chạy trước khi resume, nếu không con số báo
+    # cáo sẽ chỉ là đoạn cuối và mọi ngoại suy "s/ảnh" đều sai.
+    elapsed = prior_elapsed + (time.time() - t_start)
 
     print("\n" + "=" * 78)
     print(f"KẾT QUẢ — {args.dataset}, Diffuse2Seg training-free đầy đủ")
@@ -403,6 +512,12 @@ def main():
                                float(np.mean(ceilings)) if ceilings else None},
                        "per_image": per_image}, f, indent=2)
         print(f"  -> {args.out}")
+
+    # Chạy xong thì BỎ checkpoint. Để lại thì lần chạy sau với --resume sẽ
+    # thấy next_index == end và "chạy" 0 ảnh, ghi đè kết quả bằng chính nó —
+    # vô hại nhưng gây hiểu nhầm là job đã chạy.
+    if args.checkpoint_every and os.path.isfile(ckpt):
+        os.remove(ckpt)
 
     return 0
 
