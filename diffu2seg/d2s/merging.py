@@ -298,6 +298,13 @@ def merge_maps_to_masks(f, cfg, H, W, valid_w=1.0, valid_h=1.0):
     all_labels = cluster_at_heights(d, heights)
 
     pool, per_level = [], []
+    # ⚠️ `keep_level_masks` CHỈ để vẽ. Mỗi mức là một PHÂN HOẠCH riêng (argmax
+    # trên cụm), nên vẽ cả 6 mức chồng lên nhau là sai về nguyên tắc hiển thị:
+    # mức thô đè mức mịn, ảnh thành loang lổ. Giữ mask theo mức cho phép vẽ
+    # từng phân hoạch một, như Hình 1 của paper.
+    # Tốn bộ nhớ: giữ thêm ~745 mask (H, W) bool, nên mặc định TẮT — đường chạy
+    # đo AR không cần và không được trả giá này.
+    level_masks = [] if getattr(cfg, "keep_level_masks", False) else None
     for h, labels in zip(heights, all_labels):
         masks = masks_from_clusters(
             p, labels, cfg.grid_r, H, W, min_area_px=cfg.min_area_px,
@@ -305,10 +312,15 @@ def merge_maps_to_masks(f, cfg, H, W, valid_w=1.0, valid_h=1.0):
         per_level.append({"h": float(h),
                           "n_clusters": int(labels.max()) + 1 if len(labels) else 0,
                           "n_masks": len(masks)})
+        if level_masks is not None:
+            level_masks.append(masks)
         pool.extend(masks)
 
     kept, nms_info = area_descending_nms(pool, iou_thr=cfg.nms_iou,
                                          max_masks=cfg.max_masks)
-    return kept, {"n_prompts_used": int(ok.sum()), "n_levels": cfg.n_levels,
-                  "heights": [float(h) for h in heights],
-                  "per_level": per_level, "nms": nms_info}
+    info = {"n_prompts_used": int(ok.sum()), "n_levels": cfg.n_levels,
+            "heights": [float(h) for h in heights],
+            "per_level": per_level, "nms": nms_info}
+    if level_masks is not None:
+        info["level_masks"] = level_masks
+    return kept, info

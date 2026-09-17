@@ -22,8 +22,9 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from d2s.merging import (area_descending_nms, cluster_at_heights,  # noqa: E402
-                         masks_from_clusters, normalise_maps,
-                         symmetric_kl_matrix)
+                         masks_from_clusters, merge_maps_to_masks,
+                         normalise_maps, symmetric_kl_matrix)
+from config.base import Diffu2SegConfig  # noqa: E402
 
 
 def test_normalise_rows_sum_to_one():
@@ -251,3 +252,59 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# ---------------------------------------------------------------------------
+# keep_level_masks: chỉ để VẼ, không được đổi một con số nào
+# ---------------------------------------------------------------------------
+
+def _merge_cfg(keep):
+    """Config nhỏ đủ chạy Alg.2 trên lưới 8x8."""
+    return Diffu2SegConfig(canvas=64, n_levels=3, min_area_px=1,
+                           keep_level_masks=keep).validate()
+
+
+def _fake_maps(seed=0, k=6, r=8):
+    rng = np.random.default_rng(seed)
+    f = rng.random((k, r * r)) ** 3
+    return f
+
+
+def test_keep_level_masks_does_not_change_output():
+    """Bật cờ chỉ THÊM thứ trả về; mask và mọi thống kê phải y hệt.
+
+    Nếu cờ này đổi kết quả thì ảnh vẽ ra không còn là ảnh của con số đã báo
+    cáo -- đúng loại sai âm thầm mà README cảnh báo.
+    """
+    f = _fake_maps()
+    H = W = 16
+    m_off, i_off = merge_maps_to_masks(f, _merge_cfg(False), H, W)
+    m_on, i_on = merge_maps_to_masks(f, _merge_cfg(True), H, W)
+
+    assert len(m_off) == len(m_on)
+    for a, b in zip(m_off, m_on):
+        assert np.array_equal(a, b)
+    assert i_off["per_level"] == i_on["per_level"]
+    assert i_off["nms"] == i_on["nms"]
+    assert "level_masks" not in i_off        # tắt thì KHÔNG tốn bộ nhớ
+    assert "level_masks" in i_on
+
+
+def test_each_level_is_a_partition():
+    """[NEGATIVE CONTROL] mỗi mức phải là PHÂN HOẠCH, không chồng lấn.
+
+    Đây là lý do `--mode paper` vẽ từng mức riêng: trộn 6 mức lên nhau thì
+    mức thô đè mức mịn. Nếu một mức tự nó đã chồng lấn thì cách vẽ đó cũng sai
+    và test này phải đỏ.
+    """
+    f = _fake_maps(seed=1)
+    H = W = 16
+    _, info = merge_maps_to_masks(f, _merge_cfg(True), H, W)
+    for li, masks in enumerate(info["level_masks"]):
+        if not masks:
+            continue
+        cover = np.zeros((H, W), dtype=int)
+        for m in masks:
+            cover += m.astype(int)
+        assert cover.max() <= 1, \
+            f"mức {li}: có pixel thuộc {cover.max()} mask cùng lúc"

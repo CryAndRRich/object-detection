@@ -66,54 +66,114 @@ nên CE-130 không đụng tới).
 
 ---
 
-## KẾT QUẢ ĐẦU TIÊN — PACO val, 50 ảnh (2026-09-15)
+## KẾT QUẢ — PACO val, 150 ảnh (2026-09-16)
 
-`run_paper.py --dataset paco --limit 50`, **cấu hình paper không lệch một tham số nào**,
-SD 1.5, A30, 16m37s (20,0 s/ảnh).
+`run_paper.py --dataset paco --limit 150`, **cấu hình paper không lệch một tham số
+nào** trừ `t` và `w1` (xem mục quét bên dưới), SD 1.5, A30, 41m37s (16,7 s/ảnh).
 
 | | ta | paper | các baseline của paper |
 |---|---|---|---|
-| **AR₁₀₀₀** | **10,36** | **13,6** | CutLER 10,7 · DiffSeg 9,8 · M2N2 9,6 · UnSAM 9,3 |
-| AR_S / AR_M / AR_L | 5,13 / 21,46 / 33,94 | — | |
-| recall@0,50 / @0,75 | 25,94 / 7,20 | — | |
+| **AR₁₀₀₀** | **11,80** | **13,6** | CutLER 10,7 · DiffSeg 9,8 · M2N2 9,6 · UnSAM 9,3 |
+| AR_S / AR_M / AR_L | 4,83 / 24,01 / 33,75 | — | n = 1446 / 539 / 160 |
+| AR OBJECT / PART | 17,58 / 10,47 | — | n = 772 / 1373 |
+| recall@0,50 / @0,75 | 27,79 / 8,76 | — | |
 
-**Đạt 76 % con số của paper, và vượt cả ba baseline training-free của họ** (M2N2,
-DiffSeg, UnSAM) dù chạy SD 1.5 thay SD2. Đây là 50/2410 ảnh nên còn sai số lấy mẫu.
+**Đạt 87 % con số của paper, vượt cả ba baseline training-free** dù chạy SD 1.5
+thay SD2. Lần đo trước (50 ảnh) cho 10,36; chênh lệch chủ yếu là **sai số lấy mẫu**,
+không phải cải thiện — xem mục quét.
+
+### ⚠️ Quét `t` × `w1`: 16 cấu hình KHÔNG phân biệt được
+
+Quét 150 ảnh đầu (10h07m), rồi **xác nhận lại trên 150 ảnh KHÁC** (ảnh 150–300, 2h39m):
+
+| t | w1 | ảnh 0–150 | ảnh 150–300 |
+|---|---|---|---|
+| 150 | 0,15 | 11,66 (hạng 2) | **12,95 (hạng 1)** |
+| 50 | 0,85 | 11,25 (hạng 3) | 12,63 (hạng 2) |
+| 50 | 0,15 | **11,80 (hạng 1)** | 12,60 (hạng 3) |
+| 150 | 0,85 (paper) | 11,17 (hạng 4) | 12,26 (hạng 4) |
+
+- biên độ **giữa các cấu hình**: 0,63 p.p. (sweep) / 0,69 p.p. (confirm)
+- dịch chuyển **giữa hai tập ảnh**: **+1,14 p.p.** — cả bốn cấu hình đều lên
+- bootstrap 5000 lần trên 150 ảnh: recall@50 có sd **3,55 p.p.**, CI 95% rộng 13,5 p.p.
+
+**Tập ảnh dịch mạnh gấp đôi khoảng cách giữa các cấu hình ⇒ `t` không phân biệt được
+ở n=150.** Cấu hình thắng ở sweep tụt xuống hạng 3 khi đổi tập. Đây là lý do phải có
+bước xác nhận trên tập rời.
+
+Thứ **có** sống sót: **`w1` = 0,15 đứng nhất ở cả 4 giá trị `t` trong sweep gốc** — 16
+điểm nhất quán, không phải một cặp sát nhau. Tức `up_blocks.3.attentions.1` mang tín
+hiệu tốt hơn `.0` trên PACO, **ngược** với 0,85/0,15 mà paper đo trên SA-1B và ngược
+với 0,5/0,5 của M2N2. `t=300` tệ ở mọi `w1`, khớp ghi chú "quét t XUỐNG chứ không lên".
+
+⇒ **Khuyến nghị: dùng `t=150` của paper** (không có bằng chứng để đổi), `w1=0,15`.
 
 ### Chẩn đoán — sáu mức granularity CÓ hoạt động
 
 ```
    height   cụm/ảnh  mask/ảnh
-    0.186      78.7     214.0
-    0.324      58.1     182.1
-    0.565      40.9     145.2
-    0.984      26.7     110.5
-    1.716      16.0      69.5
-    2.990       8.5      37.6
+    0.186      79.3     210.6
+    0.324      59.0     178.0
+    0.565      41.9     142.3
+    0.984      28.3     104.2
+    1.716      17.7      71.3
+    2.990       9.6      38.8
 ```
 
-Số cụm giảm đều 78,7 → 8,5 qua 6 mức. **Dải `[0,186 ; 2,99]` của paper khớp tốt với
+Số cụm giảm đều 79,3 → 9,6 qua 6 mức. **Dải `[0,186 ; 2,99]` của paper khớp tốt với
 thang KL của SD 1.5** — đây là rủi ro lớn nhất khi đổi model, và nó đã không xảy ra.
 
-Hội tụ **100 %** (n_iter trung vị 25/1000). Trần độ phân giải 93,2 %.
+Hội tụ **100 %** (n_iter trung vị 28/1000, max 50). NMS 745,3 vào → 496,0 giữ.
+Cap `N_max=1000` chỉ chạm ở **2/150 ảnh** — không phải nút thắt.
 
 ### Ba chỗ mất điểm, theo thứ tự đáng làm
 
-1. **PART kém hơn OBJECT 2,2×**: AR 8,40 (n=455) vs 18,79 (n=239). Mà 65,6 % mục tiêu
-   của PACO là part — đây là phần lớn khoảng cách tới 13,6.
-2. **Vật nhỏ**: AR_S 5,13 vs AR_L 33,94, **6,6×**. 497/694 GT là small.
-3. **IoU cao sụp nhanh**: recall 25,94 ở IoU 0,5 → 0,43 ở IoU 0,9. Biên mask thô —
-   đúng chỗ **CascadePSP** (paper gọi là optional, ta bỏ) sinh ra để sửa.
+**1. PACO hỏi PART, phương pháp trả OBJECT.** AR_part 10,47 vs AR_object 17,58.
+65,6 % annotation của PACO là bộ phận. Quan hệ số vật/ảnh với recall (cả 150 ảnh):
 
-`⚠️ 121 mask bị cắt vì chạm cap N_max=1000` trên 2/50 ảnh — chưa đáng lo, nhưng
-nếu tăng số mức thì phải để ý.
+| n_gt | số ảnh | recall TB | % tổng GT |
+|---|---|---|---|
+| 1–3 | 42 | 0,544 | 4,3 % |
+| 4–10 | 49 | 0,445 | 14,5 % |
+| 11–30 | 45 | 0,331 | 34,5 % |
+| 31+ | 14 | 0,219 | 46,6 % |
+
+Tương quan `log(n_gt)` vs recall: **−0,398**. Ảnh có ≥11 GT chiếm **39 % số ảnh nhưng
+81 % tổng GT** ⇒ AR₁₀₀₀ bị chi phối bởi nhóm ảnh dày đặc phần lớn là PART — đúng nhóm
+mà một phương pháp phân vùng theo **vật** yếu nhất. Đây là phần lớn khoảng cách tới 13,6,
+và **không phải lỗi implement**.
+
+**2. Biên mask thô ở mức ô 8 px.** recall 27,79 (IoU 0,5) → 8,76 (IoU 0,75), mất 2/3.
+Đúng chỗ **CascadePSP** (Step 3, ta bỏ) sinh ra để sửa.
+
+**3. Độ phân giải `r=140`** — chỉ giải thích ~18 %: trần TB có trọng số 0,818 vs recall
+thực 0,278, khoảng cách 0,540 là chất lượng mask chứ không phải độ phân giải.
+
+| trần độ phân giải | số ảnh | recall@50 |
+|---|---|---|
+| < 0,50 | 2 | 0,018 |
+| 0,50–0,80 | 17 | 0,157 |
+| 0,80–0,95 | 18 | 0,314 |
+| ≥ 0,95 | 113 | 0,480 |
+
+### Nhìn ảnh xác nhận chẩn đoán
+
+`d2s_viz_spread/0.00_000000017235.png` (nhà tắm, recall **0,00**): phân vùng rất hợp lý
+— bồn rửa, bệ toilet, khăn, mặt bàn, từng ô gạch đều tách đúng. Nhưng PACO chỉ annotate
+**2 vật**, 1 là PART. 479 mask, không cái nào đạt IoU 0,5 với đúng 2 GT đó.
+
+`0.03_000000029558.png` (thả diều): **30 GT, 21 là PART** — tay áo, ống quần, vành mũ.
+Model tách người/diều/bãi cỏ sạch sẽ, nhưng nó phân theo **vật**, GT hỏi **bộ phận**.
+
+⇒ **Mask tốt hơn con số 11,80 gợi ý.** Con số thấp phản ánh lệch giữa thứ đo và thứ
+sinh ra, không phải chất lượng phân vùng.
 
 ### Biến đáng quét tiếp, theo thứ tự
 
-1. **`t < 150`** — §5 của paper: *"recall degrades across timesteps"*, và 150 được chọn
-   để tối đa **mAP**, không phải AR. Ta chỉ đo AR. Đây là biến rẻ nhất và có cơ sở nhất.
-2. **CascadePSP** — nhắm thẳng vào chỗ mất điểm #3.
-3. **`--limit` lớn hơn** — 50 ảnh có sai số lấy mẫu; cả tập 2410 ảnh mất ~13h21m.
+1. **CascadePSP** — nhắm thẳng vào chỗ mất điểm #2, là chỗ duy nhất còn nhiều điểm.
+2. **`--limit` lớn hơn** — mọi kết luận về `t` hiện đều nằm trong nhiễu ở n=150.
+   Cả tập 2410 ảnh mất ~11h09m.
+3. **`t` và `w1`: KHÔNG đáng quét thêm** ở n=150 — đã chứng minh nằm trong nhiễu.
 
 ---
 
@@ -223,6 +283,58 @@ nên `f > q90` vẫn trả về ô seed → thành một box 1×1 hoàn hảo. *
 Floor hỏi thêm câu tuyệt đối: có ô nào đạt 5 % ô mạnh nhất ảnh không.
 
 Cả bốn đều có test, kèm **negative control** (tắt guard thì test phải fail).
+
+---
+
+## ⚠️ Bộ nhớ ở `r=140` — ba lần vỡ, ba nguyên nhân khác nhau
+
+Ở `r=64` (M2N2) mọi thứ nhỏ nên không ai thấy vấn đề. Ở `r=140` của paper,
+`N = 19 600` và `N²` fp16 = **0,77 GB**, `(B,H,N,N)` 8 head = **6,15 GB**. Đỉnh đo
+được đi từ **23,87 GB → 13,86 GB** qua ba lần sửa, mỗi lần một nguyên nhân khác:
+
+**1. `x.float()` trên cả tensor** (2026-09-15). M2N2 viết
+`torch.mean(torch.mean(x.float(), dim=1), dim=0)` — ở `r=140` dựng bản fp32
+**12,3 GB**. Sửa: cộng dồn từng head vào bộ đệm fp32 `(N,N)` = 1,54 GB.
+
+**2. Wrap MỌI block attention** (2026-09-16). `sd2_inject_attention_wrappers` wrap
+cả 32 module `Attention` của UNet, mà wrapper thay SDPA của PyTorch bằng bản viết
+tay — và bản viết tay **bắt buộc** dựng `(B,H,N,N)` tường minh (SDPA gốc/flash
+attention không bao giờ dựng). `down_blocks.0` có **cùng 19 600 token** với
+`up_blocks.3`, nên mỗi ảnh cấp phát rồi vứt **3 tensor 6,15 GB** thừa
+(`down_blocks.0.attentions.{0,1}` và `up_blocks.3.attentions.2`, đều `weight=0`).
+Sửa: `active_paths` — chỉ wrap block có trọng số khác 0 (2/5 thay vì 5/5).
+
+**3. Cả `(B,H,N,N)` sống suốt lúc callback chạy.** Callback được gọi TỪ TRONG
+`scaled_dot_product_attention` nên `x` chưa được giải phóng. Sửa: vòng theo head,
+mỗi lúc chỉ một `(N,N)` fp16 sống (6,15 → 0,77 GB). Bật khi tensor
+> `CHUNK_THRESHOLD_ELEMS` (4e8); dưới ngưỡng giữ đường cũ vì một matmul lớn nhanh hơn.
+Kết quả **giống hệt**: softmax chạy trên chiều cuối nên độc lập theo head, và
+`attn_weight @ value` cũng tách được theo head — không phải xấp xỉ.
+
+Thêm `torch.cuda.empty_cache()` + giải phóng `A` giữa các ảnh trong `visualize_best.py`.
+Đỉnh giữ nguyên 13,86 GB suốt 40 ảnh ⇒ không rò rỉ.
+
+### ⚠️ Hai lỗi ÂM THẦM sinh ra trong lúc sửa — cả hai đều có test
+
+**a. Chia `B*H` của riêng lần gọi.** Callback cũ chia cho `B*H` của tensor nhận
+được. Khi SDPA gọi từng head thì `B*H == 1` ⇒ attention tích luỹ **gấp 8 lần**.
+Shape đúng, không NaN, mask vẫn sinh ra, chỉ sai thang. Sửa: callback cộng **tổng
+thô** + đếm head; chia trung bình và nhân trọng số dời sang `_finish_layer()` gọi ở
+ranh giới layer. Đo được tỉ lệ đúng **8,00**.
+
+**b. `.float()` trả VIEW khi dtype đã đúng.** `head = x[b,h].float()` chỉ **sao chép
+khi dtype đổi**. Với `x` đã fp32 nó trả về view, nên `_raw_acc` trỏ thẳng vào
+`x[0,0]`; các head sau `add_` vào bộ đệm = **ghi đè lên `x[0,0]`**, rồi SDPA dùng
+chính `x` đó cho `attn_weight @ value`. Kết quả: **head 0 sai, head 1–7 đúng**
+(đo: lệch 4,97 ở phần tử đầu, trùng khít ở phần tử cuối).
+⚠️ **Đường chạy thật KHÔNG lộ lỗi này** vì `x` là fp16 → `.float()` có sao chép.
+Chỉ hiện khi fp32. Sửa: `.to(torch.float32, copy=True)`.
+
+`tests/test_sdpa_chunked.py` (4 test) phủ cả hai, gồm negative control cho mỗi lỗi.
+⚠️ Bản test ĐẦU TIÊN **chép lại** vòng lặp head trong chính test rồi so với nhánh
+một-lần — tức kiểm bản chép, không kiểm code thật, và xanh giả. Vì thế
+`CHUNK_THRESHOLD_ELEMS` là **thuộc tính lớp** chứ không phải hằng số viết thẳng:
+test hạ ngưỡng để chạy ĐÚNG nhánh chunked của code thật.
 
 ---
 

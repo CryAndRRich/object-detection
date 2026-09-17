@@ -236,6 +236,15 @@ class Diffu2SegConfig:
     # over most of the image, and log(0) = -inf poisons the whole distance
     # matrix. Same class of omission as g_eps.
 
+    keep_level_masks: bool = False
+    # CHỈ ĐỂ VẼ, không ảnh hưởng phép tính nào. Bật thì merge_maps_to_masks trả
+    # thêm info["level_masks"] = mask của TỪNG mức granularity, chưa qua NMS.
+    # Cần vì mỗi mức là một PHÂN HOẠCH riêng; vẽ cả 6 mức chồng lên nhau (như
+    # bản visualize đầu tiên) làm mức thô đè mức mịn và ảnh thành loang lổ,
+    # trong khi Hình 1 của paper vẽ mỗi panel MỘT phân hoạch.
+    # Mặc định TẮT: giữ thêm ~745 mask (H, W) bool mỗi ảnh, đường chạy đo AR
+    # không cần.
+
     # ------------------------------------------------------------------
     # Derived
     # ------------------------------------------------------------------

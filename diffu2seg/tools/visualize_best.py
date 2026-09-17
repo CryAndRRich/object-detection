@@ -36,6 +36,7 @@ import time
 
 import numpy as np
 import torch
+from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -84,6 +85,10 @@ def main():
                     help="JSON của run_paper.py — quyết định ảnh nào được vẽ")
     ap.add_argument("--limit", type=int, default=30)
     ap.add_argument("--pick", default="spread", choices=["spread", "best", "worst"])
+    ap.add_argument("--mode", default="debug", choices=["debug", "paper"],
+                    help="debug: 3 panel (ảnh gốc | mask trộn 6 mức | box vs GT), "
+                         "để chẩn đoán. paper: mỗi mức granularity một ảnh "
+                         "riêng, không box, crop bỏ pad — như Hình 1 của paper.")
     ap.add_argument("--max-draw", type=int, default=60,
                     help="số mask pred vẽ tối đa mỗi ảnh (theo diện tích giảm dần)")
     ap.add_argument("--data-root", default=None)
@@ -109,6 +114,9 @@ def main():
     for k in ("timesteps", "timestep_weights", "kl_thresholds"):
         if k in fields and isinstance(fields[k], list):
             fields[k] = tuple(fields[k])
+    # keep_level_masks CHỈ đổi thứ được TRẢ VỀ, không đổi phép tính nào -- mask
+    # và mọi con số vẫn y hệt cấu hình đã lưu trong JSON.
+    fields["keep_level_masks"] = (args.mode == "paper")
     cfg = Diffu2SegConfig(**fields).validate()
 
     root = args.data_root or os.path.join(
@@ -159,6 +167,66 @@ def main():
 
         areas = pred.reshape(len(pred), -1).sum(1) if len(pred) else np.zeros(0)
         order = np.argsort(-areas)[:args.max_draw]
+
+        if args.mode == "paper":
+            # Mỗi mức granularity là MỘT PHÂN HOẠCH: mỗi pixel đúng một cụm.
+            # Vẽ riêng từng mức, như Hình 1 của paper. Không vẽ box (paper sinh
+            # mask, không sinh box), crop bỏ pad, một panel chiếm cả khung.
+            lv = out["merge_info"].get("level_masks")
+            if not lv:
+                raise RuntimeError(
+                    "không có level_masks — cần cfg.keep_level_masks=True. "
+                    "Chạy --mode paper thì tool tự bật, nên lỗi này nghĩa là "
+                    "config bị ghi đè ở đâu đó.")
+            # ⚠️ mask của Alg.2 ở kích thước ẢNH GỐC (H, W), còn s["image"] là
+            # canvas vuông đã pad. Phải đưa nền về đúng (H, W) của mask, nếu
+            # không overlay lệch hẳn. Cắt vùng hợp lệ rồi resize về (W, H).
+            vh = int(s["valid_h"] * cfg.canvas)
+            vw = int(s["valid_w"] * cfg.canvas)
+            bg = np.asarray(Image.fromarray(
+                s["image"][:vh, :vw]).resize((s["W"], s["H"]), Image.BILINEAR))
+            heights = out["merge_info"]["heights"]
+            n_saved_this = 0
+            for li, (h, masks) in enumerate(zip(heights, lv)):
+                fig1, ax1 = plt.subplots(
+                    1, 1, figsize=(13, 13 * s["H"] / max(s["W"], 1)))
+                ax1.imshow(bg)
+                if len(masks):
+                    rng = np.random.default_rng(li)
+                    ov = np.zeros((s["H"], s["W"], 4))
+                    # to -> nhỏ, để mảnh nhỏ nằm trên và không bị mức thô che.
+                    ar = np.array([m.sum() for m in masks])
+                    for mi in np.argsort(-ar):
+                        c = rng.random(3)
+                        ov[masks[mi]] = [c[0], c[1], c[2], 0.75]
+                    ax1.imshow(ov)
+                ax1.set_title(
+                    f"mức {li + 1}/{len(heights)}  h={h:.3f}  "
+                    f"{len(masks)} mask  |  t={cfg.timesteps[0]} w1={cfg.w_up_0} "
+                    f"r={cfg.grid_r}", fontsize=13)
+                ax1.axis("off")
+                fig1.tight_layout()
+                nm = os.path.splitext(os.path.basename(s["file_name"]))[0]
+                fig1.savefig(os.path.join(args.out_dir, f"{nm}_L{li + 1}_h{h:.3f}.png"),
+                             dpi=100, bbox_inches="tight")
+                plt.close(fig1)
+                n_saved_this += 1
+
+            n_pred = len(pred)
+            del A, out, pred
+            agg.current_merged_tensor = None
+            if torch.cuda.is_available() and args.device.startswith("cuda"):
+                torch.cuda.empty_cache()
+                peak = torch.cuda.max_memory_allocated() / 1e9
+            else:
+                peak = float("nan")
+            el = time.time() - t_start
+            print(f"  [{j + 1:3d}/{len(chosen)}] {os.path.basename(s['file_name']):28s} "
+                  f"-> {n_saved_this} mức | n_gt={len(s['gt_masks']):3d} "
+                  f"n_pred={n_pred:4d} recall={rec:.2f} | đỉnh GPU {peak:.2f} GB | "
+                  f"elapsed {fmt_time(el)} | "
+                  f"ETA {fmt_time(el / (j + 1) * (len(chosen) - j - 1))}", flush=True)
+            continue
 
         fig, axes = plt.subplots(1, 3, figsize=(24, 8))
         raw = s["image"][:int(s["valid_h"] * cfg.canvas),
