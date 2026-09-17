@@ -249,26 +249,42 @@ def main():
                 list(range(1, len(heights) + 1))
             want = [i for i in want if 1 <= i <= len(heights)]
 
-            panels = [("ảnh gốc", bg, None)]
+            panels = [("Input image", bg)]
             for li in want:
                 masks, h = lv[li - 1], heights[li - 1]
-                panels.append((f"mức {li}/{len(heights)}  h={h:.3f}  "
-                               f"{len(masks)} mask",
+                panels.append((f"Granularity {li}/{len(heights)}  "
+                               f"h={h:.3f}  {len(masks)} masks",
                                _segmap(masks, s["H"], s["W"], seed=li,
-                                       cell_px=cell_px), None))
+                                       cell_px=cell_px)))
 
-            ncol = len(panels)
-            fig1, axs = plt.subplots(
-                1, ncol, figsize=(7 * ncol, 7 * s["H"] / max(s["W"], 1) + 0.6))
-            axs = np.atleast_1d(axs)
-            for ax1, (title, img, _) in zip(axs, panels):
+            # Bố cục 2 hàng, hàng dưới CĂN GIỮA. Với 7 panel: 4 trên, 3 dưới.
+            # Dùng lưới 2*ncol_top cột và cho mỗi panel rộng 2 cột; hàng thiếu
+            # panel được đẩy vào giữa bằng offset lẻ. Với 4+3: hàng trên chiếm
+            # cột 0..7, hàng dưới cột 1..6 -> lệch đúng 1 cột mỗi bên.
+            n = len(panels)
+            n_top = (n + 1) // 2
+            n_bot = n - n_top
+            ncols = 2 * n_top
+            aspect = s["H"] / max(s["W"], 1)
+            nrows = 1 if n_bot == 0 else 2
+            fig1 = plt.figure(figsize=(5.5 * n_top, 5.5 * aspect * nrows + 0.9))
+            gs = fig1.add_gridspec(nrows, ncols)
+
+            for idx, (title, img) in enumerate(panels):
+                if idx < n_top:
+                    r_, c0 = 0, idx * 2
+                else:
+                    r_ = 1
+                    c0 = (ncols - 2 * n_bot) // 2 + (idx - n_top) * 2
+                ax1 = fig1.add_subplot(gs[r_, c0:c0 + 2])
                 ax1.imshow(img)
-                ax1.set_title(title, fontsize=12)
+                ax1.set_title(title, fontsize=11)
                 ax1.axis("off")
+
             fig1.suptitle(
                 f"{s['file_name']}  |  t={cfg.timesteps[0]} w1={cfg.w_up_0} "
-                f"r={cfg.grid_r}  |  n_gt={len(s['gt_masks'])} recall@50={rec:.2f}",
-                fontsize=13)
+                f"r={cfg.grid_r}  |  {len(s['gt_masks'])} GT  "
+                f"recall@50={rec:.2f}", fontsize=13)
             fig1.tight_layout()
             nm = os.path.splitext(os.path.basename(s["file_name"]))[0]
             fig1.savefig(os.path.join(args.out_dir, f"{rec:.2f}_{nm}.png"),
@@ -297,7 +313,7 @@ def main():
                          :int(s["valid_w"] * cfg.canvas)]
 
         axes[0].imshow(raw)
-        axes[0].set_title(f"ảnh gốc {s['W']}x{s['H']}")
+        axes[0].set_title(f"Input image {s['W']}x{s['H']}")
 
         # giữa: mask pred, mỗi instance một màu
         axes[1].imshow(s["image"])
@@ -309,8 +325,8 @@ def main():
                 overlay[pred[oi]] = [c[0], c[1], c[2], 0.55]
             axes[1].imshow(overlay, extent=[0, cfg.canvas * s["valid_w"],
                                             cfg.canvas * s["valid_h"], 0])
-        axes[1].set_title(f"{len(pred)} mask (vẽ {len(order)} lớn nhất) | "
-                          f"{out['merge_info']['nms']['n_in']} trước NMS")
+        axes[1].set_title(f"{len(pred)} masks (drawing {len(order)} largest) | "
+                          f"{out['merge_info']['nms']['n_in']} before NMS")
 
         # phải: box từ mask, so GT
         axes[2].imshow(s["image"])
@@ -335,7 +351,7 @@ def main():
                 (xs.max() - xs.min() + 1) * sx, (ys.max() - ys.min() + 1) * sy,
                 fill=False, edgecolor="orange" if hit_pred[oi] else "red", lw=1.0))
         n_hit = int(hit_gt.sum())
-        axes[2].set_title(f"GT {len(s['gt_masks'])} (lá đậm = tìm thấy {n_hit}) | "
+        axes[2].set_title(f"{len(s['gt_masks'])} GT (bright green = {n_hit} found) | "
                           f"recall@50 = {rec:.2f}")
 
         for ax in (axes[1], axes[2]):
@@ -351,7 +367,7 @@ def main():
         n_part = int(s["is_part"].sum()) if "is_part" in s else -1
         fig.suptitle(
             f"{s['file_name']}  |  t={cfg.timesteps[0]} w1={cfg.w_up_0} r={cfg.grid_r}"
-            f"  |  n_gt={len(s['gt_masks'])}"
+            f"  |  {len(s['gt_masks'])} GT"
             + (f" ({n_part} PART)" if n_part >= 0 else "")
             + f"  recall@50={rec:.2f}", fontsize=13)
         fig.tight_layout()
