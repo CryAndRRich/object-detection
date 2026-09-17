@@ -47,11 +47,19 @@ from utils.mask_ops import mask_iou_matrix               # noqa: E402
 from utils.metrics import fmt_time                       # noqa: E402
 
 
-def build_dataset(name, root, canvas):
+def build_dataset(name, root, canvas, split="val"):
     if name == "paco":
         from data.paco_val import PacoVal
         return PacoVal(os.path.join(root, "paco", "paco_lvis_v1_val.json"),
                        os.path.join(root, "paco", "images"), canvas=canvas)
+    if name == "ce130":
+        # ⚠️ CE-130 CHỈ CÓ BOX GT, không có mask -> không tính được AR/recall.
+        # Chỉ dùng để XEM mask trông thế nào trên dữ liệu của dự án.
+        # file_name trong json là đường dẫn tương đối so với all_phase2_V2/.
+        from data.ce130_coco import CE130Coco
+        return CE130Coco(
+            os.path.join(root, "ce130_coco", f"ce130_agnostic_{split}.json"),
+            os.path.join(root, "all_phase2_V2"), canvas=canvas)
     from data.coco_val import CocoVal
     return CocoVal(os.path.join(root, "coco", "annotations",
                                 "instances_val2017.json"),
@@ -77,6 +85,23 @@ def pick_indices(per_image, n, mode):
             idx = np.linspace(0, len(scored) - 1, n).round().astype(int)
             chosen = [scored[i] for i in idx]
     return chosen
+
+
+def _out_name(file_name, rec, image_id):
+    """Tên file an toàn cho MỌI bộ dữ liệu.
+
+    ⚠️ CE-130 dùng file_name kiểu 'val/1386_b2/ground_truth.jpg' — basename của
+    CẢ 908 ảnh đều là 'ground_truth', nên đặt tên theo basename sẽ khiến 50 ảnh
+    ghi đè lên nhau còn đúng 1 file. Dùng cả đường dẫn tương đối, thay '/'
+    bằng '_'.
+
+    `rec` là NaN khi bộ không có mask GT (không có gì để xếp hạng) -> bỏ tiền
+    tố điểm và dùng image_id cho thứ tự ổn định.
+    """
+    stem = os.path.splitext(file_name)[0].strip("./").replace("/", "_")
+    if rec != rec:                      # NaN
+        return f"{image_id}_{stem}.png"
+    return f"{rec:.2f}_{stem}.png"
 
 
 def _segmap(masks, H, W, seed=0, cell_px=None):
@@ -135,10 +160,25 @@ def _segmap(masks, H, W, seed=0, cell_px=None):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--from-json", required=True,
-                    help="JSON của run_paper.py — quyết định ảnh nào được vẽ")
+    ap.add_argument("--from-json", default=None,
+                    help="JSON của run_paper.py — quyết định ảnh nào được vẽ. "
+                         "Bỏ qua thì phải truyền --dataset và ảnh được chọn "
+                         "NGẪU NHIÊN (dùng cho bộ không có mask GT, vd CE-130).")
+    ap.add_argument("--dataset", default=None,
+                    choices=["paco", "coco", "ce130"],
+                    help="chỉ khi KHÔNG có --from-json: bộ dữ liệu cần vẽ.")
+    ap.add_argument("--split", default="val",
+                    help="ce130: train/val/test (mặc định val)")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="hạt giống chọn ảnh ngẫu nhiên khi không có --from-json")
+    ap.add_argument("--canvas", type=int, default=None,
+                    help="ghi đè canvas. CHỈ dùng khi KHÔNG có --from-json — "
+                         "đổi canvas thì mask khác hẳn, không còn là ảnh của "
+                         "con số trong JSON. CE-130: 512 là hệ chuẩn dự án, "
+                         "1120 của paper sẽ PHÓNG TO ảnh 1,75-2,75 lần.")
     ap.add_argument("--limit", type=int, default=30)
-    ap.add_argument("--pick", default="spread", choices=["spread", "best", "worst"])
+    ap.add_argument("--pick", default="spread",
+                    choices=["spread", "best", "worst", "random"])
     ap.add_argument("--mode", default="debug", choices=["debug", "paper"],
                     help="debug: 3 panel (ảnh gốc | mask trộn 6 mức | box vs GT), "
                          "để chẩn đoán. paper: mỗi mức granularity một ảnh "
@@ -158,11 +198,22 @@ def main():
     import matplotlib.pyplot as plt
     from matplotlib.patches import Rectangle
 
-    with open(args.from_json) as f:
-        blob = json.load(f)
-    saved_cfg = blob["config"]
-    per_image = blob["per_image"]
-    dataset = blob.get("dataset", "paco")
+    if not args.from_json and not args.dataset:
+        ap.error("cần --from-json, hoặc --dataset khi bộ dữ liệu không có "
+                 "mask GT để xếp hạng (vd: --dataset ce130)")
+
+    if args.from_json:
+        with open(args.from_json) as f:
+            blob = json.load(f)
+        saved_cfg = blob["config"]
+        per_image = blob["per_image"]
+        dataset = blob.get("dataset", "paco")
+    else:
+        # KHÔNG có JSON -> không có điểm để xếp hạng -> chọn NGẪU NHIÊN.
+        # Cấu hình lấy từ config/paper.py, cộng các cờ ghi đè trên dòng lệnh.
+        blob, per_image, dataset = None, None, args.dataset
+        from config.paper import cfg as paper_cfg
+        saved_cfg = paper_cfg.to_dict()
 
     # Dựng lại ĐÚNG cấu hình đã chạy, không dùng mặc định -- nếu không thì ảnh
     # vẽ ra không phải ảnh của con số trong JSON.
@@ -174,30 +225,50 @@ def main():
     # keep_level_masks CHỈ đổi thứ được TRẢ VỀ, không đổi phép tính nào -- mask
     # và mọi con số vẫn y hệt cấu hình đã lưu trong JSON.
     fields["keep_level_masks"] = (args.mode == "paper")
+    if args.canvas is not None:
+        if args.from_json:
+            ap.error("--canvas không dùng chung với --from-json: đổi canvas là "
+                     "đổi mask, ảnh vẽ ra không còn khớp con số trong JSON.")
+        fields["canvas"] = args.canvas
     cfg = Diffu2SegConfig(**fields).validate()
 
     root = args.data_root or os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "data")
-    ds = build_dataset(dataset, root, cfg.canvas)
-    start = blob.get("start", 0)
+    ds = build_dataset(dataset, root, cfg.canvas, split=args.split)
+    start = blob.get("start", 0) if blob else 0
 
-    chosen = pick_indices(per_image, args.limit, args.pick)
+    print("=" * 74)
+    if per_image is not None:
+        chosen = pick_indices(per_image, args.limit, args.pick)
+    else:
+        # Không có điểm -> chọn NGẪU NHIÊN, có seed để lặp lại được.
+        n_av = len(ds)
+        rng = np.random.default_rng(args.seed)
+        idx = rng.choice(n_av, size=min(args.limit, n_av), replace=False)
+        chosen = [(int(k), float("nan"), None) for k in sorted(idx)]
     os.makedirs(args.out_dir, exist_ok=True)
 
-    recs = np.array([r for _, r, _ in chosen])
-    all_rec = np.array([p["hits_at_50"] / max(p["n_gt"], 1) for p in per_image])
-    print("=" * 74)
-    print(f"VISUALIZE — {len(chosen)} ảnh, chọn kiểu '{args.pick}'")
-    print(f"  nguồn       : {args.from_json}")
+    print(f"VISUALIZE — {len(chosen)} ảnh, chọn kiểu "
+          f"'{args.pick if per_image is not None else 'random'}'")
+    print(f"  nguồn       : {args.from_json or (dataset + '/' + args.split)}")
     print(f"  cấu hình    : t={cfg.timesteps[0]} w1={cfg.w_up_0} canvas={cfg.canvas} "
           f"r={cfg.grid_r} p={cfg.p}")
-    print(f"  AR_1000 lần chạy đó : {100 * blob['results']['AR_1000']:.2f}")
-    print(f"  recall@50 CẢ {len(per_image)} ảnh  : trung vị {np.median(all_rec):.2f}  "
-          f"[{all_rec.min():.2f}, {all_rec.max():.2f}]")
-    print(f"  recall@50 {len(chosen)} ảnh được chọn: trung vị {np.median(recs):.2f}  "
-          f"[{recs.min():.2f}, {recs.max():.2f}]")
-    if args.pick == "best":
-        print("  ⚠️ 'best' LÀ MẪU CHỌN LỌC — đừng đọc nó như kết quả chung.")
+    if per_image is not None:
+        recs = np.array([r for _, r, _ in chosen])
+        all_rec = np.array([p["hits_at_50"] / max(p["n_gt"], 1) for p in per_image])
+        print(f"  AR_1000 lần chạy đó : {100 * blob['results']['AR_1000']:.2f}")
+        print(f"  recall@50 CẢ {len(per_image)} ảnh  : trung vị "
+              f"{np.median(all_rec):.2f}  [{all_rec.min():.2f}, {all_rec.max():.2f}]")
+        print(f"  recall@50 {len(chosen)} ảnh được chọn: trung vị "
+              f"{np.median(recs):.2f}  [{recs.min():.2f}, {recs.max():.2f}]")
+        if args.pick == "best":
+            print("  ⚠️ 'best' LÀ MẪU CHỌN LỌC — đừng đọc nó như kết quả chung.")
+    else:
+        print(f"  tổng số ảnh : {len(ds)}  -> lấy ngẫu nhiên {len(chosen)} "
+              f"(seed {args.seed})")
+        print("  ⚠️ BỘ NÀY KHÔNG CÓ MASK GT nên KHÔNG có recall/AR — mọi con số")
+        print("     recall in ra sẽ là 0.00 vì không có gì để so, KHÔNG phải vì")
+        print("     model kém. Đây thuần tuý là xem mask trông thế nào.")
     print("=" * 74 + "\n")
 
     from d2s.attention import StableDiffusion2AttentionAggregator
@@ -286,9 +357,10 @@ def main():
                 f"r={cfg.grid_r}  |  {len(s['gt_masks'])} GT  "
                 f"recall@50={rec:.2f}", fontsize=13)
             fig1.tight_layout()
-            nm = os.path.splitext(os.path.basename(s["file_name"]))[0]
-            fig1.savefig(os.path.join(args.out_dir, f"{rec:.2f}_{nm}.png"),
-                         dpi=110, bbox_inches="tight")
+            fig1.savefig(
+                os.path.join(args.out_dir,
+                             _out_name(s["file_name"], rec, s["image_id"])),
+                dpi=110, bbox_inches="tight")
             plt.close(fig1)
             n_saved_this = 1
 
@@ -372,8 +444,8 @@ def main():
             + f"  recall@50={rec:.2f}", fontsize=13)
         fig.tight_layout()
 
-        name = os.path.splitext(os.path.basename(s["file_name"]))[0]
-        path = os.path.join(args.out_dir, f"{rec:.2f}_{name}.png")
+        path = os.path.join(args.out_dir,
+                            _out_name(s["file_name"], rec, s["image_id"]))
         fig.savefig(path, dpi=100, bbox_inches="tight")
         plt.close(fig)
 

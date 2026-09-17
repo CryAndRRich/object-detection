@@ -115,7 +115,18 @@ class CE130Coco:
         return {
             "image": canvas,
             "valid_h": valid_h,
+            # CE-130 ảnh luôn rộng >= cao (H = 384 cố định, W = 384..1918) nên
+            # resize theo min() luôn lấp kín chiều ngang -> valid_w = 1.0.
+            # Trả ra tường minh để dùng chung đường chạy với PACO, vốn có ảnh
+            # dọc và phải pad hai phía.
+            "valid_w": 1.0,
             "gt_cxcywh": gt,
+            # ⚠️ CE-130 CHỈ CÓ BOX, KHÔNG CÓ MASK. Trả mảng rỗng đúng shape để
+            # mọi thứ hạ nguồn (mask_iou_matrix, AR) chạy được mà không phải
+            # phân nhánh — chúng sẽ báo 0 GT, và đó là sự thật: không có mask
+            # nào để so. Đừng đọc "recall 0" trên CE-130 là model kém.
+            "gt_masks": np.zeros((0, H, W), dtype=bool),
+            "gt_areas": np.zeros(0, dtype=np.float64),
             "image_id": im["id"],
             "ce130_image_id": im.get("ce130_image_id"),
             "file_name": im["file_name"],

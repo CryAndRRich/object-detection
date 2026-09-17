@@ -137,3 +137,48 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# ---------------------------------------------------------------------------
+# Vẽ CE-130: bộ này KHÔNG có mask GT
+# ---------------------------------------------------------------------------
+
+def test_out_name_unique_for_ce130_paths():
+    """[NEGATIVE CONTROL] tên file ra phải RIÊNG BIỆT cho từng ảnh CE-130.
+
+    CE-130 đặt file_name kiểu 'val/1386_b2/ground_truth.jpg' — cả 908 ảnh có
+    ĐÚNG MỘT basename là 'ground_truth'. Đặt tên theo basename thì 50 ảnh vẽ ra
+    ghi đè nhau còn 1 file, và không có gì báo lỗi: thư mục vẫn tồn tại, ảnh
+    vẫn mở được. Mất dữ liệu âm thầm.
+    """
+    import ast
+    tool = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "tools", "visualize_best.py")
+    src = open(tool).read()
+    fn = [n for n in ast.parse(src).body
+          if isinstance(n, ast.FunctionDef) and n.name == "_out_name"][0]
+    ns = {"os": os}
+    exec(ast.get_source_segment(src, fn), ns)
+    out_name = ns["_out_name"]
+
+    names = {out_name(f"val/{i}_b1/ground_truth.jpg", float("nan"), i)
+             for i in range(50)}
+    assert len(names) == 50, f"chỉ có {len(names)} tên cho 50 ảnh -> ghi đè"
+
+    # basename thuần sẽ gộp tất cả về 1 -- chứng minh bẫy là thật
+    naive = {os.path.basename(f"val/{i}_b1/ground_truth.jpg") for i in range(50)}
+    assert len(naive) == 1
+
+    # PACO vẫn giữ tiền tố điểm để `ls` là bảng xếp hạng
+    assert out_name("000000005142.jpg", 1.0, 5142) == "1.00_000000005142.png"
+
+
+@needs_data
+def test_ce130_returns_empty_masks_and_valid_w():
+    """CE-130 chỉ có BOX. gt_masks rỗng đúng shape để đường chạy chung không vỡ."""
+    ds = CE130Coco(JSON, IMAGES, canvas=512)
+    s = ds[0]
+    assert s["gt_masks"].shape == (0, s["H"], s["W"])
+    assert s["gt_masks"].dtype == bool
+    assert s["valid_w"] == 1.0, "CE-130 luôn rộng >= cao nên không pad ngang"
+    assert len(s["gt_cxcywh"]) > 0, "nhưng box GT thì CÓ"
