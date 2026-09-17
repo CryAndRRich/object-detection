@@ -37,6 +37,7 @@ import time
 import numpy as np
 import torch
 from PIL import Image
+from scipy.ndimage import distance_transform_edt, median_filter
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -78,6 +79,59 @@ def pick_indices(per_image, n, mode):
     return chosen
 
 
+def _segmap(masks, H, W, seed=0, cell_px=None):
+    """Phân hoạch -> ảnh RGB màu đặc, lấp lỗ, làm mượt biên. CHỈ ĐỂ VẼ.
+
+    Ba việc, theo thứ tự, và vì sao cần:
+
+    1. LẤP LỖ. `masks_from_clusters` bỏ component nhỏ hơn `min_area_px` (100px),
+       nên phân hoạch có lỗ — đo được 3,63 % pixel trên ảnh mẫu. Nếu để trống,
+       nền lộ ra thành đốm ĐEN lỗ chỗ. Lấp bằng láng giềng gần nhất
+       (`distance_transform_edt` trả chỉ số ô gần nhất) chứ không tô một màu
+       nền, để lỗ nhỏ tan vào vùng bao quanh nó.
+
+    2. LÀM MƯỢT BIÊN. Mask sinh ở lưới r x r rồi upsample NEAREST, nên biên là
+       bậc thang cao đúng MỘT Ô. Lọc trung vị trên ẢNH NHÃN làm tròn bậc thang
+       mà KHÔNG trộn hai nhãn thành nhãn thứ ba (lọc trung bình sẽ).
+       ⚠️ Kernel phải LỚN HƠN bậc thang. Đo: bậc 8 px thì size=5 chỉ đổi 1,0 %
+       pixel (vô tác dụng), size=13 đổi 4,4 %. Nên kernel tính theo `cell_px`
+       = kích thước một ô quy về pixel ảnh gốc, không phải hằng số.
+
+    3. TÔ MÀU ĐẶC. Không phủ lên ảnh gốc: đã có panel ảnh gốc riêng bên cạnh.
+
+    ⚠️ Cả ba CHỈ đổi thứ hiển thị. Mask dùng để tính AR không đi qua hàm này.
+    """
+    lab = np.zeros((H, W), dtype=np.int32)          # 0 = chưa gán
+    for i, m in enumerate(masks):
+        lab[m] = i + 1
+
+    if (lab == 0).any() and len(masks):
+        # chỉ số của pixel khác 0 gần nhất
+        _, (iy, ix) = distance_transform_edt(
+            lab == 0, return_distances=True, return_indices=True)
+        lab = lab[iy, ix]
+
+    if cell_px and len(masks):
+        k = int(max(3, round(cell_px * 1.5)))
+        k += 1 - k % 2                               # kernel lẻ
+        sm = median_filter(lab, size=k, mode="nearest")
+        # ⚠️ Median XOÁ HẲN vùng nhỏ hơn kernel: đo được vật 8x8 px (đúng 1 ô)
+        # biến mất sạch với k=13. Mà vật nhỏ chính là nhóm ta yếu nhất
+        # (AR_S 4,83) — làm mượt để rồi xoá chúng là tự bóp méo hình minh hoạ.
+        # Nên chỉ nhận kết quả mượt ở nơi nhãn đó CÒN TỒN TẠI sau lọc.
+        survived = set(np.unique(sm).tolist())
+        lost = [v for v in np.unique(lab) if v not in survived]
+        if lost:
+            keep_mask = np.isin(lab, lost)
+            sm[keep_mask] = lab[keep_mask]           # trả lại vùng bị xoá
+        lab = sm
+
+    rng = np.random.default_rng(seed)
+    palette = rng.random((len(masks) + 1, 3))
+    palette[0] = 0.5                                # không nên còn dùng tới
+    return palette[np.clip(lab, 0, len(masks))]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -89,6 +143,9 @@ def main():
                     help="debug: 3 panel (ảnh gốc | mask trộn 6 mức | box vs GT), "
                          "để chẩn đoán. paper: mỗi mức granularity một ảnh "
                          "riêng, không box, crop bỏ pad — như Hình 1 của paper.")
+    ap.add_argument("--levels", default=None,
+                    help="--mode paper: các mức muốn vẽ, vd '1,3,6'. "
+                         "Mặc định vẽ cả 6. Panel ảnh gốc luôn có.")
     ap.add_argument("--max-draw", type=int, default=60,
                     help="số mask pred vẽ tối đa mỗi ảnh (theo diện tích giảm dần)")
     ap.add_argument("--data-root", default=None)
@@ -169,9 +226,9 @@ def main():
         order = np.argsort(-areas)[:args.max_draw]
 
         if args.mode == "paper":
-            # Mỗi mức granularity là MỘT PHÂN HOẠCH: mỗi pixel đúng một cụm.
-            # Vẽ riêng từng mức, như Hình 1 của paper. Không vẽ box (paper sinh
-            # mask, không sinh box), crop bỏ pad, một panel chiếm cả khung.
+            # MỘT file cho mỗi ảnh: ảnh gốc BÊN TRÁI, các mức granularity bên
+            # cạnh — đúng bố cục Hình 1 của paper. Segment map là ảnh MÀU ĐẶC
+            # (không phủ lên ảnh gốc), vì đã có panel ảnh gốc riêng rồi.
             lv = out["merge_info"].get("level_masks")
             if not lv:
                 raise RuntimeError(
@@ -179,38 +236,45 @@ def main():
                     "Chạy --mode paper thì tool tự bật, nên lỗi này nghĩa là "
                     "config bị ghi đè ở đâu đó.")
             # ⚠️ mask của Alg.2 ở kích thước ẢNH GỐC (H, W), còn s["image"] là
-            # canvas vuông đã pad. Phải đưa nền về đúng (H, W) của mask, nếu
-            # không overlay lệch hẳn. Cắt vùng hợp lệ rồi resize về (W, H).
+            # canvas vuông đã pad. Cắt vùng hợp lệ rồi resize về (W, H).
             vh = int(s["valid_h"] * cfg.canvas)
             vw = int(s["valid_w"] * cfg.canvas)
             bg = np.asarray(Image.fromarray(
                 s["image"][:vh, :vw]).resize((s["W"], s["H"]), Image.BILINEAR))
+
+            # Một ô lưới phủ canvas/r px trên canvas; quy về pixel ảnh gốc.
+            cell_px = (cfg.canvas / cfg.grid_r) * s["W"] / max(vw, 1)
             heights = out["merge_info"]["heights"]
-            n_saved_this = 0
-            for li, (h, masks) in enumerate(zip(heights, lv)):
-                fig1, ax1 = plt.subplots(
-                    1, 1, figsize=(13, 13 * s["H"] / max(s["W"], 1)))
-                ax1.imshow(bg)
-                if len(masks):
-                    rng = np.random.default_rng(li)
-                    ov = np.zeros((s["H"], s["W"], 4))
-                    # to -> nhỏ, để mảnh nhỏ nằm trên và không bị mức thô che.
-                    ar = np.array([m.sum() for m in masks])
-                    for mi in np.argsort(-ar):
-                        c = rng.random(3)
-                        ov[masks[mi]] = [c[0], c[1], c[2], 0.75]
-                    ax1.imshow(ov)
-                ax1.set_title(
-                    f"mức {li + 1}/{len(heights)}  h={h:.3f}  "
-                    f"{len(masks)} mask  |  t={cfg.timesteps[0]} w1={cfg.w_up_0} "
-                    f"r={cfg.grid_r}", fontsize=13)
+            want = [int(x) for x in args.levels.split(",")] if args.levels else \
+                list(range(1, len(heights) + 1))
+            want = [i for i in want if 1 <= i <= len(heights)]
+
+            panels = [("ảnh gốc", bg, None)]
+            for li in want:
+                masks, h = lv[li - 1], heights[li - 1]
+                panels.append((f"mức {li}/{len(heights)}  h={h:.3f}  "
+                               f"{len(masks)} mask",
+                               _segmap(masks, s["H"], s["W"], seed=li,
+                                       cell_px=cell_px), None))
+
+            ncol = len(panels)
+            fig1, axs = plt.subplots(
+                1, ncol, figsize=(7 * ncol, 7 * s["H"] / max(s["W"], 1) + 0.6))
+            axs = np.atleast_1d(axs)
+            for ax1, (title, img, _) in zip(axs, panels):
+                ax1.imshow(img)
+                ax1.set_title(title, fontsize=12)
                 ax1.axis("off")
-                fig1.tight_layout()
-                nm = os.path.splitext(os.path.basename(s["file_name"]))[0]
-                fig1.savefig(os.path.join(args.out_dir, f"{nm}_L{li + 1}_h{h:.3f}.png"),
-                             dpi=100, bbox_inches="tight")
-                plt.close(fig1)
-                n_saved_this += 1
+            fig1.suptitle(
+                f"{s['file_name']}  |  t={cfg.timesteps[0]} w1={cfg.w_up_0} "
+                f"r={cfg.grid_r}  |  n_gt={len(s['gt_masks'])} recall@50={rec:.2f}",
+                fontsize=13)
+            fig1.tight_layout()
+            nm = os.path.splitext(os.path.basename(s["file_name"]))[0]
+            fig1.savefig(os.path.join(args.out_dir, f"{rec:.2f}_{nm}.png"),
+                         dpi=110, bbox_inches="tight")
+            plt.close(fig1)
+            n_saved_this = 1
 
             n_pred = len(pred)
             del A, out, pred
