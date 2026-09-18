@@ -60,6 +60,9 @@ def main():
     ap.add_argument("--no-ipf", action="store_true",
                     help="[ĐỐI CHỨNG] bỏ IPF để thấy vì sao paper cần nó")
     ap.add_argument("--max-iter", type=int, default=200)
+    ap.add_argument("--underlay", type=float, default=0.35,
+                    help="độ đậm ảnh gốc dưới Markov-map, 0 = tắt hẳn (giống "
+                         "paper nhất), 0.35 = dễ đối chiếu vùng trắng với vật")
     ap.add_argument("--show-attention", action="store_true",
                     help="thêm panel attention THÔ A[seed] để so với Markov-map "
                          "(đây là đại lượng KHÁC: xác suất, cao = gần)")
@@ -145,6 +148,29 @@ def main():
     # code của họ vẽ `imshow(-markov_map, cmap='gray')`. Markov-map là THỜI
     # GIAN ĐẾN, thấp = gần về ngữ nghĩa, nên đảo dấu làm vùng cùng vật thành
     # TRẮNG. Ta theo y hệt để hình đọc được cạnh hình trong paper.
+    # ⚠️ THANG MÀU. `m` có dải [0, max_iter]: ô ĐÃ tới nằm quanh 0..50, ô CHƯA
+    # tới mang đúng max_iter (200). Để imshow tự scale theo min/max thì ~75 %
+    # dải màu bị phí cho khoảng trống giữa hai nhóm, và mọi sắc độ trong vùng
+    # đang nhìn bị nén vào một góc -> nền đen kịt, mất hết chi tiết
+    # (đo 2026-09-18 trên chính ảnh con mèo).
+    #
+    # Paper vẽ `m` ở trạng thái HỘI TỤ, nơi gần như mọi ô đều đã tới nên không
+    # gặp vấn đề này. Hình theo bước thì có cả hai loại trong một ảnh.
+    #
+    # Sửa: chốt vmin/vmax theo PHÂN VỊ của vùng ĐÃ TỚI, và dùng CHUNG cho mọi
+    # panel để các bước so được với nhau. Ô chưa tới vượt vmin sẽ bị kẹp thành
+    # đen — đúng ý nghĩa "chưa tới".
+    reached = m[m < args.max_iter]
+    if len(reached) > 8:
+        lo = float(torch.quantile(reached.float(), 0.02))
+        hi = float(torch.quantile(reached.float(), 0.98))
+    else:                       # gần như không ô nào tới: quay về dải thô
+        lo, hi = 0.0, float(args.max_iter)
+    if hi - lo < 1e-6:
+        hi = lo + 1.0
+    vmin, vmax = -hi, -lo       # vì ta vẽ -m
+    print(f"  thang màu: m in [{lo:.2f}, {hi:.2f}] (phân vị 2-98 % của vùng đã tới)")
+
     steps = [t for t in args.steps if t in snaps]
     panels = [("Input image + prompt", bg, None, None)]
     if args.show_attention:
@@ -173,7 +199,17 @@ def main():
             row = 1
             c0 = (ncols - 2 * n_bot) // 2 + (i - n_top) * 2
         ax = fig.add_subplot(gs[row, c0:c0 + 2])
-        ax.imshow(img) if cmap is None else ax.imshow(img, cmap=cmap)
+        if cmap is None:
+            ax.imshow(img)
+        elif cmap == "gray":
+            # Ảnh gốc mờ bên dưới để đối chiếu vùng trắng với vật thật; không
+            # có nó thì không biết mask có bám đúng con mèo hay không.
+            if args.underlay > 0:
+                ax.imshow(bg, alpha=args.underlay)
+            ax.imshow(img, cmap="gray", vmin=vmin, vmax=vmax,
+                      alpha=1.0 - args.underlay * 0.45)
+        else:
+            ax.imshow(img, cmap=cmap)
         ax.plot([gx], [gy], marker="o", ms=7, mfc="none", mec="lime", mew=2)
         ax.set_title(title, fontsize=10)
         ax.axis("off")
