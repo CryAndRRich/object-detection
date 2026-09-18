@@ -110,28 +110,39 @@ def test_snapshots_are_returned_at_requested_steps():
         assert abs(float(p.max()) - 1.0) < 1e-9, "đã chia max nên đỉnh = 1"
 
 
-def test_partial_markov_map_freezes_then_grows():
-    """m_t KHÔNG đơn điệu giảm — nó TĂNG ở ô chưa tới, và ĐÓNG BĂNG ở ô đã tới.
+def test_partial_markov_map_keeps_unreached_at_max():
+    """Ô CHƯA tới phải giữ max_iterations, KHÔNG mang giá trị bước hiện tại.
 
-    ⚠️ Trực giác "m_t giảm dần về m" là SAI, và tôi đã suýt ghi vào test.
-    Đo trên A_2x2: ô nền đi 1 -> 2 -> 5 -> 9.447 (TĂNG, vì ô chưa vượt tau
-    mang giá trị bước hiện tại), còn ô cùng vật chốt ở 0.937 ngay từ t=1 và
-    không đổi nữa.
+    ⚠️ Đây là chỗ đã vẽ ra hình hỏng (2026-09-18). Bản đầu gán (i+1) cho ô
+    chưa tới; ở t nhỏ thì giá trị đó (1..50) rơi TRONG dải màu của vùng đã
+    tới, nên nền bị tô gần TRẮNG và nuốt hết vật. Giữ max_iterations thì nền
+    luôn nằm ngoài dải -> luôn đen, và mọi panel dùng chung được một thang màu.
 
-    Đây chính là thứ làm hình "lan dần": vùng TRẮNG (giá trị thấp, đã tới)
-    lớn dần qua các panel, phần còn lại tối dần đi.
+    Đây là tính chất HIỂN THỊ, nhưng nó quyết định hình có đọc được hay không,
+    nên phải có test — nhìn hình thì cái nào cũng "hợp lý".
     """
     m, snaps = markov_map_from_prompt(A_2x2, 0, tau=0.3, max_iterations=50,
                                       snapshot_steps=[1, 2, 5, 20])
     ts = sorted(snaps)
 
-    # ô đã tới thì ĐÓNG BĂNG
+    # ô đã tới: ĐÓNG BĂNG ngay khi vượt tau
     for t in ts:
         _, m_t = snaps[t]
         assert abs(float(m_t[0]) - 0.0) < 1e-12, "seed luôn 0"
         assert abs(float(m_t[3]) - 0.9367) < 1e-3, "ô cùng vật chốt từ t=1"
 
-    # ô chưa tới thì TĂNG theo bước, rồi chốt khi vượt tau
-    vals = [float(snaps[t][1][1]) for t in ts]
-    assert vals == sorted(vals), f"ô nền phải tăng dần, đo {vals}"
-    assert abs(vals[-1] - float(m[1])) < 1e-9, "cuối cùng phải bằng m thật"
+    # ô nền (đến ở ~9.45): giữ max_iterations cho tới khi thực sự vượt
+    for t in (1, 2, 5):
+        _, m_t = snaps[t]
+        assert float(m_t[1]) == 50.0, \
+            f"t={t}: ô chưa tới phải là max_iterations, đo {float(m_t[1])}"
+    _, m20 = snaps[20]
+    assert abs(float(m20[1]) - float(m[1])) < 1e-9, \
+        "sau khi vượt tau thì bằng m thật"
+
+    # ĐƠN ĐIỆU GIẢM: vùng đã tới chỉ lớn dần, không bao giờ co lại
+    for a, b in zip(ts, ts[1:]):
+        _, ma = snaps[a]
+        _, mb = snaps[b]
+        assert bool((mb <= ma + 1e-12).all()), \
+            f"m_t phải giảm dần (vùng trắng lan ra), vỡ giữa t={a} và t={b}"

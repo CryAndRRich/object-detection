@@ -68,8 +68,9 @@ def markov_map_from_prompt(A, seed_index, tau=0.3, max_iterations=1000,
     Trả (m, snapshots) với m: (N,) float — bước đầu tiên mỗi ô vượt tau;
     ô không bao giờ vượt nhận max_iterations.
     snapshots: {bước: (p_t đã chia max, m_t)} cho các bước trong
-    snapshot_steps. `m_t` là Markov-map NẾU dừng ở bước đó — ô chưa vượt tau
-    nhận giá trị bước hiện tại. Đây là thứ paper vẽ (Hình 3), không phải `p_t`.
+    snapshot_steps. `m_t` là Markov-map NẾU dừng ở bước đó: ô đã vượt tau mang
+    thời gian đến của nó, ô CHƯA vượt giữ nguyên max_iterations. Đây là thứ
+    paper vẽ (Hình 3), không phải `p_t`.
 
     Nội suy tuyến tính (mặc định trong code M2N2) làm m liên tục:
         m = i + 1 - (p_t[k] - tau) / (delta + 1e-6)
@@ -112,9 +113,12 @@ def markov_map_from_prompt(A, seed_index, tau=0.3, max_iterations=1000,
             #   m_t = Markov-map NẾU DỪNG Ở ĐÂY — ô chưa vượt tau nhận (i+1)
             # Cái thứ hai mới là thứ paper vẽ, và là thứ "lan dần ra" theo
             # từng bước. `p` thì luôn có đỉnh = 1 ở seed nên nhìn ít thay đổi.
-            m_t = m.clone()
-            m_t[not_yet] = float(i + 1)
-            snaps[i + 1] = (p.clone(), m_t)
+            # ⚠️ Ô CHƯA TỚI giữ nguyên max_iterations, KHÔNG gán (i+1).
+            # Gán (i+1) thì ở t nhỏ, giá trị "chưa tới" (1..50) rơi TRONG dải
+            # màu của vùng đã tới, nên nền bị tô gần TRẮNG và nuốt hết vật.
+            # Giữ max_iterations thì nền luôn nằm ngoài dải -> luôn đen, và
+            # mọi panel dùng chung được một thang màu (đo 2026-09-18).
+            snaps[i + 1] = (p.clone(), m.clone())
         if not not_yet.any() and not want:
             break
 

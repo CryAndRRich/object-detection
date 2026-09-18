@@ -60,9 +60,10 @@ def main():
     ap.add_argument("--no-ipf", action="store_true",
                     help="[ĐỐI CHỨNG] bỏ IPF để thấy vì sao paper cần nó")
     ap.add_argument("--max-iter", type=int, default=200)
-    ap.add_argument("--underlay", type=float, default=0.35,
-                    help="độ đậm ảnh gốc dưới Markov-map, 0 = tắt hẳn (giống "
-                         "paper nhất), 0.35 = dễ đối chiếu vùng trắng với vật")
+    ap.add_argument("--underlay", type=float, default=0.0,
+                    help="độ đậm ảnh gốc dưới Markov-map. MẶC ĐỊNH 0 = tắt, "
+                         "giống paper. Bật (vd 0.3) thì dễ đối chiếu vùng "
+                         "trắng với vật, nhưng làm giảm tương phản của map.")
     ap.add_argument("--show-attention", action="store_true",
                     help="thêm panel attention THÔ A[seed] để so với Markov-map "
                          "(đây là đại lượng KHÁC: xác suất, cao = gần)")
@@ -135,12 +136,27 @@ def main():
     # ---------------- vẽ ----------------
     bg = np.asarray(Image.fromarray(s["image"][:vh, :vw])
                     .resize((s["W"], s["H"]), Image.BILINEAR))
-    gx = (cx + 0.5) / r * s["W"]
-    gy = (cy + 0.5) / r * s["H"]
+    # ⚠️ Ô lưới chỉ trải trên VÙNG HỢP LỆ, không phải cả r ô: ảnh dọc
+    # 478x640 chiếm 382/512 canvas = 47,8 ô ngang, 16,2 ô còn lại là PAD.
+    # Chia cho r sẽ đặt chấm lệch trái tới 26 % (đo: px=1.0 ra pixel 355 thay
+    # vì 478). Chia cho SỐ Ô HỢP LỆ mới đúng. Ảnh ngang có valid_w=1 nên hai
+    # cách trùng nhau — đó là lý do lỗi không lộ trên ảnh con mèo.
+    gx = (cx + 0.5) / max(vw / cfg.canvas * r, 1e-9) * s["W"]
+    gy = (cy + 0.5) / max(vh / cfg.canvas * r, 1e-9) * s["H"]
+
+    # Số ô thực sự phủ ảnh; phần còn lại của lưới nằm trên PAD.
+    nx = max(int(round(vw / cfg.canvas * r)), 1)
+    ny = max(int(round(vh / cfg.canvas * r)), 1)
 
     def to_img(vec):
-        """(N,) trên lưới r x r -> (H, W) ở kích thước ảnh gốc."""
-        a = vec.detach().float().cpu().numpy().reshape(r, r)
+        """(N,) trên lưới r x r -> (H, W) ở kích thước ảnh gốc.
+
+        ⚠️ CẮT BỎ PAD trước khi resize. Ảnh dọc 478x640 chỉ chiếm 48/64 cột
+        lưới; kéo cả 64 cột ra chiều rộng ảnh sẽ NÉN map lại và lệch khỏi vật.
+        Ảnh ngang có valid_w=1 nên không lộ — đó là lý do lỗi sống sót qua ảnh
+        con mèo.
+        """
+        a = vec.detach().float().cpu().numpy().reshape(r, r)[:ny, :nx]
         return np.asarray(Image.fromarray(a).resize((s["W"], s["H"]), Image.BILINEAR))
 
     # MÀU: theo đúng M2N2. Hình 3 của paper ghi rõ "Markov-maps are INVERTED
@@ -206,8 +222,10 @@ def main():
             # có nó thì không biết mask có bám đúng con mèo hay không.
             if args.underlay > 0:
                 ax.imshow(bg, alpha=args.underlay)
-            ax.imshow(img, cmap="gray", vmin=vmin, vmax=vmax,
-                      alpha=1.0 - args.underlay * 0.45)
+                ax.imshow(img, cmap="gray", vmin=vmin, vmax=vmax,
+                          alpha=1.0 - args.underlay * 0.45)
+            else:
+                ax.imshow(img, cmap="gray", vmin=vmin, vmax=vmax)
         else:
             ax.imshow(img, cmap=cmap)
         ax.plot([gx], [gy], marker="o", ms=7, mfc="none", mec="lime", mew=2)
