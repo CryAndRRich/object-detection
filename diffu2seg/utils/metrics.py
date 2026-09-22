@@ -11,7 +11,7 @@ mass) under the name `score_AUC` would invite a comparison against the 0.4965 -
 it must be added under a different key whose name says PROXY out loud.
 `test_metrics.py::test_no_score_auc_key` locks this.
 
-TWO TRAPS, both recorded in docs/03-ket-qua.md and both reproduced here on purpose:
+TWO TRAPS, both recorded in docs/old/ROUND_1_ARCHIVE.md (phần 03) and both reproduced here on purpose:
 
 1. RAW ACCUMULATION, divided ONCE.
    Accumulate (hits, n_gt) across images and divide at the end. Averaging the

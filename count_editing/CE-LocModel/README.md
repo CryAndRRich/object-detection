@@ -1,7 +1,7 @@
 # CE-Loc — EXPERIMENT A, B, A.1, A.2, C
 
 > **EXPERIMENT C (THIẾT KẾ, chưa implement)** — đặc tả đầy đủ ở
-> [`../../../docs/04-thiet-ke.md`](../../../docs/04-thiet-ke.md).
+> [`docs/old/ROUND_1_ARCHIVE.md (phần 04)`](../../../docs/old/ROUND_1_ARCHIVE.md).
 > Mở khối `nn.TransformerDecoder` kín thành **6 vòng refine**, mỗi vòng cho box **uốn
 > attention** bằng bias hình học tính từ **4 góc của chính nó** (`Â = Softmax(QKᵀ + R)`) —
 > cơ chế **V-DETR** (`refs/pdfs/VDETR.pdf`, code `refs/repos/V-DETR/`).
@@ -74,7 +74,7 @@ chính `patch_raw` đã cache, không phải build lại.
 này.** Bản read-only đầy đủ vẫn ở `refs/repos/Count-Editing/CE-LocModel/` nếu cần đọc lại.
 
 Thiết kế đầy đủ + toàn bộ số đo: [`../../../docs/thiet-ke-ce-loc-vong-2.md`](../../../docs/thiet-ke-ce-loc-vong-2.md).
-Lỗi vòng 1 (đọc TRƯỚC khi sửa gì): [`../../../docs/02-du-lieu-ce130.md`](../../../docs/02-du-lieu-ce130.md).
+Lỗi vòng 1 (đọc TRƯỚC khi sửa gì): [`docs/old/ROUND_1_ARCHIVE.md (phần 02)`](../../../docs/old/ROUND_1_ARCHIVE.md).
 
 **Ràng buộc**: thân model là **Diffusion Policy transformer-based**, chỉ **mượn cơ chế sinh N box**
 của DiffusionDet.
@@ -173,7 +173,7 @@ Cùng ảnh, cùng annotation (181.475 box), cùng loss/matcher/diffusion/N.
 Đọc kết quả:
 - **A.2 ≈ A.1** → đường text hoạt động tốt ngang head trực tiếp. Tốt nhất cho CE-Loc.
 - **A.2 ≫ A.1** → đường text **là nút thắt** → khớp với mismatch không gian đã đo
-  ([docs/01-bai-toan.md](../../../docs/01-bai-toan.md)).
+  ([docs/old/ROUND_1_ARCHIVE.md (phần 01)](../../../docs/old/ROUND_1_ARCHIVE.md)).
 - **cả hai đều kém** → lỗi ở phần chung (diffusion/matcher/decoder).
 
 **A.2 đang giải bài DỄ HƠN** — 1 forward xong cả ảnh (7,26 box) thay vì ~2,94
@@ -292,7 +292,7 @@ zero nên xuất phát sau, không phải vì vô dụng.
 Tại `best_epoch` của mỗi bên, trên val trong lúc train: A `iou_matched` **0,3449** >
 E1 **0,3401** — A trông tốt hơn. Nhưng eval trên **cùng** val cho AP50 E1 gấp **5,09×**.
 `n_matched` cố định **268,2** ở cả hai. Đúng cơ chế §5ter của
-`docs/02-du-lieu-ce130.md` đã ghi từ C1: `iou_matched` chỉ trung bình trên
+`docs/old/ROUND_1_ARCHIVE.md (phần 02)` đã ghi từ C1: `iou_matched` chỉ trung bình trên
 cặp Hungarian đã khớp nên **mù với GT không box nào chạm tới**. Lần này nó suýt
 khiến E1 bị đọc là "không cải thiện".
 

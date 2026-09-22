@@ -82,7 +82,7 @@ class Diffu2SegConfig:
     w_up_0: float = 0.5
     w_up_1: float = 0.5
     w_up_2: float = 0.0
-    # M2N2's measured optimum (docs/05-nguon.md, and their Table 1 on DAVIS:
+    # M2N2's measured optimum (docs/old/ROUND_1_ARCHIVE.md (phần 05), and their Table 1 on DAVIS:
     # up_0 alone 6.90, up_1 alone 7.10, both at 0.5 -> 6.72 NoC90; the two
     # down blocks are far worse at 15.25 / 13.18). These are the two highest-
     # resolution decoder blocks, which is also what Diffuse2Seg uses.

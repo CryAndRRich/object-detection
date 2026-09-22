@@ -17,7 +17,7 @@ cái nêu trong abstract: `diffu_dino/` (DiffuDINO — cái ta ghép ở đây) 
 này **không share code diffusion**, mỗi cái tự viết lại `q_sample`/beta-schedule riêng, chỉ
 dùng chung phần tiêm timestep-embedding (`layers_diffu_detr/transformer.py`).
 
-Đây là bước khảo sát tiếp theo của dự án sau DiffusionDet (xem [`../../docs/06-benchmark-detector.md`](../../docs/06-benchmark-detector.md)).
+Đây là bước khảo sát tiếp theo của dự án sau DiffusionDet (xem [`docs/old/ROUND_1_ARCHIVE.md (phần 06)`](../../docs/old/ROUND_1_ARCHIVE.md)).
 
 ## Trạng thái
 

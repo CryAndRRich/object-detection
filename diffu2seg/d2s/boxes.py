@@ -1,7 +1,7 @@
 """Binary masks -> boxes in the project's canonical coordinate system.
 
 Output is cxcywh in [0,1] on the 512 canvas -- the same system every CE-130
-number in docs/03-ket-qua.md already lives in.
+number in docs/old/ROUND_1_ARCHIVE.md (phần 03) already lives in.
 
                         THE OFF-BY-ONE THAT MATTERS
 

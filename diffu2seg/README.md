@@ -5,7 +5,7 @@ Port phần **training-free** của **Diffuse2Seg** ([arXiv 2609.06491](https://
 
 > **Mục đích: KHẢO SÁT CƠ CHẾ, chưa gắn vào pipeline CE-Loc.**
 > Đây là công cụ để xem mask/box thực tế ra sao, **không** phải ứng viên cho
-> toán tử `T` của [../../docs/01-bai-toan.md](../../docs/01-bai-toan.md).
+> toán tử `T` của [docs/old/ROUND_1_ARCHIVE.md (phần 01)](../../docs/old/ROUND_1_ARCHIVE.md).
 
 **Không có phần train Mask2Former** (bước 3 của paper) — bỏ hoàn toàn.
 
@@ -555,7 +555,7 @@ trung vị còn **1,30×1,07 ô**, round-trip IoU ~**0,35 dù mask hoàn hảo**
 quả — nếu `oracle_recall` sát trần thì nút thắt là **độ phân giải**, không phải `p`.
 
 ⚠️ **D.1 (DiffusionDet, AP50 58,13) là trần của DỮ LIỆU, KHÔNG phải mục tiêu nên
-nhắm** — xem `docs/01-bai-toan.md` mục 4.3.
+nhắm** — xem `docs/old/ROUND_1_ARCHIVE.md (phần 01)` mục 4.3.
 
 ---
 

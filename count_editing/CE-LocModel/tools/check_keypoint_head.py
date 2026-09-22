@@ -13,7 +13,7 @@ decoder/diffusion/box token.
 BỐN MỐC SO SÁNH
 ---------------
   lưới đều       : sqrt(K) x sqrt(K) điểm cách đều, KHÔNG nhìn ảnh, KHÔNG train  <- tool tự đo
-  CLIP cosine    : median 3,60 ô | 11,7 % trong 1 ô   (docs/01-bai-toan.md mục 6)
+  CLIP cosine    : median 3,60 ô | 11,7 % trong 1 ô   (docs/old/ROUND_1_ARCHIVE.md (phần 01) mục 6)
   box CE-130     : rộng trung vị 1,96 ô, cao 1,71 ô (train) -> bán kính ~1 ô
   box/ảnh        : trung vị 20 (train) / 21 (val), mean 37,6 / 42,2, p90 ~90
 

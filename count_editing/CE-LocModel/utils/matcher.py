@@ -78,7 +78,11 @@ def hungarian_match(pred_boxes, gt_boxes, scores=None):
 @torch.no_grad()
 def simota_match(pred_boxes, gt_boxes, scores=None, use_center_prior=False,
                  radius_ratio=2.5, top_k=10):
-    """One GT takes k proposals; one proposal matches AT MOST 1 GT."""
+    """One GT takes k proposals; one proposal matches AT MOST 1 GT.
+
+    When there are more GT than proposals (common at N=30 on CE-130, whose medians are
+    20/21/30 per image) the surplus GT stay unmatched -- see the rescue loop below.
+    """
     dev = pred_boxes.device
     n, m = pred_boxes.shape[0], gt_boxes.shape[0]
     if m == 0:
@@ -108,15 +112,26 @@ def simota_match(pred_boxes, gt_boxes, scores=None, use_center_prior=False,
 
     # Rescue loop for unmatched GT (loss.py:428-438): the dedup above can strip a
     # GT of all its proposals -> penalise used proposals by +1e5 and reassign.
-    for _ in range(100):
+    #
+    # ONLY SOLVABLE WHILE m <= n. Each proposal takes at most one GT, so with more GT
+    # than proposals some GT provably cannot be matched -- the loop would spin and the
+    # old `assert` fired. That never triggered in round 1 (N=100 vs a median of 20-30
+    # GT) but round 2 runs N=30 against the same medians, so images where m >= n are
+    # COMMON, not exotic. Cap the rescue at the number of GT that can possibly be
+    # covered and let the rest go unmatched: an unmatched GT simply contributes no
+    # coordinate term, exactly as with an image that has more GT than proposals under
+    # Hungarian.
+    for _ in range(min(m, n)):
         empty = matching.sum(0) == 0
         if not empty.any():
             break
-        cost[matching.sum(1) > 0] += 1e5
+        free = matching.sum(1) == 0
+        if not free.any():
+            break                       # every proposal is taken: nothing left to give
+        cost[~free] += 1e5
         for j in empty.nonzero(as_tuple=True)[0]:
             matching[cost[:, j].argmin(), j] = True
         matching = _dedup(matching)
-    assert not (matching.sum(0) == 0).any(), "a GT is still unmatched"
 
     pi, gi = matching.nonzero(as_tuple=True)
     return pi, gi

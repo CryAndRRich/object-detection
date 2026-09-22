@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 r"""Vẽ mask + box của GĐ1 lên ảnh thật, để KIỂM BẰNG MẮT.
 
-VÌ SAO CÓ FILE NÀY: bài học §5 của docs/02-du-lieu-ce130.md — visualize bắt được
+VÌ SAO CÓ FILE NÀY: bài học §5 của docs/old/ROUND_1_ARCHIVE.md (phần 02) — visualize bắt được
 **2 lỗi lớn mà toàn bộ test và 3 vòng rà soát code bỏ sót**. Bộ test ở đây chạy
 trên affinity giả lập; nó chứng minh phần toán đúng, không chứng minh mask rơi
 đúng vật.

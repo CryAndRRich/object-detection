@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 r"""Vẽ mask GĐ2 lên N ảnh, chọn theo kết quả của một lần chạy trước.
 
-NHÌN ẢNH TRƯỚC KHI TIN BẤT KỲ CON SỐ NÀO — bài học §5 của docs/02-du-lieu-ce130.md:
+NHÌN ẢNH TRƯỚC KHI TIN BẤT KỲ CON SỐ NÀO — bài học §5 của docs/old/ROUND_1_ARCHIVE.md (phần 02):
 visualize bắt được 2 lỗi lớn mà toàn bộ test và 3 vòng rà soát code bỏ sót.
 
 CHỌN ẢNH NÀO: đọc `per_image` trong JSON của `run_paper.py`, xếp theo
