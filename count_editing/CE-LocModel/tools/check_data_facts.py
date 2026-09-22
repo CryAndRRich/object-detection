@@ -20,7 +20,7 @@ KHÔNG train gì, KHÔNG cần GPU, KHÔNG cần CLIP. Chỉ đọc annotation.
 
 CHẠY (TRÊN SERVER)
 ------------------
-  python tools/check_data_facts.py --out /mnt/disk1/aiotlab/haitn/log/data_facts.json
+  python tools/check_data_facts.py --out /mnt/disk1/aiotlab/haitn/output/data_facts.json
 """
 
 import argparse

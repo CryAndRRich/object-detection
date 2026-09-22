@@ -78,7 +78,7 @@ def one_step(cfg_path):
     from torch.utils.data import DataLoader
 
     from data.factory import build_dataset
-    from models.criterion import SetCriterion, loss_from_output
+    from models.criterion import SetCriterion, loss_from_layers
     from models.detector import build_model
     from train import TorchWrap, collate, run_val
 
@@ -130,7 +130,7 @@ def one_step(cfg_path):
     pb, lg = pairs[-1]
 
     crit = SetCriterion(cfg["matcher"]["method"])
-    loss, st, _, lg = loss_from_output(crit, out, tg, labels=tl)
+    loss, st, _, lg = loss_from_layers(crit, out, tg, labels=tl)
     if not torch.isfinite(loss):
         raise ValueError(f"loss is {loss}")
     loss.backward()

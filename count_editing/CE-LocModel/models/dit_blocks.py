@@ -1,13 +1,11 @@
 """Các khối dựng nên EXPERIMENT A — xem `docs/EXPERIMENT_A_PLAN.md`.
 
-VÌ SAO LÀ FILE MỚI, KHÔNG SỬA `box_transformer.py`
---------------------------------------------------
-`box_transformer.py` phục vụ đồng thời A/B/A.1/A.2/C1/C1b/E1 của vòng 1 bằng các cờ
-(`roi_to_tgt`, `score_roi`, `refine_rounds`), và thứ tự khởi tạo module ở đó bị ràng
-buộc để giữ "bit-exact ở step 0" giữa các thí nghiệm ấy. Vòng 2 đặt lại mốc gốc nên
-ràng buộc đó không còn ý nghĩa; nhét thêm cờ vào file cũ chỉ làm nó khó đọc hơn.
+KHÔNG CÓ CỜ CHỌN THÍ NGHIỆM. Mỗi lớp làm đúng một việc.
 
-File này KHÔNG chứa cờ chọn thí nghiệm. Mỗi lớp làm đúng một việc.
+Thân mô hình vòng 1 (`box_transformer.py`) phục vụ đồng thời A/B/A.1/A.2/C1/C1b/E1 bằng
+các cờ (`roi_to_tgt`, `score_roi`, `refine_rounds`), và thứ tự khởi tạo module ở đó bị
+ràng buộc để giữ "bit-exact ở step 0" giữa các thí nghiệm ấy. File đó đã bị xoá cùng
+toàn bộ code vòng 1; nguyên văn còn trong `docs/old/ROUND_1_ARCHIVE.md`.
 
 BA ĐIỀU KHÁC VÒNG 1
 -------------------

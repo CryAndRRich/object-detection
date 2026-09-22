@@ -164,48 +164,6 @@ def test_factory_defaults_to_ce130_so_old_configs_are_untouched():
     assert dataset_kind(cfg) == "ce130"
 
 
-def test_factory_never_augments_the_eval_split():
-    """flip_prob is supplied by the caller, so an augmentation setting in a config
-    cannot leak into evaluation."""
-    import yaml
-    with open("config/experiment_a1.yaml") as f:
-        cfg = yaml.safe_load(f)
-    assert cfg["data"]["flip_prob"] == 0.5
-    assert build_dataset(cfg, "val").flip_prob == 0.0
-    assert build_dataset(cfg, "train", cfg["data"]["flip_prob"]).flip_prob == 0.5
-
-
-def test_a1_config_differs_from_a_ONLY_in_data_and_budget():
-    """A.1 is a control: model, loss, matcher, diffusion and eval must be byte
-    identical to A, or a difference in the result cannot be attributed."""
-    import yaml
-    with open("config/experiment_a.yaml") as f:
-        a = yaml.safe_load(f)
-    with open("config/experiment_a1.yaml") as f:
-        c = yaml.safe_load(f)
-    for section in ("diffusion", "loss", "matcher", "eval"):
-        assert a[section] == c[section], f"{section} differs from A"
-    # A.1 spells out n_class/use_text that A leaves implicit, so compare EFFECTIVE
-    # values rather than raw keys -- otherwise stating a default would read as a
-    # change of model.
-    defaults = {"n_class": 1, "use_text": True, "roi_k": 0}
-    keys = set(a["model"]) | set(c["model"])
-    for k in keys:
-        d = defaults.get(k)
-        assert a["model"].get(k, d) == c["model"].get(k, d), f"model.{k} differs from A"
-    changed = {k for k in a["training"] if a["training"][k] != c["training"][k]}
-    assert changed == {"batch_size", "epochs", "save_dir"}, changed
-
-
-def test_coco_val_and_test_resolve_to_the_same_file():
-    """COCO has no third split. Documented, not accidental -- eval prints the
-    resolved path so it cannot be mistaken for a held-out test set."""
-    import yaml
-    with open("config/experiment_a1.yaml") as f:
-        cfg = yaml.safe_load(f)
-    assert build_dataset(cfg, "val").ann_file == build_dataset(cfg, "test").ann_file
-
-
 def test_min_boxes_filter():
     """min_boxes=3 moves COCO towards CE-130 density. A SEPARATE experiment --
     the test exists so the knob is known to work, not so it gets turned on here."""

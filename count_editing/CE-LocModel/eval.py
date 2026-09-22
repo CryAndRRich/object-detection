@@ -1,30 +1,37 @@
 #!/usr/bin/env python3
-"""Eval CE-Loc round 2 — COCO-style AP + P/R expressed as % of the CEILING.
+"""Eval EXPERIMENT A (vòng 2) — AP50 + bộ chỉ số tách bạch box với score.
 
-TWO THINGS TO REMEMBER WHEN READING THE NUMBERS:
+TÁI DÙNG, KHÔNG CHÉP: `nms_class_agnostic`, `scores_and_classes`, `ap_from_pr`,
+`evaluate` lấy nguyên từ `eval.py`. Chúng chỉ đụng tới box và điểm số, không dính kiến
+trúc.
 
-1. THE STRUCTURAL PRECISION CEILING = min(M, N)/N. With N=100 and M~37.6 GT the
-   ceiling is only 0.376 — a variant that emits more boxes is penalised PURELY for
-   emitting more boxes, even if every box is perfect. Comparing raw P/R across
-   variants with different N is MEANINGLESS.
+BA ĐIỀU PHẢI NHỚ KHI ĐỌC SỐ
+---------------------------
+1. `oracle_recall` là chỉ số CHÍNH, không phải `iou_matched`. `iou_matched` mù với GT mà
+   không box nào chạm tới và ĐÃ ĐÁNH LỪA HAI LẦN ở vòng 1.
 
-2. THE ANNOTATIONS MISS OBJECTS. Verified by eye: image train/1074_b2 has ~8
-   buffalo but all_bboxes lists only 6. A missed object that the model correctly
-   detects counts as a FALSE POSITIVE -> measured precision is LOWER than true
-   precision. Do not conclude the model is bad without looking at the images.
+2. `--num-proposals` mặc định lấy từ config (vòng 2 là **30**). Trần `oracle_recall` ở
+   N=30 chỉ là **83,8 / 82,4 / 76,1 %** (train/val/test) vì GT bị cắt cụt trên 34-50 %
+   số ảnh. **KHÔNG so số này với vòng 1 (N=300, trần ~97 %)** — khác thang đo.
+   Muốn số để báo cáo thì chạy lại chính checkpoint này với `--num-proposals 300`;
+   đổi tự do vì kiến trúc không còn pos_emb theo chỉ số.
 
-TOP-K, NOT an absolute threshold: focal with a non-discriminating head converges
-to a constant (round 1: 0.263 < 0.5) -> every box is filtered out -> argmax keeps
-exactly 1 box.
+3. TOP-K, không phải ngưỡng tuyệt đối 0,5: focal với alpha=0,25 và head không phân biệt
+   hội tụ về HẰNG SỐ (vòng 1 rơi vào 0,263 < 0,5 -> lọc sạch mọi box, và triệu chứng
+   "ảnh chỉ vẽ đúng một box" từng bị chẩn đoán nhầm là lỗi công cụ vẽ).
+
+CHẠY TRÊN SERVER
+----------------
+  python tools/run_on_free_gpu.py -- eval.py \
+      --ckpt checkpoints/round2_a/best.pt \
+      --cache ../../data/cache_clip --split val \
+      --out /mnt/disk1/aiotlab/haitn/output/round2_a_eval_val.json
 """
 
 import argparse
 import json
 import os
-import socket
 import sys
-import time
-from datetime import datetime
 
 import numpy as np
 import torch
@@ -32,10 +39,12 @@ import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from data.ce130_dataset import normalize_for_clip  # noqa: E402
-from data.factory import build_dataset  # noqa: E402
-from models.detector import build_model  # noqa: E402
-from utils.box_ops_np import box_iou, cxcywh_to_xyxy  # noqa: E402
+from data.ce130_dataset import PatchCache
+from data.factory import build_dataset
+from models.detector import build_model
+from train import TorchWrap, collate, model_inputs, oracle_recall
+from utils.box_ops import box_iou, cxcywh_to_xyxy
+from torch.utils.data import DataLoader
 
 
 def nms_class_agnostic(boxes_xyxy, scores, iou_thr=0.5):
@@ -117,241 +126,129 @@ def evaluate(predictions, iou_thr=0.5):
 
 
 @torch.no_grad()
+
+@torch.no_grad()
+def predict(model, loader, n_prop, dev, top_k, use_nms, nms_thr):
+    """-> (danh sách dự đoán cho `evaluate`, thống kê theo tầng)."""
+    model.eval()
+    preds, layer_rec, best_ious = [], [], []
+    gen = torch.Generator(device=dev.type).manual_seed(0)
+
+    for batch in loader:
+        targets = [b.to(dev) for b in batch["boxes"]]
+        vh = torch.as_tensor(batch["valid_h"], dtype=torch.float32, device=dev)
+        layers = model.ddim_sample(n_prop, valid_h=vh, generator=gen,
+                                   return_all_layers=True, **model_inputs(batch, dev))
+        boxes_f, logits_f = layers[-1]
+
+        layer_rec.append([
+            sum(oracle_recall(b[i].cpu(), targets[i].cpu())[0] for i in range(len(targets)))
+            / max(sum(len(g) for g in targets), 1)
+            for b, _ in layers])
+
+        for i, gt in enumerate(targets):
+            b = boxes_f[i].cpu()
+            sc, cls = scores_and_classes(logits_f[i].cpu())
+            b_xyxy = cxcywh_to_xyxy(b)
+            keep = torch.argsort(sc, descending=True)[:top_k]
+            if use_nms:
+                keep = keep[nms_class_agnostic(b_xyxy[keep], sc[keep], nms_thr)]
+            preds.append({"boxes": b_xyxy[keep], "scores": sc[keep],
+                          "classes": cls[keep],
+                          "gt": cxcywh_to_xyxy(gt.cpu())})
+            if gt.numel():
+                iou = box_iou(b_xyxy, cxcywh_to_xyxy(gt.cpu()))
+                iou = iou[0] if isinstance(iou, tuple) else iou
+                best_ious.append(float(iou.max(dim=0).values.mean()))
+
+    return preds, {
+        "oracle_recall_per_layer": np.mean(layer_rec, axis=0).tolist(),
+        "mean_bestIoU": float(np.mean(best_ious)) if best_ious else 0.0,
+    }
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="config/experiment_a.yaml")
+    ap.add_argument("--config", default=None,
+                    help="mặc định lấy config đã lưu TRONG checkpoint — an toàn hơn")
     ap.add_argument("--ckpt", required=True)
-    ap.add_argument("--split", default="test")
-    ap.add_argument("--limit", type=int, default=None)
-    ap.add_argument("--device", default=None)
+    ap.add_argument("--cache", default="../../data/cache_clip")
+    ap.add_argument("--split", default="val")
     ap.add_argument("--num-proposals", type=int, default=None)
-    ap.add_argument("--round", type=int, default=None,
-                    help="EXPERIMENT C1 only: evaluate refinement round R (1-based) "
-                         "instead of the last one. The default matches inference "
-                         "(`ddim_sample` returns outs[-1], as V-DETR does with "
-                         "`intermediate[-1]`); this flag exists to measure whether "
-                         "AP actually improves round by round, which the per-round "
-                         "IoU in the training log cannot show on its own.")
+    ap.add_argument("--top-k", type=int, default=None)
+    ap.add_argument("--nms", action="store_true")
+    ap.add_argument("--nms-thr", type=float, default=0.5)
+    ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--batch-size", type=int, default=8)
+    ap.add_argument("--device", default=None)
+    ap.add_argument("--out", default=None)
     a = ap.parse_args()
 
-    with open(a.config) as f:
-        cfg = yaml.safe_load(f)
     dev = torch.device(a.device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    N = a.num_proposals or cfg["diffusion"]["num_proposals_eval"]
+    ckpt = torch.load(a.ckpt, map_location="cpu", weights_only=False)
+
+    # Ưu tiên config TRONG checkpoint: dựng model khác với model đã train là cách yên
+    # lặng nhất để báo cáo sai số.
+    if a.config:
+        with open(a.config) as f:
+            cfg = yaml.safe_load(f)
+    else:
+        cfg = ckpt["config"]
+
+    n_prop = a.num_proposals or cfg["diffusion"]["num_proposals_eval"]
+    top_k = a.top_k or cfg["eval"]["top_k"]
 
     ds = build_dataset(cfg, a.split)
     if a.limit:
         ds.items = ds.items[: a.limit]
+    cache = PatchCache(a.cache, a.split) if a.cache else None
+    loader = DataLoader(TorchWrap(ds, cache), batch_size=a.batch_size, shuffle=False,
+                        num_workers=cfg["data"]["num_workers"], collate_fn=collate,
+                        pin_memory=dev.type == "cuda")
 
-    exp_name = cfg.get("experiment", "?")
-    env = {
-        "experiment": exp_name,
-        "timestamp": datetime.now().isoformat(timespec="seconds"),
-        "device": str(dev), "torch": torch.__version__,
-        "hostname": socket.gethostname(),
-        "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
-        "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES"),
-        "command": " ".join(sys.argv), "ckpt": os.path.abspath(a.ckpt),
-    }
-    print("=" * 78, flush=True)
-    print(f"  EVAL — EXPERIMENT {exp_name}", flush=True)
-    print("-" * 78, flush=True)
-    for k, v in env.items():
-        print(f"  {k:22s} {v}", flush=True)
-    if a.round is not None:
-        print(f"  {'round':22s} {a.round} (NOT the inference default — that is the "
-              f"last round)", flush=True)
-    print(f"  {'split':22s} {a.split} | N={N} | topk={cfg['eval']['topk']} "
-          f"| nms={cfg['eval']['nms_iou']} | sampling_steps={cfg['diffusion']['sampling_steps']}",
-          flush=True)
-    print(f"  {'dataset':22s} {ds.stats()}", flush=True)
-    print("=" * 78, flush=True)
-
+    # dropout=0.0: eval không được lấy mẫu ngẫu nhiên trong mạng.
     model = build_model(cfg, dropout=0.0).to(dev)
-    sd = torch.load(a.ckpt, map_location=dev)
-    w = sd["model"] if "model" in sd else sd
-    # The checkpoint holds trainable parameters only; frozen CLIP is reloaded from
-    # HuggingFace.
-    missing, unexpected = model.load_state_dict(w, strict=False)
-    missing = [k for k in missing
-               if not (k.startswith("encoder.vision.") or k.startswith("encoder.text."))]
-    assert not missing and not unexpected, \
-        f"checkpoint mismatch: missing={missing} unexpected={unexpected}"
-    model.eval()
+    model.load_state_dict(ckpt["model"])
 
-    topk, nms_iou = cfg["eval"]["topk"], cfg["eval"]["nms_iou"]
-    predictions, all_scores = [], []
+    print(f"[eval round2-A] ckpt epoch={ckpt.get('epoch')} | split={a.split} "
+          f"({len(ds)} ảnh) | N={n_prop} | top_k={top_k} | nms={a.nms}", flush=True)
 
-    t0 = time.time()
-    per_image = []
-    for i in range(len(ds)):
-        t_i = time.time()
-        m = ds[i]
-        px = torch.from_numpy(normalize_for_clip(m["image"])).unsqueeze(0).to(dev)
-        if a.round is None:
-            boxes, logits = model.ddim_sample(N, pixel_values=px, texts=[m["text"]])
-        else:
-            rounds = model.ddim_sample(N, pixel_values=px, texts=[m["text"]],
-                                       return_all_rounds=True)
-            if not 1 <= a.round <= len(rounds):
-                raise ValueError(f"--round {a.round} outside 1..{len(rounds)}")
-            boxes, logits = rounds[a.round - 1]
+    preds, layer_stats = predict(model, loader, n_prop, dev, top_k, a.nms, a.nms_thr)
+    res = evaluate(preds)
+    res.update(layer_stats)
 
-        b = boxes[0].cpu().numpy()
-        s, cls = scores_and_classes(logits[0])
-        all_scores.append(s)
+    n_gt = sum(len(p["gt"]) for p in preds)
+    hit = sum(oracle_recall(
+        torch.as_tensor(np.stack([
+            (p["boxes"][:, 0] + p["boxes"][:, 2]) / 2,
+            (p["boxes"][:, 1] + p["boxes"][:, 3]) / 2,
+            p["boxes"][:, 2] - p["boxes"][:, 0],
+            p["boxes"][:, 3] - p["boxes"][:, 1]], axis=-1)) if len(p["boxes"]) else
+        torch.zeros(0, 4),
+        torch.as_tensor(np.stack([
+            (p["gt"][:, 0] + p["gt"][:, 2]) / 2, (p["gt"][:, 1] + p["gt"][:, 3]) / 2,
+            p["gt"][:, 2] - p["gt"][:, 0], p["gt"][:, 3] - p["gt"][:, 1]], axis=-1))
+        if len(p["gt"]) else torch.zeros(0, 4))[0] for p in preds)
+    res["oracle_recall"] = hit / max(n_gt, 1)
 
-        keep = np.argsort(-s)[:topk]                       # TOP-K, no threshold
-        b_xyxy = cxcywh_to_xyxy(b[keep]) * cfg["data"]["image_size"]
-        s_k = s[keep]
-        k2 = nms_class_agnostic(b_xyxy, s_k, nms_iou)
+    print()
+    for k in ("AP50", "AP", "oracle_recall", "mean_bestIoU"):
+        if k in res:
+            print(f"  {k:16s} {res[k]:.4f}")
+    print(f"  {'recall/tầng':16s} "
+          f"{' '.join(f'{v:.3f}' for v in res['oracle_recall_per_layer'])}")
+    print()
+    print(f"  ⚠️ N={n_prop}: trần oracle_recall là 83,8/82,4/76,1 % (train/val/test) "
+          f"nếu N=30.")
+    print(f"     KHÔNG so với vòng 1 (N=300). Chạy lại --num-proposals 300 để lấy số "
+          f"báo cáo.")
 
-        gt = cxcywh_to_xyxy(m["boxes"]) * cfg["data"]["image_size"]
-        if cls is None:
-            predictions.append((b_xyxy[k2], s_k[k2], gt))
-        else:
-            # A.2 must be scored CLASS-AWARE, or a box that finds a dog where a cat
-            # stands would count as a hit and A.2 would look better than A.1 for a
-            # reason that has nothing to do with the experiment. Boxes and GT are
-            # split per class and each class evaluated on its own; `evaluate` sums
-            # over whatever it is handed, so this composes without changing it.
-            c_k = cls[keep][k2]
-            g_lab = m["labels"]
-            # The union, not just the predicted classes: a class present only in the
-            # GT must still contribute its misses to recall, and a class predicted
-            # but absent from the GT must still contribute its false positives.
-            # Dropping either side would flatter the score.
-            for c in np.unique(np.concatenate([c_k, g_lab])):
-                predictions.append((b_xyxy[k2][c_k == c], s_k[k2][c_k == c],
-                                    gt[g_lab == c]))
-
-        per_image.append({"image_id": m["image_id"], "class": m["text"],
-                          "n_gt": len(gt), "n_after_topk": len(keep),
-                          "n_after_nms": len(k2),
-                          "score_max": float(s.max()), "score_min": float(s.min()),
-                          "seconds": time.time() - t_i})
-        if (i + 1) % max(len(ds) // 20, 1) == 0 or i == len(ds) - 1:
-            el = time.time() - t0
-            eta = el / (i + 1) * (len(ds) - i - 1)
-            print(f"  [{i+1:5d}/{len(ds)}] {100*(i+1)/len(ds):5.1f}% | "
-                  f"{1000*el/(i+1):.0f}ms/img | elapsed {el:.0f}s | ETA {eta:.0f}s",
-                  flush=True)
-
-    # AP at several IoU thresholds (AP50/AP75 + the COCO-style average)
-    res = evaluate(predictions, 0.5)
-    COCO_THR = [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]
-    ap_by_thr = {f"AP{int(100*t)}": evaluate(predictions, t)["AP"] for t in COCO_THR}
-    ap_coco = float(np.mean(list(ap_by_thr.values())))
-
-    # LOW thresholds, reported separately and NEVER folded into ap_coco (COCO is
-    # defined as .50:.95; mixing these in would make the headline number
-    # incomparable to any published result).
-    #
-    # They answer one diagnostic question that .50+ cannot: does the model bound
-    # most objects loosely, or nail a few and miss the rest? Those two failures
-    # give the same AP50 but need opposite fixes. If recall climbs steeply as the
-    # threshold drops, boxes are on the objects but not tight -- a regression
-    # problem. If it stays flat, the model is missing the objects outright -- a
-    # detection problem.
-    low = {}
-    for t in [0.1, 0.2, 0.3, 0.4]:
-        r = evaluate(predictions, t)
-        low[f"AP{int(100*t)}"] = r["AP"]
-        low[f"recall{int(100*t)}"] = r["recall"]
-        low[f"precision{int(100*t)}"] = r["precision"]
-
-    # NOTE for A.2: `predictions` holds one entry PER CLASS per image, so this
-    # ceiling is averaged over class groups, not over images. It is a diagnostic
-    # for reading raw precision, never a headline number -- and raw precision is
-    # already not comparable between A.1 and A.2 (2.47 boxes per pair vs 7.26 per
-    # image). Compare AP.
-    ceiling = float(np.mean([min(len(g), len(b)) / max(len(b), 1) for b, _, g in predictions]))
-    scores = np.concatenate(all_scores)
-    n_box = [len(b) for b, _, _ in predictions]
-    total_time = time.time() - t0
-
-    print("\n" + "=" * 78, flush=True)
-    print(f"RESULTS — EXPERIMENT {exp_name}", flush=True)
-    print("-" * 78, flush=True)
-    print(f"  AP (COCO, IoU .50:.95)   {ap_coco:.4f}", flush=True)
-    print(f"  AP50                     {ap_by_thr['AP50']:.4f}", flush=True)
-    print(f"  AP75                     {ap_by_thr['AP75']:.4f}", flush=True)
-    print(f"  precision                {res['precision']:.4f}", flush=True)
-    print(f"  recall                   {res['recall']:.4f}", flush=True)
-    print(f"  f1                       {res['f1']:.4f}", flush=True)
-    print("-" * 78, flush=True)
-    print(f"  AP by threshold: " + "  ".join(
-        f"{k} {v:.4f}" for k, v in ap_by_thr.items()), flush=True)
-    print("-" * 78, flush=True)
-    print("  DIAGNOSTIC — low IoU thresholds (NOT part of COCO AP):", flush=True)
-    print(f"  {'IoU':>6s} {'recall':>9s} {'precision':>10s} {'AP':>9s}", flush=True)
-    for t in [0.1, 0.2, 0.3, 0.4, 0.5]:
-        k = int(100 * t)
-        rr = low.get(f"recall{k}", res["recall"])
-        pp = low.get(f"precision{k}", res["precision"])
-        aa = low.get(f"AP{k}", ap_by_thr["AP50"])
-        print(f"  {t:6.2f} {rr:9.4f} {pp:10.4f} {aa:9.4f}", flush=True)
-    r10, r50 = low.get("recall10", 0.0), res["recall"]
-    ratio = r10 / max(r50, 1e-9)
-    print(f"\n  recall@0.10 / recall@0.50 = {ratio:.1f}x", flush=True)
-    if ratio > 3.0:
-        print("  -> boxes ARE on the objects but not tight enough: a REGRESSION problem.", flush=True)
-        print("     Push coordinate accuracy (GIoU weight, sampling_steps, box_renewal).", flush=True)
-    elif ratio < 1.5:
-        print("  -> loosening the threshold barely helps: the model MISSES objects outright,", flush=True)
-        print("     a DETECTION problem. Coordinate refinement will not fix it.", flush=True)
-    else:
-        print("  -> mixed: some objects bounded loosely, many missed entirely.", flush=True)
-    print("-" * 78, flush=True)
-    print(f"  predicted boxes  {res['n_pred']} ({np.mean(n_box):.1f}/img, "
-          f"before NMS {np.mean([x['n_after_topk'] for x in per_image]):.1f})", flush=True)
-    print(f"  GT boxes         {res.get('n_gt', 0)} "
-          f"({res.get('n_gt', 0)/max(len(ds),1):.1f}/img)", flush=True)
-    print(f"  precision ceiling {ceiling:.4f}  (= min(M,N)/N — raw P/R across "
-          f"different N is MEANINGLESS)", flush=True)
-    print(f"  precision / ceiling {res['precision']/max(ceiling,1e-9):.4f}  "
-          f"<- COMPARE THIS ONE", flush=True)
-    print("-" * 78, flush=True)
-    print(f"  score  mu {scores.mean():.4f}  sd {scores.std():.4f}  "
-          f"[{scores.min():.4f}, {scores.max():.4f}]  "
-          f"p50 {np.percentile(scores,50):.4f}  p99 {np.percentile(scores,99):.4f}", flush=True)
-    print(f"  time {total_time:.0f}s ({1000*total_time/max(len(ds),1):.0f}ms/img)", flush=True)
-
-    warnings = []
-    if scores.std() < 0.05:
-        warnings.append("score sd < 0.05 — the head is stuck at a constant, so AP is "
-                        "nearly meaningless (ranking is random)")
-    if np.mean(n_box) < 2:
-        warnings.append(f"only {np.mean(n_box):.1f} boxes/img after NMS — check topk/NMS")
-    if res["recall"] < 0.01:
-        warnings.append(f"recall {res['recall']:.4f} is very low")
-    for w in warnings:
-        print(f"  [!] {w}", flush=True)
-    print("=" * 78, flush=True)
-
-    out_path = (os.path.splitext(a.ckpt)[0] + f"_eval_{a.split}_N{N}"
-                + (f"_round{a.round}" if a.round else "") + ".json")
-    with open(out_path, "w") as f:
-        json.dump({
-            "summary": {**res, "AP_coco": ap_coco, "precision_ceiling": ceiling,
-                        "precision_over_ceiling": res["precision"] / max(ceiling, 1e-9),
-                        "warnings": warnings},
-            "ap_by_threshold": ap_by_thr,
-            "low_threshold_diagnostic": low,
-            "score": {"mean": float(scores.mean()), "std": float(scores.std()),
-                      "min": float(scores.min()), "max": float(scores.max()),
-                      **{f"p{q}": float(np.percentile(scores, q))
-                         for q in [1, 25, 50, 75, 99]}},
-            "boxes_per_image": {"mean": float(np.mean(n_box)), "min": int(np.min(n_box)),
-                                "max": int(np.max(n_box))},
-            "settings": {"N": N, "split": a.split, "topk": topk, "nms_iou": nms_iou,
-                         "sampling_steps": cfg["diffusion"]["sampling_steps"]},
-            "environment": env,
-            "dataset": ds.stats(),
-            "total_seconds": total_time,
-            "per_image": per_image,      # per-image, to find which ones fail
-        }, f, indent=2, ensure_ascii=False)
-    print(f"  full metrics (incl. per-image): {out_path}", flush=True)
+    if a.out:
+        with open(a.out, "w") as f:
+            json.dump({"ckpt": a.ckpt, "split": a.split, "n_proposals": n_prop,
+                       "top_k": top_k, "nms": a.nms, "results": res},
+                      f, indent=2, ensure_ascii=False)
+        print(f"  -> {a.out}")
 
 
 if __name__ == "__main__":

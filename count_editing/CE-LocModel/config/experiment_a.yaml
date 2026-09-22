@@ -1,92 +1,114 @@
-# EXPERIMENT A — CE-Loc multi-box: a Diffusion Policy transformer body plus
-# DiffusionDet's N-box generation. Design: docs/thiet-ke-ce-loc-vong-2.md
+# EXPERIMENT A (VÒNG 2) — box là luồng chính, ảnh vùng box vào liên tục theo toạ độ.
+# Thiết kế đầy đủ: docs/EXPERIMENT_A_PLAN.md
 #
-# Every number below has a reason, written down so nobody changes one blindly.
+# Đây là MỐC GỐC MỚI. Mọi thí nghiệm vòng 2 so với nó, KHÔNG so với A của vòng 1
+# (kiến trúc đổi quá nhiều để "bit-exact ở step 0" còn ý nghĩa).
+#
+# Mọi con số dưới đây đều có lý do, viết ra để không ai đổi mò.
 
-experiment: "A"
-description: "CLIP ViT-B/16 frozen (1026 tokens) + 6-layer transformer decoder + DiffusionDet loss"
+experiment: "round2-A"
+description: "box cộng dồn + RoI mỗi tầng + hai luồng token (h hình học / r ảnh) + adaLN + SimOTA"
 
 data:
   root: "../../data/all_phase2_V2"
-  image_size: 512          # CE-130 objects are median 0.069x0.061 of the canvas ->
-                           # 2.20x1.95 patches at patch16. At 224 that is only
-                           # 0.96x0.85 -> smaller than ONE patch, leaving
-                           # cross-attention nothing to point at.
-  flip_prob: 0.5           # HORIZONTAL flips only. No rotation: 5-30 degrees
-                           # inflates boxes 1.20x-1.98x (far too much for tiny
-                           # objects); 90 degrees breaks the "padding is always at
-                           # the bottom" assumption (only 9.6 % of images are square).
-  num_workers: 8           # MEASURED, not guessed: with the cache, 4 workers cannot
-                           # keep up with 12.6 MB/batch of memmap reads and the step
-                           # spends 740 ms (89 %) waiting on the DataLoader
-                           # (std 1612 ms, max 5172 ms — classic worker starvation).
-                           # 8 workers: 740 ms -> 7.4 ms, whole step 1012 -> 91 ms.
+  image_size: 512          # vật CE-130 trung vị 0,069x0,061 canvas -> 2,20x1,95 patch
+                           # ở patch16. Ở 224 chỉ còn 0,96x0,85 — nhỏ hơn MỘT patch.
+  flip_prob: 0.5           # CHỈ lật ngang. Không xoay: 5-30 độ làm box phình
+                           # 1,20x-1,98x; 90 độ phá giả định "đệm luôn ở đáy".
+  num_workers: 8           # ĐO ĐƯỢC: 4 worker không theo kịp 12,6 MB/batch đọc memmap,
+                           # step mất 740 ms (89 %) chờ DataLoader. 8 worker: 740 -> 7,4 ms.
 
 model:
   clip_name: "openai/clip-vit-base-patch16"
-  freeze_clip: true        # MANDATORY, not optional: (1) 1,911 images cannot feed
-                           # 86M parameters; (2) the 3 splits' classes are COMPLETELY
-                           # disjoint -> the task is zero-shot, and finetuning would
-                           # destroy the very capability needed; (3) backward through
-                           # the ViT costs ~19 GB.
-  d_model: 256             # original CE-Loc used 256; smaller = less overfitting
-  n_layer: 6               # Diffusion Policy uses 8 (16-action sequences);
-                           # DiffusionDet uses 6 stages
+  freeze_clip: true        # BẮT BUỘC: (1) 1.911 ảnh không nuôi nổi 86M tham số;
+                           # (2) lớp của 3 split GIAO = 0 -> bài toán là zero-shot,
+                           # finetune sẽ phá đúng năng lực cần dùng;
+                           # (3) backward qua ViT tốn ~19 GB.
+  d_model: 256
+  n_layer: 6               # DiffusionDet dùng 6 stage. Cũng là số TẦNG CỘNG DỒN.
   n_head: 8
-  dropout: 0.1             # the paper notes transformer dropout "varies greatly
-                           # across tasks" -> the most sensitive hyperparameter,
-                           # sweep it later
+  coord_dim: 64            # mỗi toạ độ -> 64 chiều sin/cos, 4 toạ độ nối lại = 256
+  dropout: 0.1
+  roi_k: 3                 # lưới 3x3 TRONG box. KHÔNG phải 1x1: đo trên CE-130 thật,
+                           # 1x1 cho AUC đúng-cỡ vs to-gấp-2 = 0,000 (mù kích thước
+                           # hoàn toàn), 3x3 cho 0,896. KHÔNG phải 7x7 của DiffusionDet:
+                           # vật trung vị ~2,0x1,7 patch, 49 điểm trong box 2 patch là
+                           # lấy trùng ở chi phí 5,4x.
+                           # ⚠️ 18-29 % box CE-130 nhỏ hơn MỘT ô lưới -> với nhóm đó
+                           # lưới 3x3 thoái hoá thành 1x1. Không trị được ở 32x32.
+  n_class: 1               # 1 chiều + sigmoid TƯƠNG ĐƯƠNG TOÁN HỌC với 2 chiều + softmax
+  use_text: true           # lớp đến với mô hình qua token text, không qua head nhiều lớp
 
 diffusion:
-  num_timesteps: 1000      # original CE-Loc used 100 — too few for cosine
-  schedule: "cosine"       # measured 3.70x the AP of linear (linear leaves only
-                           # 5.8 % signal at t=749 -> the matcher assigns arbitrarily)
-  snr_scale: 2.0           # DiffusionDet's SNR_SCALE
-  sampling_steps: 4        # sweep 1/2/4/8 later
-  num_proposals_train: 100 # GT median is 20-30, mean 37.6-48.5 per image. N=300
-                           # would be 87 % placeholders. The transformer has NO
-                           # N%4 constraint (that belongs to ConditionalUnet1D and
-                           # its stride-2 convolutions).
-  num_proposals_eval: 300  # N=100 truncates GT on 8-11 % of images (test: 11.2 %).
-                           # Changeable because index-based pos_emb was removed.
+  num_timesteps: 1000
+  schedule: "cosine"       # đo được 3,70x AP của linear (linear chỉ còn 5,8 % tín hiệu
+                           # ở t=749 -> matcher gán tuỳ tiện)
+  snr_scale: 2.0           # SNR_SCALE của DiffusionDet. Ablation của họ:
+                           # 0,1 -> 38,9 | 1,0 -> 45,0 | 2,0 -> 45,8 | 3,0 -> 45,6 AP.
+                           # Lý do: "one box only has four representation parameters...
+                           # analogous to an image with only four pixels".
+  sampling_steps: 4
+  num_proposals_train: 30  # VÒNG 2 CHỐT N=30 cho cả train và eval (kế hoạch mục 4.2).
+  num_proposals_eval: 30   # Đo lại từ dữ liệu thật 2026-09-22: box/ảnh trung vị
+                           # 20/21/30 (train/val/test); 66,4/62,9/50,3 % số ảnh có <=30
+                           # box. Trần oracle_recall khi N=30 là 83,8/82,4/76,1 %
+                           # (N=100 cho ~97 %).
+                           # ⚠️ KHÔNG so oracle_recall với vòng 1 (N=300) — khác thang.
+                           # Muốn số cuối để báo cáo thì chạy lại eval N=300 trên
+                           # checkpoint tốt nhất (chỉ eval, đổi tự do vì không còn
+                           # pos_emb theo chỉ số).
 
 loss:
-  # Same as DiffusionDet (config.py:34-36,43-44). NO epsilon loss (meaningless
-  # under set matching), NO deep supervision (single-forward architecture).
+  # Giống DiffusionDet (config.py:34-36,43-44). KHÔNG có epsilon loss (vô nghĩa dưới
+  # set matching). CÓ giám sát sâu: loss ở MỌI tầng, matcher chạy lại từng tầng —
+  # chuẩn của 8/8 bài trong khảo sát, DETR đo +8,2 AP giữa tầng 1 và tầng 6.
   l1: 5.0
   giou: 2.0
   cls: 2.0
   focal_alpha: 0.25
   focal_gamma: 2.0
+  # CỘNG loss các tầng, KHÔNG chia trung bình (vòng 1 chia -> gradient tới mỗi tầng bị
+  # nhân 1/6). DiffusionDet nhân bản weight_dict giữ nguyên trọng số cho mọi tầng phụ;
+  # V-DETR làm `loss += interm_loss`.
+  # ⚠️ Gradient lớn hơn 6 lần vòng 1 -> nếu phân kỳ thì HẠ lr, đừng quay lại chia.
+  sum_over_layers: true
 
 matcher:
-  method: "hungarian"      # SimOTA degenerates to k=1 on CE-130 (objects are only
-                           # 0.41 % of the area -> IoU collapses fast), adding
-                           # complex code for no gain while the model is weak, and
-                           # it is less label-stable. Set "simota" to try it as a
-                           # single-variable intervention.
-  use_center_prior: false  # measured NOT to improve label stability (55 % -> 51 %)
-  center_radius: 2.5       # PROPORTIONAL to the GT's sqrt(w*h), not a constant in
-                           # FPN strides like DiffusionDet (we have no FPN)
+  method: "simota"         # ĐỔI so với vòng 1. DiffusionDet KHÔNG dùng Hungarian:
+                           # `grep -c linear_sum_assignment diffusiondet/loss.py` = 0,
+                           # class tên HungarianMatcherDynamicK nhưng docstring ghi
+                           # """ simOTA for detr """.
+                           # Vòng 1 đặt "hungarian" với lý do "SimOTA suy biến về k=1
+                           # trên CE-130" — lập luận đó CHƯA CÓ SỐ ĐO nào hậu thuẫn, và
+                           # bỏ qua prior hình học cứng (cost += 100*~in_boxes_and_center)
+                           # vốn chốt phần lớn assignment ĐỘC LẬP trọng số model.
+                           # Quan trọng vì label_stability đo được chỉ 0,018.
+  use_center_prior: true   # chính là prior hình học nói trên — thứ đáng giá nhất của
+                           # SimOTA. Comment vòng 1 ghi "55 % -> 51 %" MÂU THUẪN với
+                           # history.json (0,018); coi như chưa đo, bật lên và theo dõi.
+  center_radius: 2.5       # TỈ LỆ theo sqrt(w*h) của GT, không phải hằng số theo stride
+                           # FPN như DiffusionDet (ta không có FPN).
+                           # ⚠️ box CE-130 trung vị chỉ 1,96 ô lưới -> kiểm lại giá trị
+                           # này trước khi tin kết quả.
+  top_k: 10                # số ứng viên để ƯỚC LƯỢNG k, không phải k.
+                           # k_gt = clamp(tổng top-10 IoU với GT đó, min=1).
 
 training:
-  batch_size: 8            # an A30 24GB has plenty of room (decoder ~0.8 GB +
-                           # CLIP ~1 GB); kept low for safety, raise it after
-                           # measuring real memory use
-  lr: 1.0e-4
+  batch_size: 8
+  lr: 1.0e-4               # ⚠️ loss giờ CỘNG 6 tầng -> gradient lớn hơn vòng 1 6 lần.
+                           # Giữ 1e-4 trước; nếu phân kỳ thì 5e-5.
   weight_decay: 1.0e-4
-  epochs: 300              # round 1's best landed on the last epoch 4 TIMES IN A
-                           # ROW — it never saturated, so train long from the start
-  save_dir: "checkpoints/experiment_a/"
-  seed: 42
-  amp: false               # PROJECT RULE: never enable AMP
+  epochs: 300              # vòng 1 có best rơi vào epoch cuối 4 LẦN LIÊN TIẾP
+  grad_clip: 1.0
+  seed: 0
 
 eval:
-  # TOP-K, NOT an absolute 0.5 threshold: focal with a non-discriminating head
-  # converges to a constant (round 1: 0.263 < 0.5) -> every box gets filtered ->
-  # argmax keeps exactly 1 box.
-  topk: 100
-  nms_iou: 0.5
-  box_renewal: false       # needs a discriminating score head; round 1 measured
-                           # recall collapsing 11x
-  use_ensemble: false
+  # CHỌN CHECKPOINT BẰNG oracle_recall, KHÔNG BAO GIỜ bằng iou_matched: iou_matched mù
+  # với GT mà không box nào chạm tới, và đã ĐÁNH LỪA HAI LẦN ở vòng 1 (C1 và E1).
+  select_metric: "oracle_recall"
+  split: "val"             # KHÔNG dùng test để chọn: test khác hẳn train/val
+                           # (30 vs 20-21 box/ảnh, box to gấp 1,3x) và có lô
+                           # annotation rác.
+  top_k: 30                # TOP-K, không phải ngưỡng tuyệt đối 0,5: focal với
+                           # alpha=0,25 và head không phân biệt hội tụ về HẰNG SỐ
+                           # (vòng 1 rơi vào 0,263 < 0,5 -> lọc sạch mọi box).

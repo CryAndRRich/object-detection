@@ -1,673 +1,225 @@
-# CE-Loc — EXPERIMENT A, B, A.1, A.2, C
+# EXPERIMENT A — vòng 2
 
-> **EXPERIMENT C (THIẾT KẾ, chưa implement)** — đặc tả đầy đủ ở
-> [`docs/old/ROUND_1_ARCHIVE.md (phần 04)`](../../../docs/old/ROUND_1_ARCHIVE.md).
-> Mở khối `nn.TransformerDecoder` kín thành **6 vòng refine**, mỗi vòng cho box **uốn
-> attention** bằng bias hình học tính từ **4 góc của chính nó** (`Â = Softmax(QKᵀ + R)`) —
-> cơ chế **V-DETR** (`refs/pdfs/VDETR.pdf`, code `refs/repos/V-DETR/`).
-> Thứ tự một-biến: **C1** (chỉ refine) → **C2** (+ vertex-RPE) → **C3** (+ object-normalized).
-> Chỉ thêm **~3.588 tham số** (ít hơn B **219×**).
-> **Cửa chặn Bước 0 ĐÃ CHẠY, ĐẠT**: `python3 tools/check_vertex_rpe.py`, kết quả ở
-> `viz_rpe_gate/`. `log_scale` phải **~1,0**, KHÔNG phải 512 của V-DETR.
+Thiết kế đầy đủ: [`../../../docs/EXPERIMENT_A_PLAN.md`](../../../docs/EXPERIMENT_A_PLAN.md).
+Cơ sở paper: [`../../../docs/LITERATURE_SURVEY.md`](../../../docs/LITERATURE_SURVEY.md).
 
+**Code vòng 1 đã xoá.** Không có file `*_a.py` song song — mỗi việc đúng một file.
 
-## EXPERIMENT A (2026-09-05) — ĐÃ CHẠY XONG, KẾT QUẢ THẤP
-
-Train 300 epoch / 2h16m, best epoch 266 (val_loss 2,5096). **Đã bão hoà** — 100
-epoch cuối chỉ cải thiện val_loss 0,032, lần đầu tiên trong dự án chạm trần.
-
-| | test | val |
-|---|---|---|
-| AP50 | 0,0152 | 0,0073 |
-| AP (COCO) | 0,0028 | 0,0013 |
-| precision / recall | 0,106 / 0,118 | 0,067 / 0,090 |
-
-**Thắng lợi thật**: score head hết kẹt (sd 0,175, khoảng [0,14–0,98]) — vòng 1 kẹt
-cứng ở 0,263. Việc đưa memory từ 2 lên 1026 token có tác dụng.
-
-**Nhưng định vị vẫn yếu.** Nhìn ảnh dự đoán (`tools/visualize_predictions.py`)
-thấy rõ: box bám ĐÚNG VÙNG có vật (ảnh viên bi ở góc → box ở góc) nhưng KÍCH
-THƯỚC gần như cố định — to hơn hạt đậu, nhỏ hơn con voi. Recall theo cỡ vật:
-0,217 (vật trung bình) → 0,041 (vật rất nhỏ).
-
-Đo thêm: recall@0,10 = 0,328, tức 67 % vật không có box nào chạm vào.
-
-## EXPERIMENT B — THIẾT KẾ (đổi đúng một biến)
-
-`model.roi_k: 3`. Mỗi box đọc thêm feature CLIP lấy mẫu trên lưới 3×3 **bên
-trong chính nó** (`models/roi_sampler.py`), cộng vào box token.
-
-**Vì sao**: A bắt mạng TỰ HỌC ánh xạ từ sinusoidal PE của `(cx,cy)` sang "phải
-attend vào patch nào trong 1024" — hai hệ toạ độ không liên quan, `cond_pos_emb`
-khởi tạo ngẫu nhiên. 1.911 ảnh không đủ. DiffusionDet không học thứ này bao giờ:
-RoIAlign cắt feature ngay tại toạ độ box, quan hệ là CỨNG.
-
-**Đo trước khi implement** (CLIP frozen, ảnh test thật):
-
-| lưới | AUC vật/nền | AUC "đúng cỡ" vs "to gấp đôi" |
-|---|---|---|
-| 1×1 (tâm) | 0,990 | **0,000** |
-| 3×3 | 0,989 | **0,896** |
-
-Lấy 1 điểm ở tâm cho CÙNG một vector dù box to hay nhỏ → AUC 0,000 không phải
-nhiễu mà là chứng minh nó vô cảm với kích thước. Lưới 3×3 lấy lại tín hiệu đó mà
-không mất gì.
-
-k=3 chứ không phải 7×7 của DiffusionDet: vật CE-130 chỉ ~2,0×1,7 patch trên lưới
-32×32, đặt 49 điểm vào đó là lấy mẫu thừa với chi phí 5,4×.
-
-**Zero-init**: `roi.out` khởi tạo 0 nên **step 0 thì B giống hệt A từng bit**
-(khoá bằng `tests/test_roi.py::test_B_equals_A_at_step_zero`). So sánh A vs B là
-một biến duy nhất. Lớp vẫn train bình thường — với `y=Wx+b, W=0` thì
-`∂L/∂W = δxᵀ ≠ 0`.
-
-**Cửa chặn rẻ**: `roi_branch_norm` in mỗi epoch. Nếu sau ~30 epoch vẫn ~0 thì
-chính mạng đang nói RoI feature vô dụng → dừng sớm thay vì đốt 300 epoch. Smoke
-test 1 epoch đã cho 0,1185, tức nhánh đang được dùng.
-
-Cache dùng chung với A (`image_size`, `clip_name` không đổi) — RoI lấy mẫu trên
-chính `patch_raw` đã cache, không phải build lại.
-
-
-
-**Nhánh CE-Loc gốc (ResNet18 + SpatialSoftmax + Conv1D U-Net, single-box) đã XOÁ khỏi thư mục
-này.** Bản read-only đầy đủ vẫn ở `refs/repos/Count-Editing/CE-LocModel/` nếu cần đọc lại.
-
-Thiết kế đầy đủ + toàn bộ số đo: [`../../../docs/thiet-ke-ce-loc-vong-2.md`](../../../docs/thiet-ke-ce-loc-vong-2.md).
-Lỗi vòng 1 (đọc TRƯỚC khi sửa gì): [`docs/old/ROUND_1_ARCHIVE.md (phần 02)`](../../../docs/old/ROUND_1_ARCHIVE.md).
-
-**Ràng buộc**: thân model là **Diffusion Policy transformer-based**, chỉ **mượn cơ chế sinh N box**
-của DiffusionDet.
-
-## EXPERIMENT B — ĐÃ CHẠY XONG (2026-09-06), KHÔNG CẢI THIỆN
-
-Train 300 epoch / 2h07m trên 1 GPU A30 (batch 8), best epoch **87**.
-
-| test | A | B |
-|---|---|---|
-| AP50 | 0,0152 | **0,0144** |
-| AP (COCO) | 0,0028 | 0,0025 |
-| val IoU tốt nhất | 0,345 | 0,347 |
-
-`roi_branch_norm` 0 → **15,84**, tăng đều suốt 300 epoch → nhánh RoI **có** được
-dùng, không chết. Nhưng val IoU +0,002 (trong nhiễu).
-
-**Đáng chú ý hơn: B overfit sớm.** Best epoch tụt từ 266 (A) xuống 87, và
-`val_rising_streak = 142` — val loss tăng liên tục 142 epoch cuối, trong khi train
-IoU vẫn tăng 0,339 → 0,372. Thêm 0,787M tham số trên 1.911 ảnh với split class rời
-nhau → nhánh RoI học đặc trưng bám class thay vì quy luật hình học tổng quát.
-
-### Đo tiếp: nút thắt là TÂM, không phải kích thước
-
-`tools/measure_size_regression.py` trên checkpoint B (`recall@0.50`, thay từng nửa
-box bằng GT):
-
-| | test | val |
-|---|---|---|
-| thật | 0,029 | 0,020 |
-| thay **w,h** bằng GT | 0,060 | 0,047 |
-| thay **cx,cy** bằng GT | **0,284** | **0,232** |
-
-Sửa kích thước cho +0,031; sửa tâm cho **+0,254** — gấp **8 lần**, nhất quán cả 2
-split. Giả thuyết "kích thước hằng số" chỉ **PARTIAL** (`size_ratio_within_image`
-0,264/0,312, IQR ratio 0,72 — model có biến thiên size, hẹp hơn GT). Và
-`l1_share_wh` 53 %/47 % — **cân bằng**, nên giả thuyết "L1 bỏ quên w,h" là **sai**.
-
-→ **Không rebalance loss về w,h.** Model không định vị được từng vật, chứ không
-phải định vị được rồi vẽ hộp lệch.
-
-## EXPERIMENT A.1 / A.2 — ĐÃ CHẠY XONG (trên COCO-minitrain)
-
-Sau A và B, AP thấp còn **4 nguyên nhân chồng lên nhau, không tách được**:
-
-1. code/thiết kế sai?
-2. zero-shot (train 72 class / test 28, **giao = 0**)
-3. chỉ 1.911 ảnh
-4. vật cực nhỏ, cực đông (37,6 vật/ảnh, 0,41 % diện tích)
-
-COCO-minitrain **gỡ đồng thời (2) và (3)**: 80 class dùng chung train/eval,
-73.531 mẫu.
-
-### A.1 — model của A, y nguyên, chạy trên COCO
-
-**Chỉ đổi DỮ LIỆU.** `models/` không sửa dòng nào; score head vẫn **1 chiều**.
-
-Một ảnh COCO có trung bình 2,94 class (chỉ 20,7 % ảnh có đúng 1 class), mà model
-nhận **1 text/forward** → tách mỗi ảnh thành nhiều mẫu theo class:
-
-```
-ảnh_42 + "person" → 4 box người   (bỏ qua xe, chó)
-ảnh_42 + "car"    → 2 box xe
-ảnh_42 + "dog"    → 1 box chó
-```
-
-→ **73.531 cặp (ảnh, class)** từ 25.000 ảnh.
-
-**Ngưỡng đọc kết quả, chốt TRƯỚC khi chạy** (nếu không thì số nào cũng biện minh
-được):
-
-| AP50 trên val2017 | kết luận |
+| file | vai trò |
 |---|---|
-| **< 0,05** | stack hỏng → dừng CE-Loc, sửa code trước |
-| 0,05–0,15 | stack chạy đúng, kiến trúc nhỏ |
-| **> 0,15** | stack ổn → số thấp trên CE-130 là do **bài toán**, không do bug |
+| `models/dit_blocks.py` | `update_box`, `clamp_to_valid`, `build_cross_mask`, `RegionGate`, `DiTBlock` |
+| `models/detector.py` | `BoxDiT`, `CELocDetector`, `build_model` |
+| `models/criterion.py` | `SetCriterion` — CỘNG loss các tầng, matcher mỗi tầng |
+| `models/roi_sampler.py` | `RoIFeatureSampler` — giữ nguyên từ vòng 1, đã đo kỹ |
+| `models/clip_encoder.py` | CLIP frozen — giữ nguyên |
+| `train.py` / `eval.py` | điểm vào |
+| `tools/gate_delta_direction.py` | **CỬA CHẶN — chạy TRƯỚC khi train** |
+| `config/experiment_a.yaml` | N=30, SimOTA, roi_k=3 |
+| `tests/test_experiment_a.py` | 19 test |
 
-Tham chiếu: DiffusionDet R50 đạt ~30 AP trên đúng 25K ảnh này — nhưng có FPN,
-RoIAlign, 6 stage deep supervision, backbone train được. Ghi để thấy khoảng cách
-kiến trúc, **không phải mục tiêu**.
-
-**CHỈ ĐỌC AP50, BỎ QUA PRECISION THÔ.** COCO có 2,47 box/cặp so với CE-130 37,6 →
-với N=100 trần precision cấu trúc `min(M,N)/N` ở đây là ~0,01 còn CE-130 là 0,376.
-
-### A.2 — bỏ text, score head 80 chiều
-
-**A.1 và A.2 khác đúng MỘT thứ**: class đến với model qua đâu.
-
-| | class đi qua | memory | head | mẫu |
-|---|---|---|---|---|
-| A.1 | **text đầu vào** | 1025 token (patch + text) | 1 chiều | 73.531 cặp |
-| A.2 | **head đầu ra** | 1024 token (chỉ patch) | 80 chiều | 25.000 ảnh |
-
-Cùng ảnh, cùng annotation (181.475 box), cùng loss/matcher/diffusion/N.
-
-Đọc kết quả:
-- **A.2 ≈ A.1** → đường text hoạt động tốt ngang head trực tiếp. Tốt nhất cho CE-Loc.
-- **A.2 ≫ A.1** → đường text **là nút thắt** → khớp với mismatch không gian đã đo
-  ([docs/old/ROUND_1_ARCHIVE.md (phần 01)](../../../docs/old/ROUND_1_ARCHIVE.md)).
-- **cả hai đều kém** → lỗi ở phần chung (diffusion/matcher/decoder).
-
-**A.2 đang giải bài DỄ HƠN** — 1 forward xong cả ảnh (7,26 box) thay vì ~2,94
-forward; và nó tự đặt tên class nên không bị phạt vì "đặt nhầm class". Nên A.2 cao
-hơn là **dự kiến**; chỉ khoảng cách **lớn** mới là bằng chứng. Eval đã làm
-class-aware (`eval.py` tách theo class) nên ít nhất box đúng vị trí sai class
-không được tính.
-
-**Ngân sách khớp theo lượt-ảnh, không theo epoch**: A.1 20 epoch × 73.531 =
-1,47M; A.2 **59** epoch × 25.000 = 1,475M (lệch 0,3 %). Bằng epoch thì A.1 được
-gấp 3 lần compute và phép so đo ngân sách chứ không đo điều kiện hoá.
-
-## EXPERIMENT C1 — ĐÃ CHẠY XONG (2026-09-09), REFINE KHÔNG GIÚP
-
-`refine_rounds: 6` — mở `nn.TransformerDecoder` thành vòng lặp đọc box sau **mỗi**
-layer + deep supervision. Không thêm layer attention nào; head refine riêng mỗi
-vòng, zero-init → C1 step 0 ≡ A bit-exact.
-
-**Sáu vòng đo TỆ DẦN trên mọi chỉ số không dùng score:**
-
-| vòng | `oracle_recall` | `mean_bestIoU` | AP50 |
-|---|---|---|---|
-| 1 | **0,1384** | **0,2314** | **0,0168** |
-| 3 | — | — | 0,0162 |
-| 6 | 0,1328 | 0,2157 | 0,0151 |
-
-**Nhưng `iou_matched` — thứ `loss_final` nhìn — lại TĂNG** 0,3426 → 0,3528. Đây là
-phát hiện quan trọng nhất của C1, và nó **không nói về refine**, nó nói về **cách
-chọn checkpoint**:
-
-`iou_matched` chỉ trung bình trên **cặp Hungarian đã khớp** (đúng 268,2 cặp mỗi
-vòng) → **mù hoàn toàn với GT không box nào chạm tới**. Một vòng siết chặt box nó
-đã có trong khi **mất phủ** GT khác sẽ **ghi điểm tốt hơn** trên loss và **tệ hơn**
-trong thực tế. Đúng chuyện đã xảy ra.
-
-→ Đã thêm `oracle_recall` vào `run_val` (**không score, không matcher**: tỉ lệ GT
-được **ít nhất một** box phủ ở IoU ≥ 0,5) và cờ `select_metric` trong config.
-**Cộng dồn thô `(hits, n_gt)` rồi chia MỘT lần** — trung bình tỉ lệ từng ảnh sẽ cân
-ảnh 3 GT ngang ảnh 500 GT, mà CE-130 có 1..1229 GT/ảnh (ví dụ 2 ảnh: 0,4510 vs
-0,0196, khác hẳn).
-
-**Bài học dùng lại được: chọn checkpoint bằng chỉ số mà matcher không nhìn thấy.**
-
-## EXPERIMENT C1b / C1c — ĐÃ CODE, CHƯA TRAIN
-
-Tách hai nghi vấn của C1, mỗi cái đúng một biến:
-
-- **C1b** (`config/experiment_c1b.yaml`): `refine_rounds: 1` — một vòng có bằng sáu
-  không. **Giữ nguyên 6 layer decoder**: `refine_rounds=1` làm ngây thơ sẽ khiến
-  `_forward_refine` đọc sau layer 0 rồi dừng, tức **cắt decoder còn 1 layer** và
-  trộn lẫn hai biến (số vòng giám sát vs độ sâu). Đã sửa bằng tập `read_at` chỉ đọc
-  ở layer cuối, khoá bằng `test_one_round_still_runs_every_layer`.
-- **C1c** (`config/experiment_c1c.yaml`): model **y hệt C1**, đổi **đúng một thứ** —
-  `select_metric: oracle_recall`. Trả lời "C1 có thật sự tệ hơn A không, hay chỉ là
-  ta chọn nhầm checkpoint".
-
-## EXPERIMENT E1 — ĐÃ TRAIN + EVAL XONG (2026-09-11), CẢI THIỆN LỚN NHẤT TỪ TRƯỚC TỚI NAY
-
-**Kết quả (N=300, cùng checkpoint `best.pth` epoch 283):**
-
-| | A val | **E1 val** | A test | **E1 test** |
-|---|---|---|---|---|
-| `oracle_recall` | — | **0,2021** | 0,1197 | **0,2559** |
-| `mean_bestIoU` | — | 0,2787 | 0,1740 | **0,3086** |
-| `score_AUC` | 0,4988* | **0,7001** | 0,4988 | **0,6852** |
-| **AP50** | 0,0073 | **0,0371** | 0,0152 | **0,0636** |
-| AP_coco | 0,00128 | **0,00723** | 0,00281 | **0,01268** |
-| recall | 0,0904 | **0,1985** | 0,1171 | **0,2531** |
-
-\* A chưa đo `oracle_recall`/`score_AUC` trên val (train trước khi thêm hai chỉ số này);
-số 0,4988 là trên test.
-
-**AP50 gấp 5,09× trên val và 4,18× trên test.** A/B/C1 nằm trong khoảng 1,44–1,52
-(test) suốt ba thí nghiệm; E1 phá ra 6,36. **Cải thiện có trên CẢ HAI split với tỉ
-lệ recall gần như bằng nhau (2,20× val / 2,16× test)** → không phải hiệu ứng của
-phân bố test.
-
-**Dự đoán viết trước khi train — đối chiếu:**
-
-| dự đoán | thực tế | |
-|---|---|---|
-| `score_AUC` > 0,65 | 0,685 test / 0,700 val | ✅ |
-| AP50 > 5 | 6,36 | ✅ |
-| báo cáo `best_epoch` | **283**/300 | ✅ **KHÔNG** overfit sớm như B (87) |
-| `oracle_recall` = 0,1197 ± 0,003 | **0,2559** (2,14×) | ❌ **SAI** — xem dưới |
-
-### Dự đoán SAI về oracle_recall — đã kiểm, KHÔNG phải bug
-
-Tôi viết trước khi train: box của E1 phải bit-exact bằng A, nên `oracle_recall`
-lệch khỏi 0,1197 là **bug**. Thực tế 0,2559. Theo đúng tiêu chí đó phải coi là bug
-cho tới khi chứng minh ngược lại. Bốn phép kiểm:
-
-1. **Gradient score có rò vào box?** Đo trực tiếp: loss chỉ trên score →
-   `|grad box_head| = 0.0` (chính xác 0); loss trên box → 2907,7. `.detach()` đúng.
-2. **Config lệch ngoài 3 trường score-path?** Không — chỉ `roi_k` / `roi_to_tgt` /
-   `score_roi` (+ `save_dir`).
-3. **Box đổi khi tắt nhánh RoI của head?** `torch.equal(box, box2) = True` — không
-   đổi một bit.
-4. **A/B chạy `--cache` (fp16 patch token), E1 thì không.** Khác biệt duy nhất tìm
-   được, nhưng sai số fp16 trên patch token chỉ **0,018 %** — quá nhỏ cho 2,14×.
-
-**Giải thích còn lại** (chưa kiểm chứng trực tiếp được): score head tốt hơn → nhãn
-Hungarian ổn định hơn → nhánh box học tốt hơn. Đây là kênh ảnh hưởng **qua nhãn**,
-không qua gradient, nên `.detach()` không chặn — và không mâu thuẫn với phép kiểm 1.
-
-### Nhánh RoI thật sự được dùng — đo bằng ablation trên checkpoint đã train
-
-Tắt nửa RoI của `score_from_roi` (đặt `W[:, d_model:] = 0`) rồi forward lại:
-score đổi `|Δ| mean 0,214`, bằng **2,3× độ lệch chuẩn** của chính score (0,092).
-Box **không đổi một bit**. Nghĩa là nhánh RoI mang thông tin thật, dù `|W|` nửa RoI
-(0,0012) nhỏ hơn nửa token (0,0297) **26 lần** — trọng số nhỏ vì `roi.out` khởi tạo
-zero nên xuất phát sau, không phải vì vô dụng.
-
-### `iou_matched` lại ĐÁNH LỪA lần thứ hai
-
-Tại `best_epoch` của mỗi bên, trên val trong lúc train: A `iou_matched` **0,3449** >
-E1 **0,3401** — A trông tốt hơn. Nhưng eval trên **cùng** val cho AP50 E1 gấp **5,09×**.
-`n_matched` cố định **268,2** ở cả hai. Đúng cơ chế §5ter của
-`docs/old/ROUND_1_ARCHIVE.md (phần 02)` đã ghi từ C1: `iou_matched` chỉ trung bình trên
-cặp Hungarian đã khớp nên **mù với GT không box nào chạm tới**. Lần này nó suýt
-khiến E1 bị đọc là "không cải thiện".
-
-### Điểm nghẽn đã DỊCH CHỖ
-
-`score_head_cost` = **0,0018** (test) / **0,0008** (val) — score head gần như không
-làm mất recall nữa (0,2559 đạt được vs 0,2541 thực lấy). Nó **hết là điểm nghẽn**.
-
-Điểm nghẽn giờ quay về **box**: `oracle_recall` 0,2559 vs **0,6734** của D.1 — vẫn
-kém **2,6×**. Và `score_AUC` 0,685 tuy đã xa mức tung đồng xu nhưng còn dưới trần
-probe 0,888 và dưới D.1 (0,9371).
+Đã xoá khỏi repo: `box_transformer.py` (thân vòng 1), 6 file test của A/B/C1/E1/A.2, và
+5 cửa chặn vòng 1 đã chạy xong (`check_keypoint_head`, `check_local_softargmax`,
+`check_vertex_rpe`, `check_exemplar_signal`, `measure_size_regression`) — kết quả của
+chúng đã nằm trong [`ROUND_1_ARCHIVE.md`](../../../docs/old/ROUND_1_ARCHIVE.md).
 
 ---
 
-## EXPERIMENT E1 — thiết kế (viết trước khi train)
+## Kiến trúc, một hình
 
-**Một biến so với A: score head đọc gì.** Đường sinh box — CLIP, memory, 6 layer
-decoder, `box_head` — không đổi một dòng, nên box của E1 **bit-exact bằng A**
-(đã verify end-to-end với CLIP thật: `max|diff| = 0.0`).
+```
+ảnh  -> CLIP ViT-B/16 frozen -+-> patch_raw [B,1024,768] ----> cho RoI
+                              +-> Linear(768->256) --+
+text -> CLIP text  frozen -------> Linear(768->256) --+--> memory [B,1025,256]
 
-**Vì sao.** EXPERIMENT D (DiffusionDet trên đúng dữ liệu này, class-agnostic,
-**không có text**) tách được chỗ thua thành hai lỗi độc lập:
+x_T ~ N(0,I) [B,30,4]                               <- LUỒNG CHÍNH
+ |
+ +- 4 bước DDIM, mỗi bước 6 tầng DiTBlock:
+ |    (1) r <- gate(r, roi(patch_raw, x))    lấy ảnh TẠI x hiện tại
+ |    (2) seq = [h ; r + mark(x)]            2N token
+ |    (3) self-attn có mask, adaLN theo t    r KHÔNG đọc được h
+ |    (4) chỉ r cross-attn vào memory        h lấy ảnh hoàn toàn qua r
+ |    (5) x <- update_box(x, box_delta(h))   CỘNG DỒN
+ |
+ +-> 30 box + 30 score
+```
 
-| | oracle_recall | score_AUC | AP50 |
+`h` = "tôi ở đâu" (hình học), `r` = "ở đó có gì" (ảnh). `h` không đụng `memory` nên
+mismatch giữa không gian toạ độ và không gian đặc trưng **biến mất khỏi luồng**.
+
+---
+
+## Chạy trên server
+
+Mọi lệnh chạy từ `object-detection/count_editing/CE-LocModel`.
+
+**Quy ước đường dẫn trên server** — giữ tách bạch để tải về local không lẫn:
+
+| loại | nơi để | ví dụ |
+|---|---|---|
+| **log chạy** (stdout của job) | `/mnt/disk1/aiotlab/haitn/log/` | `round2_a_0923_1400.log` |
+| **kết quả** (json, npy, …) | `/mnt/disk1/aiotlab/haitn/output/` | `round2_gate_delta.json` |
+| **checkpoint** | thẳng trong repo: `checkpoints/` | `checkpoints/round2_a/best.pt` |
+
+`checkpoints/` và `output/` đều đã nằm trong `.gitignore` nên không lo commit nhầm.
+Checkpoint để trong repo để cấu trúc server và local trùng nhau — tải về giữ nguyên
+đường dẫn.
+
+### Bước 0 — test (chạy được ở local, không cần GPU)
+
+```bash
+python -m pytest tests/test_experiment_a.py -q
+```
+Phải thấy **91 passed** (19 test của A + 72 test hạ tầng). (Đừng chạy `pytest tests/` trần — các file test vừa là script
+`main()` vừa có wrapper `test_*`, lệnh trần từng báo "no tests ran" mà vẫn exit 0.)
+
+### Bước 1 — CỬA CHẶN, chạy trước khi train
+
+Trả lời câu hỏi duy nhất chống đỡ cả thiết kế: `Linear(256->4)` có đoán được **hướng
+dịch** về GT không? Vài phút, chặn được ~10 giờ A30 nếu trượt.
+
+```bash
+python tools/run_on_free_gpu.py -- tools/gate_delta_direction.py \
+    --cache ../../data/cache_clip \
+    --split val \
+    --out /mnt/disk1/aiotlab/haitn/output/round2_gate_delta.json
+```
+
+**Đọc kết quả:**
+- **TIÊU CHÍ: `cosine > 0,5` ở `d = 1` ô.** Dưới ngưỡng ⇒ cộng dồn vô nghĩa, **DỪNG**,
+  không train.
+- Cột `xáo` và `r=0` phải **thấp hơn hẳn** cột `cosine`. Nếu xấp xỉ nhau thì `Linear`
+  chỉ học prior của phân bố delta, **không dùng ảnh** ⇒ kết quả vô giá trị.
+- Cột `nhỏ<1ô` dự kiến tệ nhất (18–29 % số box, RoI 3×3 thoái hoá thành 1×1). Nếu **chỉ**
+  nhóm này hỏng thì thiết kế vẫn dùng được, chỉ giới hạn ở box lớn.
+
+### Bước 2 — cache patch token
+
+**Cache đã có sẵn từ vòng 1, KHÔNG cần build lại**: `../../data/cache_clip/`
+(tức `object-detection/data/cache_clip/`, nằm trong repo, đã có trong `.gitignore`).
+
+Đã kiểm 2026-09-23 — khớp với config vòng 2:
+
+| | train | val |
+|---|---|---|
+| shape | `[1911, 2, 1024, 768]` | `[908, 2, 1024, 768]` |
+| dung lượng | 6,0 GB | 2,9 GB |
+| image_size | 512 | 512 |
+| CLIP | `openai/clip-vit-base-patch16` | như trên |
+| số lớp | 72 | 28 |
+
+Dùng được vì vòng 2 **không đổi** encoder, độ phân giải hay cách chuẩn hoá — chỉ đổi
+phần sau CLIP.
+
+Nếu vì lý do nào đó phải build lại, `train.py` và cửa chặn đều kiểm cache ngay lúc khởi
+động và in sẵn lệnh; hoặc chạy tay:
+
+Sinh cache (mỗi split một lệnh, chạy nền):
+```bash
+LOG=/mnt/disk1/aiotlab/haitn/log/cache_val_$(date +%m%d_%H%M).log
+nohup python tools/run_on_free_gpu.py -- tools/build_cache.py \
+    --config config/experiment_a.yaml --split val \
+    --out ../../data/cache_clip \
+    > $LOG 2>&1 &
+echo "PID $! -> $LOG"
+```
+Đổi `val` thành `train` cho split kia.
+
+| split | ảnh | dung lượng | thời gian ước tính (A30) |
 |---|---|---|---|
-| A | 0,1197 | 0,4988 | 1,52 |
-| B | 0,1201 | 0,4950 | 1,44 |
-| C1 | 0,1384 | 0,4965 | 1,51 |
-| **D.1 (N=300)** | **0,6734** | **0,9371** | **58,13** |
-| D.1 (N=3000) | 0,8349 | 0,9489 | 65,22 |
+| train | 1.911 | ~6,0 GB | ~10–15 phút |
+| val | 908 | ~2,9 GB | ~5–8 phút |
 
-`score_AUC` 0,497 là **tung đồng xu**: A/B/C1 phủ được 12–14 % GT rồi xếp hạng
-ngẫu nhiên, nên AP vứt gần hết. Cơ chế của D nằm ngay trong code: class head của D
-đọc `roi_features` — pixel pool từ **trong chính box** (`diffusiondet/head.py:245-282`),
-còn của ta đọc token đã qua 6 layer attention.
+(ảnh × 2 phiên bản gốc/lật × 1024 token × 768 chiều × fp16)
 
-**Tín hiệu đã có sẵn trong feature frozen của chính ta.** Đo trên 669 box GT
-CE-130 thật vs 669 box nhiễu (linear probe AUC = trần trên của head 1 lớp):
+Theo dõi: `tail -f $LOG` — in tiến độ kèm **thời gian đã chạy và ETA** mỗi 20 batch.
 
-| nguồn | AUC | ghi chú |
-|---|---|---|
-| `roi_feat` 3×3 | **0,8880** | gánh gần hết |
-| toạ độ box | 0,7230 | proxy cho `tok` |
-| cả hai (concat) | 0,8946 | +0,007 |
-| chỉ tâm (1×1) | **0,5187** | vô dụng — cùng vector cho mọi kích thước |
-
-Tách theo loại lỗi thì hai nguồn **bổ sung nhau**: toạ độ **mù** với box lệch tâm
-(0,4878) nhưng **mạnh hơn** `roi_feat` với box sai kích thước (0,8881 vs 0,8630)
-→ concat, tốn 256 tham số.
-
-**KHÁC EXPERIMENT B** (cũng lấy RoI mà không ăn): B cộng vào **đầu vào** decoder
-tại box **nhiễu** (`box_transformer.py:245`) rồi vẫn để score head đọc token sau 6
-layer. E1 lấy mẫu tại box **dự đoán** và nối **thẳng** vào score head. Khác cả điểm
-lấy mẫu lẫn nơi tiêu thụ. Hai cờ tách riêng (`roi_to_tgt`, `score_roi`) để không
-bao giờ chạy B+E1 cùng lúc mà tưởng là E1.
-
-**`.detach()` là bắt buộc**: không có thì score loss chảy qua toạ độ lấy mẫu vào
-`box_head`, mạng sẽ **dịch box** tới chỗ dễ chấm điểm — đúng vòng phản hồi
-score↔toạ độ ở `bai-hoc-ce-loc-detection.md` §4 (label stability sụp ~55 %). D không
-gặp vì RoI của nó lấy ở box của stage **trước**, là hằng số với stage hiện tại.
-
-### Đọc kết quả: dự đoán viết TRƯỚC khi train
-
-| chỉ số | A | E1 dự đoán | sai thì nghĩa là |
-|---|---|---|---|
-| `oracle_recall` | 0,1197 | **0,1197 ± 0,003** | **BUG**, không phải phát hiện — gradient score đã lọt vào đường box |
-| `mean_bestIoU` | 0,1740 | 0,1740 ± 0,005 | như trên |
-| `score_AUC` | 0,4988 | **> 0,65** | RoI không tới head, hoặc nhãn Hungarian đổi quá nhiều (xem `label_stability`) |
-| AP50 | 1,52 | > 5 | — |
-
-### Cửa chặn overfit-1-ảnh — ĐÃ CHẠY, ĐẠT (2026-09-10)
-
-Chạy E1 **và A** trên cùng ảnh (`1074 'buffalo'`, 6 GT, N=32, t=50), cùng seed,
-300 step. Chạy A cùng lúc là **có chủ ý**: nếu E1 và A cho `score_AUC` như nhau thì
-nhánh RoI vô tác dụng, dù `[PASS]` vẫn hiện.
-
-| | E1 | A |
-|---|---|---|
-| `score_AUC` (10 step cuối) | **0,9082** | 0,6686 |
-| `IoU_matched` cuối | 0,9420 | 0,9123 |
-| `roi_branch_norm` | 0,77 → **3,65** | — |
-
-`roi_branch_norm` tăng 4,8× ⇒ nhánh RoI **thật sự học** (deadlock zero-init đã được
-gỡ đúng). `score_AUC` hơn A **0,24** trên cùng ảnh/seed/step — bằng chứng trực tiếp
-cho giả thuyết E1.
-
-`tools/overfit_one.py` trước đó **không thể** kiểm được E1: nó chỉ in loss và IoU
-(grep `branch_norm|roi|score` không ra gì), tức sẽ in `[PASS]` trên một nhánh RoI
-chết hoàn toàn. Đã thêm `score_auc()` (cùng định nghĩa với
-`tools/measure_box_quality.py::roc_auc`, trung bình hạng khi hoà, `nan` khi chỉ có
-một lớp — đã kiểm 4 ca có đáp án biết trước: đúng→1,0, đảo→0,0, hằng→0,5, một
-lớp→nan), theo dõi `roi_branch_norm` mỗi bước, và khối phán quyết
-`[E1 PASS/PARTIAL/FAIL/SKIP]`.
-
-### Lỗi `no_grad` — decorator bị "cướp" (2026-09-10)
-
-`run_val` trong `train.py` vốn có `@torch.no_grad()`. Khi thêm hàm `oracle_recall`
-**ngay phía trên** nó, decorator dính vào hàm mới còn `run_val` thành trần → val
-build graph → vỡ ở `.numpy()` **sau 3 phút train**, trên GPU, retry đủ 3 lần
-(~15 phút GPU). **Không liên quan E1** — A/B/C1 chạy lại lúc đó cũng vỡ y hệt.
-
-Nguyên nhân gốc ở **cửa chặn**: `check_before_train.py` chạy train step thật, chạy
-`preflight.py`, import mọi tool — nhưng **không thứ nào gọi `run_val`**, vốn là một
-seam riêng (gọi model dưới `no_grad`, đọc stat per-round, đổi logits bằng `.numpy()`).
-
-Đã sửa: trả `no_grad` về `run_val`; `check_before_train.py` giờ chạy **một vòng
-`run_val` thật** bao trong `torch.enable_grad()` (đúng trạng thái `train.py` đang ở —
-thiếu decorator chỉ lộ từ đó) và báo thêm cột `val_orec`; 2 test trong
-`tests/test_refine.py`. **Kiểm chứng ngược**: bỏ decorator → 2 test fail **và**
-preflight fail với **đúng traceback đã gặp trên server**, trong 56 giây tại local.
-
-### Rủi ro đã biết
-
-- **+787K tham số (+10,9 %) — ĐÚNG BẰNG B**, vì dùng chung `RoIFeatureSampler`.
-  Đây chính là lượng đã làm B overfit (best epoch 266 → **87**). E1 rất có thể cũng
-  overfit sớm; `best.pth` chọn theo val nên vẫn lấy được điểm tốt nhất, nhưng
-  **phải nhìn `best_epoch`** khi báo cáo, đừng chỉ nhìn AP.
-- **Trần 0,888 đo trên box GT**, positive là GT chính xác còn box thật của A chỉ
-  `mean_bestIoU` 0,174 → trần thật thấp hơn.
-- **Nhãn Hungarian ~55 % ổn định** → score head học từ nhãn nhiễu.
-
-### Lỗi đã bắt khi rà (chạy SGD, không phải đọc code)
-
-**Deadlock zero-init.** `roi.out` vốn zero-init (thiết kế của B). Nếu
-`score_from_roi` **cũng** zero-init thì hai cái khoá nhau ở 0 vĩnh viễn:
-`dL/dW[:, d:] ∝ rf = 0` và `dL/d(roi.out) ∝ W[:, d:] = 0`. Đo 3 bước SGD: nửa token
-của W chạy tới 0,0499 còn nửa RoI và `roi.out` **đứng nguyên 0,00000000**. E1 sẽ
-train 7 giờ như A thuần với score hằng 0,5, loss vẫn giảm, **không cảnh báo nào**.
-→ Chỉ **một** trong hai được zero-init; giữ `roi.out` (vì `branch_norm()` đã được
-log mỗi epoch làm cảnh báo sớm), `score_from_roi` dùng init mặc định.
-
-Kèm 2 test bịt lỗi này, và **4 test âm bản đã kiểm chứng ngược** (sửa code cho sai
-rồi xác nhận test FAIL): bỏ `.detach()`, lấy mẫu ở `x_t`, bỏ qua `roi_to_tgt`,
-zero-init lại head. Ba test đầu ban đầu **pass giả** vì zero-init làm gradient/rf
-bằng 0 — phải un-zero trong test mới có sức bắt lỗi.
-
-**179/179 test pass.**
-
-## Thay đổi cốt lõi
-
-Memory của decoder từ **2 token** → **1026 token có vị trí**. Vòng 1 đo được: với 2 token thì cả N
-box nhận **cùng** một vector 256-d, và gradient trên box unmatched có hướng ngẫu nhiên (cosine
-−0,0074 ≈ tung đồng xu). Đây là "RoIAlign của người nghèo" — box đọc ảnh tại vị trí của chính nó.
-
-| | CE-Loc gốc | EXPERIMENT A |
-|---|---|---|
-| Vision | ResNet18(4ch) + SpatialSoftmax → 1 vector 128-d | **CLIP ViT-B/16 FROZEN** → 1024 patch token |
-| Text | CLIP B/32, pooled | CLIP B/16 **FROZEN**, 1 token |
-| Density map | kênh thứ 4 | **BỎ** (bài detection) |
-| Bơm điều kiện | FiLM cộng bias | **cross-attention** |
-| Box token | `Linear(4→D)` | **sinusoidal PE trên (cx,cy,w,h)** |
-| Số box | 1 | **N=100** train / **300** eval |
-| Loss | MSE trên epsilon | **5,0·L1 + 2,0·GIoU + 2,0·Focal** (giống DiffusionDet) |
-| Schedule | linear, T=100 | **cosine**, T=1000 (đo được 3,70× AP) |
-
-Tham số học được: **~8,3M** / tổng 158M (CLIP frozen).
-
-## Cấu trúc
-
-```
-utils/box_ops_np.py  diffusion_np.py  matcher_np.py   <- NUMPY THUẦN, nguồn chân lý
-utils/box_ops.py     diffusion_math.py  matcher.py    <- port cơ học sang torch
-data/ce130_dataset.py                                 <- dedupe, pad CLIP mean, flip
-models/clip_encoder.py  box_transformer.py            <- CLIP frozen + decoder
-models/detector.py  criterion.py                      <- ghép + loss
-train.py  eval.py
-config/experiment_{a,b,a1,a2,c1,c1b,c1c,e1}.yaml       <- 8 config, mỗi cái đổi 1 biến
-tools/visualize_data.py  profile_and_memory.py  build_cache.py  overfit_one.py
-tools/check_before_train.py                            <- CỬA CHẶN local trước khi push
-tests/  (12 file, 179 test — .gitignore, chỉ có ở máy dev)
-```
-
-**Vì sao tách numpy/torch**: vòng 1 chôn logic toán trong module torch nên chỉ verify được trên
-GPU → không ai verify. Giờ phần toán test được ở local bằng numpy có đáp án giải tích, rồi
-`tests/test_torch_vs_numpy.py` đảm bảo bản torch không lệch — chạy **không cần GPU, không cần train**.
-
-**`tests/` nằm trong `.gitignore`** nên KHÔNG lên server. Hệ quả: sau `git pull` không chạy được
-`pytest` ở đó, nên mọi thay đổi code phải test ở máy dev TRƯỚC khi push. Trên server thì cửa chặn
-là `tools/overfit_one.py` (§4 dưới) — nếu loss không về ~0 thì dừng, đừng train dài.
-
-## Chạy
+### Bước 3 — chạy thử ngắn trước khi chạy dài
 
 ```bash
-# 0. CỬA CHẶN Ở MÁY DEV — chạy TRƯỚC KHI push. Không cần GPU, ~5 phút.
-#    5 bước: pytest -> 1 bước train THẬT mỗi config (data -> collate -> loss ->
-#    backward) -> import mọi tool -> CHẠY THẬT preflight trên dữ liệu nhỏ -> đối
-#    chiếu chéo 4 config.
-python3 tools/check_before_train.py
-#    Hai bước "chạy thật" là bắt buộc, mỗi bước ứng với một bug ĐÃ LỌT:
-#    - `KeyError: 'labels'` trong collate: dataset trả key, TorchWrap không
-#      chuyển tiếp. Mọi test dataset pass, train chết ngay bước đầu.
-#    - `NameError: tl` trong 4 callback của preflight.py: py_compile chỉ bắt
-#      SyntaxError, tên trong hàm chỉ resolve khi hàm CHẠY. Lọt tới server.
-#    - `run_val` mất @torch.no_grad() (decorator bị hàm chèn phía trên chiếm):
-#      vỡ ở `.numpy()` SAU 3 PHÚT train, trên GPU, retry 3 lần. Train step không
-#      chạm tới `run_val` -> giờ cửa chặn chạy luôn MỘT VÒNG run_val thật.
-#    Cả ba đều có test âm bản: tái tạo lỗi -> check phải đỏ.
-#    LƯU Ý: --configs nhận ĐƯỜNG DẪN ĐẦY ĐỦ, không phải tên rút gọn:
-#      python3 tools/check_before_train.py --configs config/experiment_e1.yaml
-
-# 1. Test riêng (nếu chỉ muốn phần này), ~2 phút
-python3 -m pytest tests/ -q
-
-# 2. Nhìn ảnh TRƯỚC khi train — vòng 1 visualize bắt được 3 lỗi mà test bỏ sót
-python3 tools/visualize_data.py --n 20 --out /tmp/viz
-python3 tools/visualize_data.py --n 8 --out /tmp/viz_ph --placeholder --t 50
-
-# 3. Đo memory + có cần cache không (trên server)
-python3 tools/run_on_free_gpu.py -- tools/profile_and_memory.py --batch-size 8 --steps 10
-#    ĐO ĐƯỢC trên A30: CLIP chiếm 76,8 % thời gian (252/328 ms) -> NÊN cache.
-#    Build (~20s, 6,0 GB cho train), rồi train thêm --cache:
-python3 tools/run_on_free_gpu.py -- tools/build_cache.py --split train --out ../../data/cache_clip
-python3 tools/run_on_free_gpu.py -- tools/build_cache.py --split val   --out ../../data/cache_clip
-#    -> train nhanh ~4,3x (328 -> 76 ms/batch): 300 epoch từ 6,5h xuống 1,5h
-
-# 4. CỬA CHẶN: overfit 1 ảnh. Không đạt thì DỪNG, đừng train dài.
-python3 tools/overfit_one.py --steps 300
-
-# 5. Train — TỰ CHỌN GPU TRỐNG NHẤT (server dùng chung, không mặc định GPU 0)
-nohup python3 tools/run_on_free_gpu.py -- train.py --config config/experiment_a.yaml \
-    > /mnt/disk1/aiotlab/haitn/log/v2_train.log 2>&1 & echo $!
-#    Script cần chạy đặt SAU `--`. Không có ngưỡng free-memory (đã thử 2 lần đều
-#    hỏng — xem docstring). Có --retries: job chết thì đọc lại nvidia-smi và thử
-#    GPU khác; nhưng job bị `kill` (rc âm) thì KHÔNG thử lại.
-#    Ép GPU cụ thể: --gpu 2 (đặt TRƯỚC --)
-#    Checkpoint chỉ lưu ~8,3M tham số HỌC ĐƯỢC (95 MB). Lưu cả CLIP frozen thì
-#    nặng 698 MB mà 98 % là trọng số tải lại được từ HuggingFace.
-
-# 6. Eval — train N=100 nhưng eval N=300
-python3 tools/run_on_free_gpu.py -- eval.py --ckpt checkpoints/experiment_a/best.pth --split test
+python tools/run_on_free_gpu.py -- train.py \
+    --config config/experiment_a.yaml \
+    --cache ../../data/cache_clip \
+    --save-dir checkpoints/round2_a_smoke \
+    --limit 64 --epochs 2 --log-every-n-batch 5
 ```
+Kiểm: loss hữu hạn, `recall theo tầng` in ra đủ 6 số, không cảnh báo lạ.
 
-### A.1 / A.2 trên COCO — không dùng cache
-
-Cache cho A.1 sẽ là **78,6 GB** (25.000 ảnh × 2 bản flip × 1024 × 768 fp16) nên
-**không build** — CLIP chạy thật mỗi bước. Bù lại batch 32 thay vì 8.
+### Bước 4 — train thật (nền, kèm PID + logfile)
 
 ```bash
-# preflight (có riêng mục "experiment wiring" kiểm A.1/A.2)
-python3 tools/run_on_free_gpu.py -- tools/preflight.py --config config/experiment_a1.yaml
-
-# A.1 — 20 epoch, ~2-5h
-nohup python3 tools/run_on_free_gpu.py -- train.py --config config/experiment_a1.yaml \
-    > /mnt/disk1/aiotlab/haitn/log/experiment_a1.log 2>&1 & echo "PID=$!"
-
-# A.2 — 59 epoch (khớp lượt-ảnh với A.1, KHÔNG khớp epoch), ~2-5h
-nohup python3 tools/run_on_free_gpu.py -- train.py --config config/experiment_a2.yaml \
-    > /mnt/disk1/aiotlab/haitn/log/experiment_a2.log 2>&1 & echo "PID=$!"
-
-# eval (val2017; COCO không có split thứ ba, --split test trỏ về cùng file)
-python3 tools/run_on_free_gpu.py -- eval.py --config config/experiment_a1.yaml \
-    --ckpt checkpoints/experiment_a1/best.pth --split val --num-proposals 300
+LOG=/mnt/disk1/aiotlab/haitn/log/round2_a_$(date +%m%d_%H%M).log
+nohup python tools/run_on_free_gpu.py -- train.py \
+    --config config/experiment_a.yaml \
+    --cache ../../data/cache_clip \
+    --save-dir checkpoints/round2_a \
+    > $LOG 2>&1 &
+echo "PID $! -> $LOG"
 ```
 
-**`loss_ce` của A.2 sẽ rất lớn ở epoch đầu — đừng "sửa".** Với C=80 và logit=0 thì
-nó đúng bằng **80×** giá trị 1 chiều (đo được 520 vs 6,5). Focal dập rất nhanh
-(520 → 3,16 ở p=0,1 → 0,02 ở p=0,02), hết ngay trong epoch đầu. Hệ quả thật: grad
-đầu run lớn nên clipping quan trọng hơn, và **`loss_ce` không so được** giữa A.1
-và A.2 — so AP và IoU.
+Theo dõi:
+```bash
+tail -f $LOG
+```
 
-### C1 / C1b / C1c / E1
+### Bước 5 — eval
 
 ```bash
-# CỬA CHẶN 1 — overfit 1 ảnh, vài phút. CHẠY CẢ MỐC ĐỐI CHIẾU (A) cùng lúc:
-# nếu E1 và A cho score_AUC như nhau thì nhánh RoI vô tác dụng, dù [PASS] vẫn hiện.
-nohup bash -c '
-python3 tools/run_on_free_gpu.py -- tools/overfit_one.py \
-    --config config/experiment_e1.yaml --steps 300 --num-proposals 32
-python3 tools/run_on_free_gpu.py -- tools/overfit_one.py \
-    --config config/experiment_a.yaml  --steps 300 --num-proposals 32
-' > /mnt/disk1/aiotlab/haitn/log/e1_overfit.log 2>&1 & echo "PID=$!"
-#   [E1 PASS] score_AUC > 0,90        -> train thật
-#   [E1 FAIL] roi_branch_norm ~ 0     -> DỪNG, deadlock: score head đọc input chết
-#   [E1 FAIL] score_AUC <= 0,70       -> DỪNG, probe trên chính feature này đạt
-#                                        0,888 nên đây là lỗi NỐI DÂY, không phải
-#                                        thiếu sức chứa
-#   roi_branch_norm phải TĂNG DẦN (đo được 0,77 -> 3,65)
+# Ở N=30, cùng thang với lúc train
+python tools/run_on_free_gpu.py -- eval.py \
+    --ckpt checkpoints/round2_a/best.pt \
+    --cache ../../data/cache_clip --split val \
+    --out /mnt/disk1/aiotlab/haitn/output/round2_a_eval_val_n30.json
 
-# CỬA CHẶN 2 — train thật, ~7h (A mất 6h58m cùng cấu hình: 300 epoch, batch 8, N=100)
-nohup python3 tools/run_on_free_gpu.py -- train.py --config config/experiment_e1.yaml \
-    > /mnt/disk1/aiotlab/haitn/log/e1_train.log 2>&1 & echo "PID=$!"
-# Trong log nhìn 3 thứ:
-#   - dòng [roi ] phải ghi "EXPERIMENT E1 (score head reads the PREDICTED box)".
-#     Ghi "EXPERIMENT B" nghĩa là cờ roi_to_tgt sai.
-#   - roi_branch_norm mỗi epoch phải > 0
-#   - best_epoch: E1 mang +787K tham số ĐÚNG BẰNG B, mà B tụt 266 -> 87
-
-# eval
-nohup bash -c '
-python3 tools/run_on_free_gpu.py -- eval.py --config config/experiment_e1.yaml \
-    --ckpt checkpoints/experiment_e1/best.pth --split test --num-proposals 300
-python3 tools/run_on_free_gpu.py -- tools/measure_box_quality.py \
-    --config config/experiment_e1.yaml --ckpt checkpoints/experiment_e1/best.pth \
-    --split test --num-proposals 300
-' > /mnt/disk1/aiotlab/haitn/log/e1_eval.log 2>&1 & echo "PID=$!"
-
-# C1b / C1c — cùng dạng lệnh, đổi config. C1c KHÔNG đổi model, chỉ đổi
-# select_metric: oracle_recall -> so trực tiếp với C1 là so cách CHỌN checkpoint.
+# Ở N=300, số để BÁO CÁO (trần recall ~97 % thay vì 82 %)
+python tools/run_on_free_gpu.py -- eval.py \
+    --ckpt checkpoints/round2_a/best.pt \
+    --cache ../../data/cache_clip --split val --num-proposals 300 \
+    --out /mnt/disk1/aiotlab/haitn/output/round2_a_eval_val_n300.json
 ```
 
-## Bốn chỉ số phải nhìn khi train
+---
 
-Quan trọng ngang loss — vòng 1 thiếu nên mù suốt 5 vòng sửa:
+## Đọc số thế nào
 
-| chỉ số | ngưỡng cảnh báo |
-|---|---|
-| **% cặp match giữ nguyên giữa 2 epoch** | vòng 1 chỉ ~55 % → hơn nửa nhãn đổi mỗi epoch |
-| **std của `sigmoid(score)`** | < 0,05 → head kẹt ở hằng số (focal hội tụ về hằng số khi không phân biệt được) |
-| **IoU trung bình cặp matched** | tách khỏi loss, dễ đọc |
-| **val_loss** | best chọn theo val (không phải train) — 1.911 ảnh + class rời nhau thì overfit rất nhanh |
-| **`oracle_recall`** | **THÊM SAU C1**: không score, không matcher. `iou_matched` chỉ nhìn cặp đã khớp nên **mù với GT không box nào chạm** — C1 đo được `iou_matched` TĂNG trong khi `oracle_recall` GIẢM. Nếu hai cái đi ngược nhau, tin `oracle_recall`. |
+| chỉ số | dùng để | cảnh báo |
+|---|---|---|
+| **`oracle_recall`** | **chọn checkpoint** | matcher KHÔNG nhìn thấy nó ⇒ không bị đánh lừa |
+| `recall theo tầng` | **chỉ số CHÍNH của A** | đường **phẳng** ⇒ cộng dồn không mang lại gì |
+| `label_stability` | biến nền | vòng 1 đo được **0,018** (>98 % nhãn đổi mỗi epoch) |
+| `mean_bestIoU` | chất lượng box | tách khỏi chất lượng score |
+| `iou_matched` | ❌ **không dùng chọn checkpoint** | mù với GT mà không box nào chạm tới; đã đánh lừa **hai lần** |
 
-## Log và số liệu
+**Trần `oracle_recall` ở N=30**: 83,8 / 82,4 / 76,1 % (train/val/test) — GT bị cắt cụt
+trên 34–50 % số ảnh. **Không so với vòng 1 (N=300, trần ~97 %).**
 
-Không dùng tqdm — in thẳng ra stdout để đọc được trong file log.
+---
 
-**Train**: mỗi epoch in **3 dòng cố định**:
+## Ba điều đã biết trước, đừng ngạc nhiên
 
-```
-[ep   12/300] train   5.6230 (l1 0.4136 giou 1.5768 ce 0.2008)   val   5.6716 (l1 ... )
-           IoU train 0.0272 / val 0.0266 | matched 84.5/100 (84%) | GT/ảnh 64.8 |
-           ổn_định_nhãn 0.025 | lr 1.00e-04 | grad 19.360
-           score μ 0.3364 σ 0.0364 [0.251, 0.439] p50 0.3347 | 26s+17s (5602ms/batch) |
-           đã chạy 2m07s | ETA 41m
-           ⚠ std_score < 0,05 — score head có thể kẹt ở hằng số
-```
+1. **Loss lớn hơn vòng 1 khoảng 6 lần** — vì CỘNG 6 tầng thay vì chia trung bình
+   (DiffusionDet/DETR/V-DETR đều cộng). `loss_mean` trong log là con số so được với
+   vòng 1. Nếu **phân kỳ** thì hạ `lr` xuống `5e-5`, **đừng** quay lại chia trung bình.
 
-Cảnh báo tự động khi: `std_score < 0,05` (head kẹt hằng số), `ổn_định_nhãn < 0,40`
-(nhãn đổi quá nhiều), `grad norm > 100`.
+2. **SimOTA phủ ít GT hơn Hungarian khi `n_gt` lớn** — đo trên dữ liệu giả với N=30:
+   `n_gt=30` chỉ khớp 16/30 (Hungarian sẽ khớp đủ 30), vì SimOTA dùng nhiều proposal
+   cho một GT. Nếu `oracle_recall` kém bất thường thì đây là nghi phạm đầu tiên; đối
+   chứng bằng `matcher.method: "hungarian"` trong config.
 
-**Eval**: in tiến độ 5 %/lần kèm ms/ảnh và ETA; cuối in AP ở **10 ngưỡng IoU**
-(AP50…AP95 + AP trung bình kiểu COCO), P/R/F1, **trần precision** và `precision/trần`,
-phân bố score, thời gian.
+3. **Box nhỏ hơn 1 ô lưới (18–29 %) gần như không có tín hiệu kích thước** — lưới RoI
+   3×3 nằm gọn trong một patch. Không trị được ở độ phân giải 32×32; cần đổi backbone,
+   ngoài phạm vi A.
 
-**`checkpoints/experiment_a/history.json`** — ghi lại sau **MỖI epoch** (không đợi train xong, để job
-chết giữa chừng vẫn đọc được). Chứa:
+---
 
-| khoá | nội dung |
-|---|---|
-| `tom_tat` | best epoch/val_loss, tổng thời gian, epoch nào có cảnh báo, val có tăng liên tiếp không |
-| `moi_truong` | hostname, GPU, `CUDA_VISIBLE_DEVICES`, torch/python version, lệnh chạy, cwd, thời điểm |
-| `config` | toàn bộ config đã dùng |
-| `dataset` | thống kê train + val |
-| `epochs[]` | mỗi epoch: loss 4 thành phần (train+val), IoU, n_matched, `lr`, thời gian, ETA, cảnh báo, và **phân bố đầy đủ** (mean/std/min/max/p1/p25/p50/p75/p99) của **score**, **grad norm**, **GT/ảnh**, **ms/batch** |
+## Nếu A không hơn vòng 1
 
-Eval ghi `<ckpt>_eval_<split>_N<N>.json` — kèm **số liệu per-ảnh** (image_id, class, n_gt,
-số box sau top-k và sau NMS, score min/max, thời gian) để tìm ảnh nào hỏng.
+Ba đối chứng, mỗi cái có điều kiện kích hoạt riêng — **không phải lộ trình**:
 
-## Cạm bẫy đã khoá bằng test
+| đối chứng | khi nào chạy | cách |
+|---|---|---|
+| **gốc cố định** | recall theo tầng phẳng hoặc giảm | mọi tầng hồi quy từ `x_t` thay vì cộng dồn (V-DETR/D-FINE cố ý chọn cách này) |
+| **Hungarian** | `oracle_recall` kém, nghi SimOTA | `matcher.method: "hungarian"` |
+| **denoising query** | `label_stability` vẫn ~0,018 | nhãn qua `arange` cố định, không cần matcher |
 
-- **Hai nguồn annotation, hai định dạng box**: `all_bboxes` là **xyxy**, `target_bbox` là **cxcywh**.
-- **KHÔNG trừ `inpainted_bboxes`**: `ground_truth.jpg` là ảnh **gốc chưa xoá gì** (diff pixel 51,96
-  vs 1,41). Vòng 1 trừ đi → vứt 7–8 % vật thật.
-- **Class 3 split RỜI NHAU hoàn toàn** (72/28/28, giao = 0) → bài toán là **zero-shot**. Text
-  encoder **phải** freeze; không so số với detector closed-set.
-- **Giải mã toạ độ**: extent là `(norm+1)/2`, **không phải** `(norm+1)/4` (IoU giữa hai cách: 0,25).
-- **Placeholder**: gốc to gấp **7,3×** vật CE-130 và 13,7 % rơi vào vùng pad → đã sửa cả hai.
-- **Top-k, không ngưỡng 0,5**: focal hội tụ về hằng số → mọi box bị lọc → argmax giữ đúng 1 box.
-- **Annotation bỏ sót vật** (ảnh có ~8 con trâu, chỉ 6 box) → precision đo được **thấp hơn** thật.
-- **Trần precision cấu trúc** `min(M,N)/N` = 0,376 với N=100 → so P/R thô giữa các N là vô nghĩa.
-
-## Ghi chú
-
-- **CLIP attention**: code tự dò SDPA, lùi về `eager` nếu transformers < 4.45 (server đang 4.42).
-  Với `eager` thì attention matrix được materialize, nhưng vì CLIP chạy trong `no_grad` nên chỉ
-  giữ ~2 tensor cùng lúc chứ không phải 12 → batch 8 tốn ~0,8 GB, không đáng lo trên A30 24GB.
-- **`.venv-cpu/`** là venv Python 3.11 để test ở local (máy dev không có torch cho Python 3.14).
-  Đã `.gitignore`. Trên server dùng env riêng.
-- **Loss dùng GIoU** (trọng số 2,0, giống DiffusionDet); **metric báo cáo dùng IoU** — GIoU âm được
-  khi hai box rời nhau nên không đọc được như một chỉ số theo dõi.
-
-## Chưa làm
-
-Adapter transformer trên patch token (hoãn có chủ đích — can thiệp một-biến nếu số kém);
-`box_renewal` / `use_ensemble` (**đang chờ E1**: điều kiện bật là score head chứng minh phân
-biệt được — A/B/C1 đo `score_AUC` ~0,497 tức tung đồng xu, nên bật lúc này chỉ gây hại; nếu E1
-đưa `score_AUC` lên thì đây là thứ đáng thử NGAY sau, không tốn train lại); SimOTA center prior;
-score head kiểu `box_feature · text_feature`; kiểm feature CLIP frozen @512 (nội suy 2,3×).
+Nếu A chạy tốt thì **không đụng tới cả ba**, chuyển sang việc mà `CLAUDE.md` ghi là
+ĐIỀU KIỆN CẦN: **metric cho nhánh add**.

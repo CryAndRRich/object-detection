@@ -16,7 +16,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.criterion_a import DeepSetCriterion                      # noqa: E402
+from models.criterion import SetCriterion                            # noqa: E402
 from models.dit_blocks import (                                      # noqa: E402
     MIN_WH,
     BoxCoordEmbedder,
@@ -185,7 +185,7 @@ def test_moi_tang_co_roi_rieng():
 def test_loss_la_TONG_khong_phai_trung_binh():
     """DiffusionDet/DETR/V-DETR đều cộng loss các tầng. Chia trung bình làm gradient tới
     mỗi tầng bị nhân 1/6 — mô hình vẫn train, chỉ chậm hơn 6 lần, và không có gì báo."""
-    crit = DeepSetCriterion(matcher_method="hungarian")
+    crit = SetCriterion(matcher_method="hungarian")
     torch.manual_seed(2)
     boxes = torch.rand(B, N, 4) * 0.3 + 0.35
     logits = torch.randn(B, N)
@@ -201,7 +201,7 @@ def test_loss_la_TONG_khong_phai_trung_binh():
 def test_stats_co_duong_cong_theo_tang():
     """`*_per_layer` là chỉ số CHÍNH để đọc thí nghiệm: đường phẳng nghĩa là cộng dồn
     không mang lại gì."""
-    crit = DeepSetCriterion(matcher_method="hungarian")
+    crit = SetCriterion(matcher_method="hungarian")
     torch.manual_seed(3)
     layers = [(torch.rand(B, N, 4) * 0.3 + 0.35, torch.randn(B, N)) for _ in range(4)]
     targets = [torch.rand(2, 4) * 0.3 + 0.35 for _ in range(B)]
@@ -213,7 +213,7 @@ def test_stats_co_duong_cong_theo_tang():
 def test_criterion_tu_choi_dau_vao_sai_kieu():
     """Vòng 1 dispatch theo kiểu dữ liệu và bốn công cụ đã giải nén nhầm. Ở đây chữ ký
     chỉ có một dạng, và sai thì phải ném lỗi ngay chứ không âm thầm chạy."""
-    crit = DeepSetCriterion()
+    crit = SetCriterion()
     with pytest.raises(TypeError):
         crit((torch.rand(B, N, 4), torch.randn(B, N)), [torch.rand(2, 4)])
     with pytest.raises(TypeError):
@@ -223,7 +223,7 @@ def test_criterion_tu_choi_dau_vao_sai_kieu():
 def test_simota_chay_duoc():
     """SimOTA là matcher của EXPERIMENT A (DiffusionDet vốn dùng nó, không dùng
     Hungarian). Kiểm nó chạy và gán MỌI GT ít nhất một proposal."""
-    crit = DeepSetCriterion(matcher_method="simota")
+    crit = SetCriterion(matcher_method="simota")
     torch.manual_seed(4)
     boxes = torch.rand(1, 20, 4) * 0.3 + 0.35
     logits = torch.randn(1, 20)
@@ -256,7 +256,7 @@ def test_simota_khong_vo_khi_nhieu_GT_hon_box():
 
 def test_criterion_chay_khi_GT_nhieu_hon_box():
     """Cùng tình huống, nhưng đi qua criterion — nơi nó thực sự nổ lần đầu."""
-    crit = DeepSetCriterion(matcher_method="simota", use_center_prior=True,
+    crit = SetCriterion(matcher_method="simota", use_center_prior=True,
                             radius_ratio=2.5, top_k=10)
     torch.manual_seed(8)
     layers = [(torch.rand(2, 30, 4) * 0.3 + 0.35, torch.randn(2, 30))]

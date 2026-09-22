@@ -44,14 +44,15 @@ CHẠY TRÊN SERVER
 ----------------
   cd object-detection/count_editing/CE-LocModel
   python tools/run_on_free_gpu.py -- tools/gate_delta_direction.py \
-      --cache /mnt/disk1/aiotlab/haitn/cache --split val \
-      --out /mnt/disk1/aiotlab/haitn/log/gate_delta.json
+      --cache ../../data/cache_clip --split val \
+      --out /mnt/disk1/aiotlab/haitn/output/round2_gate_delta.json
 """
 
 import argparse
 import json
 import os
 import sys
+import time
 
 import numpy as np
 import torch
@@ -65,6 +66,14 @@ from models.dit_blocks import MIN_WH                               # noqa: E402
 from models.roi_sampler import RoIFeatureSampler                   # noqa: E402
 
 GRID = 32                       # ViT-B/16 ở 512px -> lưới 32x32
+
+
+def fmt(sec):
+    """12.3 -> '12s'; 185 -> '3m05s'. In thời gian THỰC TẾ ở mọi giai đoạn để biết
+    tiến trình còn sống — đọc cache nguội có thể mất vài phút mà không in gì."""
+    sec = int(max(sec, 0))
+    m, s = sec // 60, sec % 60
+    return f"{m}m{s:02d}s" if m else f"{s}s"
 
 
 def true_delta(box_lech, box_gt):
@@ -172,8 +181,8 @@ def fit_and_score(r_tr, d_tr, r_te, d_te, w_te, epochs, lr, dev, seed):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="config/round2_experiment_a.yaml")
-    ap.add_argument("--cache", required=True, help="thư mục cache patch token")
+    ap.add_argument("--config", default="config/experiment_a.yaml")
+    ap.add_argument("--cache", default="../../data/cache_clip", help="thư mục cache patch token")
     ap.add_argument("--split", default="val",
                     help="val: 28 lớp rời train, không có lô annotation rác của test")
     ap.add_argument("--d-cells", type=float, nargs="+", default=[0.5, 1.0, 2.0, 4.0])
@@ -196,6 +205,18 @@ def main():
     snr = cfg["diffusion"]["snr_scale"]
 
     ds = CE130Detection(cfg["data"]["root"], a.split, cfg["data"]["image_size"])
+
+    meta = os.path.join(a.cache, f"{a.split}_meta.json")
+    if not os.path.exists(meta):
+        raise SystemExit(
+            f"\nKHÔNG THẤY CACHE cho split '{a.split}': {meta}\n\n"
+            f"Vòng 1 chỉ build cache cho split nào nó train, nên '{a.split}' có thể "
+            f"chưa bao giờ được sinh. Chạy:\n\n"
+            f"  LOG=/mnt/disk1/aiotlab/haitn/log/cache_{a.split}_$(date +%m%d_%H%M).log\n"
+            f"  nohup python tools/run_on_free_gpu.py -- tools/build_cache.py \\\n"
+            f"      --config {a.config} --split {a.split} --out {a.cache} \\\n"
+            f"      > $LOG 2>&1 &\n"
+            f"  echo \"PID $! -> $LOG\"\n")
     cache = PatchCache(a.cache, a.split)
     torch.manual_seed(a.seed)
     sampler = RoIFeatureSampler(768, cfg["model"]["d_model"],
@@ -205,16 +226,30 @@ def main():
     nn.init.xavier_uniform_(sampler.out.weight)
     nn.init.zeros_(sampler.out.bias)
 
-    print(f"split={a.split}  ảnh={min(len(ds), a.max_images)}  thiết bị={dev}", flush=True)
+    n_img = min(len(ds), a.max_images)
+    n_row = len(a.d_cells) * len(a.timesteps)
+    print(f"split={a.split}  ảnh={n_img}  thiết bị={dev}  |  {n_row} cấu hình "
+          f"({len(a.d_cells)} mức d x {len(a.timesteps)} mức t)", flush=True)
+    print(f"Mỗi cấu hình: đọc cache {n_img} ảnh -> train 3 x Linear({a.epochs} bước).",
+          flush=True)
     print(f"{'d(ô)':>6} {'t':>5} {'cosine':>8} {'trung vị':>9} {'%đúng':>7} "
-          f"{'nhỏ<1ô':>8} {'vừa':>7} {'to':>7} {'xáo':>7} {'r=0':>7}", flush=True)
+          f"{'nhỏ<1ô':>8} {'vừa':>7} {'to':>7} {'xáo':>7} {'r=0':>7} {'thời gian':>10}",
+          flush=True)
 
     res = {"config": vars(a), "rows": []}
+    t_all = time.time()
+    done = 0
     for d_cells in a.d_cells:
         for t in a.timesteps:
+            t_row = time.time()
             tt = None if t < 0 else t
             r, d, w = collect(ds, cache, sampler, d_cells, tt, alphas, snr,
                               a.seed, dev, a.max_images)
+            t_collect = time.time() - t_row
+            if done == 0:
+                # Lần đầu là lần lâu nhất (đọc memmap nguội), in ngay để biết còn sống.
+                print(f"  [đọc cache lần đầu: {fmt(t_collect)} cho {len(r)} box]",
+                      flush=True)
             n = len(r)
             cut = int(n * 0.7)
             g = torch.Generator().manual_seed(a.seed)
@@ -231,15 +266,21 @@ def main():
                                  torch.zeros_like(r[te]), d[te], w[te],
                                  a.epochs, a.lr, dev, a.seed)
 
-            row = {"d_cells": d_cells, "t": t, "n_box": n,
+            done += 1
+            dt = time.time() - t_row
+            eta = (time.time() - t_all) / done * (n_row - done)
+            row = {"d_cells": d_cells, "t": t, "n_box": n, "sec": dt,
                    "real": real, "shuffled": shuf, "zero": zero}
             res["rows"].append(row)
             print(f"{d_cells:6.1f} {t:5d} {real['cosine']:8.3f} "
                   f"{real['cosine_median']:9.3f} {real['pct_dung_huong']:7.2f} "
                   f"{real['cosine_box_nho']:8.3f} {real['cosine_box_vua']:7.3f} "
                   f"{real['cosine_box_to']:7.3f} {shuf['cosine']:7.3f} "
-                  f"{zero['cosine']:7.3f}", flush=True)
+                  f"{zero['cosine']:7.3f} {fmt(dt):>10}"
+                  f"   [{done}/{n_row}, còn ~{fmt(eta)}]", flush=True)
 
+    res["total_sec"] = time.time() - t_all
+    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     with open(a.out, "w") as f:
         json.dump(res, f, indent=2, ensure_ascii=False)
 
@@ -250,7 +291,7 @@ def main():
     print("      Linear chỉ học prior của delta, KHÔNG dùng ảnh -> kết quả vô giá trị.")
     print("    - 'nhỏ<1ô' dự kiến tệ nhất (18-29 % số box, RoI 3x3 thoái hoá thành 1x1).")
     print("      Nếu chỉ nhóm này hỏng thì thiết kế vẫn dùng được, chỉ giới hạn ở box to.")
-    print(f"  -> {a.out}")
+    print(f"  tổng thời gian {fmt(res['total_sec'])}  ->  {a.out}")
 
 
 if __name__ == "__main__":

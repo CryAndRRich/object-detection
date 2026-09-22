@@ -9,8 +9,21 @@ Weights read from `diffusiondet/config.py:34-36,43-44`.
 
 NO epsilon loss (meaningless under set matching: the matcher permutes, so no
 epsilon belongs to prediction p and corresponds to GT g at once -> you would be
-training on the noise of padding boxes). NO deep supervision (single-forward
-architecture, no intermediate stage to supervise).
+training on the noise of padding boxes).
+
+GIÁM SÁT SÂU Ở MỌI TẦNG, và loss các tầng được CỘNG chứ không lấy trung bình.
+DiffusionDet, DETR và V-DETR đều cộng — mỗi tầng phụ nhận CÙNG trọng số với tầng cuối:
+
+    # refs/repos/DiffusionDet/diffusiondet/detector.py:148-151
+    for i in range(self.num_heads - 1):
+        aux_weight_dict.update({k + f"_{i}": v for k, v in weight_dict.items()})   # v GIỮ NGUYÊN
+
+    # refs/repos/V-DETR/criterion.py:703
+    loss += interm_loss
+
+Chia trung bình (cách vòng 1 làm) khiến gradient tới MỖI tầng bị nhân 1/6, tương đương
+train nhánh box ở learning rate thấp hơn 6 lần. `stats["loss_mean"]` giữ lại con số so
+sánh được cho log mà không đụng vào gradient.
 
 WHY BOTH L1 AND GIoU: L1 penalises ABSOLUTE error, so with CE-130 objects (median
 0.41 % of image area) it essentially ignores small objects; GIoU penalises
@@ -29,28 +42,23 @@ import torch.nn.functional as F
 from utils.box_ops import box_iou, cxcywh_to_xyxy, generalized_box_iou, sanitize_boxes
 from utils.matcher import match
 
-__all__ = ["SetCriterion"]
+__all__ = ["SetCriterion", "loss_from_layers"]
 
 W_L1, W_GIOU, W_CLASS = 5.0, 2.0, 2.0
 ALPHA, GAMMA = 0.25, 2.0
 
 
-def loss_from_output(crit, out, targets, labels=None):
-    """Call the criterion on whatever `model.forward` returned.
+def loss_from_layers(crit, layers, targets, labels=None):
+    """Gọi criterion trên thứ `model.forward` trả về.
 
-    A/B/A.1/A.2 return a (boxes, logits) tuple; C1 returns a LIST of those, one per
-    refinement round. Every tool that calls the model directly needs this branch, and
-    four of them were found unpacking the tuple unconditionally -- which raises on C1
-    only when that tool is actually run, i.e. on the server.
+    Tồn tại để mọi điểm vào (train / eval / visualise / overfit) đi qua CÙNG một chỗ.
+    Vòng 1 có bốn công cụ tự giải nén tuple, và chúng chỉ ném lỗi khi gặp cấu hình nhiều
+    vòng — tức là trên server, giữa một lần train dài.
 
-    Returns (loss, stats, indices, logits_of_the_round_eval_uses).
+    -> (loss, stats, indices, logits của tầng mà eval dùng)
     """
-    if isinstance(out, list):
-        loss, st, idx = crit(out, targets, labels=labels)
-        return loss, st, idx, out[-1][1]
-    boxes, logits = out
-    loss, st, idx = crit(boxes, logits, targets, labels=labels)
-    return loss, st, idx, logits
+    loss, st, idx = crit(layers, targets, labels=labels)
+    return loss, st, idx, layers[-1][1]
 
 
 class SetCriterion:
@@ -58,50 +66,49 @@ class SetCriterion:
         self.method = matcher_method
         self.matcher_kw = matcher_kw
 
-    def __call__(self, pred_boxes, pred_logits, targets=None, labels=None):
-        """Two call shapes, dispatched on the first argument:
-
-            crit(boxes, logits, targets, labels)      A / B / A.1 / A.2
-            crit(rounds, targets, labels=...)         C1 — `rounds` is a LIST of
-                                                      (boxes, logits) pairs
-
-        In the list form the second positional argument IS `targets`, so the call
-        site reads naturally; the loss is the MEAN over rounds, keeping its scale
-        comparable to A/B so the configured weights keep their meaning.
+    def __call__(self, layers, targets, labels=None):
         """
-        if isinstance(pred_boxes, list):
-            if targets is not None and labels is None:
-                labels = targets                 # crit(rounds, targets, labels)
-            return self._forward_rounds(pred_boxes, pred_logits, labels)
-        if targets is None:
-            raise TypeError("crit(boxes, logits, targets) needs `targets`")
-        return self._forward_one(pred_boxes, pred_logits, targets, labels)
+        layers  : list[(boxes [B,N,4], logits [B,N] hoặc [B,N,C])], cũ trước
+        targets : list[B] tensor [M_i, 4] cxcywh trong [0,1]
+        labels  : list[B] tensor [M_i] long — BẮT BUỘC khi logits là 3 chiều
+        -> (loss, stats, indices của tầng cuối)
 
-    def _forward_rounds(self, rounds, targets, labels=None):
-        """Mean over rounds. Per-round stats are kept: `iou_matched_per_round` is
-        THE metric for C1 -- a flat curve means iterating buys nothing, and that
-        verdict has to be visible before C2 is built on top.
+        MỘT chữ ký duy nhất. Vòng 1 dispatch theo KIỂU của đối số đầu (tuple hay list) và
+        bốn công cụ đã giải nén nhầm — lỗi chỉ lộ ra khi chạy đúng cấu hình, tức trên
+        server giữa một lần train dài.
 
-        The matcher runs again every round because the boxes changed, so the pairs
-        genuinely differ. That is 6x the matcher, which was already 24 % of a step
-        in A -- measure before committing to a long run.
+        Matcher CHẠY LẠI ở mỗi tầng, vì box của tầng 2 khác hẳn box của tầng 6 — ép chúng
+        khớp cùng một GT là sai bài toán. Đây là chuẩn của cả 8/8 bài trong khảo sát;
+        DiffusionDet gọi lại matcher trong đúng vòng lặp aux (`loss.py:253-255`).
+
+        Chi phí: matcher chạy `n_layer` lần. Ở vòng 1 với N=100 matcher đã chiếm 24 % một
+        step, nên N=30 của vòng 2 là khoản tiết kiệm quyết định (ma trận 30 x n_gt).
         """
-        total, per_round, indices = 0.0, [], None
-        for boxes, logits in rounds:
-            L, st, idx = self._forward_one(boxes, logits, targets, labels)
-            total = total + L
-            per_round.append(st)
-            indices = idx                       # keep the LAST round's assignment
-        n = len(rounds)
-        stats = {k: sum(st[k] for st in per_round) / n for k in per_round[0]}
-        stats["n_rounds"] = n
+        if not isinstance(layers, list) or not layers:
+            raise TypeError("SetCriterion cần một list [(boxes, logits)] khác rỗng")
+
+        total, per_layer, indices = 0.0, [], None
+        for boxes, logits in layers:
+            loss, st, idx = self._forward_one(boxes, logits, targets, labels)
+            total = total + loss                      # CỘNG, không chia
+            per_layer.append(st)
+            indices = idx                             # giữ assignment của tầng CUỐI
+
+        n = len(per_layer)
+        stats = {k: sum(st[k] for st in per_layer) / n for k in per_layer[0]}
+        stats["n_layers"] = n
+        # `loss` là con số THẬT đi vào backward; `loss_mean` chỉ để so với vòng 1.
+        stats["loss"] = float(total)
+        stats["loss_mean"] = float(total) / n
+
+        # Đường cong theo tầng là chỉ số CHÍNH để đọc EXPERIMENT A: phẳng nghĩa là cộng
+        # dồn không mang lại gì, và kết luận đó phải thấy được trước khi xây thêm gì.
         for k in ("loss", "iou_matched", "n_matched"):
-            stats[f"{k}_per_round"] = [st[k] for st in per_round]
-        # The headline numbers describe the round that is actually used at
-        # inference (`outs[-1]`), so the log matches what eval.py will report.
+            stats[f"{k}_per_layer"] = [st[k] for st in per_layer]
+        # Con số tiêu đề mô tả tầng mà suy luận thực sự dùng (`layers[-1]`).
         for k in ("loss", "iou_matched", "n_matched", "loss_l1", "loss_giou", "loss_ce"):
-            stats[f"{k}_final"] = per_round[-1][k]
-        return total / n, stats, indices
+            stats[f"{k}_final"] = per_layer[-1][k]
+        return total, stats, indices
 
     def _forward_one(self, pred_boxes, pred_logits, targets, labels=None):
         """

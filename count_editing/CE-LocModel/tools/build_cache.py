@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import sys
+import time
 
 import numpy as np
 import torch
@@ -69,6 +70,7 @@ def main():
     np.save(os.path.join(a.out, f"{a.split}_text.npy"), txt)
     print(f"[cache] {len(classes)} classes -> text embeddings {txt.shape}", flush=True)
 
+    t0 = time.time()
     for i0 in range(0, n_img, a.batch_size):
         idx = range(i0, min(i0 + a.batch_size, n_img))
         samples = [ds[i] for i in idx]
@@ -80,7 +82,10 @@ def main():
             mm[list(idx), v] = enc.encode_image_raw(px).cpu().numpy().astype(np.float16)
 
         if i0 % (a.batch_size * 20) == 0:
-            print(f"  {i0}/{n_img}", flush=True)
+            el = time.time() - t0
+            eta = el / max(i0 + len(list(idx)), 1) * (n_img - i0 - len(list(idx)))
+            print(f"  {i0}/{n_img}  ({el/60:.1f} phút, còn ~{eta/60:.1f} phút)",
+                  flush=True)
 
     mm.flush()
     with open(os.path.join(a.out, f"{a.split}_meta.json"), "w") as f:
@@ -88,7 +93,7 @@ def main():
                    "dtype": "float16", "image_size": cfg["data"]["image_size"],
                    "clip": cfg["model"]["clip_name"], "classes": classes,
                    "n_ver": n_ver}, f)
-    print(f"[cache] done: {path}", flush=True)
+    print(f"[cache] xong sau {(time.time()-t0)/60:.1f} phút: {path}", flush=True)
 
 
 if __name__ == "__main__":
