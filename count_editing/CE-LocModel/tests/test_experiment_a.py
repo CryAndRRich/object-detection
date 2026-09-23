@@ -380,3 +380,93 @@ def test_nut_that_ngau_nhien_lam_mat_tin_hieu():
     truoc = fit_and_score(feat[:cut], d[:cut], feat[cut:], d[cut:], w[cut:], 400, 1e-3, dev, 0)
     sau = fit_and_score(z[:cut], d[:cut], z[cut:], d[cut:], w[cut:], 400, 1e-3, dev, 0)
     assert truoc["cosine_lstsq"] > sau["cosine_lstsq"] + 0.2
+
+
+# ---------------------------------------------------------------------------
+# Chẩn đoán gate_delta_ablation — 7 giả thuyết vì sao cos2304 chỉ 0,266
+# ---------------------------------------------------------------------------
+
+def test_grid_points_scale_1_khop_box_grid_points_goc():
+    """`grid_points(scale=1.0)` phải TRÙNG `box_grid_points` của model thật, nếu không
+    thì cột 'nới 1.0x' không phải mốc so sánh hợp lệ cho các mức nới khác."""
+    from models.roi_sampler import box_grid_points
+    from tools.gate_delta_ablation import grid_points
+
+    torch.manual_seed(0)
+    box = torch.rand(11, 4) * 0.3 + 0.3
+    for k in (1, 3, 5, 7):
+        a = grid_points(box, k, 1.0)
+        b = box_grid_points(box.unsqueeze(0), k)
+        assert torch.allclose(a, b, atol=1e-6), (k, float((a - b).abs().max()))
+
+
+def test_grid_points_noi_rong_vuot_ra_ngoai_box():
+    """Giả thuyết 4 chỉ có nghĩa nếu `scale>1` thật sự lấy mẫu NGOÀI box."""
+    from tools.gate_delta_ablation import grid_points
+
+    box = torch.tensor([[0.5, 0.5, 0.2, 0.2]])
+    trong = grid_points(box, 3, 1.0)[0, 0]
+    ngoai = grid_points(box, 3, 2.0)[0, 0]
+    # trong box: mọi điểm nằm trong [cx-w/2, cx+w/2] = [0.4, 0.6]
+    assert float(trong[:, 0].min()) >= 0.4 - 1e-6
+    assert float(trong[:, 0].max()) <= 0.6 + 1e-6
+    # nới 2x: phải có điểm vượt ra ngoài
+    assert float(ngoai[:, 0].min()) < 0.4
+    assert float(ngoai[:, 0].max()) > 0.6
+
+
+def test_sample_raw_bo_dung_nut_that_proj_point():
+    """`sample_raw` phải trả CLIP THÔ k*k*768, và bằng đúng đặc trưng mà `proj_point`
+    nhận làm đầu vào — nếu lệch thì giả thuyết 2 đo nhầm thứ."""
+    import torch.nn as nn
+    from models.roi_sampler import RoIFeatureSampler
+    from tools.gate_delta_ablation import sample_raw
+    from tools.gate_delta_direction import sample_roi
+
+    torch.manual_seed(0)
+    s = RoIFeatureSampler(768, 256, 3, 0.0).eval()
+    nn.init.xavier_uniform_(s.out.weight); nn.init.zeros_(s.out.bias)
+    praw = torch.randn(1, 1024, 768)
+    box = torch.rand(6, 4) * 0.3 + 0.3
+
+    raw = sample_raw(praw, box, 3, 1.0)
+    assert raw.shape == (6, 9 * 768)
+    # đưa raw qua proj_point phải ra đúng feat 2304-d của cửa chặn
+    with torch.no_grad():
+        lai = s.proj_point(raw.view(6, 9, 768)).flatten(-2)
+    feat, _ = sample_roi(s, praw, box)
+    assert torch.allclose(lai, feat, atol=1e-5), float((lai - feat).abs().max())
+
+
+def test_knn_bat_duoc_quan_he_phi_tuyen_ma_linear_bo_lo():
+    """k-NN phải thật sự là trần mạnh hơn tuyến tính, nếu không thì kết luận
+    'đặc trưng không chứa thông tin' dựa trên nó là vô giá trị."""
+    from tools.gate_delta_ablation import probe_knn, probe_linear, _cos
+
+    torch.manual_seed(0)
+    K, D = 4000, 32
+    X = torch.randn(K, D)
+    # Phi tuyến thuần trên CẢ HAI kênh tâm. `.abs()` không dùng được ở đây: nó luôn
+    # dương nên Linear đoán trúng bằng một hằng số, che mất việc nó không học được gì.
+    d = torch.stack([X[:, 0] * X[:, 1], X[:, 2] * X[:, 3],
+                     torch.zeros(K), torch.zeros(K)], dim=-1)
+    cut = int(K * 0.7)
+    dev = torch.device("cpu")
+    lin = _cos(probe_linear(X[:cut], d[:cut], X[cut:], d[cut:], dev, 0), d[cut:])
+    knn = _cos(probe_knn(X[:cut], d[:cut], X[cut:], dev, 10), d[cut:])
+    assert knn > lin + 0.2, (knn, lin)
+
+
+def test_probe_mlp_hoc_duoc_quan_he_phi_tuyen():
+    """MLP + early stop phải hội tụ trên quan hệ phi tuyến có thật."""
+    from tools.gate_delta_ablation import probe_mlp, _cos
+
+    torch.manual_seed(0)
+    K, D = 5000, 32
+    X = torch.randn(K, D)
+    d = torch.stack([X[:, 0] * X[:, 1], X[:, 2] * X[:, 3],
+                     torch.zeros(K), torch.zeros(K)], dim=-1)
+    cut = int(K * 0.7)
+    pred = probe_mlp(X[:cut], d[:cut], X[cut:], d[cut:], torch.device("cpu"), 0,
+                     hidden=256, layers=2, epochs=4000)
+    assert _cos(pred, d[cut:]) > 0.5

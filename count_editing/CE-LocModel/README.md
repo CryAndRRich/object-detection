@@ -14,6 +14,7 @@ Cơ sở paper: [`../../../docs/LITERATURE_SURVEY.md`](../../../docs/LITERATURE_
 | `models/clip_encoder.py` | CLIP frozen — giữ nguyên |
 | `train.py` / `eval.py` | điểm vào |
 | `tools/gate_delta_direction.py` | **CỬA CHẶN — chạy TRƯỚC khi train** |
+| `tools/gate_delta_ablation.py` | **CHẨN ĐOÁN** — 7 giả thuyết vì sao cửa chặn trượt |
 | `config/experiment_a.yaml` | N=30, SimOTA, roi_k=3 |
 | `tests/test_experiment_a.py` | 19 test |
 
@@ -71,6 +72,7 @@ Checkpoint để trong repo để cấu trúc server và local trùng nhau — t
 | test | ~4 phút | trực tiếp |
 | cửa chặn (nhanh, 1 cấu hình) | ~9 phút | nền |
 | **cửa chặn (đầy đủ, 20 cấu hình)** | **~20 phút** | **nền** |
+| **chẩn đoán (23 cấu hình)** | **~15–25 phút** | **nền** |
 | build cache (nếu cần) | 5–15 phút | nền |
 | **train 300 epoch** | **~10–20 giờ** | **nền** |
 | eval | ~5–10 phút | nền |
@@ -139,6 +141,65 @@ echo "PID $! -> $LOG"
   chỉ học prior của phân bố delta, **không dùng ảnh** ⇒ kết quả vô giá trị.
 - Cột `nhỏ<1ô` dự kiến tệ nhất (18–29 % số box, RoI 3×3 thoái hoá thành 1×1). Nếu **chỉ**
   nhóm này hỏng thì thiết kế vẫn dùng được, chỉ giới hạn ở box lớn.
+
+#### Kết quả cửa chặn 2026-09-23 (bản đã sửa 2 lỗi đo): **TRƯỢT**
+
+```
+t=-1, d=1.0 :  cos2304 = 0,266   lstsq = 0,222   xáo = -0,010   r=0 = 0,007
+```
+
+**0,266 so với tiêu chí 0,5.** Kết luận đáng tin lần này: cột `dịch thật` in đúng
+0,50/1,00/2,00/4,00 ở `t=-1` (biến `d` đã sạch), và `lstsq ≈ cosine` ⇒ đã chạm trần
+tuyến tính, tăng `--epochs` vô ích.
+
+Hai điều đáng chú ý:
+- **Đối chứng sạch tuyệt đối** (`xáo` −0,010, `r=0` 0,007) ⇒ toàn bộ 0,266 đến **từ ảnh**.
+  Tín hiệu có thật, chỉ yếu. Trái lại ở `t=999`: `cos2304` 0,246 nhưng `r=0` 0,239 — gần
+  như **toàn bộ** là prior, tức con số "cao nhất bảng" của lần chạy đầu là con số **rỗng
+  nhất bảng**.
+- Box **to** đạt 0,347, cao hơn hẳn box nhỏ (0,175) — ngược dự đoán ban đầu, nhưng vẫn
+  dưới ngưỡng.
+
+0,266 trùng hướng với kết quả vòng 1 (soft-argmax: 1,34 ô so với lưới đều 1,49 ô). Cùng
+một kết luận đo bằng hai cách: **CLIP ViT-B/16 frozen ở lưới 32×32 không đủ thông tin
+định vị dưới một ô lưới.**
+
+### Bước 1b — CHẨN ĐOÁN, khi cửa chặn trượt
+
+`lstsq ≈ cosine` chỉ chứng minh chạm trần **tuyến tính**. Trước khi bỏ thiết kế phải loại
+trừ khả năng **phép đo còn yếu**. 7 giả thuyết, mỗi cái đổi được quyết định:
+
+| # | giả thuyết | kiểm bằng |
+|---|---|---|
+| 1 | `Linear` quá yếu, quan hệ phi tuyến | MLP 2–3 lớp, vài bề rộng |
+| 2 | `proj_point` (768→256) là nút thắt **thứ hai** chưa gỡ | chấm thẳng trên CLIP thô 9×768 |
+| 3 | lưới 3×3 quá thưa | k = 1, 3, 5, 7 |
+| 4 | chỉ lấy mẫu **trong** box nên không thấy biên vật | nới lưới 1,5× / 2,0× |
+| 5 | cosine 2 kênh che mất kênh tốt | tách dx, dy (+ dw, dh nếu bật jitter) |
+| 6 | **trần THẬT của đặc trưng**, không phải trần mô hình | k-NN phi tham số |
+| 7 | CLIP không đóng góp gì ngoài mã hoá toạ độ | đối chứng chỉ-toạ-độ |
+
+**~15–25 phút** ⇒ chạy nền:
+
+```bash
+LOG=/mnt/disk1/aiotlab/haitn/log/gate_ablation_$(date +%m%d_%H%M).log
+nohup python tools/run_on_free_gpu.py -- tools/gate_delta_ablation.py \
+    --split val \
+    --out /mnt/disk1/aiotlab/haitn/output/round2_gate_ablation.json \
+    > $LOG 2>&1 &
+echo "PID $! -> $LOG"
+```
+
+Thêm `--scale-jitter 0.3` nếu muốn hỏi thêm *"box có biết mình to/nhỏ sai không"* — mặc
+định `perturb` chỉ dịch tâm nên hai kênh `dw`/`dh` luôn bằng 0 và bị ẩn khỏi bảng.
+
+**Đọc kết quả** (mỗi hàng có `±se`; chênh lệch nhỏ hơn 2·se là nhiễu, không phải hiệu ứng):
+- **k-NN [6] cũng thấp** ⇒ đặc trưng **thực sự** không chứa hướng dịch. Không đổ lỗi được
+  cho mô hình ⇒ EXPERIMENT A phải thiết kế lại.
+- **mlp ≫ linear** ⇒ cửa chặn đo bằng mô hình quá yếu ⇒ chỉ cần đổi `box_delta` thành MLP.
+- **nới 2,0× ≫ nới 1,0×** ⇒ phải lấy mẫu **cả ngoài** box.
+- **[7] chỉ-toạ-độ ≈ cột ảnh** ⇒ CLIP không đóng góp gì ⇒ kết luận **nặng nhất**.
+
 
 ### Bước 2 — cache patch token
 
