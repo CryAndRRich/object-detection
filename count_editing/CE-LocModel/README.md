@@ -64,6 +64,17 @@ Mọi lệnh chạy từ `object-detection/count_editing/CE-LocModel`.
 Checkpoint để trong repo để cấu trúc server và local trùng nhau — tải về giữ nguyên
 đường dẫn.
 
+**Thời lượng ước tính** — mọi thứ > 5 phút đều đưa dạng `nohup` nền kèm PID + logfile:
+
+| việc | thời lượng | dạng chạy |
+|---|---|---|
+| test | ~4 phút | trực tiếp |
+| cửa chặn (nhanh, 1 cấu hình) | ~9 phút | nền |
+| **cửa chặn (đầy đủ, 20 cấu hình)** | **~20 phút** | **nền** |
+| build cache (nếu cần) | 5–15 phút | nền |
+| **train 300 epoch** | **~10–20 giờ** | **nền** |
+| eval | ~5–10 phút | nền |
+
 ### Bước 0 — test (chạy được ở local, không cần GPU)
 
 ```bash
@@ -75,18 +86,55 @@ Phải thấy **91 passed** (19 test của A + 72 test hạ tầng). (Đừng ch
 ### Bước 1 — CỬA CHẶN, chạy trước khi train
 
 Trả lời câu hỏi duy nhất chống đỡ cả thiết kế: `Linear(256->4)` có đoán được **hướng
-dịch** về GT không? Vài phút, chặn được ~10 giờ A30 nếu trượt.
+dịch** về GT không? Chặn được ~10–20 giờ A30 nếu trượt.
+
+> ⚠️ **Lần chạy 2026-09-23 (cosine 0,086) KHÔNG dùng để phán quyết** — bản cửa chặn đó có
+> hai lỗi đo, cả hai đều kéo điểm xuống. Đã sửa; phải chạy lại bản mới.
+>
+> 1. **Nhiễu khuếch tán nuốt biến `d`.** `add_diffusion_noise` tự nó dịch tâm box **2,12 ô**
+>    ở `t=249` và **6,64 ô** ở `t=999`, trong khi `d` cố ý gây ra chỉ 0,5–4 ô. Ở `t=999`
+>    (`alpha_bar = 0`) tương quan còn **−0,009** nên cả 4 mức `d` cho kết quả **trùng khít** —
+>    bảng 16 hàng thực chất chỉ có 4 điểm độc lập. Câu hỏi bị đổi thành **định vị tuyệt đối**,
+>    đúng câu cửa chặn soft-argmax vòng 1 đã trượt. ⇒ thêm `t = -1` và cột `dịch thật`.
+> 2. **`sampler.out` đóng băng ngẫu nhiên** thành nút thắt 2304→256 mà model thật không có
+>    (ở đó lớp này **được học**). Trên tín hiệu tuyến tính hoàn hảo, phép chiếu ấy kéo cosine
+>    **0,966 → 0,233** — xấp xỉ đúng con số bảng cũ. ⇒ chấm thêm cột `cos2304` **trước** nút
+>    thắt và lấy chính cột đó làm tiêu chí.
+>
+> Đã loại trừ, *không* phải lỗi: 400 bước AdamW đủ hội tụ (0,896 so với trần lstsq 0,900).
+
+**~20 phút** (20 cấu hình: 4 mức `d` × 5 mức `t`) ⇒ chạy nền. Chi phí gần như chỉ nằm ở
+lần đọc cache nguội đầu tiên (~8m30s); các hàng sau ~2 giây mỗi hàng.
 
 ```bash
-python tools/run_on_free_gpu.py -- tools/gate_delta_direction.py \
-    --cache ../../data/cache_clip \
+LOG=/mnt/disk1/aiotlab/haitn/log/gate_delta_$(date +%m%d_%H%M).log
+nohup python tools/run_on_free_gpu.py -- tools/gate_delta_direction.py \
     --split val \
-    --out /mnt/disk1/aiotlab/haitn/output/round2_gate_delta.json
+    --out /mnt/disk1/aiotlab/haitn/output/round2_gate_delta.json \
+    > $LOG 2>&1 &
+echo "PID $! -> $LOG"
+```
+
+Muốn biết NGAY có đạt ngưỡng không (**~9 phút**, gần như toàn bộ là đọc cache) — đúng
+**hàng phán quyết**:
+
+```bash
+LOG=/mnt/disk1/aiotlab/haitn/log/gate_quick_$(date +%m%d_%H%M).log
+nohup python tools/run_on_free_gpu.py -- tools/gate_delta_direction.py \
+    --split val --d-cells 1.0 --timesteps -1 \
+    --out /mnt/disk1/aiotlab/haitn/output/round2_gate_quick.json \
+    > $LOG 2>&1 &
+echo "PID $! -> $LOG"
 ```
 
 **Đọc kết quả:**
-- **TIÊU CHÍ: `cosine > 0,5` ở `d = 1` ô.** Dưới ngưỡng ⇒ cộng dồn vô nghĩa, **DỪNG**,
-  không train.
+- **HÀNG PHÁN QUYẾT là `t = -1`, `d = 1,0`.** Chỉ hàng đó hỏi đúng câu *"box lệch 1 ô, có
+  biết lệch hướng nào không?"*. Các hàng `t ≥ 0` bị nhiễu dịch thêm 2–7 ô (xem cột
+  `dịch thật`) nên hỏi sang chuyện khác.
+- **TIÊU CHÍ: `cos2304 > 0,5`.** Đọc cột **2304** (trước nút thắt), **không** phải cột 256 —
+  xem hộp cảnh báo ở trên.
+- Cột `lstsq` là **trần tuyến tính chính xác**. `lstsq ≈ cosine` ⇒ AdamW đã hội tụ, loại bỏ
+  nghi ngờ *"train chưa đủ"*. `lstsq ≫ cosine` ⇒ tăng `--epochs` rồi chạy lại.
 - Cột `xáo` và `r=0` phải **thấp hơn hẳn** cột `cosine`. Nếu xấp xỉ nhau thì `Linear`
   chỉ học prior của phân bố delta, **không dùng ảnh** ⇒ kết quả vô giá trị.
 - Cột `nhỏ<1ô` dự kiến tệ nhất (18–29 % số box, RoI 3×3 thoái hoá thành 1×1). Nếu **chỉ**
@@ -138,7 +186,6 @@ Theo dõi: `tail -f $LOG` — in tiến độ kèm **thời gian đã chạy và
 ```bash
 python tools/run_on_free_gpu.py -- train.py \
     --config config/experiment_a.yaml \
-    --cache ../../data/cache_clip \
     --save-dir checkpoints/round2_a_smoke \
     --limit 64 --epochs 2 --log-every-n-batch 5
 ```
@@ -150,7 +197,6 @@ Kiểm: loss hữu hạn, `recall theo tầng` in ra đủ 6 số, không cảnh
 LOG=/mnt/disk1/aiotlab/haitn/log/round2_a_$(date +%m%d_%H%M).log
 nohup python tools/run_on_free_gpu.py -- train.py \
     --config config/experiment_a.yaml \
-    --cache ../../data/cache_clip \
     --save-dir checkpoints/round2_a \
     > $LOG 2>&1 &
 echo "PID $! -> $LOG"
@@ -163,18 +209,26 @@ tail -f $LOG
 
 ### Bước 5 — eval
 
-```bash
-# Ở N=30, cùng thang với lúc train
-python tools/run_on_free_gpu.py -- eval.py \
-    --ckpt checkpoints/round2_a/best.pt \
-    --cache ../../data/cache_clip --split val \
-    --out /mnt/disk1/aiotlab/haitn/output/round2_a_eval_val_n30.json
+**~5–10 phút mỗi lần** ⇒ chạy nền. Hai lần, ở hai giá trị N:
 
-# Ở N=300, số để BÁO CÁO (trần recall ~97 % thay vì 82 %)
-python tools/run_on_free_gpu.py -- eval.py \
-    --ckpt checkpoints/round2_a/best.pt \
-    --cache ../../data/cache_clip --split val --num-proposals 300 \
-    --out /mnt/disk1/aiotlab/haitn/output/round2_a_eval_val_n300.json
+```bash
+LOG=/mnt/disk1/aiotlab/haitn/log/eval_n30_$(date +%m%d_%H%M).log
+nohup python tools/run_on_free_gpu.py -- eval.py \
+    --ckpt checkpoints/round2_a/best.pt --split val \
+    --out /mnt/disk1/aiotlab/haitn/output/round2_a_eval_val_n30.json \
+    > $LOG 2>&1 &
+echo "PID $! -> $LOG"
+```
+
+Rồi ở N=300 — số để **BÁO CÁO** (trần recall ~97 % thay vì 82 %):
+
+```bash
+LOG=/mnt/disk1/aiotlab/haitn/log/eval_n300_$(date +%m%d_%H%M).log
+nohup python tools/run_on_free_gpu.py -- eval.py \
+    --ckpt checkpoints/round2_a/best.pt --split val --num-proposals 300 \
+    --out /mnt/disk1/aiotlab/haitn/output/round2_a_eval_val_n300.json \
+    > $LOG 2>&1 &
+echo "PID $! -> $LOG"
 ```
 
 ---

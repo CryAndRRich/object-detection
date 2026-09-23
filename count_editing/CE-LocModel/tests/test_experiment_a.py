@@ -279,3 +279,104 @@ def test_coord_embed_phan_biet_duoc_vi_tri():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+# ---------------------------------------------------------------------------
+# Cửa chặn gate_delta_direction — các phần thêm sau khi phát hiện 2 lỗi đo
+# ---------------------------------------------------------------------------
+
+def test_sample_roi_khop_bit_voi_forward_cua_sampler():
+    """`sample_roi` tự viết lại đường đi của `RoIFeatureSampler.forward` để lấy được
+    đặc trưng TRƯỚC lớp `out`. Nếu hai đường lệch nhau thì cột `cos2304` đo một thứ
+    không tồn tại trong model thật."""
+    import torch.nn as nn
+    from models.roi_sampler import RoIFeatureSampler
+    from tools.gate_delta_direction import sample_roi
+
+    torch.manual_seed(0)
+    s = RoIFeatureSampler(768, 256, 3, 0.0).eval()
+    nn.init.xavier_uniform_(s.out.weight)          # như cửa chặn làm
+    nn.init.zeros_(s.out.bias)
+    praw = torch.randn(1, 1024, 768)
+    box = torch.rand(7, 4) * 0.3 + 0.3
+
+    feat, r = sample_roi(s, praw, box)
+    with torch.no_grad():
+        ref = s(praw, box.unsqueeze(0))[0]
+
+    assert feat.shape == (7, 3 * 3 * 256)
+    assert torch.allclose(r, ref, atol=1e-6), float((r - ref).abs().max())
+
+
+def test_nhieu_khuech_tan_nuot_bien_d_o_t_lon():
+    """Lý do `t=-1` phải có trong mặc định: ở `t` lớn, `d` không còn dấu vết.
+
+    Đây là lỗi đo đã làm 4 hàng `t=999` của lần chạy đầu trùng khít nhau."""
+    import numpy as np
+    import yaml
+    from tools.gate_delta_direction import perturb, true_delta, add_diffusion_noise
+    from utils.diffusion_math import cosine_alphas_cumprod
+
+    cfg = yaml.safe_load(open("config/experiment_a.yaml"))
+    al = cosine_alphas_cumprod(cfg["diffusion"]["num_timesteps"]).float()
+    snr = cfg["diffusion"]["snr_scale"]
+    gt = torch.stack([torch.rand(4000) * 0.6 + 0.2, torch.rand(4000) * 0.6 + 0.2,
+                      torch.full((4000,), 1.96 / 32), torch.full((4000,), 1.70 / 32)], -1)
+
+    def tuong_quan(t, d):
+        rng = np.random.default_rng(0)
+        box = perturb(gt, d, rng)
+        dirn = box[:, :2] - gt[:, :2]
+        if t is not None:
+            box = add_diffusion_noise(box, t, al, snr, rng)
+        dt = true_delta(box, gt)
+        return float(torch.nn.functional.cosine_similarity(dt[:, :2], -dirn, dim=-1).mean())
+
+    # Không nhiễu: delta thật chỉ đường về, ngược đúng hướng đã dịch.
+    assert tuong_quan(None, 1.0) > 0.99
+    # t=999: alpha_bar=0, box là nhiễu thuần -> `d` bị xoá sạch.
+    assert abs(tuong_quan(999, 1.0)) < 0.05
+    assert abs(tuong_quan(999, 4.0) - tuong_quan(999, 0.5)) < 0.05
+
+
+def test_lstsq_la_tran_khong_thap_hon_adamw():
+    """Cột `lstsq` phải là TRẦN: nếu nó thấp hơn AdamW thì nó bị hỏng và không còn
+    phân biệt được 'đặc trưng vô dụng' với 'train chưa đủ'."""
+    from tools.gate_delta_direction import fit_and_score
+
+    torch.manual_seed(0)
+    K, D = 3000, 64
+    W = torch.randn(D, 4) * 0.1
+    r = torch.randn(K, D)
+    d = r @ W + torch.randn(K, 4) * 0.3
+    w = torch.full((K,), 2.0)
+    cut = int(K * 0.7)
+    out = fit_and_score(r[:cut], d[:cut], r[cut:], d[cut:], w[cut:],
+                        400, 1e-3, torch.device("cpu"), 0)
+    assert out["cosine_lstsq"] >= out["cosine"] - 0.02
+    assert out["cosine_lstsq"] > 0.5        # quan hệ có thật thì phải bắt được
+
+
+def test_nut_that_ngau_nhien_lam_mat_tin_hieu():
+    """Bằng chứng cho lỗi đo thứ 2: chiếu ngẫu nhiên 2304->256 huỷ phần lớn tín hiệu,
+    nên tiêu chí phải đọc trên cột TRƯỚC nút thắt."""
+    import torch.nn as nn
+    from tools.gate_delta_direction import fit_and_score
+
+    torch.manual_seed(0)
+    K, S = 3000, 2304
+    d = torch.randn(K, S) @ (torch.randn(S, 4) * 0.05)
+    feat = torch.randn(K, S)
+    d = feat @ (torch.randn(S, 4) * 0.05) + torch.randn(K, 4) * 0.2
+    w = torch.full((K,), 2.0)
+    cut = int(K * 0.7)
+    proj = nn.Linear(S, 256)
+    nn.init.xavier_uniform_(proj.weight)
+    nn.init.zeros_(proj.bias)
+    with torch.no_grad():
+        z = proj(feat)
+
+    dev = torch.device("cpu")
+    truoc = fit_and_score(feat[:cut], d[:cut], feat[cut:], d[cut:], w[cut:], 400, 1e-3, dev, 0)
+    sau = fit_and_score(z[:cut], d[:cut], z[cut:], d[cut:], w[cut:], 400, 1e-3, dev, 0)
+    assert truoc["cosine_lstsq"] > sau["cosine_lstsq"] + 0.2

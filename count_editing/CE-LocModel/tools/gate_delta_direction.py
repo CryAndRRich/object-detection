@@ -27,16 +27,23 @@ CÁCH ĐO
    `update_box`: dịch tâm theo đơn vị kích thước box, kích thước nhân theo exp).
 5. Đo cosine giữa delta dự đoán và delta thật, trên tập val giữ riêng.
 
-TIÊU CHÍ: cosine > 0,5 ở `d = 1` ô. Dưới ngưỡng ⇒ cộng dồn vô nghĩa, DỪNG, thiết kế lại.
+TIÊU CHÍ: cosine > 0,5 trên cột `cos2304`, ở hàng `t = -1, d = 1` ô.
+Dưới ngưỡng ⇒ cộng dồn vô nghĩa, DỪNG, thiết kế lại.
 
-BA ĐỐI CHỨNG BẮT BUỘC, thiếu cái nào cũng đọc sai kết quả:
-  - `shuffle`  : `r` bị xáo trộn giữa các mẫu. Nếu điểm không tụt thì `Linear` chỉ học
-                 prior của phân bố delta, KHÔNG dùng ảnh.
-  - `zero`     : `r` = 0. Trần của việc đoán mò.
-  - theo NHÓM KÍCH THƯỚC: 18-29 % box CE-130 nhỏ hơn MỘT ô lưới, với chúng lưới 3x3 của
-                 RoI thoái hoá thành 1x1 (đo được AUC đúng-cỡ = 0,000). Gộp chung sẽ che
-                 mất việc nhóm này hỏng hoàn toàn.
-  - theo `t`   : ở `t` lớn box gần nhiễu thuần, nên quét cả mức nhiễu chứ không chỉ `d`.
+HAI LỖI ĐO CỦA BẢN ĐẦU (lần chạy 2026-09-23 cho cosine 0,086 — KHÔNG dùng để phán quyết)
+----------------------------------------------------------------------------------------
+1. `add_diffusion_noise` TỰ NÓ dịch tâm box 2,12 ô ở `t=249` và 6,64 ô ở `t=999`, trong
+   khi `d` cố ý gây ra chỉ 0,5–4 ô. Biến `d` bị nuốt: đo được tương quan giữa delta thật
+   và hướng dịch còn **−0,009** ở `t=999` (alpha_bar = 0,00000 ⇒ box là nhiễu thuần), nên
+   cả 4 mức `d` cho kết quả TRÙNG KHÍT. Câu hỏi bị đổi thành định vị tuyệt đối — đúng câu
+   cửa chặn soft-argmax vòng 1 đã trượt. ⇒ thêm `t = -1` và cột `dịch thật`.
+2. `sampler.out` bị đóng băng NGẪU NHIÊN, thành nút thắt 2304→256 mà model thật không có
+   (ở đó lớp này ĐƯỢC HỌC). Trên tín hiệu tuyến tính hoàn hảo, phép chiếu ấy kéo cosine
+   **0,966 → 0,233** — xấp xỉ đúng con số bảng cũ đo được. ⇒ chấm thêm cột `cos2304`
+   TRƯỚC nút thắt, và lấy chính cột đó làm tiêu chí.
+
+ĐÃ LOẠI TRỪ, không phải lỗi: 400 bước AdamW là đủ hội tụ (0,896 so với trần lstsq 0,900
+trên dữ liệu tổng hợp) — vẫn in cột `lstsq` mỗi hàng để luôn thấy trần.
 
 KHÔNG train model thật, KHÔNG cần GPU cho CLIP (đọc cache).
 
@@ -63,7 +70,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data.ce130_dataset import CE130Detection, PatchCache          # noqa: E402
 from models.dit_blocks import MIN_WH                               # noqa: E402
-from models.roi_sampler import RoIFeatureSampler                   # noqa: E402
+from models.roi_sampler import RoIFeatureSampler, box_grid_points  # noqa: E402
 
 GRID = 32                       # ViT-B/16 ở 512px -> lưới 32x32
 
@@ -123,10 +130,31 @@ def add_diffusion_noise(boxes, t, alphas_cumprod, snr_scale, rng):
 
 
 @torch.no_grad()
+def sample_roi(sampler, praw, box):
+    """-> (feat_2304 [n,k*k*d_model], r_256 [n,d_model]).
+
+    Trả về CẢ HAI phía của `sampler.out`. Lý do: trong cửa chặn `out` bị đóng băng
+    NGẪU NHIÊN, mà đo được phép chiếu ngẫu nhiên 2304->256 làm cosine tụt 0,966 -> 0,233
+    ngay cả khi quan hệ tuyến tính là hoàn hảo. Trong model thật lớp đó ĐƯỢC HỌC nên
+    không có nút thắt ấy. Chấm cả hai để tách "CLIP có tín hiệu không" khỏi
+    "phép chiếu ngẫu nhiên làm mất bao nhiêu".
+    """
+    B, P, d_in = praw.shape
+    g = int(round(P ** 0.5))
+    fmap = praw.transpose(1, 2).reshape(B, d_in, g, g)
+    pts = box_grid_points(box.unsqueeze(0).to(praw.device), sampler.k)
+    samp = torch.nn.functional.grid_sample(fmap, pts * 2.0 - 1.0, mode="bilinear",
+                                           padding_mode="border", align_corners=False)
+    samp = samp.permute(0, 2, 3, 1)                                  # [1,n,k*k,d_in]
+    feat = sampler.proj_point(samp.to(sampler.proj_point.weight.dtype)).flatten(-2)
+    return feat[0], sampler.out(feat)[0]
+
+
+@torch.no_grad()
 def collect(ds, cache, sampler, d_cells, t, alphas, snr_scale, seed, dev, max_img):
-    """-> (r [K,256], delta_thật [K,4], rộng_ô [K]) cho mọi GT box của các ảnh đã chọn."""
+    """-> (feat [K,2304], r [K,256], delta_thật [K,4], rộng_ô [K], dịch_thật_ô [K])."""
     rng = np.random.default_rng(seed)
-    R, D, W = [], [], []
+    F_, R, D, W, S = [], [], [], [], []
     for i in range(min(len(ds), max_img)):
         s = ds.__getitem__(i, need_image=False)
         gt = torch.as_tensor(s["boxes"], dtype=torch.float32)
@@ -138,33 +166,21 @@ def collect(ds, cache, sampler, d_cells, t, alphas, snr_scale, seed, dev, max_im
         box = perturb(gt, d_cells, rng)
         if t is not None:
             box = add_diffusion_noise(box, t, alphas, snr_scale, rng)
-        r = sampler(praw, box.unsqueeze(0).to(dev))[0]               # [n,256]
+        feat, r = sample_roi(sampler, praw, box)
+        F_.append(feat.cpu())
         R.append(r.cpu())
         D.append(true_delta(box, gt))
         W.append(gt[:, 2] * GRID)
-    return torch.cat(R), torch.cat(D), torch.cat(W)
+        # Độ dịch tâm THỰC TẾ sau cả perturb lẫn nhiễu khuếch tán. Phải đo, vì ở
+        # t=249 riêng nhiễu đã dịch ~2,12 ô — lấn át hoàn toàn `d` mà ta cố ý gây ra.
+        S.append((box[:, :2] - gt[:, :2]).norm(dim=-1) * GRID)
+    return torch.cat(F_), torch.cat(R), torch.cat(D), torch.cat(W), torch.cat(S)
 
 
-def fit_and_score(r_tr, d_tr, r_te, d_te, w_te, epochs, lr, dev, seed):
-    """Train `Linear(256->4)` trên tập train, chấm cosine trên tập test.
-
-    Cosine chứ không phải MSE: cửa chặn hỏi về HƯỚNG. Một mô hình đoán đúng hướng nhưng
-    sai độ lớn vẫn dùng được (6 tầng cộng dồn sẽ bù dần); đoán sai hướng thì không.
-    """
-    torch.manual_seed(seed)
-    head = nn.Linear(r_tr.shape[1], 4).to(dev)
-    opt = torch.optim.AdamW(head.parameters(), lr=lr, weight_decay=1e-4)
-    r_tr, d_tr = r_tr.to(dev), d_tr.to(dev)
-    for _ in range(epochs):
-        opt.zero_grad()
-        nn.functional.mse_loss(head(r_tr), d_tr).backward()
-        opt.step()
-
-    with torch.no_grad():
-        pred = head(r_te.to(dev)).cpu()
-    # Chỉ trên 2 kênh TÂM: đó là "hướng dịch". Hai kênh kích thước là câu hỏi khác.
+def _cos_stats(pred, d_te, w_te):
+    """Cosine trên 2 kênh TÂM (đó là 'hướng dịch'; 2 kênh kích thước là câu hỏi khác),
+    kèm tách theo nhóm kích thước."""
     cos = nn.functional.cosine_similarity(pred[:, :2], d_te[:, :2], dim=-1)
-
     small = w_te < 1.0                      # nhỏ hơn MỘT ô lưới
     mid = (w_te >= 1.0) & (w_te < 3.0)
     big = w_te >= 3.0
@@ -179,6 +195,42 @@ def fit_and_score(r_tr, d_tr, r_te, d_te, w_te, epochs, lr, dev, seed):
     }
 
 
+def fit_and_score(r_tr, d_tr, r_te, d_te, w_te, epochs, lr, dev, seed):
+    """Train `Linear(d->4)` trên tập train, chấm cosine trên tập test.
+
+    Cosine chứ không phải MSE: cửa chặn hỏi về HƯỚNG. Một mô hình đoán đúng hướng nhưng
+    sai độ lớn vẫn dùng được (6 tầng cộng dồn sẽ bù dần); đoán sai hướng thì không.
+
+    Chấm HAI cách. AdamW là cách model thật học; `lstsq` là nghiệm bình phương tối thiểu
+    chính xác, tức TRẦN của mọi ánh xạ tuyến tính. Có trần thì mới phân biệt được
+    "đặc trưng không mang tín hiệu" với "tối ưu chưa hội tụ" — đã kiểm trên dữ liệu tổng
+    hợp: 400 bước đạt 0,896 so với trần 0,900, nên epochs không phải chỗ nghi ngờ.
+    """
+    torch.manual_seed(seed)
+    head = nn.Linear(r_tr.shape[1], 4).to(dev)
+    opt = torch.optim.AdamW(head.parameters(), lr=lr, weight_decay=1e-4)
+    r_tr_d, d_tr_d = r_tr.to(dev), d_tr.to(dev)
+    for _ in range(epochs):
+        opt.zero_grad()
+        nn.functional.mse_loss(head(r_tr_d), d_tr_d).backward()
+        opt.step()
+    with torch.no_grad():
+        pred = head(r_te.to(dev)).cpu()
+    out = _cos_stats(pred, d_te, w_te)
+
+    # TRẦN tuyến tính: thêm cột hằng số để có bias, giải trên float64 cho ổn định.
+    try:
+        one = torch.ones(len(r_tr), 1, dtype=torch.float64)
+        A = torch.cat([r_tr.double(), one], dim=1)
+        sol = torch.linalg.lstsq(A, d_tr.double()).solution
+        Ate = torch.cat([r_te.double(), torch.ones(len(r_te), 1, dtype=torch.float64)], 1)
+        out["cosine_lstsq"] = _cos_stats((Ate @ sol).float(), d_te, w_te)["cosine"]
+    except Exception as e:                                   # ma trận suy biến
+        out["cosine_lstsq"] = float("nan")
+        out["lstsq_error"] = str(e)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="config/experiment_a.yaml")
@@ -186,8 +238,10 @@ def main():
     ap.add_argument("--split", default="val",
                     help="val: 28 lớp rời train, không có lô annotation rác của test")
     ap.add_argument("--d-cells", type=float, nargs="+", default=[0.5, 1.0, 2.0, 4.0])
-    ap.add_argument("--timesteps", type=int, nargs="+", default=[249, 499, 749, 999],
-                    help="-1 nghĩa là KHÔNG thêm nhiễu khuếch tán")
+    ap.add_argument("--timesteps", type=int, nargs="+", default=[-1, 249, 499, 749, 999],
+                    help="-1 = KHÔNG thêm nhiễu khuếch tán. PHẢI có -1: nhiễu tự nó "
+                         "dịch tâm 2,12 ô ở t=249 và 6,64 ô ở t=999, lấn át biến `d`; "
+                         "ở t=999 alpha_bar=0 nên mọi mức `d` cho cùng một kết quả.")
     ap.add_argument("--max-images", type=int, default=400)
     ap.add_argument("--epochs", type=int, default=400)
     ap.add_argument("--lr", type=float, default=1e-3)
@@ -232,9 +286,12 @@ def main():
           f"({len(a.d_cells)} mức d x {len(a.timesteps)} mức t)", flush=True)
     print(f"Mỗi cấu hình: đọc cache {n_img} ảnh -> train 3 x Linear({a.epochs} bước).",
           flush=True)
-    print(f"{'d(ô)':>6} {'t':>5} {'cosine':>8} {'trung vị':>9} {'%đúng':>7} "
-          f"{'nhỏ<1ô':>8} {'vừa':>7} {'to':>7} {'xáo':>7} {'r=0':>7} {'thời gian':>10}",
-          flush=True)
+    print(f"{'d(ô)':>6} {'t':>5} {'dịch thật':>10} | {'cos256':>7} {'lstsq':>7} "
+          f"{'cos2304':>8} {'lstsq':>7} | {'nhỏ<1ô':>8} {'vừa':>7} {'to':>7} | "
+          f"{'xáo':>6} {'r=0':>6} {'thời gian':>9}", flush=True)
+    print(f"{'':>6} {'':>5} {'(ô lưới)':>10} | {'-- sau nút thắt --':^15} "
+          f"{'-- TRƯỚC nút thắt --':^16} | {'-- theo cỡ (2304) --':^24} | "
+          f"{'đối chứng':^13}", flush=True)
 
     res = {"config": vars(a), "rows": []}
     t_all = time.time()
@@ -243,8 +300,8 @@ def main():
         for t in a.timesteps:
             t_row = time.time()
             tt = None if t < 0 else t
-            r, d, w = collect(ds, cache, sampler, d_cells, tt, alphas, snr,
-                              a.seed, dev, a.max_images)
+            feat, r, d, w, shift = collect(ds, cache, sampler, d_cells, tt, alphas,
+                                           snr, a.seed, dev, a.max_images)
             t_collect = time.time() - t_row
             if done == 0:
                 # Lần đầu là lần lâu nhất (đọc memmap nguội), in ngay để biết còn sống.
@@ -256,12 +313,14 @@ def main():
             perm = torch.randperm(n, generator=g)
             tr, te = perm[:cut], perm[cut:]
 
-            real = fit_and_score(r[tr], d[tr], r[te], d[te], w[te],
-                                 a.epochs, a.lr, dev, a.seed)
+            fit = lambda X: fit_and_score(X[tr], d[tr], X[te], d[te], w[te],  # noqa: E731
+                                          a.epochs, a.lr, dev, a.seed)
+            real = fit(r)                      # 256-d, SAU nút thắt ngẫu nhiên
+            raw = fit(feat)                    # 2304-d, TRƯỚC nút thắt
             # ĐỐI CHỨNG 1: xáo `r` giữa các mẫu -> phá liên hệ ảnh<->delta.
             shuf = fit_and_score(r[tr][torch.randperm(cut, generator=g)], d[tr],
                                  r[te], d[te], w[te], a.epochs, a.lr, dev, a.seed)
-            # ĐỐI CHỨNG 2: không có ảnh.
+            # ĐỐI CHỨNG 2: không có ảnh. Trần của việc đoán mò theo prior.
             zero = fit_and_score(torch.zeros_like(r[tr]), d[tr],
                                  torch.zeros_like(r[te]), d[te], w[te],
                                  a.epochs, a.lr, dev, a.seed)
@@ -269,15 +328,18 @@ def main():
             done += 1
             dt = time.time() - t_row
             eta = (time.time() - t_all) / done * (n_row - done)
+            sh_med = float(shift.median())
             row = {"d_cells": d_cells, "t": t, "n_box": n, "sec": dt,
-                   "real": real, "shuffled": shuf, "zero": zero}
+                   "dich_that_o_median": sh_med,
+                   "real": real, "raw2304": raw, "shuffled": shuf, "zero": zero}
             res["rows"].append(row)
-            print(f"{d_cells:6.1f} {t:5d} {real['cosine']:8.3f} "
-                  f"{real['cosine_median']:9.3f} {real['pct_dung_huong']:7.2f} "
-                  f"{real['cosine_box_nho']:8.3f} {real['cosine_box_vua']:7.3f} "
-                  f"{real['cosine_box_to']:7.3f} {shuf['cosine']:7.3f} "
-                  f"{zero['cosine']:7.3f} {fmt(dt):>10}"
-                  f"   [{done}/{n_row}, còn ~{fmt(eta)}]", flush=True)
+            print(f"{d_cells:6.1f} {t:5d} {sh_med:10.2f} | "
+                  f"{real['cosine']:7.3f} {real['cosine_lstsq']:7.3f} "
+                  f"{raw['cosine']:8.3f} {raw['cosine_lstsq']:7.3f} | "
+                  f"{raw['cosine_box_nho']:8.3f} {raw['cosine_box_vua']:7.3f} "
+                  f"{raw['cosine_box_to']:7.3f} | "
+                  f"{shuf['cosine']:6.3f} {zero['cosine']:6.3f} {fmt(dt):>9}"
+                  f"  [{done}/{n_row}, còn ~{fmt(eta)}]", flush=True)
 
     res["total_sec"] = time.time() - t_all
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
@@ -286,7 +348,17 @@ def main():
 
     print()
     print("  ĐỌC KẾT QUẢ:")
-    print("    - TIÊU CHÍ: cosine > 0,5 ở d=1 ô. Dưới ngưỡng -> cộng dồn vô nghĩa, DỪNG.")
+    print("    - HÀNG PHÁN QUYẾT là t=-1, d=1.0 (không nhiễu khuếch tán). Chỉ hàng đó")
+    print("      hỏi đúng câu 'box lệch 1 ô, biết lệch hướng nào không?'. Các hàng t>=0")
+    print("      bị nhiễu dịch tâm thêm 2-7 ô, biến câu hỏi thành ĐỊNH VỊ TUYỆT ĐỐI —")
+    print("      đúng câu mà cửa chặn soft-argmax vòng 1 ĐÃ TRƯỢT. Xem cột 'dịch thật'.")
+    print("    - TIÊU CHÍ: cos2304 > 0,5. Dùng cột 2304 (TRƯỚC nút thắt) chứ không phải")
+    print("      256, vì ở đây `sampler.out` bị đóng băng NGẪU NHIÊN còn trong model thật")
+    print("      nó ĐƯỢC HỌC. Đo trên tín hiệu tuyến tính hoàn hảo: chiếu ngẫu nhiên")
+    print("      2304->256 kéo cosine 0,966 -> 0,233, tức cột 256 phần lớn đo nút thắt.")
+    print("    - 'lstsq' là TRẦN tuyến tính chính xác. Nếu lstsq ~ cosine thì AdamW đã")
+    print("      hội tụ, loại bỏ nghi ngờ 'train chưa đủ'. Nếu lstsq >> cosine thì tăng")
+    print("      --epochs rồi chạy lại.")
     print("    - 'xáo' và 'r=0' phải THẤP HƠN HẲN cột cosine. Nếu xấp xỉ nhau thì")
     print("      Linear chỉ học prior của delta, KHÔNG dùng ảnh -> kết quả vô giá trị.")
     print("    - 'nhỏ<1ô' dự kiến tệ nhất (18-29 % số box, RoI 3x3 thoái hoá thành 1x1).")
