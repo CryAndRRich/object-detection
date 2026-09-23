@@ -54,7 +54,8 @@ import yaml
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data.ce130_dataset import CE130Detection, PatchCache          # noqa: E402
-from tools.gate_delta_direction import GRID, fmt, perturb, true_delta  # noqa: E402
+import tools.gate_delta_direction as _gdd                           # noqa: E402
+from tools.gate_delta_direction import fmt, perturb, set_grid, true_delta  # noqa: E402
 
 NGUONG = 0.5                    # tiêu chí của cửa chặn
 
@@ -119,7 +120,7 @@ def collect(ds, cache, d_cells, seed, dev, max_img, ks, scales, sj=0.0):
             for sc in scales:
                 feats[(k, sc)].append(sample_raw(praw, box, k, sc).cpu())
         D.append(true_delta(box, gt))
-        W.append(gt[:, 2] * GRID)
+        W.append(gt[:, 2] * _gdd.GRID)
         POS.append(box)                                     # giả thuyết 7
     return ({kk: torch.cat(v) for kk, v in feats.items()},
             torch.cat(D), torch.cat(W), torch.cat(POS))
@@ -245,11 +246,12 @@ def main():
     if not os.path.exists(meta):
         raise SystemExit(f"KHÔNG THẤY CACHE: {meta}")
     cache = PatchCache(a.cache, a.split)
+    g = set_grid(cache.meta["shape"][2])
 
     ks, scales = [1, 3, 5, 7], [1.0, 1.5, 2.0]
     t0 = time.time()
     print(f"split={a.split}  ảnh={min(len(ds), a.max_images)}  d={a.d_cells} ô  "
-          f"t=-1 (KHÔNG nhiễu)  thiết bị={dev}", flush=True)
+          f"t=-1 (KHÔNG nhiễu)  lưới {g}x{g}  thiết bị={dev}", flush=True)
     print(f"Thu đặc trưng cho {len(ks)}x{len(scales)} cách lấy mẫu trong MỘT lượt "
           f"đọc cache...", flush=True)
 

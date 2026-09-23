@@ -15,6 +15,7 @@ Cơ sở paper: [`../../../docs/LITERATURE_SURVEY.md`](../../../docs/LITERATURE_
 | `train.py` / `eval.py` | điểm vào |
 | `tools/gate_delta_direction.py` | **CỬA CHẶN — chạy TRƯỚC khi train** |
 | `tools/gate_delta_ablation.py` | **CHẨN ĐOÁN** — 7 giả thuyết vì sao cửa chặn trượt |
+| `tools/gate_grid_resolution.py` | **NGOẠI SUY** độ phân giải lưới — chạy TRƯỚC khi build cache 1024px |
 | `config/experiment_a.yaml` | N=30, SimOTA, roi_k=3 |
 | `tests/test_experiment_a.py` | 19 test |
 
@@ -72,7 +73,9 @@ Checkpoint để trong repo để cấu trúc server và local trùng nhau — t
 | test | ~4 phút | trực tiếp |
 | cửa chặn (nhanh, 1 cấu hình) | ~9 phút | nền |
 | **cửa chặn (đầy đủ, 20 cấu hình)** | **~20 phút** | **nền** |
-| **chẩn đoán (23 cấu hình)** | **~15–25 phút** | **nền** |
+| **chẩn đoán (23 cấu hình)** | **~2 phút** | trực tiếp |
+| **ngoại suy lưới (6 cấu hình)** | **~3 phút** | trực tiếp |
+| build cache val @1024px | ~10–20 phút | nền |
 | build cache (nếu cần) | 5–15 phút | nền |
 | **train 300 epoch** | **~10–20 giờ** | **nền** |
 | eval | ~5–10 phút | nền |
@@ -199,6 +202,70 @@ Thêm `--scale-jitter 0.3` nếu muốn hỏi thêm *"box có biết mình to/nh
 - **mlp ≫ linear** ⇒ cửa chặn đo bằng mô hình quá yếu ⇒ chỉ cần đổi `box_delta` thành MLP.
 - **nới 2,0× ≫ nới 1,0×** ⇒ phải lấy mẫu **cả ngoài** box.
 - **[7] chỉ-toạ-độ ≈ cột ảnh** ⇒ CLIP không đóng góp gì ⇒ kết luận **nặng nhất**.
+
+#### Kết quả chẩn đoán 2026-09-23: nút thắt là **ĐỘ PHÂN GIẢI**, không phải kiến trúc
+
+| nhóm | số | kết luận |
+|---|---|---|
+| [1+2] linear 0,253 → mlp 0,304, lớp 3 không tăng thêm | +0,05 | probe **không** phải vấn đề; `proj_point` **không** phải nút thắt |
+| [6] k-NN 0,175 < linear 0,253 | — | tín hiệu nằm ở một **hướng tuyến tính mảnh**, bị phương sai nội dung lấn át |
+| [3+4] k=5: **0,042 → 0,288** khi nới 2,0×; k=7: 0,164 → **0,328** | ×7 | **phát hiện chính** |
+| [7] chỉ-toạ-độ 0,073, prior 0,004, xáo −0,020 vs ảnh 0,304 | — | CLIP **có** đóng góp thật; RoI không vô nghĩa |
+
+**Vì sao [3+4] là phát hiện chính.** Box trung vị rộng **1,96 ô lưới**. k=5 bó trong box ⇒
+0,39 ô/điểm, **dày hơn một ô** ⇒ `grid_sample` nội suy ra 5 giá trị gần trùng nhau. Nới
+rộng giúp vì các điểm bắt đầu chạm những ô **khác** nhau. Giới hạn là **số ô mỗi box**,
+không phải số điểm lấy mẫu.
+
+Khớp ba phép đo độc lập: soft-argmax vòng 1 (1,34 ô vs lưới đều 1,49), cửa chặn (0,266),
+chẩn đoán (trần 0,328). ⇒ **CLIP ViT-B/16 @512px (lưới 32×32) không đủ phân giải.**
+
+### Bước 1c — NGOẠI SUY độ phân giải, trước khi build cache 1024px
+
+Nâng 512 → 1024px cho lưới 64×64, box trung vị 1,96 → 3,92 ô. Nhưng cache tốn **34 GB**
+(so với 8,5 GB) và ViT attention tốn **16×**. Trước khi trả giá đó, đi **ngược lại**: hạ
+lưới hiện có 32 → 16 → 8 bằng average-pool, xem trần tụt bao nhiêu.
+
+```bash
+python tools/run_on_free_gpu.py -- tools/gate_grid_resolution.py \
+    --split val --out /mnt/disk1/aiotlab/haitn/output/round2_gate_grid.json
+```
+
+**~3 phút**, đọc cache có sẵn, không build gì.
+
+**Đọc kết quả:**
+- **dốc > +0,06 / lần gấp đôi lưới** ⇒ độ phân giải đúng là nút thắt ⇒ build cache 1024px.
+- **dốc ≈ 0 hoặc âm** ⇒ thông tin không nằm ở độ phân giải ⇒ **đừng build**, đổi hướng.
+- `dự báo ở lưới 64` là ngoại suy tuyến tính trên 3 điểm, dùng để **chặn** (còn dưới 0,5
+  thì cả kịch bản lạc quan cũng trượt), **không** dùng để kết luận sẽ đạt. Chiều tăng
+  không đối xứng với chiều giảm: ViT pretrain ở 14×14, nội suy `pos_embed` càng xa càng
+  kém tin cậy.
+
+### Bước 1d — build cache 1024px (CHỈ khi bước 1c ủng hộ)
+
+Chỉ build `val` trước (**5 GB**) để chạy lại cửa chặn; train/test chỉ build khi cửa chặn đạt.
+
+```bash
+# kiểm dung lượng trống TRƯỚC
+df -h /mnt/disk1/aiotlab/haitn/
+
+LOG=/mnt/disk1/aiotlab/haitn/log/cache_val_1024_$(date +%m%d_%H%M).log
+nohup python tools/run_on_free_gpu.py -- tools/build_cache.py \
+    --config config/experiment_a.yaml --split val \
+    --image-size 1024 --batch-size 2 \
+    --out ../../data/cache_clip_1024 \
+    > $LOG 2>&1 &
+echo "PID $! -> $LOG"
+```
+
+Rồi chạy lại cửa chặn trên cache mới:
+
+```bash
+python tools/run_on_free_gpu.py -- tools/gate_delta_direction.py \
+    --split val --cache ../../data/cache_clip_1024 --d-cells 1.0 --timesteps -1 \
+    --out /mnt/disk1/aiotlab/haitn/output/round2_gate_1024.json
+```
+
 
 
 ### Bước 2 — cache patch token

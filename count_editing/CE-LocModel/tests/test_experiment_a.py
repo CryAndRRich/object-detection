@@ -470,3 +470,86 @@ def test_probe_mlp_hoc_duoc_quan_he_phi_tuyen():
     pred = probe_mlp(X[:cut], d[:cut], X[cut:], d[cut:], torch.device("cpu"), 0,
                      hidden=256, layers=2, epochs=4000)
     assert _cos(pred, d[cut:]) > 0.5
+
+
+# ---------------------------------------------------------------------------
+# gate_grid_resolution — ngoại suy độ phân giải lưới
+# ---------------------------------------------------------------------------
+
+def test_sample_at_grid_giu_nguyen_khi_khong_ha_luoi():
+    """`g_new == g` phải là no-op, khớp `sample_raw`. Nếu lệch thì hàng 'lưới 32'
+    không so được với chẩn đoán trước đó."""
+    from tools.gate_delta_ablation import sample_raw
+    from tools.gate_grid_resolution import sample_at_grid
+
+    torch.manual_seed(0)
+    praw = torch.randn(1, 1024, 768)
+    box = torch.rand(9, 4) * 0.3 + 0.3
+    a = sample_at_grid(praw, box, 3, 1.0, 32)
+    b = sample_raw(praw, box, 3, 1.0)
+    assert torch.allclose(a, b, atol=1e-6), float((a - b).abs().max())
+
+
+def test_ha_luoi_lam_mat_chi_tiet_khong_gian():
+    """Hạ lưới phải THỰC SỰ làm mất chi tiết: hai điểm cách nhau dưới một ô của lưới
+    mới phải cho cùng giá trị. Nếu không thì phép ngoại suy đo một thứ giả."""
+    from tools.gate_grid_resolution import sample_at_grid
+
+    torch.manual_seed(0)
+    praw = torch.randn(1, 1024, 768)
+    # hai box lệch nhau 1 ô của lưới 32 (=1/32), nhưng cùng một ô của lưới 8
+    b1 = torch.tensor([[0.5, 0.5, 0.02, 0.02]])
+    b2 = torch.tensor([[0.5 + 1.0 / 32, 0.5, 0.02, 0.02]])
+    v32 = (sample_at_grid(praw, b1, 1, 1.0, 32) - sample_at_grid(praw, b2, 1, 1.0, 32))
+    v8 = (sample_at_grid(praw, b1, 1, 1.0, 8) - sample_at_grid(praw, b2, 1, 1.0, 8))
+    # ở lưới 32 hai vị trí khác nhau rõ; ở lưới 8 gần như trùng
+    assert float(v32.abs().mean()) > float(v8.abs().mean()) * 2
+
+
+def test_avg_pool_khong_phai_lay_thua():
+    """Hạ lưới bằng average-pool giữ trung bình vùng. Kiểm bằng feature map hằng số
+    theo khối: pool phải trả đúng giá trị khối đó."""
+    from tools.gate_grid_resolution import sample_at_grid
+
+    # feature map: nửa trái = 1, nửa phải = 3 -> pool 32->8 vẫn giữ 1 và 3
+    fm = torch.ones(1, 1, 32, 32)
+    fm[:, :, :, 16:] = 3.0
+    praw = fm.reshape(1, 1, 1024).transpose(1, 2)          # [1,1024,1]
+    trai = sample_at_grid(praw, torch.tensor([[0.25, 0.5, 0.02, 0.02]]), 1, 1.0, 8)
+    phai = sample_at_grid(praw, torch.tensor([[0.75, 0.5, 0.02, 0.02]]), 1, 1.0, 8)
+    assert abs(float(trai) - 1.0) < 1e-4, float(trai)
+    assert abs(float(phai) - 3.0) < 1e-4, float(phai)
+
+
+def test_set_grid_lam_d_cells_dung_don_vi_o_o_moi_do_phan_giai():
+    """`perturb(d=1)` phải dịch đúng MỘT ô của lưới ĐANG dùng, ở mọi độ phân giải.
+
+    Không có `set_grid`, `GRID=32` cố định sẽ làm `d=1 ô` trên cache 1024px dịch thật ra
+    2 ô của lưới 64 — bảng so sánh hai độ dịch khác nhau, không assert nào bắt.
+    (Cạm bẫy 1: sai âm thầm.)
+    """
+    import numpy as np
+    import tools.gate_delta_direction as gdd
+
+    cu = gdd.GRID
+    try:
+        box = torch.tensor([[0.5, 0.5, 0.06, 0.05]])
+        for n_token, g in [(1024, 32), (4096, 64), (256, 16)]:
+            assert gdd.set_grid(n_token) == g
+            out = gdd.perturb(box, 1.0, np.random.default_rng(0))
+            dich_chuan_hoa = float((out[0, :2] - box[0, :2]).norm())
+            assert abs(dich_chuan_hoa * g - 1.0) < 1e-4, (g, dich_chuan_hoa * g)
+    finally:
+        gdd.GRID = cu
+
+
+def test_set_grid_tu_choi_so_token_khong_vuong():
+    import pytest
+
+    import tools.gate_delta_direction as gdd
+    cu = gdd.GRID
+    try:
+        with pytest.raises(AssertionError):
+            gdd.set_grid(1000)
+    finally:
+        gdd.GRID = cu

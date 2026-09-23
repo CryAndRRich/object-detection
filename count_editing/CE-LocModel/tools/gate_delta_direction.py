@@ -72,7 +72,21 @@ from data.ce130_dataset import CE130Detection, PatchCache          # noqa: E402
 from models.dit_blocks import MIN_WH                               # noqa: E402
 from models.roi_sampler import RoIFeatureSampler, box_grid_points  # noqa: E402
 
-GRID = 32                       # ViT-B/16 ở 512px -> lưới 32x32
+GRID = 32                       # MẶC ĐỊNH: ViT-B/16 ở 512px -> lưới 32x32.
+                                # ⚠️ KHÔNG dùng trực tiếp khi cache có thể khác độ phân
+                                # giải — gọi `set_grid()` sau khi biết số token thật.
+                                # Nếu bỏ qua, `d=1 ô` trên cache 1024px sẽ dịch 2 ô của
+                                # lưới 64 và bảng so sánh hai độ dịch KHÁC nhau mà không
+                                # assert nào bắt (cạm bẫy 1: sai âm thầm).
+
+
+def set_grid(n_token):
+    """Đặt `GRID` theo số patch token THẬT của cache. Trả về giá trị đã đặt."""
+    global GRID
+    g = int(round(n_token ** 0.5))
+    assert g * g == n_token, f"{n_token} token không phải lưới vuông"
+    GRID = g
+    return g
 
 
 def fmt(sec):
@@ -272,6 +286,10 @@ def main():
             f"      > $LOG 2>&1 &\n"
             f"  echo \"PID $! -> $LOG\"\n")
     cache = PatchCache(a.cache, a.split)
+    g = set_grid(cache.meta["shape"][2])
+    print(f"cache: lưới {g}x{g} ({cache.meta['shape'][2]} token), ảnh "
+          f"{cache.meta.get('image_size', '?')}px -> box trung vị 1,96 ô ở lưới 32 "
+          f"tương đương {1.96 * g / 32:.2f} ô ở đây", flush=True)
     torch.manual_seed(a.seed)
     sampler = RoIFeatureSampler(768, cfg["model"]["d_model"],
                                 cfg["model"]["roi_k"], 0.0).to(dev).eval()

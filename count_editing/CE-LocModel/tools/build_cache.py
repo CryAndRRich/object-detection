@@ -38,10 +38,18 @@ def main():
     ap.add_argument("--no-flip", action="store_true", help="cache the original image only")
     ap.add_argument("--limit", type=int, default=None, help="shrink for a smoke test")
     ap.add_argument("--device", default=None)
+    ap.add_argument("--image-size", type=int, default=None,
+                    help="ghi đè `data.image_size` của config. 1024 -> lưới 64x64 "
+                         "(box CE-130 trung vị 1,96 -> 3,92 ô). Cache to gấp 4 và ViT "
+                         "attention tốn 16x, nên GIẢM --batch-size theo.")
     a = ap.parse_args()
 
     with open(a.config) as f:
         cfg = yaml.safe_load(f)
+    if a.image_size:
+        # Ghi vào cfg chứ không truyền riêng: `image_size` đi vào CẢ dataset, encoder
+        # lẫn meta.json. Đặt một chỗ thì ba nơi không thể lệch nhau.
+        cfg["data"]["image_size"] = a.image_size
     dev = torch.device(a.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     os.makedirs(a.out, exist_ok=True)
 
