@@ -553,3 +553,39 @@ def test_set_grid_tu_choi_so_token_khong_vuong():
             gdd.set_grid(1000)
     finally:
         gdd.GRID = cu
+
+
+def test_probe_mlp_on_dinh_tren_dac_trung_thang_lech():
+    """Hồi quy cho lỗi @1024: `mlp 3 lớp` cho 0,077 và `k=7 nới 2,0x` cho 0,030 —
+    THẤP HƠN CẢ mức sàn k=1. Nguyên nhân là đặc trưng thang lệch + lr cố định làm
+    phân kỳ. Sau khi chuẩn hoá + quét lr, mạng sâu KHÔNG được tệ hơn mạng nông."""
+    from tools.gate_delta_ablation import probe_mlp, _cos
+
+    torch.manual_seed(0)
+    K, D = 3000, 512
+    X = torch.randn(K, D)
+    # thang rất lệch giữa các chiều, như đặc trưng CLIP thô
+    X = X * torch.logspace(-2, 3, D).unsqueeze(0)
+    W = torch.randn(D, 4) * 0.01
+    d = X @ W + torch.randn(K, 4) * 0.3
+    cut = int(K * 0.7)
+    dev = torch.device("cpu")
+
+    nong = _cos(probe_mlp(X[:cut], d[:cut], X[cut:], d[cut:], dev, 0,
+                          hidden=256, layers=2, epochs=800), d[cut:])
+    sau = _cos(probe_mlp(X[:cut], d[:cut], X[cut:], d[cut:], dev, 0,
+                         hidden=256, layers=3, epochs=800), d[cut:])
+    assert nong > 0.3, nong
+    assert sau > nong - 0.15, (sau, nong)   # sâu hơn không được sụp đổ
+
+
+def test_max_cond_len_theo_do_phan_giai_that():
+    """`cond_pos_emb` phải đủ chỗ cho memory ở ĐỘ PHÂN GIẢI ĐANG DÙNG.
+
+    Hằng 1152 đủ cho 512px (1024 patch + 1 text) nhưng KHÔNG đủ cho 1024px (4096 + 1):
+    train trên cache 1024px sẽ ném lỗi ngay batch đầu."""
+    from models.detector import BoxDiT
+
+    for image_size, n_patch in [(512, 1024), (1024, 4096)]:
+        dec = BoxDiT(64, 1, 2, 16, max_cond_len=n_patch + 128)
+        assert dec.cond_pos_emb.shape[1] >= n_patch + 1, (image_size, n_patch)

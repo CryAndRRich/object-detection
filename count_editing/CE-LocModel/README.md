@@ -246,8 +246,13 @@ python tools/run_on_free_gpu.py -- tools/gate_grid_resolution.py \
 Chỉ build `val` trước (**5 GB**) để chạy lại cửa chặn; train/test chỉ build khi cửa chặn đạt.
 
 ```bash
-# kiểm dung lượng trống TRƯỚC
-df -h /mnt/disk1/aiotlab/haitn/
+# kiểm dung lượng trống TRƯỚC — CẢ HAI ổ, chúng khác nhau
+df -h /mnt/disk1/aiotlab/haitn/   # nơi ghi cache
+df -h /home/aiotlab               # nơi HF để weights nếu quên HF_HOME
+
+# HF_HOME PHẢI đặt trước: không có nó, HuggingFace tải CLIP về /home/aiotlab/.cache/
+# (ổ KHÁC, còn ~45 MB) -> "No space left on device", dù /mnt/disk1 còn 1 TB.
+export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache
 
 LOG=/mnt/disk1/aiotlab/haitn/log/cache_val_1024_$(date +%m%d_%H%M).log
 nohup python tools/run_on_free_gpu.py -- tools/build_cache.py \

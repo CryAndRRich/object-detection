@@ -154,50 +154,72 @@ def probe_linear(Xtr, dtr, Xte, dte, dev, seed, epochs=400, lr=1e-3):
 
 
 def probe_mlp(Xtr, dtr, Xte, dte, dev, seed, hidden=512, layers=2,
-              epochs=3000, lr=1e-3, bs=4096):
-    """MLP có minibatch + early stop theo tập val tách từ train.
+              epochs=3000, lrs=(3e-4, 1e-3, 3e-3), bs=4096, patience=15):
+    """MLP có minibatch + early stop + QUÉT lr + CHUẨN HOÁ đặc trưng.
 
-    Minibatch chứ không full-batch như probe tuyến tính: MLP nhiều tham số hơn hẳn,
-    full-batch 400 bước sẽ chưa hội tụ và ta lại không phân biệt được 'đặc trưng yếu'
-    với 'train chưa đủ' — đúng cái bẫy cửa chặn bản đầu đã mắc.
+    Ba thứ sửa sau lần chạy @1024 (2026-09-23), nơi `mlp 3 lớp` cho 0,077 còn
+    `k=7 nới 2,0x` cho 0,030 — THẤP HƠN CẢ MỨC SÀN k=1 (0,019). Không thể là kết luận
+    về đặc trưng; đó là lỗi tối ưu:
+
+      1. CHUẨN HOÁ (z-score theo từng chiều, thống kê lấy TỪ TẬP TRAIN): đặc trưng CLIP
+         thô ở 37.632 chiều có thang rất lệch, gradient bước đầu lớn -> phân kỳ ngay.
+      2. QUÉT lr rồi lấy cấu hình tốt nhất theo tập val riêng: một lr cố định không thể
+         hợp cho cả 768-d lẫn 37.632-d.
+      3. PATIENCE 15 thay vì 8: mạng sâu hơn cần nhiều epoch hơn mới thoát vùng phẳng.
+
+    Vẫn là early stop theo val TÁCH TỪ TRAIN, không đụng tập test — nếu chọn lr theo
+    test thì con số cuối là rò rỉ, không còn là trần trung thực.
     """
-    torch.manual_seed(seed)
-    mods, d_in = [], Xtr.shape[1]
-    for _ in range(layers - 1):
-        mods += [nn.Linear(d_in, hidden), nn.GELU()]
-        d_in = hidden
-    mods += [nn.Linear(d_in, 4)]
-    net = nn.Sequential(*mods).to(dev)
-    opt = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=1e-4)
-
     n = len(Xtr)
     cut = int(n * 0.85)
     g = torch.Generator().manual_seed(seed)
     pm = torch.randperm(n, generator=g)
     tr, va = pm[:cut], pm[cut:]
-    Xd, dd = Xtr[tr].to(dev), dtr[tr].to(dev)
-    Xv, dv = Xtr[va].to(dev), dtr[va].to(dev)
 
-    best, best_state, bad = -2.0, None, 0
-    steps_per_ep = max(1, len(Xd) // bs)
-    for ep in range(epochs // steps_per_ep + 1):
-        idx = torch.randperm(len(Xd), device=dev)
-        for j in range(steps_per_ep):
-            b = idx[j * bs:(j + 1) * bs]
-            opt.zero_grad(); F.mse_loss(net(Xd[b]), dd[b]).backward(); opt.step()
-        with torch.no_grad():
-            c = _cos(net(Xv).cpu(), dv.cpu())
-        if c > best + 1e-4:
-            best, bad = c, 0
-            best_state = {k: v.detach().clone() for k, v in net.state_dict().items()}
-        else:
-            bad += 1
-            if bad >= 8:                       # kiên nhẫn 8 epoch
-                break
-    if best_state is not None:
-        net.load_state_dict(best_state)
-    with torch.no_grad():
-        return net(Xte.to(dev)).cpu()
+    # Chuẩn hoá bằng thống kê CỦA TẬP TRAIN, áp cho cả val lẫn test.
+    mu = Xtr[tr].mean(0, keepdim=True)
+    sd = Xtr[tr].std(0, keepdim=True).clamp(min=1e-5)
+    Xd = ((Xtr[tr] - mu) / sd).to(dev)
+    Xv = ((Xtr[va] - mu) / sd).to(dev)
+    Xt = ((Xte - mu) / sd).to(dev)
+    dd, dv = dtr[tr].to(dev), dtr[va].to(dev)
+
+    tot_best, tot_pred = -2.0, None
+    for lr in lrs:
+        torch.manual_seed(seed)
+        mods, d_in = [], Xtr.shape[1]
+        for _ in range(layers - 1):
+            mods += [nn.Linear(d_in, hidden), nn.GELU()]
+            d_in = hidden
+        mods += [nn.Linear(d_in, 4)]
+        net = nn.Sequential(*mods).to(dev)
+        opt = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=1e-4)
+
+        best, best_state, bad = -2.0, None, 0
+        steps_per_ep = max(1, len(Xd) // bs)
+        for _ in range(epochs // steps_per_ep + 1):
+            idx = torch.randperm(len(Xd), device=dev)
+            for j in range(steps_per_ep):
+                bidx = idx[j * bs:(j + 1) * bs]
+                opt.zero_grad()
+                F.mse_loss(net(Xd[bidx]), dd[bidx]).backward()
+                opt.step()
+            with torch.no_grad():
+                c = _cos(net(Xv).cpu(), dv.cpu())
+            if c > best + 1e-4:
+                best, bad = c, 0
+                best_state = {k: v.detach().clone()
+                              for k, v in net.state_dict().items()}
+            else:
+                bad += 1
+                if bad >= patience:
+                    break
+        if best_state is not None and best > tot_best:
+            net.load_state_dict(best_state)
+            tot_best = best
+            with torch.no_grad():
+                tot_pred = net(Xt).cpu()
+    return tot_pred
 
 
 def probe_knn(Xtr, dtr, Xte, dev, k=10, chunk=512):

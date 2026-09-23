@@ -77,6 +77,8 @@ class BoxDiT(nn.Module):
     def __init__(self, d_model=256, n_layer=6, n_head=8, coord_dim=64,
                  dim_feedforward=None, dropout=0.1, roi_dim=768, roi_k=3,
                  n_class=1, max_cond_len=1152):
+        # 1152 = 1024 patch (512px) + 128 dư. Người gọi nên truyền theo độ phân giải
+        # thật thay vì dựa vào mặc định này.
         super().__init__()
         self.d_model, self.n_class = d_model, n_class
 
@@ -156,8 +158,12 @@ class CELocDetector(nn.Module):
         self.n_class = n_class
         self.encoder = CLIPConditionEncoder(clip_name, d_model, image_size,
                                             freeze_clip, use_text=use_text)
+        # `max_cond_len` PHẢI suy từ độ phân giải thật, không phải hằng số: ở 512px
+        # memory là 1024 patch + 1 text, ở 1024px là 4096 + 1. Để hằng 1152 thì train
+        # trên cache 1024px ném lỗi ngay batch đầu (may là lỗi rõ, không sai âm thầm).
         self.decoder = BoxDiT(d_model, n_layer, n_head, coord_dim,
-                              dropout=dropout, roi_k=roi_k, n_class=n_class)
+                              dropout=dropout, roi_k=roi_k, n_class=n_class,
+                              max_cond_len=self.encoder.num_patches + 128)
         self.num_timesteps = num_timesteps
         self.sampling_steps = sampling_steps
         self.snr_scale = snr_scale
