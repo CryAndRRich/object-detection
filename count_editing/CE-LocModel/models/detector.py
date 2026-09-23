@@ -181,18 +181,22 @@ class CELocDetector(nn.Module):
         """
         dev = self.alphas_cumprod.device
         _check_generator(generator, dev)
-        t = int(torch.randint(0, self.num_timesteps, (1,), device=dev,
-                              generator=generator).item())
+        # MỖI ẢNH MỘT `t` — DiffusionDet gọi `randint` BÊN TRONG `prepare_diffusion_concat`,
+        # vốn chạy riêng từng ảnh (`detector.py:375,419`). Trước 2026-09-23 chỗ này bốc
+        # MỘT `t` cho cả batch: mỗi batch hoặc toàn ảnh dễ (t nhỏ) hoặc toàn ảnh khó
+        # (t lớn), nên loss và gradient dao động theo batch chứ không theo dữ liệu —
+        # log cho thấy iou_matched nhảy 0,016 <-> 0,79 giữa các batch liền nhau.
+        ts = torch.randint(0, self.num_timesteps, (len(targets),), device=dev,
+                           generator=generator)
         xs, gts = [], []
         for i, gt in enumerate(targets):
             x_t, _, is_gt = prepare_diffusion_concat(
-                gt.to(dev), num_proposals, t, self.alphas_cumprod, self.snr_scale,
-                valid_h=float(valid_h[i]), generator=generator,
+                gt.to(dev), num_proposals, int(ts[i]), self.alphas_cumprod,
+                self.snr_scale, valid_h=float(valid_h[i]), generator=generator,
             )
             xs.append(x_t)
             gts.append(is_gt)
-        t_batch = torch.full((len(targets),), t, dtype=torch.long, device=dev)
-        return torch.stack(xs), t_batch, torch.stack(gts)
+        return torch.stack(xs), ts.long(), torch.stack(gts)
 
     def forward(self, x_t, timesteps, pixel_values=None, texts=None,
                 patch_raw=None, text_raw=None, valid_h=None):

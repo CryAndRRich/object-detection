@@ -48,6 +48,8 @@ from data.factory import build_dataset  # noqa: E402
 from models.criterion import SetCriterion, loss_from_layers  # noqa: E402
 from models.detector import build_model  # noqa: E402
 from utils.box_ops import box_iou, cxcywh_to_xyxy  # noqa: E402
+from utils.checkpoint import CheckpointManager, rng_state, set_rng_state  # noqa: E402
+from utils.grad_monitor import GradMonitor  # noqa: E402
 
 
 class TorchWrap(Dataset):
@@ -81,6 +83,20 @@ class TorchWrap(Dataset):
             out["patch_raw"] = torch.from_numpy(patch)
             out["text_raw"] = torch.from_numpy(text)
         return out
+
+
+def seed_worker(worker_id):
+    """Seed lại RNG RIÊNG của dataset trong từng worker.
+
+    Dataset tung đồng xu lật ảnh bằng `np.random.Generator` của chính nó. Worker được
+    fork từ tiến trình chính nên cả 8 worker nhận CÙNG trạng thái RNG và tung cùng một
+    dãy — PyTorch chỉ tự seed lại torch/random/np.random toàn cục, không đụng tới
+    Generator riêng. `torch.initial_seed()` trong worker đã khác nhau theo worker_id.
+    """
+    info = torch.utils.data.get_worker_info()
+    inner = getattr(info.dataset, "ds", None)
+    if inner is not None and hasattr(inner, "rng"):
+        inner.rng = np.random.default_rng(torch.initial_seed() % 2 ** 32)
 
 
 def collate(batch):
@@ -248,6 +264,10 @@ def main():
     ap.add_argument("--limit", type=int, default=None, help="thu nhỏ để chạy thử")
     ap.add_argument("--device", default=None)
     ap.add_argument("--log-every-n-batch", type=int, default=None)
+    ap.add_argument("--resume", action="store_true",
+                    help="train tiếp từ <save-dir>/last.pt (model + optimizer + epoch + "
+                         "history + RNG). Không có cờ này mà last.pt đã tồn tại thì DỪNG, "
+                         "để không ghi đè nhầm một lần train đang dở.")
     a = ap.parse_args()
 
     with open(a.config) as f:
@@ -257,6 +277,14 @@ def main():
     bs = a.batch_size or tr_cfg["batch_size"]
     n_train, n_eval = d_cfg["num_proposals_train"], d_cfg["num_proposals_eval"]
     save_dir = a.save_dir or tr_cfg.get("save_dir", "checkpoints/round2_a")
+    ckpt = CheckpointManager(save_dir)
+    if ckpt.has_last() and not a.resume:
+        raise SystemExit(
+            f"\n{ckpt.last_path} ĐÃ TỒN TẠI — có một lần train đang dở ở đây.\n"
+            f"  - train tiếp : thêm --resume\n"
+            f"  - train mới  : đổi --save-dir (đừng xoá last.pt nếu chưa chắc)\n")
+    if a.resume and not ckpt.has_last():
+        raise SystemExit(f"\n--resume nhưng không thấy {ckpt.last_path}. Sai --save-dir?\n")
 
     dev = torch.device(a.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     torch.manual_seed(tr_cfg["seed"])
@@ -295,7 +323,11 @@ def main():
                     f"  echo \"PID $! -> $LOG\"\n")
 
     t_boot = time.time()
-    ds_tr = build_dataset(cfg, "train")
+    # flip_prob PHẢI truyền tường minh: mặc định của build_dataset là 0.0. Trước
+    # 2026-09-23 dòng này không truyền, nên MỌI lần train vòng 2 chạy KHÔNG lật ảnh dù
+    # config ghi 0.5 (và cache đã tốn gấp đôi dung lượng để lưu bản lật).
+    ds_tr = build_dataset(cfg, "train", flip_prob=cfg["data"].get("flip_prob", 0.0),
+                          seed=tr_cfg["seed"])
     ds_va = build_dataset(cfg, "val")          # flip_prob 0.0: không tăng cường lúc eval
     if a.limit:
         ds_tr.items = ds_tr.items[: a.limit]
@@ -305,7 +337,7 @@ def main():
 
     nw = cfg["data"]["num_workers"]
     dl_kw = dict(num_workers=nw, collate_fn=collate, pin_memory=dev.type == "cuda",
-                 persistent_workers=nw > 0)
+                 persistent_workers=nw > 0, worker_init_fn=seed_worker)
     ld_tr = DataLoader(TorchWrap(ds_tr, PatchCache(a.cache, "train") if a.cache else None),
                        batch_size=bs, shuffle=True, drop_last=True, **dl_kw)
     ld_va = DataLoader(TorchWrap(ds_va, PatchCache(a.cache, "val") if a.cache else None),
@@ -337,18 +369,44 @@ def main():
     print(f"[loss ] matcher={m_cfg['method']} | lr={tr_cfg['lr']} "
           f"(loss CỘNG {cfg['model']['n_layer']} tầng)", flush=True)
 
+    gmon = GradMonitor(model, every=10)
+
     if a.log_every_n_batch is None:
         a.log_every_n_batch = max(len(ld_tr) // 5, 1) if len(ld_tr) >= 10 else 0
 
     history, best, prev_labels = [], None, {}
     gen = torch.Generator(device=dev.type).manual_seed(tr_cfg["seed"])
+    start_ep, elapsed_before = 0, 0.0
+    if a.resume:
+        # Nạp về CPU: trạng thái RNG PHẢI là tensor CPU. model/optimizer.load_state_dict
+        # tự chuyển tensor sang device của tham số.
+        st = ckpt.load_last(map_location="cpu")
+        errs, warns = CheckpointManager.config_mismatch(st["config"], cfg)
+        if errs:
+            raise SystemExit(f"\nKHÔNG resume được: config khác checkpoint ở {errs} — "
+                             f"weight cũ không khớp model mới. Dùng --save-dir khác.\n")
+        if warns:
+            print(f"[resume] ⚠️  nhánh {warns} khác lần trước (vd batch/lr) — vẫn tiếp tục",
+                  flush=True)
+        model.load_state_dict(st["model"])
+        opt.load_state_dict(st["optimizer"])
+        set_rng_state(st["rng"], gen)
+        history, best, prev_labels = st["history"], st["best"], st["prev_labels"]
+        start_ep = st["epoch"] + 1
+        elapsed_before = history[-1]["elapsed_sec"] if history else 0.0
+        print(f"[resume] từ {ckpt.last_path}: đã xong epoch {st['epoch']}, "
+              f"best {best} -> tiếp từ epoch {start_ep}", flush=True)
+    if start_ep >= epochs:
+        raise SystemExit(f"\nĐã train đủ {epochs} epoch; muốn thêm thì tăng --epochs.\n")
+
     t_start = time.time()
-    print(f"[boot ] tổng khởi động {fmt_time(t_start-t_boot)} — bắt đầu epoch 0 "
+    print(f"[boot ] tổng khởi động {fmt_time(t_start-t_boot)} — bắt đầu epoch {start_ep} "
           f"({len(ld_tr)} batch/epoch)", flush=True)
 
-    for ep in range(epochs):
+    for ep in range(start_ep, epochs):
         model.train()
         t0, run, n_seen, labels_now, grad_norms = time.time(), {}, 0, {}, []
+        n_skip = 0
 
         for bi, batch in enumerate(ld_tr):
             targets = [b.to(dev) for b in batch["boxes"]]
@@ -361,7 +419,14 @@ def main():
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
+            gmon.maybe_record(bi)                   # đo TRƯỚC clip: độ lớn thật
             gn = torch.nn.utils.clip_grad_norm_(model.parameters(), tr_cfg["grad_clip"])
+            if not torch.isfinite(gn):
+                # Một batch NaN/inf mà vẫn step thì ghi NaN vào MỌI weight, và last.pt
+                # lưu mỗi epoch sẽ nhiễm theo. Bỏ bước này, đếm lại để báo.
+                n_skip += 1
+                opt.zero_grad(set_to_none=True)
+                continue
             grad_norms.append(float(gn))
             opt.step()
 
@@ -391,34 +456,59 @@ def main():
             warnings.append(f"label_stability {stability:.3f} dưới sàn ngẫu nhiên")
         if va_stats.get("score", {}).get("std", 1.0) < 0.05:
             warnings.append("std_score < 0.05 — head score có thể đang kẹt ở hằng số")
-        if grad_norms and np.mean(grad_norms) > 100:
-            warnings.append(f"grad norm {np.mean(grad_norms):.1f} rất lớn — cân nhắc hạ lr")
+        # Grad norm ~100 trước clip KHÔNG tự nó là vấn đề: với AdamW, clip toàn cục chỉ
+        # đổi thang của gradient, còn Adam chia cho căn phương sai nên gần như bất biến
+        # theo thang (DETR clip 0,1 và bị cắt ở hầu hết mọi bước). Thứ đáng báo là norm
+        # TĂNG DẦN so với đầu (dấu hiệu phân kỳ) và bước bị bỏ vì NaN.
+        g0 = history[0]["grad_norm"].get("p50") if history else None
+        g_now = float(np.median(grad_norms)) if grad_norms else float("nan")
+        if g0 and g_now > 5 * g0:
+            warnings.append(f"grad norm trung vị {g_now:.1f} gấp >5x epoch đầu ({g0:.1f}) "
+                            f"— dấu hiệu phân kỳ, cân nhắc hạ lr")
+        if n_skip:
+            warnings.append(f"bỏ {n_skip} bước vì grad norm NaN/inf")
 
-        eta = (time.time() - t_start) / (ep + 1) * (epochs - ep - 1)
+        eta = (time.time() - t_start) / (ep - start_ep + 1) * (epochs - ep - 1)
         print(f"[ep {ep:3d}] train {tr_stats['loss']:8.3f} | val {va_stats['loss']:8.3f} "
               f"| oracle_recall {va_stats['oracle_recall']:.4f} "
               f"| stab {stability:.3f} | {fmt_time(time.time()-t0)} | ETA {fmt_time(eta)}",
               flush=True)
         print(f"          recall/tầng: {' '.join(f'{v:.3f}' for v in rec)}", flush=True)
+        gsum = gmon.summary()
+        gshare = GradMonitor.share(gsum)
+        print(f"          grad norm trung vị {g_now:.1f} | chia theo nhóm: "
+              + ", ".join(f"{g} {v:.1f} ({gshare[g]*100:.0f}%)"
+                          for g, v in list(gsum.items())[:4]), flush=True)
+        bd = [gsum.get(f"box_delta[{i}]", float("nan")) for i in range(len(rec))]
+        print(f"          box_delta/tầng: {' '.join(f'{v:.2f}' for v in bd)}", flush=True)
         for w in warnings:
             print(f"          ⚠️  {w}", flush=True)
 
         history.append({"epoch": ep, "train": tr_stats, "val": va_stats,
                         "label_stability": stability,
                         "grad_norm": array_stats(grad_norms),
+                        "grad_norm_by_group": gsum,
+                        "skipped_steps": n_skip,
                         "warnings": warnings,
                         "epoch_sec": time.time() - t0,
-                        "elapsed_sec": time.time() - t_start})
+                        "elapsed_sec": elapsed_before + time.time() - t_start})
         write_json(save_dir, env, cfg, history, ds_tr, ds_va)
 
         # CHỌN CHECKPOINT BẰNG oracle_recall, KHÔNG BAO GIỜ bằng iou_matched hay loss:
         # matcher không nhìn thấy oracle_recall nên nó không bị đánh lừa như hai lần ở
         # vòng 1 (C1 và E1).
-        if best is None or va_stats["oracle_recall"] > best["oracle_recall"]:
+        is_best = best is None or va_stats["oracle_recall"] > best["oracle_recall"]
+        if is_best:
             best = {"epoch": ep, "oracle_recall": va_stats["oracle_recall"],
                     "loss": va_stats["loss"]}
-            torch.save({"model": model.state_dict(), "config": cfg, "epoch": ep,
-                        "best": best}, os.path.join(save_dir, "best.pt"))
+        # Lưu MỖI epoch (last.pt), chép sang best.pt khi cải thiện. Ghi nguyên tử nên bị
+        # ngắt giữa lúc ghi cũng không hỏng file cũ; tối đa mất một epoch.
+        t_save = time.time()
+        ckpt.save({"model": model.state_dict(), "optimizer": opt.state_dict(),
+                   "config": cfg, "epoch": ep, "best": best, "history": history,
+                   "prev_labels": prev_labels, "rng": rng_state(gen)}, is_best)
+        print(f"          💾 last.pt{' + best.pt' if is_best else ''} "
+              f"({fmt_time(time.time()-t_save)})", flush=True)
 
     print(f"[done] {fmt_time(time.time()-t_start)} | best {best}", flush=True)
 

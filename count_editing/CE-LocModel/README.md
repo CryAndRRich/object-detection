@@ -340,6 +340,33 @@ Theo dõi:
 tail -f $LOG
 ```
 
+**Checkpoint lưu MỖI epoch** vào `--save-dir`:
+
+| file | nội dung | dùng cho |
+|---|---|---|
+| `last.pt` | epoch mới nhất: model + optimizer + history + RNG | train tiếp (`--resume`) |
+| `best.pt` | epoch có `oracle_recall` cao nhất, cùng định dạng | eval |
+
+Ghi **nguyên tử** (`.tmp` rồi đổi tên): bị ngắt đúng lúc đang ghi thì file cũ vẫn nguyên.
+Bị ngắt bất kỳ lúc nào cũng chỉ mất tối đa **một epoch**.
+
+**Bị ngắt thì train tiếp** — cùng lệnh, cùng `--save-dir`, thêm `--resume`:
+```bash
+LOG=/mnt/disk1/aiotlab/haitn/log/round2_a_resume_$(date +%m%d_%H%M).log
+nohup python tools/run_on_free_gpu.py -- train.py \
+    --config config/experiment_a.yaml \
+    --save-dir checkpoints/round2_a --resume \
+    > $LOG 2>&1 &
+echo "PID $! -> $LOG"
+```
+
+- Không có `--resume` mà `last.pt` đã có ⇒ **dừng ngay**, không ghi đè lần train đang dở.
+- Config khác checkpoint ở `model` / `diffusion` / `matcher` / `data` ⇒ **từ chối** (weight
+  cũ không khớp model mới). Đổi `training` (batch, lr, epochs) hay `num_workers` thì được,
+  chỉ in cảnh báo.
+- Resume khôi phục cả moment của AdamW và RNG — kiểm bằng test: train 4 bước liền trùng
+  **từng bit** với train 2 bước + resume + 2 bước.
+
 ### Bước 5 — eval
 
 **~5–10 phút mỗi lần** ⇒ chạy nền. Hai lần, ở hai giá trị N:

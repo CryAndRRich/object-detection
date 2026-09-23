@@ -589,3 +589,193 @@ def test_max_cond_len_theo_do_phan_giai_that():
     for image_size, n_patch in [(512, 1024), (1024, 4096)]:
         dec = BoxDiT(64, 1, 2, 16, max_cond_len=n_patch + 128)
         assert dec.cond_pos_emb.shape[1] >= n_patch + 1, (image_size, n_patch)
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint: last.pt / best.pt mỗi epoch + resume
+# ---------------------------------------------------------------------------
+
+def _toy_train_state(seed=0):
+    torch.manual_seed(seed)
+    net = torch.nn.Linear(4, 2)
+    opt = torch.optim.AdamW(net.parameters(), lr=1e-2)
+    return net, opt
+
+
+def _one_step(net, opt, gen):
+    x = torch.randn(8, 4, generator=gen)
+    opt.zero_grad()
+    net(x).pow(2).mean().backward()
+    opt.step()
+
+
+def test_checkpoint_save_ghi_last_va_chi_chep_best_khi_cai_thien(tmp_path):
+    from utils.checkpoint import CheckpointManager
+
+    m = CheckpointManager(str(tmp_path))
+    m.save({"epoch": 0, "v": 1}, is_best=True)
+    m.save({"epoch": 1, "v": 2}, is_best=False)
+    assert m.load_last()["epoch"] == 1
+    best = torch.load(m.best_path, weights_only=False)
+    assert best["epoch"] == 0                      # best KHÔNG bị ghi đè bởi epoch tệ hơn
+    assert not list(tmp_path.glob("*.tmp"))        # không để lại file tạm
+
+
+def test_checkpoint_ghi_nguyen_tu_giu_file_cu_khi_ghi_hong(tmp_path, monkeypatch):
+    """Bị ngắt giữa lúc ghi thì last.pt CŨ phải còn nguyên — đó là lý do tồn tại."""
+    import pytest
+
+    from utils.checkpoint import CheckpointManager
+
+    m = CheckpointManager(str(tmp_path))
+    m.save({"epoch": 5}, is_best=False)
+
+    def hong(obj, path):
+        with open(path, "wb") as f:
+            f.write(b"dang ghi do")
+        raise KeyboardInterrupt                    # giả lập bị kill giữa chừng
+    monkeypatch.setattr(torch, "save", hong)
+    with pytest.raises(KeyboardInterrupt):
+        m.save({"epoch": 6}, is_best=False)
+    monkeypatch.undo()
+    assert m.load_last()["epoch"] == 5
+
+
+def test_resume_cho_ket_qua_trung_khit_train_lien_tuc(tmp_path):
+    """Train 4 bước liền == train 2 bước, lưu, nạp vào model MỚI, train tiếp 2 bước.
+    Kiểm cả optimizer (moment của AdamW) lẫn RNG — thiếu cái nào cũng lệch."""
+    from utils.checkpoint import CheckpointManager, rng_state, set_rng_state
+
+    net_a, opt_a = _toy_train_state()
+    gen_a = torch.Generator().manual_seed(1)
+    for _ in range(4):
+        _one_step(net_a, opt_a, gen_a)
+
+    net_b, opt_b = _toy_train_state()
+    gen_b = torch.Generator().manual_seed(1)
+    for _ in range(2):
+        _one_step(net_b, opt_b, gen_b)
+    m = CheckpointManager(str(tmp_path))
+    m.save({"model": net_b.state_dict(), "optimizer": opt_b.state_dict(),
+            "rng": rng_state(gen_b), "epoch": 1}, is_best=False)
+
+    net_c, opt_c = _toy_train_state(seed=123)      # khởi tạo KHÁC, phải bị ghi đè hết
+    gen_c = torch.Generator().manual_seed(999)
+    st = m.load_last()
+    net_c.load_state_dict(st["model"])
+    opt_c.load_state_dict(st["optimizer"])
+    set_rng_state(st["rng"], gen_c)
+    for _ in range(2):
+        _one_step(net_c, opt_c, gen_c)
+
+    for pa, pc in zip(net_a.parameters(), net_c.parameters()):
+        assert torch.equal(pa, pc)
+
+
+def test_config_mismatch_chan_doi_kien_truc_cho_phep_doi_batch():
+    from utils.checkpoint import CheckpointManager
+
+    cu = {"model": {"n_layer": 6}, "diffusion": {}, "matcher": {},
+          "data": {"image_size": 1024, "num_workers": 8}, "training": {"batch_size": 2}}
+    doi_batch = {**cu, "training": {"batch_size": 6},
+                 "data": {"image_size": 1024, "num_workers": 4}}
+    doi_anh = {**cu, "data": {"image_size": 512, "num_workers": 8}}
+
+    assert CheckpointManager.config_mismatch(cu, doi_batch) == ([], ["training"])
+    assert CheckpointManager.config_mismatch(cu, doi_anh)[0] == ["data"]
+
+
+# ---------------------------------------------------------------------------
+# Rà pipeline 2026-09-23: t mỗi ảnh, lật ảnh, grad monitor
+# ---------------------------------------------------------------------------
+
+def test_build_inputs_boc_t_rieng_cho_tung_anh():
+    """DiffusionDet bốc `t` cho TỪNG ảnh. Bản cũ bốc một `t` cho cả batch."""
+    from types import SimpleNamespace
+
+    from models.detector import CELocDetector
+    from utils.diffusion_math import cosine_alphas_cumprod
+
+    fake = SimpleNamespace(alphas_cumprod=cosine_alphas_cumprod(1000), num_timesteps=1000,
+                           snr_scale=2.0)
+    gt = [torch.tensor([[0.5, 0.5, 0.1, 0.1]])] * 16
+    g = torch.Generator().manual_seed(0)
+    x_t, t, _ = CELocDetector.build_inputs(fake, gt, 30, [1.0] * 16, generator=g)
+    assert x_t.shape == (16, 30, 4) and t.shape == (16,) and t.dtype == torch.long
+    assert len(set(t.tolist())) > 8, t.tolist()          # 16 ảnh, gần như chắc khác nhau
+
+
+def test_train_truyen_flip_prob_tu_config():
+    """Hồi quy: train.py từng gọi build_dataset(cfg, "train") KHÔNG có flip_prob, nên
+    augmentation tắt âm thầm dù config ghi 0.5."""
+    src = open("train.py").read()
+    call = src[src.index('ds_tr = build_dataset('):]
+    call = call[:call.index(")\n")]
+    assert "flip_prob=" in call and 'cfg["data"]' in call, call
+
+
+class _CoinDS(torch.utils.data.Dataset):
+    """Dataset tung đồng xu bằng Generator RIÊNG — giống CE130Detection."""
+
+    def __init__(self):
+        import numpy as np
+        self.rng = np.random.default_rng(0)
+
+    def __len__(self):
+        return 64
+
+    def __getitem__(self, i):
+        return float(self.rng.random())
+
+
+class _Wrap(torch.utils.data.Dataset):
+    def __init__(self, ds):
+        self.ds = ds
+
+    def __len__(self):
+        return len(self.ds)
+
+    def __getitem__(self, i):
+        return self.ds[i]
+
+
+def test_seed_worker_lam_cac_worker_tung_dong_xu_khac_nhau():
+    """Không seed lại thì 2 worker fork cùng trạng thái RNG và trả CÙNG dãy số."""
+    from train import seed_worker
+
+    def draws(init):
+        ld = torch.utils.data.DataLoader(_Wrap(_CoinDS()), batch_size=8, num_workers=2,
+                                         worker_init_fn=init)
+        b = [x.tolist() for x in ld]
+        return b[0], b[1]                     # batch 0 từ worker 0, batch 1 từ worker 1
+
+    w0, w1 = draws(None)
+    assert w0 == w1                           # lỗi được tái hiện: hai worker trùng dãy
+    w0, w1 = draws(seed_worker)
+    assert w0 != w1
+
+
+def test_grad_monitor_nhom_va_ti_phan():
+    from utils.grad_monitor import GradMonitor, group_of
+
+    assert group_of("decoder.layers.0.box_delta.weight") == "box_delta[0]"
+    assert group_of("decoder.layers.5.roi.proj_point.weight") == "roi.proj_point"
+    assert group_of("decoder.layers.2.roi.out.bias") == "roi.out"
+    assert group_of("decoder.layers.3.cross_attn.in_proj_weight") == "cross_attn"
+    assert group_of("encoder.proj_patch.weight") == "proj_patch"
+    assert group_of("decoder.score_head.4.weight") == "score_head"
+    assert group_of("decoder.cond_pos_emb") == "embed/khác"
+
+    net = torch.nn.Module()
+    net.encoder = torch.nn.Module()
+    net.encoder.proj_patch = torch.nn.Linear(4, 4)
+    net.encoder.proj_text = torch.nn.Linear(4, 4)
+    x = torch.randn(3, 4)
+    (net.encoder.proj_patch(x * 100).sum() + net.encoder.proj_text(x).sum()).backward()
+    mon = GradMonitor(net, every=1)
+    mon.maybe_record(0)
+    s = mon.summary()
+    assert list(s)[0] == "proj_patch"          # đầu vào to x100 -> gradient áp đảo
+    sh = GradMonitor.share(s)
+    assert abs(sum(sh.values()) - 1.0) < 1e-6
+    assert mon.summary() == {}                 # summary xoá mẫu để đo epoch sau

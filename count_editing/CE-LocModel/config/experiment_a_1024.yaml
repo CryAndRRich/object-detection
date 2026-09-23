@@ -16,7 +16,8 @@ data:
                            # lưới 64x64, box 3,92 ô, cửa chặn lên 0,317 và trần chẩn
                            # đoán 0,304 -> 0,438. VẪN DƯỚI TIÊU CHÍ — train ở đây là
                            # canh bạc có cơ sở, không phải cửa chặn đã đạt.
-  flip_prob: 0.5           # CHỈ lật ngang. Không xoay: 5-30 độ làm box phình
+  flip_prob: 0.5           # ⚠️ trước 2026-09-23 train.py KHÔNG đọc giá trị này.
+                           # CHỈ lật ngang. Không xoay: 5-30 độ làm box phình
                            # 1,20x-1,98x; 90 độ phá giả định "đệm luôn ở đáy".
   num_workers: 8           # ĐO ĐƯỢC: 4 worker không theo kịp 12,6 MB/batch đọc memmap,
                            # step mất 740 ms (89 %) chờ DataLoader. 8 worker: 740 -> 7,4 ms.
@@ -38,7 +39,8 @@ model:
                            # vật trung vị ~2,0x1,7 patch, 49 điểm trong box 2 patch là
                            # lấy trùng ở chi phí 5,4x.
                            # ⚠️ 18-29 % box CE-130 nhỏ hơn MỘT ô lưới -> với nhóm đó
-                           # lưới 3x3 thoái hoá thành 1x1. Không trị được ở 32x32.
+                           # lưới 3x3 thoái hoá thành 1x1 (số đo ở lưới 32x32;
+                           # ở 64x64 của file này box to gấp đôi tính theo ô).
   n_class: 1               # 1 chiều + sigmoid TƯƠNG ĐƯƠNG TOÁN HỌC với 2 chiều + softmax
   use_text: true           # lớp đến với mô hình qua token text, không qua head nhiều lớp
 
@@ -97,9 +99,12 @@ matcher:
                            # k_gt = clamp(tổng top-10 IoU với GT đó, min=1).
 
 training:
-  batch_size: 2            # GIẢM TỪ 8: ở 1024px memory là 4096 token thay vì 1024,
-                           # attention tốn 16x. Cache đã bỏ CLIP khỏi vòng train nhưng
-                           # decoder vẫn cross-attend 4096 token mỗi tầng.
+  batch_size: 6            # ĐO THẬT 2026-09-23: batch 2 chỉ dùng 1.538 MiB / 24 GB.
+                           # Lo "attention 16x" là NHẦM — ViT 4096 token chỉ chạy lúc
+                           # BUILD CACHE, không có trong vòng train. Decoder N=30 box
+                           # cross-attend 4096 token nhẹ hơn nhiều bậc.
+                           # batch 6 ~ 4,6 GB, chừa chỗ vì GPU dùng chung (OOM ở giờ
+                           # thứ 10 thì mất trắng). 955 -> 318 batch/epoch.
   lr: 1.0e-4               # ⚠️ loss giờ CỘNG 6 tầng -> gradient lớn hơn vòng 1 6 lần.
                            # Giữ 1e-4 trước; nếu phân kỳ thì 5e-5.
   weight_decay: 1.0e-4
