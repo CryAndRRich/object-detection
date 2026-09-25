@@ -876,3 +876,29 @@ def test_scores_and_classes_tra_numpy():
     assert isinstance(s, np.ndarray) and c is None
     s, c = ev.scores_and_classes(torch.tensor([[0.0, 3.0], [1.0, -1.0]]))
     assert c.tolist() == [1, 0]
+
+
+def test_oracle_score_tach_loi_xep_hang_khoi_loi_box():
+    """Box đúng nhưng score đảo ngược: AP thật thấp, TRẦN phải về 1.
+    Box sai hoàn toàn: trần cũng 0 — sửa score vô ích."""
+    import eval as ev
+
+    gt = np.array([[0.2, 0.2, 0.1, 0.1], [0.6, 0.6, 0.1, 0.1]])
+    far = [0.9, 0.9, 0.05, 0.05]
+    boxes = np.array(gt.tolist() + [far, far])
+    bad_sc = np.array([0.1, 0.2, 0.9, 0.8])            # box sai lại điểm cao
+    rec = {"image_id": "a", "boxes": boxes, "scores": bad_sc, "classes": None,
+           "gt": gt, "keep": ev.postprocess(boxes, bad_sc, 100, None)}
+
+    that = ev.score_records([rec])
+    tran = ev.score_records(ev.with_oracle_scores([rec], 100, None))
+    # FP, FP, TP, TP -> precision đơn điệu 0,5 ở cả hai mức recall -> AP = 0,5
+    assert that["AP50"] == pytest.approx(0.5)
+    assert tran["AP50"] == pytest.approx(1.0)
+
+    orc = ev.with_oracle_scores([rec], 100, None)[0]
+    assert np.array_equal(orc["boxes"], boxes)          # box giữ nguyên từng bit
+    assert orc["scores"][:2] == pytest.approx([1.0, 1.0]) and orc["scores"][2] == 0.0
+
+    sai = {**rec, "boxes": np.array([far] * 4)}
+    assert ev.score_records(ev.with_oracle_scores([sai], 100, None))["AP50"] == 0.0

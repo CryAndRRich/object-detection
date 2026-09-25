@@ -6,7 +6,8 @@ MỌI THỨ SAU MODEL LÀ NUMPY, chấm bằng `utils/metrics_np.py` — cùng g
 và `score_AUC` tính trên TẤT CẢ N box). Bản trước 2026-09-25 trộn torch/numpy và vỡ ngay
 lần chạy đầu (`torch.argsort` trên mảng numpy); không test nào chạy trọn luồng.
 
-SỐ SO VỚI E1 (AP50 6,36): `--split test --num-proposals 300 --top-k 100 --nms`.
+SỐ ĐỂ SO VỚI BASELINE D.1 (DiffusionDet trên CE-130, AP50 58,13) và E1 (6,36):
+`--split test --num-proposals 300 --top-k 100 --nms`.
 
 BA ĐIỀU PHẢI NHỚ KHI ĐỌC SỐ
 ---------------------------
@@ -48,7 +49,7 @@ from data.ce130_dataset import PatchCache  # noqa: E402
 from data.factory import build_dataset  # noqa: E402
 from models.detector import build_model  # noqa: E402
 from train import TorchWrap, collate, fmt_time, model_inputs  # noqa: E402
-from utils.box_ops_np import cxcywh_to_xyxy  # noqa: E402
+from utils.box_ops_np import box_iou, cxcywh_to_xyxy  # noqa: E402
 from utils.metrics_np import (COCO_THR, evaluate, nms_class_agnostic,  # noqa: E402,F401
                               quality, summarise)
 
@@ -123,6 +124,23 @@ def predict(model, loader, n_prop, dev, top_k, nms_thr=None):
     return records, (layer_hit / max(n_gt_tot, 1)).tolist()
 
 
+def with_oracle_scores(records, top_k, nms_thr=None):
+    """Thay score của mỗi box bằng IoU THẬT lớn nhất của nó với GT, rồi top-k/NMS lại.
+
+    -> TRẦN AP với ĐÚNG bộ box hiện tại, nếu score head xếp hạng hoàn hảo. Tách hai lỗi:
+    trần cao mà AP thật thấp -> nút thắt là XẾP HẠNG (sửa score head); trần cũng thấp ->
+    nút thắt là BOX (sửa score vô ích). Không chạy lại model, box giữ nguyên từng bit.
+    """
+    out = []
+    for r in records:
+        if len(r["gt"]) and len(r["boxes"]):
+            sc = box_iou(cxcywh_to_xyxy(r["boxes"]), cxcywh_to_xyxy(r["gt"]))[0].max(axis=1)
+        else:
+            sc = np.zeros(len(r["boxes"]))
+        out.append({**r, "scores": sc, "keep": postprocess(r["boxes"], sc, top_k, nms_thr)})
+    return out
+
+
 def score_records(records):
     """Bản ghi numpy -> mọi chỉ số, cùng định nghĩa với bảng vòng 1. Hàm thuần, test được."""
     preds = [(cxcywh_to_xyxy(r["boxes"][r["keep"]]), r["scores"][r["keep"]],
@@ -165,6 +183,8 @@ def main():
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--device", default=None)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--oracle-score", action="store_true",
+                    help="chấm thêm TRẦN AP khi score = IoU thật với GT (không chạy lại model)")
     a = ap.parse_args()
 
     dev = torch.device(a.device or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -203,10 +223,22 @@ def main():
               "oracle_recall", "score_AUC", "mean_bestIoU", "score_head_cost"):
         print(f"  {k:16s} {res[k]:.4f}")
     print(f"  {'recall/tầng':16s} {' '.join(f'{v:.3f}' for v in rec_layer)}")
-    print(f"\n  So với E1 (test, N=300, top-k 100, NMS 0,5): AP50 0,0636 | "
-          f"oracle_recall 0,2559 | score_AUC 0,6852")
+    # BASELINE là D.1 (DiffusionDet trên CE-130), KHÔNG phải E1 — E1 chỉ là mốc nội bộ
+    # của CE-Loc vòng 1. Cùng split test, N=300.
+    print("\n  mốc (test, N=300)     AP50    oracle_recall  score_AUC  mean_bestIoU")
+    print("  BASELINE D.1        0,5813      0,6734       0,9371      0,5974")
+    print("  E1 (CE-Loc vòng 1)  0,0636      0,2559       0,6852      0,3086")
     if n_prop == 30:
         print("  ⚠️ N=30: trần oracle_recall chỉ 83,8/82,4/76,1 % (train/val/test).")
+
+    if a.oracle_score:
+        orc = score_records(with_oracle_scores(records, top_k, nms_thr))
+        res["oracle_score"] = orc
+        print("\n  TRẦN khi score = IoU thật với GT (cùng box, cùng top-k/NMS):")
+        for k in ("AP50", "AP75", "AP_coco", "recall"):
+            print(f"  {k:16s} thật {res[k]:.4f}  |  trần {orc[k]:.4f}  "
+                  f"({res[k] / max(orc[k], 1e-9) * 100:.0f} % trần)")
+        print("  -> trần >> thật: nút thắt là XẾP HẠNG. trần cũng thấp: nút thắt là BOX.")
 
     if a.out:
         os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
