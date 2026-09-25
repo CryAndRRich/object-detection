@@ -391,6 +391,37 @@ nohup python tools/run_on_free_gpu.py -- eval.py \
 echo "PID $! -> $LOG"
 ```
 
+**Số để so với BASELINE D.1** (DiffusionDet trên CE-130, AP50 58,13) phải dùng đúng giao thức
+của bảng vòng 1: `--split test --num-proposals 300 --top-k 100 --nms`. Thêm `--oracle-score`
+để in trần AP khi score hoàn hảo (cùng box).
+
+### Bước 6 — EXPERIMENT A.1: probe score head (kế hoạch `docs/EXPERIMENT_A_PLAN.md` mục 15)
+
+Đóng băng A (`checkpoints/exp_a_1024_v2/last.pt`), chỉ train score head tầng cuối. Ba biến
+thể chọn bằng `--score-input` (không có cờ thì dừng ngay). Mỗi biến thể ~40–60 phút train +
+~1 phút eval ⇒ cả chuỗi **~2–3 giờ**, chạy nền:
+
+```bash
+export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache
+C=../../data/cache_clip_1024; O=/mnt/disk1/aiotlab/haitn/output
+LOG=/mnt/disk1/aiotlab/haitn/log/expA1_$(date +%m%d_%H%M).log
+nohup bash -c "
+  set -x
+  for V in r roi r+roi; do
+    D=checkpoints/exp_a1_\${V/+/_}
+    python tools/run_on_free_gpu.py -- train.py --config config/experiment_a1.yaml \
+        --cache $C --score-input \$V --save-dir \$D
+    python tools/run_on_free_gpu.py -- eval.py --ckpt \$D/best.pt --cache $C \
+        --split test --num-proposals 300 --top-k 100 --nms --oracle-score \
+        --out $O/expA1_\${V/+/_}_test_N300.json
+  done
+" > $LOG 2>&1 &
+echo "PID $! -> $LOG"
+```
+
+**Kiểm tra toàn vẹn**: box của cả ba biến thể giống A ⇒ `oracle_recall` phải là **0,4045** và
+trần AP50 **0,2823** (±0,001). Lệch hơn ⇒ probe đã làm đổi box, kết quả vô giá trị.
+
 ---
 
 ## Đọc số thế nào

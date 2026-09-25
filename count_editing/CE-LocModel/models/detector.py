@@ -37,8 +37,10 @@ import torch.nn as nn
 
 from models.clip_encoder import CLIPConditionEncoder
 from models.dit_blocks import (
+    SCORE_INPUTS,
     BoxCoordEmbedder,
     DiTBlock,
+    FinalScoreHead,
     TimestepConditioner,
     build_cross_mask,
     clamp_to_valid,
@@ -76,7 +78,7 @@ class BoxDiT(nn.Module):
 
     def __init__(self, d_model=256, n_layer=6, n_head=8, coord_dim=64,
                  dim_feedforward=None, dropout=0.1, roi_dim=768, roi_k=3,
-                 n_class=1, max_cond_len=1152):
+                 n_class=1, max_cond_len=1152, score_input="r_linear"):
         # 1152 = 1024 patch (512px) + 128 dư. Người gọi nên truyền theo độ phân giải
         # thật thay vì dựa vào mặc định này.
         super().__init__()
@@ -111,6 +113,17 @@ class BoxDiT(nn.Module):
                                          for _ in range(n_layer)])
         self.norm_r = nn.LayerNorm(d_model)
 
+        # EXPERIMENT A.1: score TẦNG CUỐI đọc thứ khác `r` (kế hoạch mục 15). Mặc định
+        # "r_linear" không dựng gì thêm => checkpoint A nạp y nguyên. `score_head[-1]` vẫn
+        # được giữ (không dùng) để state_dict của A nạp vào chỉ thiếu `final_score.*`.
+        if score_input not in SCORE_INPUTS:
+            raise ValueError(f"score_input={score_input!r}, phải là một trong {SCORE_INPUTS}")
+        if score_input != "r_linear" and n_class != 1:
+            raise ValueError("FinalScoreHead chỉ hỗ trợ n_class=1")
+        self.score_input = score_input
+        self.final_score = (FinalScoreHead(score_input, d_model, roi_dim, roi_k)
+                            if score_input != "r_linear" else None)
+
     def forward(self, boxes_norm, timesteps, memory, patch_raw, valid_h=None):
         """
         boxes_norm : [B,N,4] cxcywh trong [0,1]
@@ -135,9 +148,14 @@ class BoxDiT(nn.Module):
 
         mask = build_cross_mask(x.shape[1], x.device)
         outs = []
+        last = len(self.layers) - 1
         for i, layer in enumerate(self.layers):
             x, h, r = layer(x, h, r, memory, patch_raw, t_emb, mask, valid_h)
-            logits = self.score_head[i](self.norm_r(r))
+            if i == last and self.final_score is not None:
+                # `x` ở đây là box SAU update_box của tầng cuối — đúng box được chấm.
+                logits = self.final_score(self.norm_r(r), x, patch_raw, valid_h)
+            else:
+                logits = self.score_head[i](self.norm_r(r))
             outs.append((x, logits.squeeze(-1) if self.n_class == 1 else logits))
         return outs
 
@@ -148,7 +166,8 @@ class CELocDetector(nn.Module):
     def __init__(self, clip_name="openai/clip-vit-base-patch16", d_model=256,
                  n_layer=6, n_head=8, image_size=512, num_timesteps=1000,
                  snr_scale=2.0, sampling_steps=4, dropout=0.1, freeze_clip=True,
-                 roi_k=3, n_class=1, use_text=True, coord_dim=64):
+                 roi_k=3, n_class=1, use_text=True, coord_dim=64,
+                 score_input="r_linear"):
         super().__init__()
         if (n_class > 1) != (not use_text):
             raise ValueError(
@@ -163,12 +182,41 @@ class CELocDetector(nn.Module):
         # trên cache 1024px ném lỗi ngay batch đầu (may là lỗi rõ, không sai âm thầm).
         self.decoder = BoxDiT(d_model, n_layer, n_head, coord_dim,
                               dropout=dropout, roi_k=roi_k, n_class=n_class,
-                              max_cond_len=self.encoder.num_patches + 128)
+                              max_cond_len=self.encoder.num_patches + 128,
+                              score_input=score_input)
+        self.probe = False
         self.num_timesteps = num_timesteps
         self.sampling_steps = sampling_steps
         self.snr_scale = snr_scale
         self.register_buffer("alphas_cumprod", cosine_alphas_cumprod(num_timesteps),
                              persistent=False)
+
+    # ------------------------------------------------------------------ probe
+
+    def freeze_for_probe(self):
+        """EXPERIMENT A.1: đóng băng MỌI THỨ trừ `decoder.final_score`.
+
+        Box khi đó chỉ phụ thuộc phần đóng băng => giống hệt mô hình gốc, mọi thay đổi AP
+        chỉ đến từ xếp hạng. -> danh sách tham số còn học được.
+        """
+        if self.decoder.final_score is None:
+            raise ValueError("freeze_for_probe cần score_input khác 'r_linear'")
+        for p in self.parameters():
+            p.requires_grad = False
+        for p in self.decoder.final_score.parameters():
+            p.requires_grad = True
+        self.probe = True
+        self.train(self.training)
+        return list(self.decoder.final_score.parameters())
+
+    def train(self, mode=True):
+        """Ở chế độ probe, phần đóng băng LUÔN ở eval() (không dropout): head phải học trên
+        đúng đặc trưng mà lúc eval nó thấy. Chỉ `final_score` theo `mode`."""
+        super().train(mode)
+        if getattr(self, "probe", False):
+            super().train(False)
+            self.decoder.final_score.train(mode)
+        return self
 
     # ------------------------------------------------------------------ train
 
@@ -280,4 +328,5 @@ def build_model(cfg, dropout=None):
         d["sampling_steps"], m["dropout"] if dropout is None else dropout,
         m["freeze_clip"], roi_k=m.get("roi_k", 3),
         n_class=m.get("n_class", 1), use_text=m.get("use_text", True),
-        coord_dim=m.get("coord_dim", 64))
+        coord_dim=m.get("coord_dim", 64),
+        score_input=m.get("score_input", "r_linear"))

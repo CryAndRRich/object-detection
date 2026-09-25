@@ -33,7 +33,14 @@ __all__ = [
     "build_cross_mask",
     "RegionGate",
     "DiTBlock",
+    "FinalScoreHead",
+    "SCORE_INPUTS",
 ]
+
+# Đầu vào score head TẦNG CUỐI (EXPERIMENT A.1, docs/EXPERIMENT_A_PLAN.md mục 15).
+# "r_linear" = A nguyên bản (Linear trên norm_r(r)) — không dựng module mới nào, nên
+# checkpoint của A nạp được y nguyên.
+SCORE_INPUTS = ("r_linear", "r", "roi", "r+roi")
 
 # Box thật nhỏ nhất của CE-130 rộng 0,0059 nên ngưỡng này không cắt mất box nào.
 MIN_WH = 0.005
@@ -317,3 +324,45 @@ class DiTBlock(nn.Module):
         # (5) cập nhật luồng chính.
         x = update_box(x, self.box_delta(h))
         return x, h, r
+
+
+class FinalScoreHead(nn.Module):
+    """Score cho box TẦNG CUỐI — EXPERIMENT A.1 (kế hoạch mục 15).
+
+    VÌ SAO: trong `DiTBlock`, RoI lấy tại `x` ĐẦU tầng rồi box mới dịch, và `r` là hỗn
+    hợp gate/attention của 6 tầng. Score của A vì vậy nói về một vùng mà box đã rời đi.
+    D.1 (AUC 0,937) và E1 (0,685) đều chấm bằng RoI tại CHÍNH box được chấm; A chỉ 0,615.
+
+    Ba đầu vào, CÙNG một MLP để khác biệt chỉ đến từ đầu vào:
+      "r"      MLP(norm_r(r))                   đối chứng: head mới, đầu vào cũ
+      "roi"    MLP(roi(patch_raw, x_cuối))      RoI tại box được chấm
+      "r+roi"  MLP(cat[norm_r(r), roi(...)])
+
+    `x_cuối` được `.detach()` như trong khối: không để loss score kéo toạ độ (mục 7.1).
+    """
+
+    def __init__(self, mode, d_model=256, roi_dim=768, roi_k=3, hidden=256):
+        super().__init__()
+        if mode not in SCORE_INPUTS or mode == "r_linear":
+            raise ValueError(f"FinalScoreHead không dùng cho mode={mode!r}; "
+                             f"chọn một trong {SCORE_INPUTS[1:]}")
+        self.mode = mode
+        self.use_r = mode in ("r", "r+roi")
+        self.use_roi = mode in ("roi", "r+roi")
+        if self.use_roi:
+            self.roi = RoIFeatureSampler(roi_dim, d_model, roi_k, 0.0)
+            # KHÔNG zero-init như RoI trong khối: ở đây RoI là nguồn tín hiệu DUY NHẤT (mode
+            # "roi"), đầu ra 0 thì MLP phía sau thấy hằng số ở mọi box.
+            nn.init.xavier_uniform_(self.roi.out.weight)
+            nn.init.zeros_(self.roi.out.bias)
+        d_in = d_model * (int(self.use_r) + int(self.use_roi))
+        self.mlp = nn.Sequential(nn.Linear(d_in, hidden), nn.GELU(), nn.Linear(hidden, 1))
+
+    def forward(self, r_normed, x, patch_raw, valid_h=None):
+        """r_normed [B,N,D] (đã qua norm_r), x [B,N,4] box CUỐI -> logit [B,N,1]."""
+        feats = []
+        if self.use_r:
+            feats.append(r_normed)
+        if self.use_roi:
+            feats.append(self.roi(patch_raw, clamp_to_valid(x, valid_h).detach()))
+        return self.mlp(torch.cat(feats, dim=-1))

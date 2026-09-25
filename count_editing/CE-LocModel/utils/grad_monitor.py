@@ -39,6 +39,8 @@ def group_of(name):
         return name.split(".")[1]                   # proj_patch, proj_text
     if name.startswith("decoder.score_head"):
         return "score_head"
+    if name.startswith("decoder.final_score."):
+        return "final_score." + name.split(".")[2]          # final_score.roi / .mlp
     return "embed/khác"                             # box_embed, time_cond, pos_emb...
 
 

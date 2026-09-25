@@ -902,3 +902,132 @@ def test_oracle_score_tach_loi_xep_hang_khoi_loi_box():
 
     sai = {**rec, "boxes": np.array([far] * 4)}
     assert ev.score_records(ev.with_oracle_scores([sai], 100, None))["AP50"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# EXPERIMENT A.1 — score head tầng cuối đọc RoI tại box được chấm (kế hoạch mục 15)
+# ---------------------------------------------------------------------------
+
+def _tiny_dit(score_input="r_linear", seed=0):
+    from models.detector import BoxDiT
+    torch.manual_seed(seed)
+    return BoxDiT(d_model=64, n_layer=2, n_head=2, coord_dim=16, dropout=0.0,
+                  roi_dim=32, roi_k=3, score_input=score_input)
+
+
+def _tiny_inputs(B=2, N=5, seed=1):
+    g = torch.Generator().manual_seed(seed)
+    boxes = torch.rand(B, N, 4, generator=g) * 0.4 + 0.3
+    t = torch.randint(0, 1000, (B,), generator=g)
+    mem = torch.randn(B, 17, 64, generator=g)
+    praw = torch.randn(B, 16, 32, generator=g)            # lưới 4x4
+    return boxes, t, mem, praw
+
+
+def _tiny_probe_detector(score_input):
+    """CELocDetector không nạp CLIP: chỉ cần decoder cho freeze/train()."""
+    from models.detector import CELocDetector
+    m = CELocDetector.__new__(CELocDetector)
+    torch.nn.Module.__init__(m)
+    m.encoder = torch.nn.Linear(4, 4)                     # đứng thay CLIP + projection
+    m.decoder = _tiny_dit(score_input)
+    m.probe = False
+    return m
+
+
+@pytest.mark.parametrize("mode", ["r", "roi", "r+roi"])
+def test_a1_nap_A_chi_thieu_final_score(mode):
+    a = _tiny_dit("r_linear")
+    p = _tiny_dit(mode, seed=5)
+    missing, unexpected = p.load_state_dict(a.state_dict(), strict=False)
+    assert not unexpected
+    assert missing and all(k.startswith("final_score.") for k in missing), missing
+
+
+def test_a1_r_linear_giu_nguyen_A():
+    """Mặc định không dựng module mới => checkpoint A cũ nạp strict và cho đúng logit."""
+    a = _tiny_dit("r_linear")
+    assert a.final_score is None
+    assert not any(k.startswith("final_score") for k in a.state_dict())
+    boxes, t, mem, praw = _tiny_inputs()
+    outs = a(boxes, t, mem, praw)
+    # logit tầng cuối đúng là score_head[-1](norm_r(r)) — kiểm gián tiếp: đổi
+    # score_head[-1] thì logit tầng cuối đổi, box không đổi
+    with torch.no_grad():
+        a.score_head[-1].bias.add_(1.0)
+    outs2 = a(boxes, t, mem, praw)
+    assert torch.equal(outs[-1][0], outs2[-1][0])
+    assert torch.allclose(outs2[-1][1], outs[-1][1] + 1.0, atol=1e-6)
+
+
+@pytest.mark.parametrize("mode", ["r", "roi", "r+roi"])
+def test_a1_box_giong_het_A_chi_logit_tang_cuoi_doi(mode):
+    """Kiểm tra toàn vẹn mục 15.5 ở mức đơn vị: cùng weight, cùng đầu vào => MỌI box và
+    logit tầng 1..n-1 trùng từng bit với A; chỉ logit tầng cuối khác."""
+    a = _tiny_dit("r_linear")
+    p = _tiny_dit(mode, seed=5)
+    p.load_state_dict(a.state_dict(), strict=False)
+    a.eval(); p.eval()
+    boxes, t, mem, praw = _tiny_inputs()
+    oa, op = a(boxes, t, mem, praw), p(boxes, t, mem, praw)
+    for (ba, la), (bp, lp) in zip(oa, op):
+        assert torch.equal(ba, bp)
+    for (_, la), (_, lp) in zip(oa[:-1], op[:-1]):
+        assert torch.equal(la, lp)
+    assert not torch.equal(oa[-1][1], op[-1][1])
+
+
+def test_a1_freeze_chi_con_final_score_hoc_va_base_luon_eval():
+    m = _tiny_probe_detector("r+roi")
+    trainable = m.freeze_for_probe()
+    names = {n for n, p in m.named_parameters() if p.requires_grad}
+    assert names and all(n.startswith("decoder.final_score.") for n in names)
+    assert {id(p) for p in trainable} == {id(p) for n, p in m.named_parameters()
+                                          if p.requires_grad}
+    m.train()
+    assert m.decoder.final_score.training
+    assert not m.decoder.layers[0].training and not m.encoder.training
+    m.eval()
+    assert not m.decoder.final_score.training
+
+
+def test_a1_freeze_tu_choi_r_linear():
+    m = _tiny_probe_detector("r_linear")
+    with pytest.raises(ValueError):
+        m.freeze_for_probe()
+
+
+def test_a1_score_khong_keo_toa_do_va_roi_nhin_dung_box():
+    """RoI tại `x.detach()`: loss score không chảy về toạ độ. Và mode 'roi' phải
+    nhạy với vị trí box (nếu không, nó không đọc gì từ ảnh)."""
+    from models.dit_blocks import FinalScoreHead
+    torch.manual_seed(0)
+    head = FinalScoreHead("roi", d_model=64, roi_dim=32, roi_k=3)
+    praw = torch.randn(1, 16, 32)
+    x = (torch.rand(1, 5, 4) * 0.4 + 0.3).requires_grad_(True)
+    out = head(torch.zeros(1, 5, 64), x, praw)
+    out.sum().backward()
+    assert x.grad is None or float(x.grad.abs().max()) == 0.0
+    x2 = x.detach().clone()
+    x2[..., 0] += 0.25
+    assert not torch.allclose(out, head(torch.zeros(1, 5, 64), x2, praw))
+
+
+def test_a1_select_metric():
+    from train import select_metric
+    assert select_metric({}) == "oracle_recall"
+    assert select_metric({"eval": {"select_metric": "score_AUC"}}) == "score_AUC"
+    with pytest.raises(ValueError):
+        select_metric({"eval": {"select_metric": "iou_matched"}})   # cạm bẫy 3
+
+
+def test_a1_config_giu_nguyen_kien_truc_cua_A():
+    """Weight A chỉ nạp được nếu mọi nhánh quyết định kiến trúc trùng A."""
+    import yaml
+    a = yaml.safe_load(open("config/experiment_a_1024.yaml"))
+    a1 = yaml.safe_load(open("config/experiment_a1.yaml"))
+    for k in ("model", "diffusion", "matcher", "data"):
+        assert a[k] == a1[k], k
+    assert "score_input" not in a1["model"]          # bắt buộc chọn bằng --score-input
+    assert a1["eval"]["select_metric"] == "score_AUC"
+    assert a1["probe"]["init_from"].endswith("exp_a_1024_v2/last.pt")

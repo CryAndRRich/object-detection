@@ -50,6 +50,8 @@ from models.detector import build_model  # noqa: E402
 from utils.box_ops import box_iou, cxcywh_to_xyxy  # noqa: E402
 from utils.checkpoint import CheckpointManager, rng_state, set_rng_state  # noqa: E402
 from utils.grad_monitor import GradMonitor  # noqa: E402
+from utils.metrics_np import quality  # noqa: E402
+from models.dit_blocks import SCORE_INPUTS  # noqa: E402
 
 
 class TorchWrap(Dataset):
@@ -184,6 +186,21 @@ def per_layer_recall(layers, targets):
     return out
 
 
+# Chỉ số được phép dùng chọn checkpoint — cả hai CAO hơn là tốt hơn. KHÔNG có
+# `iou_matched` (cạm bẫy 3: đã đánh lừa hai lần).
+SELECT_METRICS = ("oracle_recall", "score_AUC")
+
+
+def select_metric(cfg):
+    """Đọc `eval.select_metric` từ config. Trước 2026-09-25 khoá này có trong config nhưng
+    train.py bỏ qua và luôn dùng `oracle_recall` — với A.1 (box đóng băng) chỉ số đó là
+    HẰNG SỐ, nên best.pt sẽ kẹt ở epoch 0."""
+    m = cfg.get("eval", {}).get("select_metric", "oracle_recall")
+    if m not in SELECT_METRICS:
+        raise ValueError(f"eval.select_metric={m!r}, phải là một trong {SELECT_METRICS}")
+    return m
+
+
 def write_json(save_dir, env, cfg, history, ds_train, ds_val):
     """Ghi MỌI chỉ số vào history.json sau MỖI epoch.
 
@@ -193,11 +210,13 @@ def write_json(save_dir, env, cfg, history, ds_train, ds_val):
     """
     # Tính `best` TỪ history, không lấy từ đối số: hàm này được gọi TRƯỚC khi vòng train
     # cập nhật `best`, nên dùng đối số sẽ lệch đúng một epoch.
-    # Chọn theo `oracle_recall` — CAO hơn là tốt hơn.
-    top = max(history, key=lambda e: e["val"]["oracle_recall"]) if history else None
+    # Chọn theo `eval.select_metric` — CAO hơn là tốt hơn.
+    sm = select_metric(cfg)
+    top = max(history, key=lambda e: e["val"][sm]) if history else None
     summary = {
-        "select_metric": "oracle_recall",
+        "select_metric": sm,
         "epochs_completed": len(history),
+        f"best_{sm}": top["val"][sm] if top else None,
         "best_oracle_recall": top["val"]["oracle_recall"] if top else None,
         "best_epoch": top["epoch"] if top else None,
         "best_val_loss": top["val"]["loss"] if top else None,
@@ -218,14 +237,14 @@ def write_json(save_dir, env, cfg, history, ds_train, ds_val):
 
 
 @torch.no_grad()
-def run_val(model, loader, crit, n_prop, dev):
+def run_val(model, loader, crit, n_prop, dev, loss_layers=lambda L: L):
     """Validation. Trả dict thống kê, gồm đường cong theo tầng.
 
     `no_grad` nằm ở ĐÂY. Vòng 1 từng mất decorator này khi chèn một hàm mới ngay phía
     trên: decorator đi theo hàm mới, còn vòng val âm thầm dựng đồ thị rồi vỡ ở `.numpy()`.
     """
     model.eval()
-    agg, layer_rec, layer_iou, scores, n_batch = {}, [], [], [], 0
+    agg, layer_rec, layer_iou, scores, n_batch, aucs = {}, [], [], [], 0, []
     gen = torch.Generator(device=dev.type).manual_seed(0)
     for batch in loader:
         targets = [b.to(dev) for b in batch["boxes"]]
@@ -233,7 +252,15 @@ def run_val(model, loader, crit, n_prop, dev):
         x_t, t, _ = model.build_inputs(targets, n_prop, batch["valid_h"], generator=gen)
         vh = torch.as_tensor(batch["valid_h"], dtype=torch.float32, device=dev)
         layers = model(x_t, t, valid_h=vh, **model_inputs(batch, dev))
-        _, st, _, logits = loss_from_layers(crit, layers, targets, labels)
+        _, st, _, logits = loss_from_layers(crit, loss_layers(layers), targets, labels)
+
+        # score_AUC — CÙNG định nghĩa với eval.py (utils/metrics_np.quality): trong mỗi ảnh,
+        # box có IoU >= 0,5 với một GT nào đó có được score cao hơn box còn lại không.
+        fb, fl = layers[-1]
+        for i, gt in enumerate(targets):
+            aucs.append(quality(fb[i].float().cpu().numpy(),
+                                fl[i].float().sigmoid().cpu().numpy(),
+                                gt.cpu().numpy(), size=1)[3])
 
         layer_rec.append(per_layer_recall(layers, targets))
         layer_iou.append(st["iou_matched_per_layer"])
@@ -248,6 +275,8 @@ def run_val(model, loader, crit, n_prop, dev):
     out["iou_per_layer"] = np.mean(layer_iou, axis=0).tolist()
     out["oracle_recall"] = out["oracle_recall_per_layer"][-1]
     out["score"] = array_stats(np.concatenate(scores)) if scores else {}
+    a = np.array([x for x in aucs if not np.isnan(x)])
+    out["score_AUC"] = float(a.mean()) if len(a) else float("nan")
     model.train()
     return out
 
@@ -264,6 +293,9 @@ def main():
     ap.add_argument("--limit", type=int, default=None, help="thu nhỏ để chạy thử")
     ap.add_argument("--device", default=None)
     ap.add_argument("--log-every-n-batch", type=int, default=None)
+    ap.add_argument("--score-input", choices=SCORE_INPUTS, default=None,
+                    help="EXPERIMENT A.1: đầu vào score head tầng cuối. Ghi đè "
+                         "model.score_input của config (và được lưu vào checkpoint).")
     ap.add_argument("--resume", action="store_true",
                     help="train tiếp từ <save-dir>/last.pt (model + optimizer + epoch + "
                          "history + RNG). Không có cờ này mà last.pt đã tồn tại thì DỪNG, "
@@ -272,6 +304,10 @@ def main():
 
     with open(a.config) as f:
         cfg = yaml.safe_load(f)
+    if a.score_input:
+        # Ghi VÀO cfg trước mọi thứ: cfg này được lưu trong checkpoint, eval.py dựng lại
+        # mô hình từ đó mà không cần cờ.
+        cfg["model"]["score_input"] = a.score_input
     tr_cfg, d_cfg = cfg["training"], cfg["diffusion"]
     epochs = a.epochs or tr_cfg["epochs"]
     bs = a.batch_size or tr_cfg["batch_size"]
@@ -349,6 +385,21 @@ def main():
     # CLIP tải về/khởi tạo có thể mất hàng phút mà không in gì — mốc này để biết
     # tiến trình còn sống chứ không phải treo.
     print(f"[boot ] dựng model (tải CLIP): {fmt_time(time.time()-t_model)}", flush=True)
+    probe_cfg = cfg.get("probe")
+    if probe_cfg:
+        # EXPERIMENT A.1 (kế hoạch mục 15): nạp A đã train, đóng băng hết trừ final_score.
+        base = torch.load(probe_cfg["init_from"], map_location="cpu", weights_only=False)
+        missing, unexpected = model.load_state_dict(base["model"], strict=False)
+        bad = [k for k in missing if not k.startswith("decoder.final_score.")]
+        if bad or unexpected:
+            raise SystemExit(f"\ninit_from không khớp mô hình: thiếu {bad[:5]} | "
+                             f"thừa {list(unexpected)[:5]}\n")
+        if not missing:
+            raise SystemExit("\nprobe cần model.score_input khác 'r_linear' "
+                             "(dùng --score-input r|roi|r+roi)\n")
+        model.freeze_for_probe()
+        print(f"[probe] nạp {probe_cfg['init_from']} (epoch {base.get('epoch')}); "
+              f"ĐÓNG BĂNG hết trừ final_score ({cfg['model']['score_input']})", flush=True)
     trainable = [p for p in model.parameters() if p.requires_grad]
     print(f"[model] tham số học được {sum(p.numel() for p in trainable)/1e6:.2f}M "
           f"/ tổng {sum(p.numel() for p in model.parameters())/1e6:.1f}M", flush=True)
@@ -368,6 +419,12 @@ def main():
     # xuống 5e-5, ĐỪNG quay lại chia trung bình.
     print(f"[loss ] matcher={m_cfg['method']} | lr={tr_cfg['lr']} "
           f"(loss CỘNG {cfg['model']['n_layer']} tầng)", flush=True)
+
+    # Probe: chỉ tầng cuối vào loss — L1/GIoU không có tham số học nên gradient chỉ đến
+    # từ focal, và matcher chạy 1 lần thay vì n_layer lần.
+    loss_layers = (lambda L: L[-1:]) if probe_cfg else (lambda L: L)
+    sm = select_metric(cfg)
+    print(f"[ckpt ] chọn best.pt theo val {sm}", flush=True)
 
     gmon = GradMonitor(model, every=10)
 
@@ -415,7 +472,7 @@ def main():
                                            generator=gen)
             vh = torch.as_tensor(batch["valid_h"], dtype=torch.float32, device=dev)
             layers = model(x_t, t, valid_h=vh, **model_inputs(batch, dev))
-            loss, st, idx, _ = loss_from_layers(crit, layers, targets, labels)
+            loss, st, idx, _ = loss_from_layers(crit, loss_layers(layers), targets, labels)
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -446,7 +503,7 @@ def main():
         tr_stats = {k: v / max(n_seen, 1) for k, v in run.items()}
         stability = label_stability(prev_labels, labels_now)
         prev_labels = labels_now
-        va_stats = run_val(model, ld_va, crit, n_eval, dev)
+        va_stats = run_val(model, ld_va, crit, n_eval, dev, loss_layers)
         rec = va_stats["oracle_recall_per_layer"]
 
         warnings = []
@@ -497,10 +554,10 @@ def main():
         # CHỌN CHECKPOINT BẰNG oracle_recall, KHÔNG BAO GIỜ bằng iou_matched hay loss:
         # matcher không nhìn thấy oracle_recall nên nó không bị đánh lừa như hai lần ở
         # vòng 1 (C1 và E1).
-        is_best = best is None or va_stats["oracle_recall"] > best["oracle_recall"]
+        is_best = best is None or va_stats[sm] > best[sm]
         if is_best:
-            best = {"epoch": ep, "oracle_recall": va_stats["oracle_recall"],
-                    "loss": va_stats["loss"]}
+            best = {"epoch": ep, sm: va_stats[sm],
+                    "oracle_recall": va_stats["oracle_recall"], "loss": va_stats["loss"]}
         # Lưu MỖI epoch (last.pt), chép sang best.pt khi cải thiện. Ghi nguyên tử nên bị
         # ngắt giữa lúc ghi cũng không hỏng file cũ; tối đa mất một epoch.
         t_save = time.time()

@@ -1,0 +1,129 @@
+# EXPERIMENT A (VÒNG 2) — box là luồng chính, ảnh vùng box vào liên tục theo toạ độ.
+# Thiết kế đầy đủ: docs/EXPERIMENT_A_PLAN.md
+#
+# Đây là MỐC GỐC MỚI. Mọi thí nghiệm vòng 2 so với nó, KHÔNG so với A của vòng 1
+# (kiến trúc đổi quá nhiều để "bit-exact ở step 0" còn ý nghĩa).
+#
+# Mọi con số dưới đây đều có lý do, viết ra để không ai đổi mò.
+
+experiment: "round2-A.1"
+description: "EXPERIMENT A.1: probe score head tầng cuối trên A @1024 đã train (box đóng băng)"
+# Kế hoạch: docs/EXPERIMENT_A_PLAN.md mục 15. Mọi nhánh model/diffusion/matcher/data GIỮ
+# NGUYÊN như experiment_a_1024.yaml — weight của A phải nạp vào được.
+#
+# Biến thể chọn bằng cờ, KHÔNG sửa file này (ba file gần trùng nhau sẽ lệch dần):
+#   train.py --config config/experiment_a1.yaml --score-input {r | roi | r+roi}
+# Không truyền cờ => train.py dừng ngay: probe cần đầu vào score khác A.
+
+probe:
+  init_from: "checkpoints/exp_a_1024_v2/last.pt"   # AP50 test 10,36 — tốt nhất của A
+
+data:
+  root: "../../data/all_phase2_V2"
+  image_size: 1024         # ĐỔI TỪ 512 sau khi đo: ở lưới 32x32 box trung vị chỉ rộng
+                           # 1,96 ô, cửa chặn TRƯỢT (cos 0,266 / tiêu chí 0,5). Ở 1024px
+                           # lưới 64x64, box 3,92 ô, cửa chặn lên 0,317 và trần chẩn
+                           # đoán 0,304 -> 0,438. VẪN DƯỚI TIÊU CHÍ — train ở đây là
+                           # canh bạc có cơ sở, không phải cửa chặn đã đạt.
+  flip_prob: 0.5           # ⚠️ trước 2026-09-23 train.py KHÔNG đọc giá trị này.
+                           # CHỈ lật ngang. Không xoay: 5-30 độ làm box phình
+                           # 1,20x-1,98x; 90 độ phá giả định "đệm luôn ở đáy".
+  num_workers: 8           # ĐO ĐƯỢC: 4 worker không theo kịp 12,6 MB/batch đọc memmap,
+                           # step mất 740 ms (89 %) chờ DataLoader. 8 worker: 740 -> 7,4 ms.
+
+model:
+  clip_name: "openai/clip-vit-base-patch16"
+  freeze_clip: true        # BẮT BUỘC: (1) 1.911 ảnh không nuôi nổi 86M tham số;
+                           # (2) lớp của 3 split GIAO = 0 -> bài toán là zero-shot,
+                           # finetune sẽ phá đúng năng lực cần dùng;
+                           # (3) backward qua ViT tốn ~19 GB.
+  d_model: 256
+  n_layer: 6               # DiffusionDet dùng 6 stage. Cũng là số TẦNG CỘNG DỒN.
+  n_head: 8
+  coord_dim: 64            # mỗi toạ độ -> 64 chiều sin/cos, 4 toạ độ nối lại = 256
+  dropout: 0.1
+  roi_k: 3                 # lưới 3x3 TRONG box. KHÔNG phải 1x1: đo trên CE-130 thật,
+                           # 1x1 cho AUC đúng-cỡ vs to-gấp-2 = 0,000 (mù kích thước
+                           # hoàn toàn), 3x3 cho 0,896. KHÔNG phải 7x7 của DiffusionDet:
+                           # vật trung vị ~2,0x1,7 patch, 49 điểm trong box 2 patch là
+                           # lấy trùng ở chi phí 5,4x.
+                           # ⚠️ 18-29 % box CE-130 nhỏ hơn MỘT ô lưới -> với nhóm đó
+                           # lưới 3x3 thoái hoá thành 1x1 (số đo ở lưới 32x32;
+                           # ở 64x64 của file này box to gấp đôi tính theo ô).
+  n_class: 1               # 1 chiều + sigmoid TƯƠNG ĐƯƠNG TOÁN HỌC với 2 chiều + softmax
+  use_text: true           # lớp đến với mô hình qua token text, không qua head nhiều lớp
+
+diffusion:
+  num_timesteps: 1000
+  schedule: "cosine"       # đo được 3,70x AP của linear (linear chỉ còn 5,8 % tín hiệu
+                           # ở t=749 -> matcher gán tuỳ tiện)
+  snr_scale: 2.0           # SNR_SCALE của DiffusionDet. Ablation của họ:
+                           # 0,1 -> 38,9 | 1,0 -> 45,0 | 2,0 -> 45,8 | 3,0 -> 45,6 AP.
+                           # Lý do: "one box only has four representation parameters...
+                           # analogous to an image with only four pixels".
+  sampling_steps: 4
+  num_proposals_train: 30  # VÒNG 2 CHỐT N=30 cho cả train và eval (kế hoạch mục 4.2).
+  num_proposals_eval: 30   # Đo lại từ dữ liệu thật 2026-09-22: box/ảnh trung vị
+                           # 20/21/30 (train/val/test); 66,4/62,9/50,3 % số ảnh có <=30
+                           # box. Trần oracle_recall khi N=30 là 83,8/82,4/76,1 %
+                           # (N=100 cho ~97 %).
+                           # ⚠️ KHÔNG so oracle_recall với vòng 1 (N=300) — khác thang.
+                           # Muốn số cuối để báo cáo thì chạy lại eval N=300 trên
+                           # checkpoint tốt nhất (chỉ eval, đổi tự do vì không còn
+                           # pos_emb theo chỉ số).
+
+loss:
+  # Giống DiffusionDet (config.py:34-36,43-44). KHÔNG có epsilon loss (vô nghĩa dưới
+  # set matching). CÓ giám sát sâu: loss ở MỌI tầng, matcher chạy lại từng tầng —
+  # chuẩn của 8/8 bài trong khảo sát, DETR đo +8,2 AP giữa tầng 1 và tầng 6.
+  l1: 5.0
+  giou: 2.0
+  cls: 2.0
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+  # CỘNG loss các tầng, KHÔNG chia trung bình (vòng 1 chia -> gradient tới mỗi tầng bị
+  # nhân 1/6). DiffusionDet nhân bản weight_dict giữ nguyên trọng số cho mọi tầng phụ;
+  # V-DETR làm `loss += interm_loss`.
+  # ⚠️ Gradient lớn hơn 6 lần vòng 1 -> nếu phân kỳ thì HẠ lr, đừng quay lại chia.
+  sum_over_layers: true
+
+matcher:
+  method: "simota"         # ĐỔI so với vòng 1. DiffusionDet KHÔNG dùng Hungarian:
+                           # `grep -c linear_sum_assignment diffusiondet/loss.py` = 0,
+                           # class tên HungarianMatcherDynamicK nhưng docstring ghi
+                           # """ simOTA for detr """.
+                           # Vòng 1 đặt "hungarian" với lý do "SimOTA suy biến về k=1
+                           # trên CE-130" — lập luận đó CHƯA CÓ SỐ ĐO nào hậu thuẫn, và
+                           # bỏ qua prior hình học cứng (cost += 100*~in_boxes_and_center)
+                           # vốn chốt phần lớn assignment ĐỘC LẬP trọng số model.
+                           # Quan trọng vì label_stability đo được chỉ 0,018.
+  use_center_prior: true   # chính là prior hình học nói trên — thứ đáng giá nhất của
+                           # SimOTA. Comment vòng 1 ghi "55 % -> 51 %" MÂU THUẪN với
+                           # history.json (0,018); coi như chưa đo, bật lên và theo dõi.
+  center_radius: 2.5       # TỈ LỆ theo sqrt(w*h) của GT, không phải hằng số theo stride
+                           # FPN như DiffusionDet (ta không có FPN).
+                           # ⚠️ box CE-130 trung vị chỉ 1,96 ô lưới -> kiểm lại giá trị
+                           # này trước khi tin kết quả.
+  top_k: 10                # số ứng viên để ƯỚC LƯỢNG k, không phải k.
+                           # k_gt = clamp(tổng top-10 IoU với GT đó, min=1).
+
+training:
+  batch_size: 6
+  lr: 1.0e-3               # head nhỏ (0,07-0,92M) train TỪ ĐẦU; 1e-4 của A là cho 18M
+                           # tham số train chung.
+  weight_decay: 1.0e-4
+  epochs: 30               # 318 batch x 30 = 9.540 bước; decoder chỉ forward.
+  grad_clip: 1.0
+  seed: 0
+
+eval:
+  # CHỌN CHECKPOINT BẰNG oracle_recall, KHÔNG BAO GIỜ bằng iou_matched: iou_matched mù
+  # với GT mà không box nào chạm tới, và đã ĐÁNH LỪA HAI LẦN ở vòng 1 (C1 và E1).
+  select_metric: "score_AUC"   # ⚠️ box ĐÓNG BĂNG => oracle_recall là HẰNG SỐ, không
+                               # chọn được gì. score_AUC cùng định nghĩa với eval.py.
+  split: "val"             # KHÔNG dùng test để chọn: test khác hẳn train/val
+                           # (30 vs 20-21 box/ảnh, box to gấp 1,3x) và có lô
+                           # annotation rác.
+  top_k: 30                # TOP-K, không phải ngưỡng tuyệt đối 0,5: focal với
+                           # alpha=0,25 và head không phân biệt hội tụ về HẰNG SỐ
+                           # (vòng 1 rơi vào 0,263 < 0,5 -> lọc sạch mọi box).
