@@ -70,83 +70,10 @@ from data.ce130_dataset import normalize_for_clip  # noqa: E402
 from data.factory import build_dataset  # noqa: E402
 from models.detector import build_model  # noqa: E402
 from utils.box_ops_np import box_iou, cxcywh_to_xyxy  # noqa: E402
-from eval import nms_class_agnostic, scores_and_classes  # noqa: E402
-
-
-def roc_auc(labels, scores):
-    """AUC via the rank-sum identity — no sklearn dependency, and exact on ties.
-
-    Returns nan when one class is missing (AUC is undefined there); the caller
-    averages over images and skips those, rather than silently scoring them 0.5.
-    """
-    labels = np.asarray(labels)
-    scores = np.asarray(scores, dtype=np.float64)      # accept lists too
-    n_pos = int(labels.sum())
-    n_neg = len(labels) - n_pos
-    if n_pos == 0 or n_neg == 0:
-        return float("nan")
-    order = np.argsort(scores, kind="mergesort")
-    ranks = np.empty(len(scores), dtype=np.float64)
-    ranks[order] = np.arange(1, len(scores) + 1)
-    # average ranks within tied groups, else a constant score would score != 0.5
-    s_sorted = scores[order]
-    i = 0
-    while i < len(s_sorted):
-        j = i
-        while j + 1 < len(s_sorted) and s_sorted[j + 1] == s_sorted[i]:
-            j += 1
-        if j > i:
-            ranks[order[i:j + 1]] = (i + j + 2) / 2.0
-        i = j + 1
-    return float((ranks[labels == 1].sum() - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg))
-
-
-def quality(pred_cxcywh, scores, gt_cxcywh, size=512, iou_thr=0.5, pred_cls=None,
-            gt_cls=None):
-    """Metrics for ONE image. Returns (best_iou per GT, hit count, n_gt, auc).
-
-    `best_iou` is taken over ALL predictions, with no score involved and no greedy
-    assignment: the question is "was this object covered at all", and a greedy
-    matcher would answer a different one (it can hand a GT's best box to another
-    GT). eval.py's greedy rule stays where it belongs — in eval.py.
-    """
-    if len(gt_cxcywh) == 0:
-        return np.zeros(0), 0, 0, float("nan")
-    g = cxcywh_to_xyxy(gt_cxcywh) * size
-    if len(pred_cxcywh) == 0:
-        return np.zeros(len(g)), 0, len(g), float("nan")
-    p = cxcywh_to_xyxy(pred_cxcywh) * size
-
-    m = box_iou(p, g)[0]                                   # [P, G]
-    if pred_cls is not None and gt_cls is not None:
-        # class-aware, matching eval.py's per-class split: a box on the right
-        # pixels but the wrong class is not a hit
-        m = np.where(np.asarray(pred_cls)[:, None] == np.asarray(gt_cls)[None, :],
-                     m, 0.0)
-
-    best = m.max(axis=0)                                   # per GT
-    hit = int((best >= iou_thr).sum())
-    # A prediction counts as "correct" for ranking if it clears iou_thr on any GT.
-    auc = roc_auc((m.max(axis=1) >= iou_thr).astype(int), np.asarray(scores))
-    return best, hit, len(g), auc
-
-
-def summarise(best_all, hits, n_gt, aucs, recall_scored=None):
-    b = np.concatenate(best_all) if best_all else np.zeros(0)
-    a = np.array([x for x in aucs if not np.isnan(x)])
-    out = {
-        "oracle_recall": hits / max(n_gt, 1),
-        "mean_bestIoU": float(b.mean()) if len(b) else 0.0,
-        "median_bestIoU": float(np.median(b)) if len(b) else 0.0,
-        "score_AUC": float(a.mean()) if len(a) else float("nan"),
-        "score_AUC_n_images": int(len(a)),
-        "n_gt": int(n_gt),
-    }
-    if recall_scored is not None:
-        out["recall_scored"] = recall_scored
-        # The gap IS the price of the score head — the number this tool exists for.
-        out["score_head_cost"] = out["oracle_recall"] - recall_scored
-    return out
+from eval import scores_and_classes  # noqa: E402
+# Định nghĩa oracle_recall / score_AUC nằm ở MỘT chỗ, dùng chung với eval.py.
+from utils.metrics_np import (nms_class_agnostic, quality, roc_auc,  # noqa: E402,F401
+                              summarise)
 
 
 @torch.no_grad()

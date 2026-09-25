@@ -11,6 +11,7 @@ Chạy: `python -m pytest tests/test_experiment_a.py -q`
 import os
 import sys
 
+import numpy as np
 import pytest
 import torch
 
@@ -779,3 +780,99 @@ def test_grad_monitor_nhom_va_ti_phan():
     sh = GradMonitor.share(s)
     assert abs(sum(sh.values()) - 1.0) < 1e-6
     assert mon.summary() == {}                 # summary xoá mẫu để đo epoch sau
+
+
+# ---------------------------------------------------------------------------
+# eval.py chạy TRỌN LUỒNG — trước 2026-09-25 không test nào làm vậy và lần eval đầu
+# tiên vỡ ngay (torch.argsort trên numpy, cls=None bị index, evaluate nhận dict).
+# ---------------------------------------------------------------------------
+
+class _FakeSampler(torch.nn.Module):
+    """ddim_sample trả về đúng box/score định sẵn cho từng ảnh."""
+
+    def __init__(self, per_image):
+        super().__init__()
+        self.per_image = per_image                     # list[(boxes [N,4], logits [N])]
+        self.i = 0
+
+    def ddim_sample(self, n, valid_h=None, generator=None, return_all_layers=False,
+                    **kw):
+        B = kw["patch_raw"].shape[0]
+        items = self.per_image[self.i:self.i + B]
+        self.i += B
+        boxes = torch.stack([b for b, _ in items])
+        logits = torch.stack([l for _, l in items])
+        # 2 "tầng": tầng đầu lệch hẳn, tầng cuối là dự đoán thật
+        return [(boxes + 0.3, logits), (boxes, logits)]
+
+
+class _FakeLoader:
+    def __init__(self, batches):
+        self.batches = batches
+        self.dataset = [None] * sum(len(b["boxes"]) for b in batches)
+
+    def __iter__(self):
+        return iter(self.batches)
+
+    def __len__(self):
+        return len(self.batches)
+
+
+def _batch(gts, ids):
+    B = len(gts)
+    return {"boxes": [torch.tensor(g, dtype=torch.float32) for g in gts],
+            "labels": [torch.zeros(len(g), dtype=torch.long) for g in gts],
+            "text": ["x"] * B, "valid_h": [1.0] * B, "image_id": ids,
+            "patch_raw": torch.zeros(B, 4, 8), "text_raw": torch.zeros(B, 1, 8)}
+
+
+def test_eval_tron_luong_du_doan_hoan_hao():
+    import eval as ev
+
+    gt0 = [[0.2, 0.2, 0.1, 0.1], [0.6, 0.6, 0.1, 0.1]]
+    gt1 = [[0.5, 0.3, 0.2, 0.1]]
+    far = [0.9, 0.9, 0.05, 0.05]
+    per = [(torch.tensor(gt0 + [far, far]), torch.tensor([5.0, 5.0, -5.0, -5.0])),
+           (torch.tensor(gt1 + [far, far, far]), torch.tensor([5.0, -5.0, -5.0, -5.0]))]
+    loader = _FakeLoader([_batch([gt0, gt1], ["a", "b"])])
+    recs, rec_layer = ev.predict(_FakeSampler(per), loader, 4, torch.device("cpu"),
+                                 top_k=100, nms_thr=0.5)
+    res = ev.score_records(recs)
+
+    assert res["AP50"] == pytest.approx(1.0)
+    assert res["oracle_recall"] == pytest.approx(1.0)
+    assert res["score_AUC"] == pytest.approx(1.0)
+    assert rec_layer[-1] == pytest.approx(1.0) and rec_layer[0] < 1.0
+    # NMS gộp các box `far` trùng nhau: 4 box -> còn 3 ở ảnh 0 (2 GT + 1 far)
+    assert len(recs[0]["keep"]) == 3
+
+
+def test_eval_ap_tinh_tay():
+    """2 GT; dự đoán theo score: TP 0.9, FP 0.8, TP 0.7.
+    recall [.5 .5 1], precision [1 .5 .667] -> AP = .5*1 + .5*.667 = 0,8333."""
+    from utils.metrics_np import evaluate
+
+    gt = np.array([[0.0, 0.0, 0.1, 0.1], [0.5, 0.5, 0.6, 0.6]])
+    boxes = np.array([[0.0, 0.0, 0.1, 0.1], [0.8, 0.8, 0.9, 0.9], [0.5, 0.5, 0.6, 0.6]])
+    r = evaluate([(boxes, np.array([0.9, 0.8, 0.7]), gt)], 0.5)
+    assert r["AP"] == pytest.approx(0.5 + 0.5 * 2 / 3)
+    assert r["recall"] == pytest.approx(1.0)
+
+
+def test_postprocess_top_k_truoc_roi_nms():
+    import eval as ev
+
+    b = np.array([[0.5, 0.5, 0.2, 0.2], [0.5, 0.5, 0.2, 0.2], [0.1, 0.1, 0.05, 0.05]])
+    s = np.array([0.9, 0.8, 0.1])
+    assert ev.postprocess(b, s, top_k=2).tolist() == [0, 1]
+    assert ev.postprocess(b, s, top_k=2, nms_thr=0.5).tolist() == [0]   # trùng bị gộp
+    assert ev.postprocess(b, s, top_k=3, nms_thr=0.5).tolist() == [0, 2]
+
+
+def test_scores_and_classes_tra_numpy():
+    import eval as ev
+
+    s, c = ev.scores_and_classes(torch.tensor([0.0, 2.0]))
+    assert isinstance(s, np.ndarray) and c is None
+    s, c = ev.scores_and_classes(torch.tensor([[0.0, 3.0], [1.0, -1.0]]))
+    assert c.tolist() == [1, 0]

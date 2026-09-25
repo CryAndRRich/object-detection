@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Eval EXPERIMENT A (vòng 2) — AP50 + bộ chỉ số tách bạch box với score.
 
-TÁI DÙNG, KHÔNG CHÉP: `nms_class_agnostic`, `scores_and_classes`, `ap_from_pr`,
-`evaluate` lấy nguyên từ `eval.py`. Chúng chỉ đụng tới box và điểm số, không dính kiến
-trúc.
+MỌI THỨ SAU MODEL LÀ NUMPY, chấm bằng `utils/metrics_np.py` — cùng giao thức và cùng
+định nghĩa chỉ số với bảng vòng 1 (top-k -> NMS -> ghép tham lam -> AP; `oracle_recall`
+và `score_AUC` tính trên TẤT CẢ N box). Bản trước 2026-09-25 trộn torch/numpy và vỡ ngay
+lần chạy đầu (`torch.argsort` trên mảng numpy); không test nào chạy trọn luồng.
+
+SỐ SO VỚI E1 (AP50 6,36): `--split test --num-proposals 300 --top-k 100 --nms`.
 
 BA ĐIỀU PHẢI NHỚ KHI ĐỌC SỐ
 ---------------------------
@@ -32,139 +35,119 @@ import argparse
 import json
 import os
 import sys
+import time
 
 import numpy as np
 import torch
 import yaml
+from torch.utils.data import DataLoader
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from data.ce130_dataset import PatchCache
-from data.factory import build_dataset
-from models.detector import build_model
-from train import TorchWrap, collate, model_inputs, oracle_recall
-from utils.box_ops import box_iou, cxcywh_to_xyxy
-from torch.utils.data import DataLoader
+from data.ce130_dataset import PatchCache  # noqa: E402
+from data.factory import build_dataset  # noqa: E402
+from models.detector import build_model  # noqa: E402
+from train import TorchWrap, collate, fmt_time, model_inputs  # noqa: E402
+from utils.box_ops_np import cxcywh_to_xyxy  # noqa: E402
+from utils.metrics_np import (COCO_THR, evaluate, nms_class_agnostic,  # noqa: E402,F401
+                              quality, summarise)
 
-
-def nms_class_agnostic(boxes_xyxy, scores, iou_thr=0.5):
-    """NMS does not need scores to remove duplicates in principle, but it does need
-    them to decide WHICH box to keep within an overlapping group."""
-    order = np.argsort(-scores)
-    keep = []
-    while len(order):
-        i = order[0]
-        keep.append(i)
-        if len(order) == 1:
-            break
-        iou = box_iou(boxes_xyxy[i:i + 1], boxes_xyxy[order[1:]])[0][0]
-        order = order[1:][iou <= iou_thr]
-    return np.array(keep, dtype=int)
+# `nms_class_agnostic` được import lại ở đây để các tool cũ vẫn `from eval import ...`.
 
 
 def scores_and_classes(logits_1):
-    """[N] or [N,C] logits for ONE image -> (score [N], class [N] or None).
+    """[N] hoặc [N,C] logit của MỘT ảnh -> (score [N] numpy, class [N] numpy hoặc None).
 
-    A/B have a 1-D head, so the score is the sigmoid and there is no class.
-    A.2 has a C-way head: the score is the BEST class's confidence and the class
-    is its index -- the standard detector reading, and the one that keeps AP
-    comparable, because a proposal's confidence must not be diluted by the 79
-    classes it is not.
+    Head 1 chiều: score = sigmoid, không có lớp. Head C lớp (A.2): score là độ tin của
+    lớp TỐT NHẤT và lớp là chỉ số của nó.
     """
+    logits_1 = logits_1.detach().float().cpu()
     if logits_1.dim() == 1:
-        return torch.sigmoid(logits_1).cpu().numpy(), None
-    p = torch.sigmoid(logits_1)
-    best = p.max(dim=-1)
-    return best.values.cpu().numpy(), best.indices.cpu().numpy()
+        return torch.sigmoid(logits_1).numpy(), None
+    best = torch.sigmoid(logits_1).max(dim=-1)
+    return best.values.numpy(), best.indices.numpy()
 
 
-def ap_from_pr(rec, prec):
-    """COCO-style AP: make precision monotonically decreasing, then integrate."""
-    m_rec = np.concatenate([[0.0], rec, [1.0]])
-    m_pre = np.concatenate([[0.0], prec, [0.0]])
-    for i in range(len(m_pre) - 2, -1, -1):
-        m_pre[i] = max(m_pre[i], m_pre[i + 1])
-    idx = np.where(m_rec[1:] != m_rec[:-1])[0]
-    return float(np.sum((m_rec[idx + 1] - m_rec[idx]) * m_pre[idx + 1]))
+def postprocess(boxes_cxcywh, scores, top_k, nms_thr=None):
+    """Một ảnh, numpy -> chỉ số box giữ lại: TOP-K theo score, rồi NMS nếu bật.
 
-
-def evaluate(predictions, iou_thr=0.5):
-    """predictions: list[(boxes_xyxy [K,4], scores [K], gt_xyxy [M,4])] -> dict."""
-    records, total_gt = [], 0
-    for boxes, scores, gt in predictions:
-        total_gt += len(gt)
-        if len(boxes) == 0:
-            continue
-        order = np.argsort(-scores)
-        used = np.zeros(len(gt), dtype=bool)
-        for i in order:
-            if len(gt) == 0:
-                records.append((scores[i], 0))
-                continue
-            iou = box_iou(boxes[i:i + 1], gt)[0][0]
-            j = int(np.argmax(iou))
-            if iou[j] >= iou_thr and not used[j]:
-                used[j] = True
-                records.append((scores[i], 1))
-            else:
-                records.append((scores[i], 0))
-
-    if not records or total_gt == 0:
-        return {"AP": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0, "n_pred": 0}
-
-    records.sort(key=lambda x: -x[0])
-    tp = np.cumsum([r[1] for r in records])
-    fp = np.cumsum([1 - r[1] for r in records])
-    rec = tp / total_gt
-    prec = tp / np.maximum(tp + fp, 1e-9)
-    p, r = float(prec[-1]), float(rec[-1])
-    return {
-        "AP": ap_from_pr(rec, prec), "precision": p, "recall": r,
-        "f1": 2 * p * r / max(p + r, 1e-9), "n_pred": len(records),
-        "n_gt": total_gt,
-    }
+    Top-k chứ không ngưỡng tuyệt đối: focal với head không phân biệt hội tụ về hằng số
+    (vòng 1: 0,263 < 0,5 -> lọc sạch mọi box). Thứ tự top-k rồi NMS giống vòng 1.
+    """
+    keep = np.argsort(-np.asarray(scores), kind="stable")[:top_k]
+    if nms_thr is not None and len(keep):
+        k2 = nms_class_agnostic(cxcywh_to_xyxy(boxes_cxcywh[keep]), scores[keep], nms_thr)
+        keep = keep[k2]
+    return keep
 
 
 @torch.no_grad()
+def predict(model, loader, n_prop, dev, top_k, nms_thr=None):
+    """Chạy DDIM từ nhiễu thuần -> list bản ghi numpy mỗi ảnh + recall theo tầng.
 
-@torch.no_grad()
-def predict(model, loader, n_prop, dev, top_k, use_nms, nms_thr):
-    """-> (danh sách dự đoán cho `evaluate`, thống kê theo tầng)."""
+    Bản ghi giữ CẢ N box (để tính `oracle_recall`/`score_AUC` đúng định nghĩa) lẫn chỉ số
+    `keep` sau top-k/NMS (để tính AP).
+    """
     model.eval()
-    preds, layer_rec, best_ious = [], [], []
+    records, layer_hit, n_gt_tot = [], None, 0
     gen = torch.Generator(device=dev.type).manual_seed(0)
+    n_img, t0 = len(loader.dataset), time.time()
 
-    for batch in loader:
-        targets = [b.to(dev) for b in batch["boxes"]]
+    for bi, batch in enumerate(loader):
         vh = torch.as_tensor(batch["valid_h"], dtype=torch.float32, device=dev)
         layers = model.ddim_sample(n_prop, valid_h=vh, generator=gen,
                                    return_all_layers=True, **model_inputs(batch, dev))
-        boxes_f, logits_f = layers[-1]
+        if layer_hit is None:
+            layer_hit = np.zeros(len(layers))
 
-        layer_rec.append([
-            sum(oracle_recall(b[i].cpu(), targets[i].cpu())[0] for i in range(len(targets)))
-            / max(sum(len(g) for g in targets), 1)
-            for b, _ in layers])
+        for i, gt in enumerate(batch["boxes"]):
+            gt = gt.numpy()
+            n_gt_tot += len(gt)
+            for li, (lb, _) in enumerate(layers):
+                layer_hit[li] += quality(lb[i].float().cpu().numpy(), np.zeros(len(lb[i])),
+                                         gt, size=1)[1]
+            boxes_f, logits_f = layers[-1]
+            b = boxes_f[i].float().cpu().numpy()
+            sc, cls = scores_and_classes(logits_f[i])
+            records.append({"image_id": batch["image_id"][i], "boxes": b, "scores": sc,
+                            "classes": cls, "keep": postprocess(b, sc, top_k, nms_thr),
+                            "gt": gt})
 
-        for i, gt in enumerate(targets):
-            b = boxes_f[i].cpu()
-            sc, cls = scores_and_classes(logits_f[i].cpu())
-            b_xyxy = cxcywh_to_xyxy(b)
-            keep = torch.argsort(sc, descending=True)[:top_k]
-            if use_nms:
-                keep = keep[nms_class_agnostic(b_xyxy[keep], sc[keep], nms_thr)]
-            preds.append({"boxes": b_xyxy[keep], "scores": sc[keep],
-                          "classes": cls[keep],
-                          "gt": cxcywh_to_xyxy(gt.cpu())})
-            if gt.numel():
-                iou = box_iou(b_xyxy, cxcywh_to_xyxy(gt.cpu()))
-                iou = iou[0] if isinstance(iou, tuple) else iou
-                best_ious.append(float(iou.max(dim=0).values.mean()))
+        done = len(records)
+        if bi % max(len(loader) // 10, 1) == 0 or done == n_img:
+            el = time.time() - t0
+            print(f"  [{done:5d}/{n_img}] {el / max(done, 1) * 1000:.0f} ms/ảnh | "
+                  f"đã chạy {fmt_time(el)} | còn ~{fmt_time(el / done * (n_img - done))}",
+                  flush=True)
 
-    return preds, {
-        "oracle_recall_per_layer": np.mean(layer_rec, axis=0).tolist(),
-        "mean_bestIoU": float(np.mean(best_ious)) if best_ious else 0.0,
-    }
+    return records, (layer_hit / max(n_gt_tot, 1)).tolist()
+
+
+def score_records(records):
+    """Bản ghi numpy -> mọi chỉ số, cùng định nghĩa với bảng vòng 1. Hàm thuần, test được."""
+    preds = [(cxcywh_to_xyxy(r["boxes"][r["keep"]]), r["scores"][r["keep"]],
+              cxcywh_to_xyxy(r["gt"])) for r in records]
+    ap_by_thr = {f"AP{int(round(100 * t))}": evaluate(preds, t)["AP"] for t in COCO_THR}
+    at50 = evaluate(preds, 0.5)
+
+    best_all, hits, n_gt, aucs = [], 0, 0, []
+    for r in records:
+        best, hit, ng, auc = quality(r["boxes"], r["scores"], r["gt"], size=1)
+        best_all.append(best)
+        hits += hit
+        n_gt += ng
+        aucs.append(auc)
+    res = summarise(best_all, hits, n_gt, aucs, recall_scored=at50["recall"])
+
+    res.update(ap_by_thr)
+    res["AP_coco"] = float(np.mean(list(ap_by_thr.values())))
+    res.update({k: at50[k] for k in ("precision", "recall", "f1", "n_pred", "n_gt")})
+    # Chẩn đoán ở ngưỡng IoU THẤP (không gộp vào AP_coco): recall tăng vọt khi hạ ngưỡng
+    # nghĩa là box nằm trên vật nhưng chưa khít (vấn đề hồi quy); đứng yên nghĩa là bỏ
+    # sót vật hẳn (vấn đề phát hiện).
+    for t in (0.1, 0.3):
+        res[f"recall{int(100 * t)}"] = evaluate(preds, t)["recall"]
+    return res
 
 
 def main():
@@ -176,7 +159,7 @@ def main():
     ap.add_argument("--split", default="val")
     ap.add_argument("--num-proposals", type=int, default=None)
     ap.add_argument("--top-k", type=int, default=None)
-    ap.add_argument("--nms", action="store_true")
+    ap.add_argument("--nms", action="store_true", help="NMS không phân lớp sau top-k (E1 có)")
     ap.add_argument("--nms-thr", type=float, default=0.5)
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--batch-size", type=int, default=8)
@@ -186,7 +169,6 @@ def main():
 
     dev = torch.device(a.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     ckpt = torch.load(a.ckpt, map_location="cpu", weights_only=False)
-
     # Ưu tiên config TRONG checkpoint: dựng model khác với model đã train là cách yên
     # lặng nhất để báo cáo sai số.
     if a.config:
@@ -197,6 +179,7 @@ def main():
 
     n_prop = a.num_proposals or cfg["diffusion"]["num_proposals_eval"]
     top_k = a.top_k or cfg["eval"]["top_k"]
+    nms_thr = a.nms_thr if a.nms else None
 
     ds = build_dataset(cfg, a.split)
     if a.limit:
@@ -206,48 +189,31 @@ def main():
                         num_workers=cfg["data"]["num_workers"], collate_fn=collate,
                         pin_memory=dev.type == "cuda")
 
-    # dropout=0.0: eval không được lấy mẫu ngẫu nhiên trong mạng.
-    model = build_model(cfg, dropout=0.0).to(dev)
+    model = build_model(cfg, dropout=0.0).to(dev)     # dropout=0: eval không lấy mẫu
     model.load_state_dict(ckpt["model"])
-
     print(f"[eval round2-A] ckpt epoch={ckpt.get('epoch')} | split={a.split} "
-          f"({len(ds)} ảnh) | N={n_prop} | top_k={top_k} | nms={a.nms}", flush=True)
+          f"({len(ds)} ảnh) | N={n_prop} | top_k={top_k} | nms={nms_thr}", flush=True)
 
-    preds, layer_stats = predict(model, loader, n_prop, dev, top_k, a.nms, a.nms_thr)
-    res = evaluate(preds)
-    res.update(layer_stats)
-
-    n_gt = sum(len(p["gt"]) for p in preds)
-    hit = sum(oracle_recall(
-        torch.as_tensor(np.stack([
-            (p["boxes"][:, 0] + p["boxes"][:, 2]) / 2,
-            (p["boxes"][:, 1] + p["boxes"][:, 3]) / 2,
-            p["boxes"][:, 2] - p["boxes"][:, 0],
-            p["boxes"][:, 3] - p["boxes"][:, 1]], axis=-1)) if len(p["boxes"]) else
-        torch.zeros(0, 4),
-        torch.as_tensor(np.stack([
-            (p["gt"][:, 0] + p["gt"][:, 2]) / 2, (p["gt"][:, 1] + p["gt"][:, 3]) / 2,
-            p["gt"][:, 2] - p["gt"][:, 0], p["gt"][:, 3] - p["gt"][:, 1]], axis=-1))
-        if len(p["gt"]) else torch.zeros(0, 4))[0] for p in preds)
-    res["oracle_recall"] = hit / max(n_gt, 1)
+    records, rec_layer = predict(model, loader, n_prop, dev, top_k, nms_thr)
+    res = score_records(records)
+    res["oracle_recall_per_layer"] = rec_layer
 
     print()
-    for k in ("AP50", "AP", "oracle_recall", "mean_bestIoU"):
-        if k in res:
-            print(f"  {k:16s} {res[k]:.4f}")
-    print(f"  {'recall/tầng':16s} "
-          f"{' '.join(f'{v:.3f}' for v in res['oracle_recall_per_layer'])}")
-    print()
-    print(f"  ⚠️ N={n_prop}: trần oracle_recall là 83,8/82,4/76,1 % (train/val/test) "
-          f"nếu N=30.")
-    print(f"     KHÔNG so với vòng 1 (N=300). Chạy lại --num-proposals 300 để lấy số "
-          f"báo cáo.")
+    for k in ("AP50", "AP75", "AP_coco", "precision", "recall", "recall10", "recall30",
+              "oracle_recall", "score_AUC", "mean_bestIoU", "score_head_cost"):
+        print(f"  {k:16s} {res[k]:.4f}")
+    print(f"  {'recall/tầng':16s} {' '.join(f'{v:.3f}' for v in rec_layer)}")
+    print(f"\n  So với E1 (test, N=300, top-k 100, NMS 0,5): AP50 0,0636 | "
+          f"oracle_recall 0,2559 | score_AUC 0,6852")
+    if n_prop == 30:
+        print("  ⚠️ N=30: trần oracle_recall chỉ 83,8/82,4/76,1 % (train/val/test).")
 
     if a.out:
+        os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
         with open(a.out, "w") as f:
-            json.dump({"ckpt": a.ckpt, "split": a.split, "n_proposals": n_prop,
-                       "top_k": top_k, "nms": a.nms, "results": res},
-                      f, indent=2, ensure_ascii=False)
+            json.dump({"ckpt": a.ckpt, "epoch": ckpt.get("epoch"), "split": a.split,
+                       "n_proposals": n_prop, "top_k": top_k, "nms_thr": nms_thr,
+                       "results": res}, f, indent=2, ensure_ascii=False)
         print(f"  -> {a.out}")
 
 

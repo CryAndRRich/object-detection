@@ -82,12 +82,16 @@ class CE130Detection:
         """Dedupe by source image: exactly one branch per image-id."""
         by_image = {}
         for br in sorted(glob.glob(os.path.join(self.root, self.split, "*"))):
+            iid = os.path.basename(br).split("_b")[0]
+            # Every branch is equivalent, so check BEFORE reading: the old order parsed
+            # the JSON of all ~3 branches per image and threw 2 away. On the server's
+            # disk the dataset step of boot took 13-14 min.
+            if iid in by_image:
+                continue
             ann = self._read_annotation(br)
             if ann is None:
                 continue
-            iid = os.path.basename(br).split("_b")[0]
-            if iid not in by_image:                       # every branch is equivalent
-                by_image[iid] = (br, ann)
+            by_image[iid] = (br, ann)
 
         items = []
         for iid, (br, ann) in sorted(by_image.items()):
