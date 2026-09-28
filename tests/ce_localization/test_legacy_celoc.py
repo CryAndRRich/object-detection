@@ -127,7 +127,9 @@ def _tiny_policy(use_density=True, num_timesteps=1000):
     """Đúng kiến trúc, không tải gì; text encoder thay bằng hằng (không có tokenizer offline)."""
     m = ObjectPlacementPolicy(use_density=use_density, pretrained_vision=False, pretrained_text=False,
                               num_timesteps=num_timesteps)
-    m.text_encoder.forward = lambda texts: torch.zeros(len(texts), 128)
+    # tạo trên CÙNG thiết bị với model: train.py đưa model lên cuda khi có GPU (Kaggle)
+    m.text_encoder.forward = lambda texts: torch.zeros(len(texts), 128,
+                                                       device=m.text_encoder.projection.weight.device)
     return m
 
 
