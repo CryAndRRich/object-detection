@@ -1,8 +1,8 @@
 """Box quality tách riêng khỏi score-head quality — THUẦN NUMPY, không cần detectron2.
 
 Dùng bởi ``tools/measure_box_quality_ce130.py`` (EXPERIMENT D). Cùng công thức 3 chỉ số
-với ``count_editing/CE-LocModel/tools/measure_box_quality.py`` (bản gốc của ý tưởng này,
-viết cho CE-LocModel A/B/C) — viết lại độc lập, KHÔNG import trực tiếp, vì hai stack
+với ``ce_localization (tools/measure_box_quality.py cũ — nay là utils/metrics_np.py)`` (bản gốc của ý tưởng này,
+viết cho CE-Loc vòng 1 (A/B/C)) — viết lại độc lập, KHÔNG import trực tiếp, vì hai stack
 không dùng chung dependency (detectron2/COCO-json ở đây so với numpy-dict/CLIP-cache
 bên kia).
 

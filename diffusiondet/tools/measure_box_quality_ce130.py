@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Đo box quality của DiffusionDet trên CE-130, TÁCH RIÊNG khỏi chất lượng score head —
-EXPERIMENT D so trực tiếp với CE-LocModel A/B/C.
+EXPERIMENT D so trực tiếp với CE-Loc vòng 1 (A/B/C).
 
 Vì sao KHÔNG dùng AP làm kết luận chính (xem
 ``docs/thiet-ke-experiment-d-diffusiondet-ce130.md`` §4 và
-``count_editing/CE-LocModel/tools/measure_box_quality.py`` — bản gốc của ý tưởng này,
-viết cho CE-LocModel, đo trên A/B/C): A/B đã đo được ``score_AUC = 0,512`` (~ngẫu
+``ce_localization (tools/measure_box_quality.py cũ — nay là utils/metrics_np.py)`` — bản gốc của ý tưởng này,
+viết cho ce_localization, đo trên A/B/C): A/B đã đo được ``score_AUC = 0,512`` (~ngẫu
 nhiên, tung đồng xu), tức AP của chúng phản ánh CẢ ranking lẫn box, không tách được đâu
 là lỗi hình học đâu là lỗi xếp hạng. So "AP của D" với "AP của A/B/C" là so hai đại
 lượng trộn theo tỉ lệ khác nhau — không có nghĩa.

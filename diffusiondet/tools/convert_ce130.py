@@ -2,11 +2,11 @@
 """Chuyển CE-130 (`all_phase2_V2/`) sang COCO json cho DiffusionDet — EXPERIMENT D.
 
 Vì sao cần: đo TRẦN THỰC TẾ của bài toán định vị CE-130 bằng một detector chuẩn đã kiểm
-chứng (DiffusionDet), làm đối chứng cho AP50 0,0152 của CE-LocModel A/B/C. Đặc tả đầy đủ:
+chứng (DiffusionDet), làm đối chứng cho AP50 0,0152 của CE-Loc vòng 1 (A/B/C). Đặc tả đầy đủ:
 ``docs/thiet-ke-experiment-d-diffusiondet-ce130.md``.
 
 Nguồn dữ liệu và 3 bẫy đã có bằng chứng đo được (`object-detection/data/README.md` §8,
-đối chiếu lại `count_editing/CE-LocModel/data/ce130_dataset.py` — bản đã verify):
+đối chiếu lại `ce_localization/data/ce130_dataset.py` — bản đã verify):
 
 1. **`all_bboxes` là `xyxy` tuyệt đối**, COCO json cần `[x, y, w, h]` góc trên-trái.
    Chuyển sai thì box vẫn nằm trong ảnh — không assert nào bắt được.
@@ -69,7 +69,7 @@ import re
 def clip_box_xyxy(box, width, height):
     """``all_bboxes`` có box vượt biên và box suy biến (w hoặc h <= 0). Số hiện hành, đo
     lại 2026-09-08 trên đúng dữ liệu này: **85/71.852 box train**, 0 ở val/test — con số
-    "14/37.110" trong docstring ``filter_degenerate`` của CE-LocModel là số cũ, đo TRƯỚC
+    "14/37.110" trong docstring ``filter_degenerate`` của ce_localization là số cũ, đo TRƯỚC
     khi sửa "không trừ ``inpainted_bboxes``" nên tổng box khi đó ít hơn nhiều.
 
     Trả về ``[x, y, w, h]`` COCO hoặc None nếu rỗng sau khi cắt biên.
@@ -280,7 +280,7 @@ def build_coco(items, mode, image_root_for_relpath=None, cat_id_of=None):
     # trên dữ liệu thật: train 0, val 0, **test 855 box / 16 ảnh** — 15 ảnh trong đó có
     # id dạng 62xx liên tiếp, tức MỘT LÔ annotation lỗi. Ảnh 6261 chẳng hạn: 325 box mà
     # 293 box bao gần trọn ảnh, chồng khít lên nhau, không box nào bao một quả táo.
-    # KHÔNG tự lọc (giữ nguyên dữ liệu để số liệu còn so được với CE-LocModel A/B/C),
+    # KHÔNG tự lọc (giữ nguyên dữ liệu để số liệu còn so được với CE-Loc vòng 1 (A/B/C)),
     # chỉ đếm và báo — xem README mục EXPERIMENT D.
     area_img = {im["id"]: im["width"] * im["height"] for im in images}
     n_huge = sum(1 for a in annotations if a["area"] > 0.5 * area_img[a["image_id"]])

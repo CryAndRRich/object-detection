@@ -1,7 +1,7 @@
 _BASE_: "Base-Kaggle-T4x2.yaml"
 # EXPERIMENT D.1 — DiffusionDet R50 trên CE-130, class-agnostic (NUM_CLASSES=1).
 #
-# KHÔNG phải cải tiến của CE-LocModel A/B/C — là ĐỐI CHỨNG: một detector chuẩn, đã
+# KHÔNG phải cải tiến của CE-Loc vòng 1 (A/B/C) — là ĐỐI CHỨNG: một detector chuẩn, đã
 # kiểm chứng trên COCO/VOC/CrowdHuman, đặt lên đúng dữ liệu CE-130 để biết TRẦN THỰC TẾ.
 # Đặc tả đầy đủ: docs/thiet-ke-experiment-d-diffusiondet-ce130.md
 #

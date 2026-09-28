@@ -191,7 +191,7 @@ def ce130_image_root(root=None):
 
 
 def _register_ce130(root):
-    """CE-130 — EXPERIMENT D (đối chứng cho CE-LocModel A/B/C, không phải cải tiến).
+    """CE-130 — EXPERIMENT D (đối chứng cho CE-Loc vòng 1 (A/B/C), không phải cải tiến).
 
     D.1 (class-agnostic, LÀM TRƯỚC): 3 split gốc, mỗi ảnh 1 class nên "mọi vật trong
     ảnh" == "vật thuộc category ảnh đó" (đã đo: 3.598/3.598) — hợp lệ làm đối chứng.

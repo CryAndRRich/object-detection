@@ -1,10 +1,9 @@
-# Gộp 2026-09-15 từ 3 file (gốc repo + count_editing/ + CE-LocModel/).
-# Ghi chú chi tiết: README.md mục "Môi trường".
+# MỘT .gitignore cho cả repo. tests/ ĐƯỢC đẩy lên server (chạy test trước job GPU).
 
 # dữ liệu lớn — không push git, up thủ công lên server
 weights/
 # CHỈ data/ ở gốc repo. Không có dấu / đầu dòng thì rule này nuốt luôn package
-# code CE-LocModel/data/ và diffu2seg/data/ -> server pull về sẽ crash.
+# code ce_localization/data/ và diffuse2seg/data/ -> server pull về sẽ crash.
 /data/
 datasets/
 samples/

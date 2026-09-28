@@ -1,0 +1,50 @@
+# CE-Loc — mô hình nền (EXPERIMENT A vòng 2 @1024px). Lịch sử + số đo:
+# docs/old/ROUND_2_EXPERIMENT_A.md. Kết quả test N=300: AP50 10,36 (baseline D.1: 58,13).
+#
+# Trọng số loss (5·L1 + 2·GIoU + 2·Focal, alpha 0,25, gamma 2) là HẰNG SỐ trong
+# models/criterion.py, không đọc từ đây.
+
+experiment: "ce_loc"
+description: "box cộng dồn + RoI mỗi tầng + hai luồng token (h/r) + adaLN + SimOTA @1024px"
+
+data:
+  root: "../data/all_phase2_V2"   # tương đối so với ce_localization/
+  image_size: 1024                 # lưới CLIP 64x64; box trung vị 3,9 ô (ở 512px chỉ 1,96 ô
+                                   # — cửa chặn định vị trượt, xem tài liệu lưu trữ)
+  flip_prob: 0.5                   # chỉ lật ngang (xoay làm box phình, phá "đệm luôn ở đáy")
+  num_workers: 8                   # 4 worker không theo kịp đọc memmap
+
+model:
+  clip_name: "openai/clip-vit-base-patch16"
+  freeze_clip: true                # BẮT BUỘC: lớp 3 split rời nhau (zero-shot), 1.911 ảnh
+  d_model: 256
+  n_layer: 6                       # cũng là số tầng cộng dồn toạ độ
+  n_head: 8
+  coord_dim: 64                    # 4 toạ độ x 64 chiều sin/cos = 256
+  dropout: 0.1
+  roi_k: 3                         # lưới 3x3 trong box (1x1 mù kích thước)
+
+diffusion:
+  num_timesteps: 1000              # lịch cosine (utils/diffusion_math.py)
+  snr_scale: 2.0                   # như DiffusionDet
+  sampling_steps: 4
+  num_proposals_train: 30          # box/ảnh trung vị 20/21/30 (train/val/test)
+  num_proposals_eval: 30           # số để báo cáo: eval.py --num-proposals 300
+
+matcher:
+  method: "simota"                 # như DiffusionDet
+  use_center_prior: true           # +100 vào cost cho proposal ngoài (box AND vùng tâm)
+  center_radius: 2.5               # tỉ lệ theo sqrt(w*h) của GT
+  top_k: 10                        # số ứng viên để ƯỚC LƯỢNG k, không phải k
+
+training:
+  batch_size: 6                    # đo thật: batch 2 chỉ dùng 1,5/24 GB
+  lr: 1.0e-4                       # loss CỘNG 6 tầng; phân kỳ thì hạ lr, đừng chia loss
+  weight_decay: 1.0e-4
+  epochs: 300                      # recall chững từ epoch ~50
+  grad_clip: 1.0
+  seed: 0
+
+eval:
+  select_metric: "oracle_recall"   # oracle_recall | score_AUC. KHÔNG dùng iou_matched.
+  top_k: 30                        # top-k, KHÔNG ngưỡng tuyệt đối: head focal dễ ra hằng số
