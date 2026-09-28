@@ -33,7 +33,8 @@ Loss như DiffusionDet (5·L1 + 2·GIoU + 2·Focal, SimOTA), đặt ở mọi t�
 | `models/` | `clip_encoder`, `dit_blocks` (DiTBlock, update_box, mask), `roi_sampler`, `detector` (BoxDiT, CELocDetector, DDIM), `criterion` |
 | `data/` | `ce130_dataset` (đọc CE-130, cache), `loader` (DataLoader) |
 | `utils/` | hình học box + khuếch tán (bản torch và bản numpy tham chiếu), matcher, `metrics_np` (chấm điểm), `checkpoint`, `grad_monitor`, `log` |
-| `tools/` | `build_cache`, `check_data_facts`, `visualize_data` |
+| `tools/` | `build_cache`, `check_data_facts`, `visualize_data`, `inspect_spatial_softmax` (soi CE-Loc GỐC) |
+| `legacy/` | CE-Loc GỐC (bài add) viết lại đúng công thức, nạp strict `weights/celoc/best_model.pth`: `celoc_vision` (ResNet18 + SpatialSoftmax), `celoc_model` (CLIP text, U-Net 1D, sampler, IoU), `celoc_data`, `train.py`, `eval.py` |
 | `checkpoints/` | không vào git |
 
 Test ở `object-detection/tests/ce_localization/`.
@@ -74,6 +75,32 @@ mà `last.pt` đã có thì train DỪNG ngay, không ghi đè.
 python ../tools/run_on_free_gpu.py -- eval.py --ckpt checkpoints/<tên>/best.pt \
     --split test --num-proposals 300 --top-k 100 --nms --oracle-score \
     --out /mnt/disk1/aiotlab/haitn/output/<tên>_test_N300.json
+```
+
+**Soi SpatialSoftmax của CE-Loc gốc** (chỉ cần torch/torchvision/matplotlib, CPU được; 100 ảnh
+có hình ~4–7 phút mỗi chế độ):
+```bash
+for m in original inpainted_1 inpainted_2; do
+  python tools/inspect_spatial_softmax.py --image $m --n 100 --out ../../output/spatial_softmax/$m
+done
+```
+Ảnh vào: gốc (`ground_truth.jpg`) / xoá 1 vật (lượt 1, đúng đầu vào bài add) / xoá 2 vật (lượt 2);
+4 density: Full (lượt 1 dày nhất) / −1 / −2 (lượt 2, 3 cùng nhánh) / trống. Mỗi ảnh một hình 4×3
+(ảnh | Density Map | SpatialSoftmax Output, 512 chấm = 512 kênh, màu = độ nhọn), lỗ inpaint nét
+đứt đỏ. Density được sinh lại trên từng ảnh inpaint (hai nhánh lệch nhau nhiều blob) nên không
+ghép được map "đủ mọi vật". Kết luận ở `CLAUDE.md` mục Trạng thái.
+
+**Train lại CE-Loc gốc, có / không density** (`legacy/`). Công thức suy từ checkpoint gốc:
+AdamW lr 5e-5 wd 0,01, cosine T_max 300 theo epoch, batch 32, 300 epoch, best = loss train nhỏ
+nhất. Log in s/bước sau 100 bước đầu và eval 500 ảnh test mỗi 10 epoch. Eval (`legacy/eval.py`)
+báo cả sampler `mock` của bài lẫn `ddpm` đúng, IoU đúng (`best_iou`) lẫn công thức sai của bài
+(`best_iou_orig`), và mốc `prior` (30 box train ngẫu nhiên, không nhìn ảnh).
+```bash
+export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache TORCH_HOME=/mnt/disk1/aiotlab/haitn/torch_cache
+LOG=/mnt/disk1/aiotlab/haitn/log/celoc_nodensity_$(date +%m%d_%H%M).log
+nohup python ../tools/run_on_free_gpu.py -- legacy/train.py --save-dir checkpoints/celoc_nodensity \
+    --no-density > $LOG 2>&1 &
+echo "PID $! -> $LOG"
 ```
 
 ## Đọc số
