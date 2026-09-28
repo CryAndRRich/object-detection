@@ -11,7 +11,7 @@ Hai sampler: `mock` (vòng lặp gốc, 100 bước "x -= eps/100" — số so �
                   của bài, chỉ để đối chiếu số đã công bố)
 Mốc `prior`: N target_bbox lấy ngẫu nhiên từ samples/train, KHÔNG nhìn ảnh — model phải hơn nó.
 
-  python ../tools/run_on_free_gpu.py -- legacy/eval.py --ckpt checkpoints/celoc_density/best.pt \\
+  python ../tools/run_on_free_gpu.py -- legacy/eval.py --ckpt checkpoints/celoc_density/best.pth \\
       --out /mnt/disk1/aiotlab/haitn/output/celoc_density_test.json
 """
 
@@ -28,7 +28,7 @@ from torch.utils.data import DataLoader, Subset
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from ce_localization.legacy.celoc_data import ObjectPlacementDataset  # noqa: E402
+from ce_localization.legacy.celoc_data import ObjectPlacementDataset, to_model_input  # noqa: E402
 from ce_localization.legacy.celoc_model import (  # noqa: E402
     iou_original_formula, iou_pixels, load_policy, sample_ddpm, sample_mock)
 from ce_localization.legacy.celoc_vision import TARGET  # noqa: E402
@@ -45,8 +45,8 @@ def run_eval(model, loader, n_samples=30, samplers=SAMPLERS, seed=0, log_every=0
     out = {s: {"best": [], "mean": [], "best_orig": []} for s in samplers}
     gts, t0, done = [], time.time(), 0
     for k, batch in enumerate(loader):
-        den = batch["density_map"].to(dev) if "density_map" in batch else None
-        cond = model.condition(batch["pixel_values"].to(dev), den, list(batch["text"]))
+        rgb, den = to_model_input(batch, dev, model.use_density)
+        cond = model.condition(rgb, den, list(batch["text"]))
         gt = batch["bbox"].numpy()[:, None]                              # [B, 1, 4]
         gts.append(gt[:, 0])
         for s in samplers:
@@ -90,6 +90,53 @@ def prior_baseline(prior, gt, n_samples, seed=0):
             "mean_iou": float(iou.mean()), "best_iou_orig": float(iou_original_formula(boxes, gt[:, None]).max(1).mean())}
 
 
+@torch.no_grad()
+def visualize(model, ds, idxs, path, n_samples=30, seed=0):
+    """Mỗi ảnh một ô, mỗi sampler một hàng: GT (xanh lá), n_samples box (đỏ mờ), box tốt nhất
+    theo IoU (vàng — ORACLE, chỉ để nhìn). Vẽ trên canvas 512 đúng như model thấy."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+    from ce_localization.legacy.celoc_model import denormalize
+
+    dev = next(model.parameters()).device
+    g = torch.Generator(device=dev).manual_seed(seed)
+    items = [ds[i] for i in idxs]
+    batch = {"pixel_values": torch.stack([it["pixel_values"] for it in items])}
+    if model.use_density:
+        batch["density_map"] = torch.stack([it["density_map"] for it in items])
+    rgb, den = to_model_input(batch, dev, model.use_density)
+    cond = model.condition(rgb, den, [it["text"] for it in items])
+    gt = np.stack([it["bbox"].numpy() for it in items])
+    fig, axes = plt.subplots(len(SAMPLERS), len(items), figsize=(2.6 * len(items), 2.9 * len(SAMPLERS)), squeeze=False)
+    for r, s in enumerate(SAMPLERS):
+        boxes = (sample_mock if s == "mock" else sample_ddpm)(model, cond, n_samples, generator=g).cpu().numpy()
+        iou = iou_pixels(boxes, gt[:, None])
+        for c, it in enumerate(items):
+            ax = axes[r, c]
+            ax.imshow(it["pixel_values"].permute(1, 2, 0).numpy())
+            for k, b in enumerate(denormalize(boxes[c])):
+                w, h = max(b[2], 0), max(b[3], 0)
+                best = k == int(iou[c].argmax())
+                ax.add_patch(Rectangle((b[0] - w / 2, b[1] - h / 2), w, h, fill=False,
+                                       ec="yellow" if best else "red", lw=1.4 if best else 0.6,
+                                       alpha=1.0 if best else 0.45))
+            b = denormalize(gt[c])
+            ax.add_patch(Rectangle((b[0] - b[2] / 2, b[1] - b[3] / 2), b[2], b[3], fill=False, ec="lime", lw=1.6))
+            ax.set_xlim(0, TARGET)
+            ax.set_ylim(TARGET, 0)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_title(f"{it['text']} | best {iou[c].max():.2f}", fontsize=8)
+            if c == 0:
+                ax.set_ylabel(s)
+    fig.suptitle("GT (green) | predictions (red) | best by IoU (yellow)")
+    fig.tight_layout()
+    fig.savefig(path, dpi=90)
+    plt.close(fig)
+
+
 def print_table(summary, title=""):
     print(f"\n{title}\n{'':>8} {'best_iou':>9} {'hit50':>7} {'mean_iou':>9} {'best_orig':>10}")
     for s, r in summary.items():
@@ -107,6 +154,7 @@ def main():
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--num-workers", type=int, default=8)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--viz", type=int, default=0, help="vẽ N ảnh test (cố định theo seed) -> <out>_viz.png")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -131,6 +179,12 @@ def main():
     with open(args.out, "w") as f:
         json.dump(dict(args=vars(args), epoch=ck.get("epoch"), use_density=model.use_density,
                        summary=summary, per_image={s: v for s, v in out.items()}), f)
+    if args.viz:
+        base = ds.dataset if isinstance(ds, Subset) else ds
+        idxs = sorted(np.random.default_rng(args.seed).permutation(len(ds))[: args.viz].tolist())
+        viz_path = os.path.splitext(args.out)[0] + "_viz.png"
+        visualize(model, base, idxs, viz_path, args.n_samples, args.seed)
+        print(f"hình -> {viz_path}")
     print(f"[{fmt_time(time.time() - t0)}] xong -> {args.out}")
 
 

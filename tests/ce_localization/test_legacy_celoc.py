@@ -127,9 +127,11 @@ def _tiny_policy(use_density=True, num_timesteps=1000):
     """Đúng kiến trúc, không tải gì; text encoder thay bằng hằng (không có tokenizer offline)."""
     m = ObjectPlacementPolicy(use_density=use_density, pretrained_vision=False, pretrained_text=False,
                               num_timesteps=num_timesteps)
-    # tạo trên CÙNG thiết bị với model: train.py đưa model lên cuda khi có GPU (Kaggle)
-    m.text_encoder.forward = lambda texts: torch.zeros(len(texts), 128,
-                                                       device=m.text_encoder.projection.weight.device)
+    # đi qua projection + Mish như bản thật (DDP đòi mọi tham số train được đều góp vào loss);
+    # tạo trên CÙNG thiết bị với model (train.py đưa model lên cuda khi có GPU — Kaggle)
+    te = m.text_encoder
+    te.forward = lambda texts: te.activation(te.projection(
+        torch.zeros(len(texts), te.hidden_size, device=te.projection.weight.device)))
     return m
 
 
@@ -253,7 +255,7 @@ def test_dataset_normalizes_like_original(tmp_path):
     exp = [(236 * s / 512) * 2 - 1, (192 * s / 512) * 2 - 1, (47.2 * s / 512) * 2 - 1, (38.4 * s / 512) * 2 - 1]
     assert np.allclose(item["bbox"].numpy(), exp, atol=1e-6)
     assert item["pixel_values"].shape == (3, 512, 512) and item["density_map"].shape == (1, 512, 512)
-    assert item["density_map"][0, 0, 0] == pytest.approx(14 / 255)
+    assert item["pixel_values"].dtype == torch.uint8 and item["density_map"][0, 0, 0] == 14
     assert "density_map" not in ObjectPlacementDataset(str(tmp_path), use_density=False)[0]
 
 
@@ -287,20 +289,20 @@ def test_train_then_resume_then_eval_full_flow(tmp_path, monkeypatch, no_density
     monkeypatch.setattr(tr.CheckpointManager, "save", _stop_after_first(tr.CheckpointManager.save))
     with pytest.raises(_StopTrain):
         tr.main()
-    h1 = torch.load(os.path.join(save, "last.pt"), weights_only=False)
+    h1 = torch.load(os.path.join(save, "last.pth"), weights_only=False)
     assert h1["epoch"] == 0 and "eval" in h1["history"][0]
 
     monkeypatch.undo()
     monkeypatch.setattr(tr, "ObjectPlacementPolicy", lambda use_density: _tiny_policy(use_density, 50))
     monkeypatch.setattr(_sys, "argv", base + ["--resume"])
     tr.main()
-    h2 = torch.load(os.path.join(save, "last.pt"), weights_only=False)
+    h2 = torch.load(os.path.join(save, "last.pth"), weights_only=False)
     assert h2["epoch"] == 1 and len(h2["history"]) == 2
-    assert os.path.exists(os.path.join(save, "best.pt"))
+    assert os.path.exists(os.path.join(save, "best.pth"))
 
     monkeypatch.setattr(ev, "load_policy", lambda p, d: _load_tiny(p, not no_density))
     out = str(tmp_path / "res.json")
-    monkeypatch.setattr(_sys, "argv", ["eval.py", "--ckpt", os.path.join(save, "best.pt"), "--data", data,
+    monkeypatch.setattr(_sys, "argv", ["eval.py", "--ckpt", os.path.join(save, "best.pth"), "--data", data,
                                        "--prior-from", data, "--n-samples", "3", "--num-workers", "0",
                                        "--out", out])
     ev.main()
@@ -353,4 +355,121 @@ def test_train_max_hours_stops_cleanly_after_one_epoch(tmp_path, monkeypatch, ca
                                        "--epochs", "5", "--max-hours", "1e-6", "--no-density"])
     tr.main()
     assert "DỪNG trước epoch 2" in capsys.readouterr().out
-    assert torch.load(os.path.join(save, "last.pt"), weights_only=False)["epoch"] == 0
+    assert torch.load(os.path.join(save, "last.pth"), weights_only=False)["epoch"] == 0
+
+
+# ============================================================================
+# cache uint8, --stop-epoch, DDP 2 tiến trình, visualize
+# ============================================================================
+
+from ce_localization.legacy.celoc_data import build_cache, to_model_input
+
+
+def _original_float_item(ds, i):
+    """Đường gốc: to_tensor = float32 / 255 trên CPU."""
+    img, den, _ = ds.load_canvas(i)
+    return (torch.from_numpy(np.asarray(img, np.float32) / 255.0).permute(2, 0, 1),
+            torch.from_numpy(np.asarray(den, np.float32) / 255.0)[None])
+
+
+@pytest.mark.parametrize("workers", [0, 2])
+def test_cache_items_bit_identical_to_png_path(tmp_path, workers):
+    data = str(tmp_path / "samples")
+    _fake_samples(data, 3)
+    # density khác nền để phép so có nghĩa
+    Image.fromarray(np.random.default_rng(1).integers(0, 255, (384, 472, 4), dtype=np.uint8)).save(
+        f"{data}/density/1_1.png")
+    cache = str(tmp_path / "cache")
+    build_cache(data, cache, use_density=True, workers=workers, log=lambda s: None)
+    png = ObjectPlacementDataset(data)
+    for use_density in (True, False):
+        c = ObjectPlacementDataset(data, use_density=use_density, cache_dir=cache)
+        for i in range(3):
+            a, b = png[i], c[i]
+            assert torch.equal(a["pixel_values"], b["pixel_values"]) and torch.equal(a["bbox"], b["bbox"])
+            assert a["scale"] == b["scale"]
+            if use_density:
+                assert torch.equal(a["density_map"], b["density_map"])
+            else:
+                assert "density_map" not in b
+    # đưa về float trên thiết bị == to_tensor gốc, từng bit
+    ref_rgb, ref_den = _original_float_item(png, 1)
+    rgb, den = to_model_input({"pixel_values": png[1]["pixel_values"][None],
+                               "density_map": png[1]["density_map"][None]}, torch.device("cpu"), True)
+    assert torch.equal(rgb[0], ref_rgb) and torch.equal(den[0], ref_den)
+
+
+def test_cache_rejects_mismatch_and_is_idempotent(tmp_path):
+    data = str(tmp_path / "samples")
+    _fake_samples(data, 2)
+    cache = str(tmp_path / "cache")
+    build_cache(data, cache, use_density=False, workers=0, log=lambda s: None)
+    with pytest.raises(ValueError):                                    # cache không density
+        ObjectPlacementDataset(data, use_density=True, cache_dir=cache)
+    msgs = []
+    build_cache(data, cache, use_density=False, workers=0, log=msgs.append)
+    assert msgs and msgs[0].startswith("cache đã có")
+    os.remove(f"{data}/images/1_1.png")
+    with pytest.raises(ValueError):                                    # danh sách file đổi
+        ObjectPlacementDataset(data, use_density=False, cache_dir=cache)
+
+
+def _train_argv(save, data, *extra):
+    return ["train.py", "--save-dir", save, "--data", data, "--eval-data", data, "--batch-size", "2",
+            "--num-workers", "0", *extra]
+
+
+def test_stop_epoch_keeps_schedule_but_stops(tmp_path, monkeypatch):
+    import ce_localization.legacy.train as tr
+    data = str(tmp_path / "samples")
+    _fake_samples(data, 2)
+    save = str(tmp_path / "ck")
+    monkeypatch.setattr(tr, "ObjectPlacementPolicy", lambda use_density: _tiny_policy(use_density, 50))
+    monkeypatch.setattr(_sys, "argv", _train_argv(save, data, "--epochs", "300", "--stop-epoch", "2",
+                                                  "--eval-every", "0", "--no-density"))
+    tr.main()
+    ck = torch.load(os.path.join(save, "last.pth"), weights_only=False)
+    assert ck["epoch"] == 1 and len(ck["history"]) == 2
+    assert ck["scheduler_state_dict"]["T_max"] == 300
+    assert ck["history"][1]["lr"] == pytest.approx(5e-5 * (1 + _math.cos(_math.pi * 1 / 300)) / 2)
+    with open(os.path.join(save, "last.pth"), "rb") as f:               # pickle, KHÔNG zip
+        assert f.read(2) != b"PK"
+
+
+def _ddp_worker(rank, world, port, save, data, cache):
+    import ce_localization.legacy.train as tr
+    os.environ.update(RANK=str(rank), LOCAL_RANK=str(rank), WORLD_SIZE=str(world),
+                      MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port))
+    tr.ObjectPlacementPolicy = lambda use_density: _tiny_policy(use_density, 50)
+    _sys.argv = _train_argv(save, data, "--epochs", "300", "--stop-epoch", "2", "--eval-every", "2",
+                            "--eval-n", "2", "--cache-dir", cache)
+    tr.main()
+
+
+def test_ddp_two_processes_train_with_cache(tmp_path):
+    """torchrun 2 tiến trình (gloo, CPU): chia batch, all_reduce loss, chỉ rank 0 ghi, dừng đúng."""
+    import socket
+    import torch.multiprocessing as tmp
+    data = str(tmp_path / "samples")
+    _fake_samples(data, 4)
+    cache = str(tmp_path / "cache")
+    build_cache(data, cache, use_density=True, workers=0, log=lambda s: None)
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    save = str(tmp_path / "ck")
+    tmp.spawn(_ddp_worker, args=(2, port, save, data, cache), nprocs=2, join=True)
+    ck = torch.load(os.path.join(save, "last.pth"), weights_only=False)
+    assert ck["epoch"] == 1 and "eval" in ck["history"][1]
+    assert _math.isfinite(ck["history"][1]["loss"])
+    assert sorted(os.listdir(save)) == ["best.pth", "history.json", "last.pth"]
+
+
+def test_eval_visualize_writes_png(tmp_path):
+    import ce_localization.legacy.eval as ev
+    data = str(tmp_path / "samples")
+    _fake_samples(data, 2)
+    m = _tiny_policy(True, 50).eval()
+    out = str(tmp_path / "viz.png")
+    ev.visualize(m, ObjectPlacementDataset(data), [0, 1], out, n_samples=3)
+    assert os.path.getsize(out) > 1000

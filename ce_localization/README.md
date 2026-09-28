@@ -91,21 +91,24 @@ done
 ghép được map "đủ mọi vật". Kết luận ở `CLAUDE.md` mục Trạng thái.
 
 **Train lại CE-Loc gốc, có / không density** (`legacy/`). Công thức suy từ checkpoint gốc:
-AdamW lr 5e-5 wd 0,01, cosine T_max 300 theo epoch, batch 32, 300 epoch, best = loss train nhỏ
-nhất. Log in s/bước sau 100 bước đầu và eval 500 ảnh test mỗi 10 epoch. Eval (`legacy/eval.py`)
-báo cả sampler `mock` của bài lẫn `ddpm` đúng, IoU đúng (`best_iou`) lẫn công thức sai của bài
-(`best_iou_orig`), và mốc `prior` (30 box train ngẫu nhiên, không nhìn ảnh).
+AdamW lr 5e-5 wd 0,01, cosine `T_max` 300 theo epoch, batch toàn cục 32, best = loss train nhỏ
+nhất; `--stop-epoch 120` dừng sớm mà giữ lịch. Checkpoint `last.pth` / `best.pth` (pickle không
+zip). Eval (`legacy/eval.py`) báo cả sampler `mock` của bài lẫn `ddpm` đúng, IoU đúng
+(`best_iou`) lẫn công thức sai của bài (`best_iou_orig`), mốc `prior`; `--viz N` vẽ box.
 ```bash
+# server, 1 GPU trống nhất
 export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache TORCH_HOME=/mnt/disk1/aiotlab/haitn/torch_cache
 LOG=/mnt/disk1/aiotlab/haitn/log/celoc_nodensity_$(date +%m%d_%H%M).log
 nohup python ../tools/run_on_free_gpu.py -- legacy/train.py --save-dir checkpoints/celoc_nodensity \
-    --no-density > $LOG 2>&1 &
+    --no-density --stop-epoch 120 > $LOG 2>&1 &
 echo "PID $! -> $LOG"
+# nhiều GPU (Kaggle): cache rồi DDP
+python legacy/build_cache.py --data <samples>/train --out <cache> [--no-density]
+torchrun --standalone --nproc_per_node=2 legacy/train.py --save-dir <out> --cache-dir <cache> --stop-epoch 120 ...
 ```
-Server dùng chung quá tải (2026-09-28: 2,4 s/bước, ETA 125 giờ — CPU idle 2 %, I/O pressure 48)
-⇒ chạy trên Kaggle bằng `notebooks/celoc_legacy_kaggle.ipynb` (gitignore, chỉ ở local; T4×2, hai bản song song, tự
-`--max-hours` + nối tiếp phiên, tự eval khi đủ 300 epoch). Dữ liệu up lên Kaggle:
-`cd data && zip -r -0 ce-loc-samples.zip samples` (~7 GB; `-0` vì PNG đã nén). Ngữ cảnh: `docs/SPATIAL_SOFTMAX.md`.
+Kaggle: `notebooks/celoc_legacy_kaggle.ipynb` (gitignore, chỉ ở local), mỗi lần chạy train một bản
+trên cả 2 T4, ≤ 11 giờ, tự eval + vẽ. Server dùng chung từng quá tải (2,4 s/bước). Ngữ cảnh:
+`docs/SPATIAL_SOFTMAX.md`.
 
 ## Đọc số
 

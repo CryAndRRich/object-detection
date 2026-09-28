@@ -221,6 +221,10 @@ class ObjectPlacementPolicy(nn.Module):
         pred = self.noise_net(noisy.unsqueeze(1), t, cond).squeeze(1)
         return F.mse_loss(pred, noise)
 
+    def forward(self, rgb, density, text, gt_bbox, generator=None):
+        """= compute_loss. DDP chỉ đồng bộ gradient khi bước tính đi qua `model(...)`."""
+        return self.compute_loss(rgb, density, text, gt_bbox, generator=generator)
+
 
 def load_policy(ckpt_path, device="cpu", pretrained_text=True):
     """Nạp checkpoint gốc hoặc checkpoint của `legacy/train.py`. Density suy từ conv1.
