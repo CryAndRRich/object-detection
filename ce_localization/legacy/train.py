@@ -32,6 +32,49 @@ from ce_localization.utils.checkpoint import CheckpointManager, rng_state, set_r
 from ce_localization.utils.log import fmt_time  # noqa: E402
 
 
+def _sync(dev):
+    if dev.type == "cuda":
+        torch.cuda.synchronize()
+
+
+def bench(model, loader, optimizer, gen, dev, use_density, n):
+    """Tách nút thắt: (1) CHỈ đọc dữ liệu, (2) CHỈ tính toán trên một batch cố định đã nằm trên
+    GPU, với cudnn.benchmark tắt (mặc định, như lúc train) rồi bật."""
+    model.train()
+    t, it = time.time(), iter(loader)
+    for k in range(n + 3):
+        try:
+            batch = next(it)
+        except StopIteration:                                            # tập nhỏ: quay vòng
+            it = iter(loader)
+            batch = next(it)
+        if k == 2:                                                       # bỏ 3 batch khởi động worker
+            t = time.time()
+    data_s = (time.time() - t) / n
+    print(f"(1) CHỈ đọc dữ liệu: {data_s:.3f} s/bước ({n} bước, {loader.num_workers} worker)", flush=True)
+
+    rgb = batch["pixel_values"].to(dev)
+    den = batch["density_map"].to(dev) if use_density else None
+    box, text = batch["bbox"].to(dev), list(batch["text"])
+    for flag in (False, True):
+        torch.backends.cudnn.benchmark = flag
+        if dev.type == "cuda":
+            torch.cuda.reset_peak_memory_stats()
+        for k in range(n + 3):
+            if k == 3:
+                _sync(dev)
+                t = time.time()
+            loss = model.compute_loss(rgb, den, text, box, generator=gen)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+        _sync(dev)
+        mem = torch.cuda.max_memory_allocated() / 2**30 if dev.type == "cuda" else 0
+        print(f"(2) CHỈ tính toán, cudnn.benchmark={flag}: {(time.time() - t) / n:.3f} s/bước, "
+              f"đỉnh bộ nhớ {mem:.1f} GB", flush=True)
+    print("-> bước train thật ≈ max(1), (2) khi worker đọc song song với GPU", flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--save-dir", required=True)
@@ -46,13 +89,20 @@ def main():
     ap.add_argument("--eval-n", type=int, default=500, help="số ảnh test cố định cho eval định kỳ")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--max-hours", type=float, default=0,
+                    help="dừng sạch sau epoch nếu epoch kế tiếp có thể vượt N giờ (Kaggle: 12h/phiên); 0 = tắt")
+    ap.add_argument("--cudnn-benchmark", action="store_true",
+                    help="cuDNN tự chọn thuật toán conv nhanh nhất (phép toán không đổi)")
+    ap.add_argument("--bench", type=int, default=0,
+                    help="đo riêng đọc dữ liệu / tính toán GPU trong N bước rồi thoát (không ghi gì)")
     args = ap.parse_args()
-    cfg = {k: v for k, v in vars(args).items() if k not in ("resume", "num_workers", "save_dir")}
+    cfg = {k: v for k, v in vars(args).items() if k not in ("resume", "num_workers", "save_dir", "bench", "max_hours", "cudnn_benchmark")}
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_density = not args.no_density
-    ckm = CheckpointManager(args.save_dir)
-    if ckm.has_last() and not args.resume:
+    ckm = CheckpointManager(args.save_dir) if not args.bench else None
+    if ckm is not None and ckm.has_last() and not args.resume:
         sys.exit(f"{ckm.last_path} đã có — thêm --resume để chạy tiếp, hoặc đổi --save-dir")
+    torch.backends.cudnn.benchmark = args.cudnn_benchmark
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     t0 = time.time()
@@ -74,6 +124,9 @@ def main():
           f"{len(loader)} bước/epoch | eval {len(idx)} ảnh test | {n_train / 1e6:.2f}M tham số train | cfg {cfg}",
           flush=True)
 
+    if args.bench:
+        return bench(model, loader, optimizer, gen, dev, use_density, args.bench)
+
     start, best_loss, history = 0, float("inf"), []
     if args.resume and ckm.has_last():
         ck = ckm.load_last()
@@ -86,7 +139,7 @@ def main():
         set_rng_state(ck["rng"], gen)
         print(f"resume từ epoch {ck['epoch']} (best loss {best_loss:.5f})", flush=True)
 
-    t_train = time.time()
+    t_train, slowest = time.time(), 0.0
     for epoch in range(start, args.epochs):
         model.train()
         te, total = time.time(), 0.0
@@ -132,6 +185,13 @@ def main():
         print(f"[{fmt_time(time.time() - t0)} | ETA {fmt_time(el / done * (args.epochs - epoch - 1))}] "
               f"epoch {epoch + 1}/{args.epochs} loss {avg:.5f}{' *best' if is_best else ''} lr {lr:.3e} "
               f"({fmt_time(rec['epoch_s'])}){ev}", flush=True)
+
+        slowest = max(slowest, time.time() - te)                         # kể cả eval + ghi checkpoint
+        if args.max_hours and epoch + 1 < args.epochs and \
+                time.time() - t0 + 1.15 * slowest > args.max_hours * 3600:
+            print(f"DỪNG trước epoch {epoch + 2}: epoch kế tiếp (~{fmt_time(slowest)}) có thể vượt "
+                  f"--max-hours {args.max_hours}. Chạy lại đúng lệnh + --resume.", flush=True)
+            return
 
     if history and "eval" in history[-1]:
         print_table(history[-1]["eval"], f"eval cuối ({len(idx)} ảnh test)")

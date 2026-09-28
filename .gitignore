@@ -10,8 +10,9 @@ samples/
 samples_test/
 samples_real/
 
-# notebook Kaggle lưu trữ của diffusiondet — giữ ở local, không đẩy git
-/diffusiondet/notebooks/
+# MỌI thư mục notebooks/ (notebook Kaggle) — chỉ ở local, không đẩy git. Notebook clone repo
+# từ GitHub nên không cần nằm trong repo.
+notebooks/
 
 # kết quả / model (dấu / cuối: chỉ khớp THƯ MỤC, không khớp tên file)
 output/

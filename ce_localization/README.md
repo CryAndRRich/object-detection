@@ -102,6 +102,10 @@ nohup python ../tools/run_on_free_gpu.py -- legacy/train.py --save-dir checkpoin
     --no-density > $LOG 2>&1 &
 echo "PID $! -> $LOG"
 ```
+Server dùng chung quá tải (2026-09-28: 2,4 s/bước, ETA 125 giờ — CPU idle 2 %, I/O pressure 48)
+⇒ chạy trên Kaggle bằng `notebooks/celoc_legacy_kaggle.ipynb` (gitignore, chỉ ở local; T4×2, hai bản song song, tự
+`--max-hours` + nối tiếp phiên, tự eval khi đủ 300 epoch). Dữ liệu up lên Kaggle:
+`cd data && zip -r -0 ce-loc-samples.zip samples` (~7 GB; `-0` vì PNG đã nén). Ngữ cảnh: `docs/SPATIAL_SOFTMAX.md`.
 
 ## Đọc số
 

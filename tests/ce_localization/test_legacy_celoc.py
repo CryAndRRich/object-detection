@@ -324,3 +324,31 @@ def _load_tiny(path, use_density):
     m = _tiny_policy(use_density, 50)
     m.load_state_dict(ck["model_state_dict"])
     return m.eval(), ck
+
+
+def test_train_bench_mode_runs_and_writes_nothing(tmp_path, monkeypatch, capsys):
+    import ce_localization.legacy.train as tr
+    data = str(tmp_path / "samples")
+    _fake_samples(data, 4)
+    monkeypatch.setattr(tr, "ObjectPlacementPolicy", lambda use_density: _tiny_policy(use_density, 50))
+    save = str(tmp_path / "ck")
+    monkeypatch.setattr(_sys, "argv", ["train.py", "--save-dir", save, "--data", data, "--eval-data", data,
+                                       "--batch-size", "2", "--num-workers", "0", "--bench", "1"])
+    tr.main()
+    out = capsys.readouterr().out
+    assert "CHỈ đọc dữ liệu" in out and "cudnn.benchmark=True" in out
+    assert not os.path.exists(save)
+
+
+def test_train_max_hours_stops_cleanly_after_one_epoch(tmp_path, monkeypatch, capsys):
+    import ce_localization.legacy.train as tr
+    data = str(tmp_path / "samples")
+    _fake_samples(data, 2)
+    save = str(tmp_path / "ck")
+    monkeypatch.setattr(tr, "ObjectPlacementPolicy", lambda use_density: _tiny_policy(use_density, 50))
+    monkeypatch.setattr(_sys, "argv", ["train.py", "--save-dir", save, "--data", data, "--eval-data", data,
+                                       "--batch-size", "2", "--num-workers", "0", "--eval-every", "0",
+                                       "--epochs", "5", "--max-hours", "1e-6", "--no-density"])
+    tr.main()
+    assert "DỪNG trước epoch 2" in capsys.readouterr().out
+    assert torch.load(os.path.join(save, "last.pt"), weights_only=False)["epoch"] == 0
