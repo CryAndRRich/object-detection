@@ -4,7 +4,7 @@
 (CC-BY-NC 4.0, [../LICENSE](../LICENSE)). Hai việc đã XONG, **không chạy lại**:
 
 1. **3 benchmark** (COCO-minitrain 25K, VOC 07+12, CrowdHuman) train trên Kaggle 2× T4 — số liệu
-   ở `docs/old/ROUND_1_ARCHIVE.md` (phần 06), notebook ở `../../notebooks/`.
+   ở `docs/old/ROUND_1_ARCHIVE.md` (phần 06), notebook Kaggle ở `notebooks/` (gitignore — chỉ có ở local).
 2. **D.1 = BASELINE của CE-Loc**: cùng code, chạy trên CE-130 class-agnostic (mục cuối).
 
 ## Dữ liệu
