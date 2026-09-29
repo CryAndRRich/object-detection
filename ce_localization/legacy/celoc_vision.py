@@ -78,25 +78,30 @@ class SpatialVisualEncoder(nn.Module):
         return self.projection(xy), xy.reshape(xy.shape[0], -1, 2), att, feat
 
 
-def resize_and_pad(img, density, target=TARGET):
-    """Như `ObjectPlacementDataset.resize_and_pad`: density phải là ảnh "L"."""
+def resize_and_pad(img, density=None, target=TARGET):
+    """Như `ObjectPlacementDataset.resize_and_pad`: density phải là ảnh "L" (None = bản không density)."""
     w, h = img.size
     scale = min(target / w, target / h)
     nw, nh = int(w * scale), int(h * scale)
     img = img.resize((nw, nh), resample=Image.BILINEAR)
-    density = density.resize((nw, nh), resample=Image.NEAREST)
     padded_img = Image.new("RGB", (target, target), (0, 0, 0))
     padded_img.paste(img, (0, 0))
+    if density is None:
+        return padded_img, None, scale
+    density = density.resize((nw, nh), resample=Image.NEAREST)
     padded_density = Image.new("L", (target, target), 0)
     padded_density.paste(density, (0, 0))
     return padded_img, padded_density, scale
 
 
-def to_input(img_rgb, density_any):
+def to_input(img_rgb, density_any=None):
     """PIL RGB + PIL density (mode bất kỳ, như file PNG gốc) -> tensor [1,3,T,T], [1,1,T,T],
-    scale. `.convert("L")` như dataset gốc."""
-    img, den, scale = resize_and_pad(img_rgb.convert("RGB"), density_any.convert("L"))
+    scale. `.convert("L")` như dataset gốc. density_any=None -> density trả về None."""
+    img, den, scale = resize_and_pad(img_rgb.convert("RGB"),
+                                     None if density_any is None else density_any.convert("L"))
     rgb = torch.from_numpy(np.asarray(img, dtype=np.float32) / 255.0).permute(2, 0, 1)
+    if den is None:
+        return rgb[None], None, scale
     d = torch.from_numpy(np.asarray(den, dtype=np.float32) / 255.0)[None]
     return rgb[None], d[None], scale
 

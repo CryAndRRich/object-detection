@@ -43,8 +43,12 @@ def print_results(tag, res):
     for k in KEYS:
         print(f"  {k:16s} {res[k]:.4f}")
     print(f"  {'recall/stage':16s} {' '.join(f'{v:.3f}' for v in res['oracle_recall_per_stage'])}")
+    print(f"  {'box giữ/ảnh':16s} {res['kept_per_image']:.1f}  (hậu xử lý {res['postprocess']})")
     for name, v in res["size_recall"].items():
         print(f"  {'recall ' + name:16s} {v['oracle_recall']:.4f}  (n_gt {v['n_gt']})")
+    for name, v in res["density_recall"].items():
+        print(f"  {'ảnh ' + name:16s} oracle_recall {v['oracle_recall']:.4f} | box giữ lại phủ "
+              f"{v['kept_recall']:.4f}  ({v['n_img']} ảnh, n_gt {v['n_gt']})")
     if "oracle_score" in res:
         o = res["oracle_score"]
         print("  TRẦN khi score = IoU thật (cùng box, cùng top-k/NMS):")
@@ -109,10 +113,16 @@ def main():
         rec, stage = predict(model, loader, text_table, n_prop, steps=steps, top_k=top_k,
                              nms_thr=nms_thr, renewal=not a.no_renewal, seed=a.seed,
                              log_every=max(len(loader) // 10, 1))
-        res = score(rec, stage, top_k, nms_thr, oracle=a.oracle_score)
-        res["eval_sec"] = time.time() - t
-        print_results(f"{steps} bước ({fmt_time(res['eval_sec'])})", res)
-        out["results"][f"steps{steps}"] = res
+        el = time.time() - t
+        # có NMS thì báo CẢ HAI thứ tự hậu xử lý (người dùng chốt 2026-09-29): khoá cũ `steps{k}` =
+        # top-k trước (so được với bảng cũ), `steps{k}_nmsfirst` = NMS trước như DiffusionDet
+        orders = ["topk_first", "nms_first"] if nms_thr is not None else ["topk_first"]
+        for order in orders:
+            res = score(rec, stage, top_k, nms_thr, oracle=a.oracle_score, order=order)
+            res["eval_sec"] = el
+            key = f"steps{steps}" + ("_nmsfirst" if order == "nms_first" else "")
+            print_results(f"{steps} bước, {order} ({fmt_time(el)})", res)
+            out["results"][key] = res
 
     if a.attn_diag:
         loader = DataLoader(ds, batch_size=a.batch_size, shuffle=False, num_workers=a.num_workers,

@@ -18,14 +18,15 @@ import torch
 
 from ce_localization.alpha.data import to_device
 from ce_localization.alpha.diffusion import prepare_train_boxes
-from ce_localization.eval import postprocess, score_records, with_oracle_scores
+from ce_localization.eval import postprocess, score_records
 from ce_localization.utils.box_ops_np import box_iou as box_iou_np
 from ce_localization.utils.box_ops_np import cxcywh_to_xyxy as c2x_np
 from ce_localization.utils.box_ops_np import xyxy_to_cxcywh as x2c_np
 from ce_localization.utils.log import fmt_time
-from ce_localization.utils.metrics_np import oracle_hits
+from ce_localization.utils.metrics_np import nms_class_agnostic, oracle_hits
 
-__all__ = ["SIZE_BINS", "predict", "score", "size_recall", "attention_diagnostics"]
+__all__ = ["SIZE_BINS", "DENSITY_BINS", "POSTPROCESS", "postprocess_nms_first", "predict", "score",
+           "size_recall", "density_recall", "attention_diagnostics"]
 
 # cạnh sqrt(w·h) của GT, pixel QUY VỀ CANVAS 512 (để so được giữa canvas 512 và 1024):
 # < 1 ô P5 của canvas 512 (32 px) | 1–4 ô | > 4 ô
@@ -77,6 +78,61 @@ def predict(model, loader, text_table, num_proposals, steps=1, top_k=100, nms_th
     return records, (stage_hit / max(n_gt, 1)).tolist()
 
 
+# số GT trong ảnh (kiểm giả thuyết: vật nhỏ nằm trong ảnh dày, 200 proposal không phủ hết)
+DENSITY_BINS = ((0, 30, "<=30 vật"), (31, 100, "31-100 vật"), (101, 10 ** 9, ">100 vật"))
+
+
+def postprocess_nms_first(boxes_cxcywh, scores, top_k, nms_thr=None):
+    """Thứ tự của DiffusionDet + COCO: NMS trên TOÀN BỘ box trước, rồi giữ top-k theo score.
+    (`eval.postprocess` làm ngược lại: top-k trước rồi NMS — với matcher một-nhiều như SimOTA,
+    top-k toàn bản trùng, NMS xong mỗi ảnh chỉ còn ~25 box; docs mục 12.3.)"""
+    scores = np.asarray(scores)
+    if nms_thr is None or not len(scores):
+        return np.argsort(-scores, kind="stable")[:top_k]
+    return nms_class_agnostic(c2x_np(boxes_cxcywh), scores, nms_thr)[:top_k]
+
+
+POSTPROCESS = {"topk_first": postprocess, "nms_first": postprocess_nms_first}
+
+
+def rekeep(records, top_k, nms_thr, order="topk_first"):
+    fn = POSTPROCESS[order]
+    return [{**r, "keep": fn(r["boxes"], r["scores"], top_k, nms_thr)} for r in records]
+
+
+def oracle_score_records(records, top_k, nms_thr, order="topk_first"):
+    """Score = IoU thật lớn nhất với GT (box giữ nguyên), rồi hậu xử lý theo CÙNG thứ tự."""
+    fn = POSTPROCESS[order]
+    out = []
+    for r in records:
+        if len(r["gt"]) and len(r["boxes"]):
+            sc = box_iou_np(c2x_np(r["boxes"]), c2x_np(r["gt"]))[0].max(axis=1)
+        else:
+            sc = np.zeros(len(r["boxes"]))
+        out.append({**r, "scores": sc, "keep": fn(r["boxes"], sc, top_k, nms_thr)})
+    return out
+
+
+def density_recall(records, iou_thr=0.5):
+    """Theo số GT của ảnh: oracle_recall (mọi box) và recall của box GIỮ LẠI sau hậu xử lý
+    (có box giữ lại nào phủ GT ở IoU >= thr, không nhìn score)."""
+    acc = {name: [0, 0, 0, 0] for _, _, name in DENSITY_BINS}           # hit_all, hit_kept, n_gt, n_img
+    for r in records:
+        n = len(r["gt"])
+        name = next(nm for lo, hi, nm in DENSITY_BINS if lo <= n <= hi)
+        a = acc[name]
+        a[2] += n
+        a[3] += 1
+        if not n or not len(r["boxes"]):
+            continue
+        iou = box_iou_np(c2x_np(r["boxes"]), c2x_np(r["gt"]))[0]
+        a[0] += int((iou.max(0) >= iou_thr).sum())
+        kept = iou[r["keep"]] if len(r["keep"]) else np.zeros((0, n))
+        a[1] += int((kept.max(0) >= iou_thr).sum()) if len(kept) else 0
+    return {name: {"oracle_recall": h / max(g, 1), "kept_recall": k / max(g, 1), "n_gt": g, "n_img": m}
+            for name, (h, k, g, m) in acc.items()}
+
+
 def size_recall(records, iou_thr=0.5):
     """oracle_recall tách theo cỡ GT (SIZE_BINS)."""
     hit = {name: [0, 0] for _, _, name in SIZE_BINS}
@@ -92,13 +148,18 @@ def size_recall(records, iou_thr=0.5):
     return {name: {"oracle_recall": h / max(n, 1), "n_gt": n} for name, (h, n) in hit.items()}
 
 
-def score(records, stage_recall, top_k=100, nms_thr=0.5, oracle=True):
-    """Mọi chỉ số của một lượt eval -> dict (float thuần, ghi JSON được)."""
+def score(records, stage_recall, top_k=100, nms_thr=0.5, oracle=True, order="topk_first"):
+    """Mọi chỉ số của một lượt eval -> dict (float thuần, ghi JSON được).
+    `order`: "topk_first" (quy ước cũ, `eval.postprocess`) | "nms_first" (như DiffusionDet)."""
+    records = rekeep(records, top_k, nms_thr, order)
     res = score_records(records)
+    res["postprocess"] = order
+    res["kept_per_image"] = float(np.mean([len(r["keep"]) for r in records])) if records else 0.0
     res["oracle_recall_per_stage"] = stage_recall
     res["size_recall"] = size_recall(records)
+    res["density_recall"] = density_recall(records)
     if oracle:
-        res["oracle_score"] = score_records(with_oracle_scores(records, top_k, nms_thr))
+        res["oracle_score"] = score_records(oracle_score_records(records, top_k, nms_thr, order))
     return res
 
 

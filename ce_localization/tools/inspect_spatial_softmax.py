@@ -17,6 +17,9 @@ không ghép được một map "đủ mọi vật". Nên:
 Mỗi ảnh gốc một ca.
 
 Hình: mỗi ca 4 hàng (density) x 3 cột (Original | Density Map | SpatialSoftmax Output).
+Checkpoint KHÔNG density (conv1 3 kênh, `legacy/train.py --no-density`): model không đọc density ->
+1 hàng x 2 cột (ảnh | SpatialSoftmax Output), bỏ mọi số đo theo density (lift_blobs_full, shift_px,
+cos_emb). Density vẫn dùng ở bước CHỌN nhánh để ra đúng bộ ảnh như bản có density (so được từng ảnh).
 Cột 3 = 512 chấm, mỗi chấm là toạ độ kỳ vọng của MỘT kênh; màu = số ô hiệu dụng của softmax
 kênh đó (vàng = nhọn, chấm có nghĩa là một vị trí; tím = trải đều, chấm bị kéo về giữa khung).
 
@@ -27,8 +30,8 @@ Số đo (log + metrics.json; trung bình trên 512 kênh, trọng số w_c = ||
   frac_localized  tỉ lệ (trọng số) kênh có < 16 ô hiệu dụng
   shift_px        chấm dịch bao nhiêu pixel (ảnh gốc) so với Full;  cos_emb: vis_emb so với Full
 
-  python tools/inspect_spatial_softmax.py --image original --n 100 --out ../../output/spatial_softmax/original
-  python tools/inspect_spatial_softmax.py --image inpainted_1 --n 100 --out ../../output/spatial_softmax/inpainted_1
+  python tools/inspect_spatial_softmax.py --image original --n 100 --out ../../output/spatial_softmax/density_paper/original
+  python tools/inspect_spatial_softmax.py --image inpainted_1 --n 100 --out ../../output/spatial_softmax/density_paper/inpainted_1
 """
 
 import argparse
@@ -50,6 +53,7 @@ from ce_localization.legacy.celoc_vision import TARGET, grid_to_canvas, load_vis
 
 BG = np.array([0, 0, 127])            # nền jet của density = "không có vật"
 SETTINGS = ["full", "minus1", "minus2", "empty"]
+NO_DENSITY = ["none"]                 # checkpoint 3 kênh: một lần chạy, không density
 ROW_LABELS = {"full": "Full", "minus1": "−1 object", "minus2": "−2 objects", "empty": "Empty"}
 LOCALIZED = 16                        # kênh "tập trung" nếu < 16 ô hiệu dụng
 FONT = {"family": "DejaVu Sans", "size": 12, "weight": "normal"}   # MỌI chữ trên hình
@@ -215,34 +219,47 @@ def holes(case, image):
     return {"original": [], "inpainted_1": [case["t1"]], "inpainted_2": [case["t1"], case["r1"]]}[image]
 
 
+def settings_for(enc):
+    return SETTINGS if enc.in_channels == 4 else NO_DENSITY
+
+
 @torch.no_grad()
 def run_case(enc, case, w, image):
-    dens = {"full": case["dens"][0], "minus1": case["dens"][1], "minus2": case["dens"][2],
-            "empty": Image.new("RGB", case["original"].size, tuple(BG))}
-    rgbs, ds, inputs = [], [], {}
-    for name in SETTINGS:
-        rgb, den, scale = to_input(case[image], dens[name])
-        rgbs.append(rgb)
-        ds.append(den)
-        inputs[name] = (rgb[0].permute(1, 2, 0).numpy(), den[0, 0].numpy())
-    emb, kp, att, _ = enc(torch.cat(rgbs), torch.cat(ds))
+    use_density = enc.in_channels == 4
+    settings = settings_for(enc)
+    if use_density:
+        dens = {"full": case["dens"][0], "minus1": case["dens"][1], "minus2": case["dens"][2],
+                "empty": Image.new("RGB", case["original"].size, tuple(BG))}
+        rgbs, ds, inputs = [], [], {}
+        for name in settings:
+            rgb, den, scale = to_input(case[image], dens[name])
+            rgbs.append(rgb)
+            ds.append(den)
+            inputs[name] = (rgb[0].permute(1, 2, 0).numpy(), den[0, 0].numpy())
+        emb, kp, att, _ = enc(torch.cat(rgbs), torch.cat(ds))
+    else:
+        rgb, _, scale = to_input(case[image])
+        inputs = {"none": (rgb[0].permute(1, 2, 0).numpy(), None)}
+        emb, kp, att, _ = enc(rgb)
     emb, kp, att = emb.numpy(), kp.numpy(), att.numpy()
     n_cell = att.shape[-1]
     kp_canvas = grid_to_canvas(kp, n_cell)                                # (hàng, cột) pixel canvas
     eff = np.exp(-(att * np.log(att + 1e-12)).sum(axis=(2, 3)))          # [S, C]
 
     covs = {"objects": coverage(case["objects"], scale, n_cell), "T1": coverage([case["t1"]], scale, n_cell),
-            "R1": coverage([case["r1"]], scale, n_cell), "R2": coverage([case["r2"]], scale, n_cell),
-            "blobs_full": mask_coverage(blob_mask(case["dens"][0]), scale, n_cell)}
+            "R1": coverage([case["r1"]], scale, n_cell), "R2": coverage([case["r2"]], scale, n_cell)}
+    if use_density:
+        covs["blobs_full"] = mask_coverage(blob_mask(case["dens"][0]), scale, n_cell)
     if holes(case, image):
         covs["holes"] = coverage(holes(case, image), scale, n_cell)
     rows = {}
-    for i, name in enumerate(SETTINGS):
+    for i, name in enumerate(settings):
         r = {f"lift_{g}": lift(att[i], w, cv)[0] for g, cv in covs.items()}
         r["eff_cells"] = float((w * eff[i]).sum() / w.sum())
         r["frac_localized"] = float((w * (eff[i] < LOCALIZED)).sum() / w.sum())
-        r["shift_px"] = float((w * np.linalg.norm(kp_canvas[i] - kp_canvas[0], axis=-1)).sum() / w.sum() / scale)
-        r["cos_emb"] = float(emb[i] @ emb[0] / (np.linalg.norm(emb[i]) * np.linalg.norm(emb[0]) + 1e-12))
+        if use_density:
+            r["shift_px"] = float((w * np.linalg.norm(kp_canvas[i] - kp_canvas[0], axis=-1)).sum() / w.sum() / scale)
+            r["cos_emb"] = float(emb[i] @ emb[0] / (np.linalg.norm(emb[i]) * np.linalg.norm(emb[0]) + 1e-12))
         rows[name] = r
     return dict(rows=rows, kp=kp_canvas, eff=eff, inputs=inputs, scale=scale)
 
@@ -260,30 +277,42 @@ def plot_case(case, res, path, image):
                          "figure.titlesize": FONT["size"], "xtick.labelsize": FONT["size"],
                          "ytick.labelsize": FONT["size"]})
     ext = [0, TARGET, TARGET, 0]
-    fig, axes = plt.subplots(len(SETTINGS), 3, figsize=(3 * 3.2, len(SETTINGS) * 3.2))
-    for i, name in enumerate(SETTINGS):
+    settings = list(res["inputs"])
+    use_density = settings != NO_DENSITY
+    n_col = 3 if use_density else 2
+    fig, axes = plt.subplots(len(settings), n_col, figsize=(n_col * 3.2, len(settings) * 3.2), squeeze=False)
+    for i, name in enumerate(settings):
         rgb, den = res["inputs"][name]
-        a0, a1, a2 = axes[i]
+        if use_density:
+            a0, a1, a2 = axes[i]
+            a1.imshow(den, cmap="gray", vmin=0, vmax=1, extent=ext)
+        else:
+            a0, a2 = axes[i]
         a0.imshow(rgb, extent=ext)
-        a1.imshow(den, cmap="gray", vmin=0, vmax=1, extent=ext)
         a2.imshow(rgb * 0.45, extent=ext)
         order = np.argsort(-res["eff"][i])                                # chấm nhọn vẽ sau (nằm trên)
         sc = a2.scatter(res["kp"][i, order, 1], res["kp"][i, order, 0], s=9, c=res["eff"][i, order],
                         cmap="viridis_r", norm=LogNorm(vmin=1, vmax=256), edgecolors="white", linewidths=0.15)
-        a0.set_ylabel(ROW_LABELS[name])
+        if use_density:
+            a0.set_ylabel(ROW_LABELS[name])
         for b in holes(case, image):                                      # chỗ vật đã bị xoá
             x1, y1, x2, y2 = b * res["scale"]
             for a in (a0, a2):
                 a.add_patch(Rectangle((x1, y1), x2 - x1, y2 - y1, fill=False, ec="red", lw=1.2, ls="--"))
-        for a in (a0, a1, a2):
+        for a in axes[i]:
             a.set_xlim(0, TARGET)
             a.set_ylim(TARGET, 0)
             a.set_xticks([])
             a.set_yticks([])
-    for a, t in zip(axes[0], [IMAGE_TITLE[image], "Density Map", "SpatialSoftmax Output"]):
+    titles = [IMAGE_TITLE[image], "Density Map", "SpatialSoftmax Output"] if use_density else \
+        [IMAGE_TITLE[image], "SpatialSoftmax Output"]
+    for a, t in zip(axes[0], titles):
         a.set_title(t)
-    fig.subplots_adjust(top=1 - 0.9 / fig.get_figheight(), right=0.88, wspace=0.05, hspace=0.08)
-    cb = fig.colorbar(sc, cax=fig.add_axes([0.9, 0.3, 0.015, 0.4]))
+    right = 0.88 if use_density else 0.84
+    fig.subplots_adjust(top=1 - (0.9 if use_density else 0.6) / fig.get_figheight(), right=right,
+                        wspace=0.05, hspace=0.08)
+    cb = fig.colorbar(sc, cax=fig.add_axes([right + 0.02, 0.2 if not use_density else 0.3,
+                                            0.015 if use_density else 0.025, 0.6 if not use_density else 0.4]))
     cb.set_label("Effective cells")
     fig.suptitle(f"{case['iid']} ({case['cls']})")
     fig.savefig(path, dpi=100, bbox_inches="tight")
@@ -318,6 +347,8 @@ def main():
     if not cases:
         return
 
+    settings = settings_for(enc)
+    print(f"[{time.time() - t0:5.1f}s] density {'CÓ' if settings == SETTINGS else 'KHÔNG'} -> setting {settings}")
     all_rows, per_case = [], []
     for k, case in enumerate(cases):
         res = run_case(enc, case, w, args.image)
@@ -328,25 +359,39 @@ def main():
         if not args.no_figures:
             plot_case(case, res, os.path.join(args.out, f"{case['iid']}.png"), args.image)
         el = time.time() - t0
-        rf, re = res["rows"]["full"], res["rows"]["empty"]
-        print(f"[{el:5.1f}s | ETA {el / (k + 1) * (len(cases) - k - 1):4.0f}s] {k + 1}/{len(cases)} {case['name']:>9} "
-              f"n_obj {len(case['objects']):3d} | lift_obj full {rf['lift_objects']:.2f} empty {re['lift_objects']:.2f} "
-              f"| loc full {rf['frac_localized']:.2f} | R1 full {rf['lift_R1']:.2f} -1 {res['rows']['minus1']['lift_R1']:.2f} "
-              f"| shift_empty {re['shift_px']:.1f}px cos {re['cos_emb']:.3f}")
+        head = (f"[{el:5.1f}s | ETA {el / (k + 1) * (len(cases) - k - 1):4.0f}s] {k + 1}/{len(cases)} "
+                f"{case['name']:>9} n_obj {len(case['objects']):3d} | ")
+        if settings == SETTINGS:
+            rf, re = res["rows"]["full"], res["rows"]["empty"]
+            print(head + f"lift_obj full {rf['lift_objects']:.2f} empty {re['lift_objects']:.2f} "
+                  f"| loc full {rf['frac_localized']:.2f} | R1 full {rf['lift_R1']:.2f} -1 {res['rows']['minus1']['lift_R1']:.2f} "
+                  f"| shift_empty {re['shift_px']:.1f}px cos {re['cos_emb']:.3f}")
+        else:
+            r = res["rows"]["none"]
+            print(head + f"lift_obj {r['lift_objects']:.2f} | lift_holes {r.get('lift_holes', float('nan')):.2f} "
+                  f"| loc {r['frac_localized']:.2f} | eff {r['eff_cells']:.1f}")
 
     cols = ["lift_holes", "lift_objects", "lift_blobs_full", "lift_R1", "lift_R2", "lift_T1", "frac_localized", "eff_cells",
             "shift_px", "cos_emb"]
+    if settings != SETTINGS:
+        cols = [c for c in cols if c not in ("lift_blobs_full", "shift_px", "cos_emb")]
     print("\nTRUNG VỊ trên các ca (lift: 1 = ngẫu nhiên):")
     print(f"{'setting':>8} " + " ".join(f"{c.replace('lift_', 'L_')[:12]:>12}" for c in cols))
     summary = {}
-    for s in SETTINGS:
+    for s in settings:
         summary[s] = {c: float(np.nanmedian([r[s].get(c, np.nan) for r in all_rows])) for c in cols}
         print(f"{s:>8} " + " ".join(f"{summary[s][c]:12.3f}" for c in cols))
-    blob = {k: float(np.median([c["blob"][k] for c in per_case])) for k in per_case[0]["blob"]}
-    print(f"\nKiểm density (trung vị tỉ lệ pixel blob trong box): {blob}")
+    out = dict(args=vars(args), checkpoint={k: str(v) for k, v in info.items()}, w_c=w.tolist(),
+               skipped=skipped, median=summary, cases=per_case)
+    if settings == SETTINGS:
+        blob = {k: float(np.median([c["blob"][k] for c in per_case])) for k in per_case[0]["blob"]}
+        print(f"\nKiểm density (trung vị tỉ lệ pixel blob trong box): {blob}")
+        out["blob_check_median"] = blob
+    else:
+        for c in per_case:
+            c.pop("blob")
     with open(os.path.join(args.out, "metrics.json"), "w") as f:
-        json.dump(dict(args=vars(args), checkpoint={k: str(v) for k, v in info.items()}, w_c=w.tolist(),
-                       skipped=skipped, median=summary, blob_check_median=blob, cases=per_case), f, indent=1)
+        json.dump(out, f, indent=1)
     print(f"[{time.time() - t0:5.1f}s] xong -> {args.out}")
 
 

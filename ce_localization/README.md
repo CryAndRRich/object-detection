@@ -81,7 +81,9 @@ python ../tools/run_on_free_gpu.py -- eval.py --ckpt checkpoints/<tên>/best.pt 
 có hình ~4–7 phút mỗi chế độ):
 ```bash
 for m in original inpainted_1 inpainted_2; do
-  python tools/inspect_spatial_softmax.py --image $m --n 100 --out ../../output/spatial_softmax/$m
+  python tools/inspect_spatial_softmax.py --image $m --n 100 --out ../../output/spatial_softmax/density_paper/$m
+  # weight nodensity: thêm --ckpt ../weights/celoc/best_nodensity.pth, --out .../nodensity/$m
+  #   (checkpoint 3 kênh -> tự bỏ density: 1 hàng x 2 cột, cùng bộ ảnh)
 done
 ```
 Ảnh vào: gốc (`ground_truth.jpg`) / xoá 1 vật (lượt 1, đúng đầu vào bài add) / xoá 2 vật (lượt 2);

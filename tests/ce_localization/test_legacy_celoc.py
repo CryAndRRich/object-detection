@@ -78,6 +78,39 @@ def test_preprocess_like_original_dataset():
     assert d[0, 0, 416:].max() == 0.0
 
 
+def test_preprocess_without_density_matches_rgb_of_density_path():
+    img = Image.new("RGB", (472, 384), (200, 100, 50))
+    rgb, d, scale = to_input(img)
+    ref, _, ref_scale = to_input(img, Image.new("L", img.size, 0))
+    assert d is None and scale == ref_scale and torch.equal(rgb, ref)
+
+
+def _fake_case():
+    img = Image.new("RGB", (472, 384), (120, 140, 90))
+    den = Image.new("RGB", (472, 384), (0, 0, 127))
+    boxes = [np.array([40, 40, 90, 90], float), np.array([200, 100, 250, 160], float),
+             np.array([300, 200, 340, 250], float)]
+    return dict(name="x_b1", iid="1", cls="thing", original=img, inpainted_1=img, inpainted_2=img,
+                dens=[den, den, den], objects=boxes, t1=boxes[0], r1=boxes[1], r2=boxes[2])
+
+
+@pytest.mark.parametrize("in_channels", [3, 4])
+def test_inspect_run_and_plot_with_and_without_density(tmp_path, in_channels):
+    from ce_localization.tools import inspect_spatial_softmax as tool
+    enc = SpatialVisualEncoder(output_dim=16, in_channels=in_channels).eval()
+    w = np.ones(512)
+    case = _fake_case()
+    res = tool.run_case(enc, case, w, "inpainted_1")
+    settings = tool.SETTINGS if in_channels == 4 else tool.NO_DENSITY
+    assert list(res["rows"]) == settings and list(res["inputs"]) == settings
+    r = res["rows"][settings[0]]
+    assert "lift_holes" in r and ("cos_emb" in r) == (in_channels == 4) and ("lift_blobs_full" in r) == (in_channels == 4)
+    path = str(tmp_path / "fig.png")
+    tool.plot_case(case, res, path, "inpainted_1")
+    h, wd = Image.open(path).size[::-1]
+    assert (h < wd) == (in_channels == 3)                                 # 1 hàng x 2 cột: ngang hơn cao
+
+
 def test_lift_is_one_for_uniform_attention_and_high_on_box():
     scale = 1.0
     cov = coverage([np.array([0, 0, 64, 64], float)], scale, 16)          # 2x2 ô

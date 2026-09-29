@@ -380,6 +380,42 @@ def test_model_sample_one_and_multi_step():
     assert o4["boxes"].shape[1] == 40
 
 
+# ----------------------------------------------------------------------------- hậu xử lý
+
+def test_nms_first_keeps_distinct_boxes_topk_first_keeps_duplicates():
+    """Ca của matcher một-nhiều: 3 bản trùng điểm cao + 2 vật khác điểm thấp hơn, top-k 2.
+    top-k trước rồi NMS -> 1 box ; NMS trước rồi top-k -> 2 vật khác nhau (như DiffusionDet)."""
+    from ce_localization.alpha.evaluate import POSTPROCESS
+    b = np.array([[0.2, 0.2, 0.1, 0.1], [0.201, 0.2, 0.1, 0.1], [0.2, 0.201, 0.1, 0.1],
+                  [0.7, 0.7, 0.1, 0.1], [0.5, 0.2, 0.1, 0.1]])
+    sc = np.array([0.9, 0.89, 0.88, 0.5, 0.4])
+    assert len(POSTPROCESS["topk_first"](b, sc, 2, 0.5)) == 1
+    assert POSTPROCESS["nms_first"](b, sc, 2, 0.5).tolist() == [0, 3]
+
+
+def test_oracle_records_topk_first_equals_old_eval():
+    from ce_localization.alpha.evaluate import oracle_score_records
+    from ce_localization.eval import with_oracle_scores
+    rng = np.random.default_rng(0)
+    rec = [{"boxes": np.c_[rng.uniform(0.1, 0.9, (30, 2)), rng.uniform(0.02, 0.2, (30, 2))],
+            "scores": rng.uniform(size=30), "keep": np.arange(5),
+            "gt": np.c_[rng.uniform(0.1, 0.9, (8, 2)), rng.uniform(0.02, 0.2, (8, 2))]} for _ in range(3)]
+    new, old = oracle_score_records(rec, 10, 0.5, "topk_first"), with_oracle_scores(rec, 10, 0.5)
+    for n, o in zip(new, old):
+        assert np.allclose(n["scores"], o["scores"]) and np.array_equal(n["keep"], o["keep"])
+
+
+def test_density_recall_bins():
+    from ce_localization.alpha.evaluate import density_recall
+    gt = lambda n: np.tile([[0.5, 0.5, 0.1, 0.1]], (n, 1))              # noqa: E731
+    rec = [{"boxes": gt(1), "scores": np.ones(1), "keep": np.array([0]), "gt": gt(5)},
+           {"boxes": gt(1), "scores": np.ones(1), "keep": np.array([], dtype=int), "gt": gt(40)}]
+    d = density_recall(rec)
+    assert d["<=30 vật"] == {"oracle_recall": 1.0, "kept_recall": 1.0, "n_gt": 5, "n_img": 1}
+    assert d["31-100 vật"]["oracle_recall"] == 1.0 and d["31-100 vật"]["kept_recall"] == 0.0
+    assert d[">100 vật"]["n_img"] == 0
+
+
 # ----------------------------------------------------------------------------- lịch / batch
 
 def test_warmup_multistep_matches_detectron2():
@@ -442,8 +478,10 @@ def test_full_flow_train_resume_eval(tmp_path, monkeypatch, kind):
     ea.main()
     with open(out) as f:
         res = json.load(f)
-    for s in ("steps1", "steps4"):
+    assert set(res["results"]) == {"steps1", "steps4", "steps1_nmsfirst", "steps4_nmsfirst"}
+    for s in res["results"]:
         r = res["results"][s]
+        assert set(r["density_recall"]) == {"<=30 vật", "31-100 vật", ">100 vật"}
         assert 0 <= r["oracle_recall"] <= 1 and len(r["oracle_recall_per_stage"]) == 6
         assert "AP50" in r["oracle_score"] and set(r["size_recall"]) == {"<1 ô P5", "1-4 ô P5", ">4 ô P5"}
     att = res["attention"]["999"]
