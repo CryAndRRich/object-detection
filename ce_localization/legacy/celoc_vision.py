@@ -1,7 +1,7 @@
 """Vision encoder của CE-Loc gốc (ResNet18 4 kênh + SpatialSoftmax), viết lại ĐÚNG từng phép
 tính của `models/vision_encoder.py`, `models/spatial_softmax.py`, `data/dataset.py` trong
 refs/repos/Count-Editing/CE-LocModel — để nạp strict các key `vision_encoder.*` của
-`best_model.pth`.
+`best_paper.pth`.
 
 Ba chi tiết của bản gốc phải giữ nguyên (sai là soi nhầm model):
 

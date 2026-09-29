@@ -1,6 +1,6 @@
 """CE-Loc GỐC (bài add) viết lại đúng từng phép tính của refs/repos/Count-Editing/CE-LocModel:
 `models/{text_encoder,components,noise_pred_net,diffusion_module}.py`. Tên module/param trùng
-bản gốc để nạp strict `weights/celoc/best_model.pth`. Thêm: bỏ density (vision 3 kênh), sampler
+bản gốc để nạp strict `weights/celoc/best_paper.pth`. Thêm: bỏ density (vision 3 kênh), sampler
 DDPM đúng công thức cạnh sampler "mock" gốc, và IoU.
 
 Cấu hình suy ra từ checkpoint gốc (config yaml không có trong repo):

@@ -294,7 +294,7 @@ def plot_case(case, res, path, image):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ckpt", default="../weights/celoc/best_model.pth")
+    ap.add_argument("--ckpt", default="../weights/celoc/best_paper.pth")
     ap.add_argument("--samples", default="../data/samples/test", help="checkpoint train trên samples/train")
     ap.add_argument("--ce130", default="../data/all_phase2_V2")
     ap.add_argument("--n", type=int, default=20)

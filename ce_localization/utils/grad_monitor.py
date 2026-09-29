@@ -43,12 +43,14 @@ def group_of(name):
 
 
 class GradMonitor:
-    def __init__(self, model, every=10):
+    def __init__(self, model, every=10, group_fn=group_of):
+        """`group_fn`: tên tham số -> tên nhóm. Mặc định theo tên tham số của CE-Loc vòng 2;
+        model khác (vd. ALPHA) truyền hàm riêng."""
         self.every = every
         self.groups = defaultdict(list)
         for n, p in model.named_parameters():
             if p.requires_grad:
-                self.groups[group_of(n)].append(p)
+                self.groups[group_fn(n)].append(p)
         self.samples = defaultdict(list)
 
     def maybe_record(self, step):

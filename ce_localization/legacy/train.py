@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train lại CE-Loc GỐC (bài add) — cùng công thức với checkpoint `weights/celoc/best_model.pth`,
+"""Train lại CE-Loc GỐC (bài add) — cùng công thức với checkpoint `weights/celoc/best_paper.pth`,
 có tuỳ chọn BỎ density (`--no-density`: vision 3 kênh, không đọc file density).
 
 Công thức suy từ checkpoint gốc (train_w_args.py không có trong repo):

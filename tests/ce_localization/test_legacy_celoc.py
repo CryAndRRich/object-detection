@@ -18,7 +18,7 @@ from ce_localization.legacy.celoc_vision import (
 )
 from ce_localization.tools.inspect_spatial_softmax import coverage, lift, mask_coverage
 
-CKPT = os.path.join(os.path.dirname(__file__), "..", "..", "weights", "celoc", "best_model.pth")
+CKPT = os.path.join(os.path.dirname(__file__), "..", "..", "weights", "celoc", "best_paper.pth")
 
 
 def original_spatial_softmax(feature_map):
@@ -98,7 +98,7 @@ def test_mask_coverage_follows_resize_and_pad():
     assert cov[13:].max() == 0.0                                          # hàng độn
 
 
-@pytest.mark.skipif(not os.path.exists(CKPT), reason="thiếu weights/celoc/best_model.pth")
+@pytest.mark.skipif(not os.path.exists(CKPT), reason="thiếu weights/celoc/best_paper.pth")
 def test_checkpoint_loads_strict():
     enc, info = load_vision_encoder(CKPT)
     assert info["conv1_in_channels"] == 4
@@ -135,7 +135,7 @@ def _tiny_policy(use_density=True, num_timesteps=1000):
     return m
 
 
-@pytest.mark.skipif(not os.path.exists(CKPT), reason="thiếu weights/celoc/best_model.pth")
+@pytest.mark.skipif(not os.path.exists(CKPT), reason="thiếu weights/celoc/best_paper.pth")
 def test_policy_architecture_matches_original_checkpoint():
     sd = torch.load(CKPT, map_location="cpu", weights_only=False)["model_state_dict"]
     m = ObjectPlacementPolicy(pretrained_vision=False, pretrained_text=False)
@@ -146,7 +146,7 @@ def test_policy_architecture_matches_original_checkpoint():
 
 
 def test_cosine_schedule_reproduces_checkpoint_lr():
-    """lr trong optimizer của best_model.pth (epoch 113) = 3,420311e-5 với lr đầu 5e-5."""
+    """lr trong optimizer của best_paper.pth (epoch 113) = 3,420311e-5 với lr đầu 5e-5."""
     opt = torch.optim.AdamW([torch.nn.Parameter(torch.zeros(1))], lr=5e-5)
     sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=300)
     for _ in range(114):

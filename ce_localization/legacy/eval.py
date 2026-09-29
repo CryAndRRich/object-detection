@@ -145,7 +145,7 @@ def print_table(summary, title=""):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ckpt", required=True, help="best.pt / last.pt của legacy/train.py, hoặc best_model.pth gốc")
+    ap.add_argument("--ckpt", required=True, help="best.pth / last.pth của legacy/train.py, hoặc weights/celoc/best_paper.pth (của bài)")
     ap.add_argument("--data", default="../data/samples/test")
     ap.add_argument("--prior-from", default="../data/samples/train", help="'' = bỏ mốc prior")
     ap.add_argument("--n-samples", type=int, default=30)

@@ -1,0 +1,61 @@
+# EXPERIMENT ALPHA0 — memory = [t ; text]. Kế hoạch: docs/EXPERIMENT_ALPHA.md (gốc multi_condition/).
+# alpha0 / alpha1 / alpha2 CHỈ khác `model.memory` (và experiment/description).
+
+experiment: "alpha0"
+description: "R-50+FPN + RoI token + 6 tầng decoder DP; memory [t ; text]; N=200"
+
+data:
+  root: "../data/all_phase2_V2"     # tương đối so với ce_localization/
+  image_size: 512                   # letterbox như CE-Loc gốc, không augmentation
+  num_workers: 4
+
+model:
+  memory: "none"                    # none | spatial_softmax | grid
+  d_model: 256
+  n_stage: 6
+  n_head: 4                         # y nguyên tầng decoder của DP (config hybrid)
+  dim_feedforward: 1024
+  dropout: 0.3
+  text_dim: 512
+  clip_text: "openai/clip-vit-base-patch32"   # CLIP text frozen như CE-Loc gốc
+  pretrained_backbone: true         # R-50 ImageNet; mọi lớp conv train, BN đóng băng
+
+diffusion:
+  num_timesteps: 1000               # cosine
+  snr_scale: 2.0
+  num_proposals: 200                # train và eval
+
+matcher:
+  ota_k: 5
+  center_radius: 2.5
+
+loss:
+  class_weight: 2.0
+  l1_weight: 5.0
+  giou_weight: 2.0
+  alpha: 0.25
+  gamma: 2.0
+  prior_prob: 0.01
+
+training:
+  batch_size: 2                     # TOÀN CỤC; Kaggle 2 GPU -> 1 ảnh/GPU
+  lr: 8.84e-6
+  weight_decay: 1.0e-4
+  max_iter: 12000
+  steps: [9000, 11000]
+  gamma: 0.1
+  warmup_iters: 1000
+  warmup_factor: 0.01
+  grad_clip: 1.0                    # toàn mô hình, L2
+  seed: 0
+  log_every: 20
+  ckpt_every: 1000
+  eval_every: 2000
+
+eval:
+  split: "val"                      # eval định kỳ + chọn best.pth; báo cáo trên test (eval_alpha.py)
+  select_metric: "oracle_recall"
+  sampling_steps: 1                 # chính: 1 bước
+  batch_size: 8
+  top_k: 100
+  nms_thr: 0.5

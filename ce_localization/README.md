@@ -34,7 +34,7 @@ Loss như DiffusionDet (5·L1 + 2·GIoU + 2·Focal, SimOTA), đặt ở mọi t�
 | `data/` | `ce130_dataset` (đọc CE-130, cache), `loader` (DataLoader) |
 | `utils/` | hình học box + khuếch tán (bản torch và bản numpy tham chiếu), matcher, `metrics_np` (chấm điểm), `checkpoint`, `grad_monitor`, `log` |
 | `tools/` | `build_cache`, `check_data_facts`, `visualize_data`, `inspect_spatial_softmax` (soi CE-Loc GỐC) |
-| `legacy/` | CE-Loc GỐC (bài add) viết lại đúng công thức, nạp strict `weights/celoc/best_model.pth`: `celoc_vision` (ResNet18 + SpatialSoftmax), `celoc_model` (CLIP text, U-Net 1D, sampler, IoU), `celoc_data`, `train.py`, `eval.py` |
+| `legacy/` | CE-Loc GỐC (bài add) viết lại đúng công thức, nạp strict `weights/celoc/best_paper.pth`: `celoc_vision` (ResNet18 + SpatialSoftmax), `celoc_model` (CLIP text, U-Net 1D, sampler, IoU), `celoc_data`, `train.py`, `eval.py` |
 | `checkpoints/` | không vào git |
 
 Test ở `object-detection/tests/ce_localization/`.
@@ -109,6 +109,22 @@ torchrun --standalone --nproc_per_node=2 legacy/train.py --save-dir <out> --cach
 Kaggle: `notebooks/celoc_legacy_kaggle.ipynb` (gitignore, chỉ ở local), mỗi lần chạy train một bản
 trên cả 2 T4, ≤ 11 giờ, tự eval + vẽ. Server dùng chung từng quá tải (2,4 s/bước). Ngữ cảnh:
 `docs/SPATIAL_SOFTMAX.md`.
+
+## EXPERIMENT ALPHA (`alpha/`, `train_alpha.py`, `eval_alpha.py`)
+
+R-50 + FPN (mọi lớp conv train, BN đóng băng), mỗi box nhiễu lấy RoIAlign thành 1 token, 6 stage
+là tầng decoder của Diffusion Policy cross-attend memory `[t ; text ; (ảnh)]`, head / loss /
+khuếch tán kiểu DiffusionDet, N = 200. Đầu vào letterbox 512 như CE-Loc gốc, không augmentation.
+Ba config chỉ khác `model.memory`:
+
+| config | memory |
+|---|---|
+| `config/alpha0.yaml` | `[t ; text]` |
+| `config/alpha1.yaml` | `[t ; text ; 1 token SpatialSoftmax(P5)]` |
+| `config/alpha2.yaml` | `[t ; text ; lưới ô P5 16×16 + PE 2D]` |
+
+Kế hoạch, cửa chặn G1–G4, lệnh chạy đầy đủ (server + Kaggle `torchrun`) và bảng kết quả:
+`docs/EXPERIMENT_ALPHA.md` (gốc `multi_condition/`). Test: `tests/ce_localization/test_alpha.py`.
 
 ## Đọc số
 
