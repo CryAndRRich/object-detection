@@ -24,6 +24,8 @@ from torchvision.ops.misc import FrozenBatchNorm2d
 from ce_localization.alpha import criterion as C
 from ce_localization.alpha.backbone import ResNet50FPN
 from ce_localization.alpha.data import AlphaCE130, collate, letterbox, scale_boxes
+from ce_localization.alpha.density import (JET, DensityIndex, build_index, decode_jet,
+                                           letterbox_density)
 from ce_localization.alpha.diffusion import cosine_alphas_cumprod, ddim_sample, prepare_train_boxes
 from ce_localization.alpha.head import SCALE_CLAMP, apply_deltas
 from ce_localization.alpha.memory import (MemoryEncoder, masked_spatial_softmax, sine_pos_2d,
@@ -33,7 +35,9 @@ from ce_localization.alpha.roi import MultiLevelRoIAlign, assign_levels
 from ce_localization.alpha.text import TextTable
 from ce_localization.alpha.train_utils import epoch_batches, warmup_multistep
 
-CFG0 = os.path.join(os.path.dirname(__file__), "..", "..", "ce_localization", "config", "alpha0.yaml")
+CFG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "ce_localization", "config")
+CFG0 = os.path.join(CFG_DIR, "alpha0.yaml")
+CFG3 = {"full": os.path.join(CFG_DIR, "alpha3_1.yaml"), "mix": os.path.join(CFG_DIR, "alpha3_2.yaml")}
 
 
 # ----------------------------------------------------------------------------- dữ liệu giả
@@ -72,16 +76,20 @@ def _fake_text_table(names, cfg, dev):
     return TextTable(table)
 
 
-def _test_cfg(tmp_path, memory="none", data_root=None):
-    with open(CFG0) as f:
+def _test_cfg(tmp_path, memory="none", data_root=None, density=None):
+    with open(CFG0 if density is None else CFG3[density]) as f:
         cfg = yaml.safe_load(f)
     cfg["data"].update(root=data_root, image_size=128, num_workers=0)
+    if density is not None:
+        base = os.path.dirname(data_root)
+        cfg["data"].update(density_root=os.path.join(base, "samples"),
+                           density_index=os.path.join(base, "density_index.json"))
     cfg["model"].update(memory=memory, pretrained_backbone=False)
     cfg["diffusion"]["num_proposals"] = 20
     cfg["training"].update(max_iter=4, steps=[3], warmup_iters=2, log_every=1, ckpt_every=2,
                            eval_every=2)
     cfg["eval"]["batch_size"] = 2
-    p = str(tmp_path / f"cfg_{memory}.yaml")
+    p = str(tmp_path / f"cfg_{memory}_{density}.yaml")
     with open(p, "w") as f:
         yaml.safe_dump(cfg, f)
     return p, cfg
@@ -554,8 +562,195 @@ def test_config_diff_ignores_data_root_and_workers():
     with open(CFG0) as f:
         cfg = yaml.safe_load(f)
     other = json.loads(json.dumps(cfg))
-    other["data"].update(root="/kaggle/input/x/all_phase2_V2", num_workers=2)
+    other["data"].update(root="/kaggle/input/x/all_phase2_V2", num_workers=2,
+                         density_root="/kaggle/input/y/samples", density_index="/kaggle/temp/i.json")
     other["training"]["max_iter"] = 99
     assert config_diff(cfg, other) == ([], ["training"])
     other["model"]["memory"] = "grid"
     assert config_diff(cfg, other)[0] == ["model"]
+
+
+# ----------------------------------------------------------------------------- ALPHA3: density
+
+def _fake_density(base, n_variants=None):
+    """samples/{train,test}/density/{iid}_{k}.png tô jet cho mọi ảnh của CE-130 giả: bản k chỉ vẽ
+    blob trên (số box − k) box đầu (mất dần vật, như lượt inpaint); ảnh đầu mỗi split chỉ 1 bản.
+    Rồi dựng chỉ mục như `tools/build_density_index.py`."""
+    root = os.path.join(base, "all_phase2_V2")
+    for split in ("train", "val", "test"):
+        for j, br in enumerate(sorted(os.listdir(os.path.join(root, split)))):
+            iid = br.split("_b")[0]
+            with open(os.path.join(root, split, br, "annotation.json")) as f:
+                boxes = json.load(f)["all_bboxes"]
+            w, h = Image.open(os.path.join(root, split, br, "ground_truth.jpg")).size
+            n = 1 if j == 0 else (n_variants or 3)
+            out = os.path.join(base, "samples", "test" if split == "test" else "train", "density")
+            os.makedirs(out, exist_ok=True)
+            for k in range(n):
+                lv = np.zeros((h, w), dtype=np.uint8)
+                for x1, y1, x2, y2 in boxes[: max(len(boxes) - k, 0)]:
+                    cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
+                    lv[max(cy - 3, 0):cy + 4, max(cx - 3, 0):cx + 4] = 255
+                    lv[max(cy - 1, 0):cy + 2, max(cx - 1, 0):cx + 2] = 128
+                Image.fromarray(JET[lv]).save(os.path.join(out, f"{iid}_{k + 1}.png"))
+    idx = build_index(os.path.join(base, "samples"), workers=0, log=lambda *a: None)
+    with open(os.path.join(base, "density_index.json"), "w") as f:
+        json.dump(idx, f)
+    return DensityIndex(os.path.join(base, "density_index.json"), os.path.join(base, "samples"))
+
+
+def test_jet_lut_matches_matplotlib_and_decode_roundtrips():
+    mpl = pytest.importorskip("matplotlib")
+    ref = mpl.colormaps["jet"](np.linspace(0, 1, 256), bytes=True)[:, :3]
+    assert np.array_equal(JET, ref)
+    assert tuple(JET[0]) == (0, 0, 127) and tuple(JET[255]) == (127, 0, 0)    # nền / đậm nhất
+    lv = np.random.default_rng(0).integers(0, 256, (37, 53)).astype(np.uint8)
+    dec, dist = decode_jet(JET[lv])
+    assert dist == 0 and np.array_equal(JET[dec], JET[lv])                    # màu trùng => mức ±1
+    assert np.abs(dec.astype(int) - lv).max() <= 3                          # mức 29–32 cùng (0,0,255)
+
+
+def test_letterbox_density_matches_celoc_original_nearest():
+    """Cùng resize NEAREST + dán góc trên-trái của `resize_and_pad` gốc, chỉ khác bước giải mã."""
+    from ce_localization.legacy.celoc_vision import resize_and_pad
+    rng = np.random.default_rng(0)
+    lv = rng.integers(0, 256, (384, 683)).astype(np.uint8)
+    img = Image.fromarray(rng.integers(0, 255, (384, 683, 3), dtype=np.uint8))
+    canvas, scale, nw, nh = letterbox(img, 512)
+    _, ref, _ = resize_and_pad(img, Image.fromarray(lv), 512)          # uint8 2D -> "L"
+    got = letterbox_density(lv, nw, nh, 512)
+    assert got.dtype == np.float32 and got.shape == (512, 512)
+    assert np.array_equal(got, np.asarray(ref, dtype=np.float32) / 255.0)
+    assert got[nh:].max() == 0
+
+
+def test_density_index_pick_modes(tmp_path):
+    _fake_ce130(str(tmp_path / "all_phase2_V2"))
+    di = _fake_density(str(tmp_path))
+    multi = [i for i, v in di.variants.items() if len(v) == 3][0]
+    single = [i for i, v in di.variants.items() if len(v) == 1][0]
+    areas = [a for _, a, _ in di.variants[multi]]
+    assert areas == sorted(areas, reverse=True) and areas[0] > areas[-1]
+    assert di.pick(multi, "full") == (di.variants[multi][0][0], "full")
+    assert di.pick(multi, "partial") == (di.variants[multi][-1][0], "partial")
+    assert di.pick(single, "partial") == (di.variants[single][0][0], "full")   # 1 bản -> full
+    assert di.pick(multi, "empty") == (None, "empty")
+    cnt, seen = {"full": 0, "partial": 0, "empty": 0}, set()
+    for k in range(3000):
+        rel, kind = di.pick(multi, "mix", np.random.default_rng([0, 0, k]))
+        cnt[kind] += 1
+        if kind == "partial":
+            assert rel != di.variants[multi][0][0]
+            seen.add(rel)
+    assert all(abs(c / 3000 - 1 / 3) < 0.03 for c in cnt.values()), cnt
+    assert seen == {r for r, _, _ in di.variants[multi][1:]}                  # rút đều các bản thiếu vật
+    kinds = {di.pick(single, "mix", np.random.default_rng([0, 0, k]))[1] for k in range(50)}
+    assert kinds == {"full", "empty"}
+
+
+def test_dataset_density_channel_and_mix_reproducible(tmp_path):
+    root = str(tmp_path / "all_phase2_V2")
+    _fake_ce130(root)
+    di = _fake_density(str(tmp_path))
+    ds = AlphaCE130(root, "train", 128, density="full", density_index=di)
+    s = ds[1]
+    nh, nw = s["valid_hw"]
+    assert s["image"].shape == (4, 128, 128) and s["density_kind"] == "full"
+    den = s["image"][3]
+    assert den.max() == 1.0 and den[nh:].abs().max() == 0 and den.min() >= 0
+    x1, y1, x2, y2 = s["boxes"][0].tolist()                    # blob ở tâm box đầu
+    assert den[int((y1 + y2) / 2), int((x1 + x2) / 2)] > 0
+    ref = AlphaCE130(root, "train", 128)[1]["image"]
+    assert torch.equal(s["image"][:3], ref)                     # 3 kênh đầu y như ALPHA0
+    assert AlphaCE130(root, "train", 128, density="empty", density_index=di)[1]["image"][3].abs().max() == 0
+
+    def kinds(epoch):
+        d = AlphaCE130(root, "train", 128, density="mix", density_index=di, seed=0)
+        d.epoch = epoch
+        return [d[i]["density_kind"] for i in range(len(d))], [d[i]["image"][3].sum().item() for i in range(len(d))]
+    assert kinds(0) == kinds(0)                                 # tái lập (resume / worker)
+    assert len({tuple(kinds(e)[0]) for e in range(8)}) > 1      # đổi theo epoch
+    b = collate([s, s])
+    assert b["images"].shape == (2, 4, 128, 128) and b["density_kind"] == ["full", "full"]
+    with pytest.raises(ValueError):
+        AlphaCE130(root, "train", 128, density="mix")           # thiếu chỉ mục
+
+
+def test_backbone_4ch_density_weight_zero_and_equals_3ch():
+    from ce_localization.alpha.backbone import density_weight_ratio
+    torch.manual_seed(0)
+    m3 = ResNet50FPN(pretrained=False).eval()
+    torch.manual_seed(0)
+    m4 = ResNet50FPN(pretrained=False, in_channels=4).eval()
+    w = m4.stem[0].weight
+    assert w.shape == (64, 4, 7, 7) and w.requires_grad and w[:, 3].abs().max() == 0
+    assert density_weight_ratio(m4) == 0.0 and density_weight_ratio(m3) is None
+    assert [n for n, _ in m3.named_parameters()] == [n for n, _ in m4.named_parameters()]  # thứ tự cũ
+    x = torch.randn(1, 3, 64, 64)
+    with torch.no_grad():
+        o3 = m3(x)
+        o4a = m4(torch.cat([x, torch.zeros(1, 1, 64, 64)], 1))
+        o4b = m4(torch.cat([x, torch.rand(1, 1, 64, 64)], 1))
+    for k in o3:
+        assert torch.allclose(o3[k], o4a[k], atol=1e-6) and torch.allclose(o4a[k], o4b[k], atol=1e-6), k
+
+
+def test_alpha3_configs_only_differ_from_alpha0_by_density():
+    with open(CFG0) as f:
+        c0 = yaml.safe_load(f)
+    for mode, p in CFG3.items():
+        with open(p) as f:
+            c = yaml.safe_load(f)
+        assert c["data"].pop("density") == mode and c["model"].pop("in_channels") == 4
+        assert c["eval"].pop("density") == "full"
+        c["data"].pop("density_root"), c["data"].pop("density_index")
+        for k in ("experiment", "description"):
+            c.pop(k), c0.get(k)
+        assert {k: v for k, v in c.items()} == {k: v for k, v in c0.items() if k not in ("experiment", "description")}
+
+
+@pytest.mark.parametrize("mode", ["full", "mix"])
+def test_full_flow_density_train_resume_eval(tmp_path, monkeypatch, mode):
+    """ALPHA3.1 / 3.2: train 2 -> --resume tới 4 == train liền 4 (mix phải tái lập qua resume);
+    eval full / partial / empty ghi đúng điều kiện; model 3 kênh + --density bị từ chối."""
+    root = str(tmp_path / "all_phase2_V2")
+    _fake_ce130(root)
+    _fake_density(str(tmp_path))
+    cfg_path, _ = _test_cfg(tmp_path, "none", root, density=mode)
+    a, b = str(tmp_path / "a"), str(tmp_path / "b")
+    _run_train(monkeypatch, ["--config", cfg_path, "--save-dir", a, "--max-iter", "2"])
+    _run_train(monkeypatch, ["--config", cfg_path, "--save-dir", a, "--resume"])
+    _run_train(monkeypatch, ["--config", cfg_path, "--save-dir", b])
+    ka = torch.load(os.path.join(a, "last.pth"), weights_only=False)
+    kb = torch.load(os.path.join(b, "last.pth"), weights_only=False)
+    assert ka["iter"] == kb["iter"] == 4
+    for k in kb["model"]:
+        assert torch.allclose(ka["model"][k].float(), kb["model"][k].float(), atol=1e-5), k
+    w = kb["model"]["backbone.stem.0.weight"]
+    assert w.shape[1] == 4 and w[:, 3].abs().max() > 0          # kênh density có gradient, đã học
+    ev = [h for h in kb["history"] if "eval" in h]
+    assert ev and ev[-1]["density_weight_ratio"] > 0
+
+    import ce_localization.eval_alpha as ea
+    import ce_localization.train_alpha as ta
+    monkeypatch.setattr(ta, "build_text_table", _fake_text_table)
+    for cond in (None, "partial", "empty"):
+        out = str(tmp_path / f"res_{cond}.json")
+        argv = ["eval_alpha.py", "--ckpt", os.path.join(a, "best.pth"), "--split", "test", "--nms",
+                "--steps", "1", "--batch-size", "2", "--num-workers", "0", "--out", out, "--device", "cpu"]
+        monkeypatch.setattr(sys, "argv", argv + ([] if cond is None else ["--density", cond]))
+        ea.main()
+        with open(out) as f:
+            res = json.load(f)
+        assert res["density"] == (cond or "full") and sum(res["density_kinds"].values()) == 2
+        assert res["density_weight_ratio"] > 0 and set(res["results"]) == {"steps1", "steps1_nmsfirst"}
+    with open(str(tmp_path / "res_partial.json")) as f:
+        assert json.load(f)["density_kinds"] == {"full": 1, "partial": 1}   # ảnh đầu test chỉ 1 bản
+
+    p0, _ = _test_cfg(tmp_path, "none", root)
+    c3 = str(tmp_path / "c3")
+    _run_train(monkeypatch, ["--config", p0, "--save-dir", c3, "--max-iter", "2"])
+    monkeypatch.setattr(sys, "argv", ["eval_alpha.py", "--ckpt", os.path.join(c3, "best.pth"),
+                                      "--density", "full", "--device", "cpu", "--num-workers", "0"])
+    with pytest.raises(SystemExit):
+        ea.main()

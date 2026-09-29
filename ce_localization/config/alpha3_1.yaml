@@ -1,0 +1,70 @@
+# EXPERIMENT ALPHA3.1 — ALPHA0 + density làm kênh thứ 4 của R-50 (như CE-Loc gốc, conv1 kênh mới
+# khởi tạo 0). Kế hoạch: docs/EXPERIMENT_ALPHA.md mục 5 (gốc multi_condition/).
+# alpha3_1 / alpha3_2 CHỈ khác `data.density` (full / mix); còn lại y hệt alpha0.yaml.
+
+experiment: "alpha3_1"
+description: "ALPHA0 + density kênh 4 (conv1 khởi tạo 0); train density CỐ ĐỊNH = bản đầy đủ nhất"
+
+data:
+  root: "../data/all_phase2_V2"     # tương đối so với ce_localization/
+  image_size: 1024                  # letterbox góc trên-trái như CE-Loc gốc, không augmentation.
+                                    # 512 (ALPHA0 đầu, 2026-09-29) thu nhỏ đa số ảnh -> vật < 32 px
+                                    # recall 0,35 (docs mục 12.3) -> người dùng chốt 1024
+  num_workers: 4
+  density: "full"                  # full = bản có diện tích blob lớn nhất của ảnh, cố định suốt train
+  density_root: "../data/samples"   # samples/{train,test}/density/{iid}_{k}.png (tra theo iid)
+  density_index: "../data/density_index.json"   # tools/build_density_index.py, dựng một lần
+
+model:
+  memory: "none"                    # none | spatial_softmax | grid
+  in_channels: 4                    # RGB chuẩn hoá ImageNet + density [0,1]
+  d_model: 256
+  n_stage: 6
+  n_head: 4                         # y nguyên tầng decoder của DP (config hybrid)
+  dim_feedforward: 1024
+  dropout: 0.3
+  text_dim: 512
+  clip_text: "openai/clip-vit-base-patch32"   # CLIP text frozen như CE-Loc gốc
+  grid_size: 16                     # chỉ ALPHA2: pool vùng thật của P5 (32×32 @1024) về 16×16 = 256 token
+  pretrained_backbone: true         # R-50 ImageNet; mọi lớp conv train, BN đóng băng
+
+diffusion:
+  num_timesteps: 1000               # cosine
+  snr_scale: 2.0
+  num_proposals: 200                # train và eval
+
+matcher:
+  ota_k: 5
+  center_radius: 2.5
+
+loss:
+  class_weight: 2.0
+  l1_weight: 5.0
+  giou_weight: 2.0
+  alpha: 0.25
+  gamma: 2.0
+  prior_prob: 0.01
+
+training:
+  batch_size: 2                     # TOÀN CỤC; Kaggle 2 GPU -> 1 ảnh/GPU
+  lr: 1.0e-4                         # lr của Diffusion Policy; G3 2026-09-29: 8,84e-6 học quá chậm
+  weight_decay: 1.0e-4
+  max_iter: 12000
+  steps: [9000, 11000]
+  gamma: 0.1
+  warmup_iters: 1000
+  warmup_factor: 0.01
+  grad_clip: 1.0                    # toàn mô hình, L2
+  seed: 0
+  log_every: 20
+  ckpt_every: 1000
+  eval_every: 2000
+
+eval:
+  split: "val"                      # eval định kỳ + chọn best.pth; báo cáo trên test (eval_alpha.py)
+  select_metric: "oracle_recall"
+  density: "full"                   # eval định kỳ (chọn best.pth) với density đầy đủ; test: full / partial / empty
+  sampling_steps: 1                 # chính: 1 bước
+  batch_size: 2                     # @1024 batch 8 OOM trên GPU dùng chung (2026-09-29); không đổi kết quả
+  top_k: 100
+  nms_thr: 0.5

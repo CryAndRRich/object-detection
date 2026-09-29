@@ -12,6 +12,11 @@ Box: `all_bboxes` xyxy pixel ẢNH GỐC (qua `CE130Detection._scan`: dedupe the
 
 CE-130 cao 384, rộng >= 384 nên nw = T và phần đệm LUÔN ở đáy; nhưng code không giả định điều
 đó — `valid_hw = (nh, nw)` đi kèm mỗi ảnh.
+
+ALPHA3 (`density` khác None): nối density [0,1] (letterbox NEAREST, `alpha/density.py`) làm kênh
+thứ 4 -> ảnh [4,T,T]. Kênh density KHÔNG chuẩn hoá mean/std (như CE-Loc gốc: chỉ /255). Chế độ
+`mix` rút bản density theo RNG seed (seed, epoch, chỉ số ảnh): tái lập khi resume, không phụ thuộc
+số worker (cạm bẫy 12). `epoch` do vòng train gán TRƯỚC khi tạo DataLoader của epoch đó.
 """
 
 import numpy as np
@@ -19,6 +24,7 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
+from ce_localization.alpha.density import MODES, letterbox_density, load_density_levels
 from ce_localization.data.ce130_dataset import CE130Detection
 
 __all__ = ["IMAGENET_MEAN", "IMAGENET_STD", "letterbox", "scale_boxes", "AlphaCE130",
@@ -57,11 +63,21 @@ def normalize(canvas_uint8):
 class AlphaCE130(Dataset):
     """Một phần tử = một ẢNH (đã dedupe) với mọi box của lớp trong ảnh."""
 
-    def __init__(self, root, split, image_size=512):
+    def __init__(self, root, split, image_size=512, density=None, density_index=None, seed=0):
         # target của CE130Detection không dùng ở đây: chỉ lấy danh sách ảnh + box từ `_scan`.
         self.ds = CE130Detection(root, split, target=image_size)
         self.items = self.ds.items
         self.image_size = image_size
+        if density is not None:
+            if density not in MODES:
+                raise ValueError(f"density {density!r} không thuộc {MODES}")
+            if density_index is None:
+                raise ValueError("density cần density_index")
+            miss = [it["image_id"] for it in self.items if it["image_id"] not in density_index]
+            if miss:
+                raise ValueError(f"{len(miss)} ảnh {split} không có density (vd. {miss[:5]})")
+        self.density, self.density_index, self.seed = density, density_index, seed
+        self.epoch = 0
 
     def __len__(self):
         return len(self.items)
@@ -74,12 +90,21 @@ class AlphaCE130(Dataset):
         img = Image.open(it["img_path"]).convert("RGB")
         canvas, scale, nw, nh = letterbox(img, self.image_size)
         boxes = scale_boxes(it["boxes_xyxy_px"], scale, nw, nh)
+        x = normalize(canvas)
+        kind = None
+        if self.density is not None:
+            rng = np.random.default_rng([self.seed, self.epoch, i]) if self.density == "mix" else None
+            rel, kind = self.density_index.pick(it["image_id"], self.density, rng)
+            den = (np.zeros((self.image_size, self.image_size), dtype=np.float32) if rel is None else
+                   letterbox_density(load_density_levels(self.density_index.path(rel)), nw, nh, self.image_size))
+            x = np.concatenate([x, den[None]], axis=0)
         return {
-            "image": torch.from_numpy(normalize(canvas)),
+            "image": torch.from_numpy(x),
             "boxes": torch.from_numpy(boxes).float(),                    # xyxy pixel canvas
             "valid_hw": (nh, nw),
             "text": it["text"],
             "image_id": it["image_id"],
+            "density_kind": kind,                                        # None | full | partial | empty
         }
 
 
@@ -95,6 +120,7 @@ def collate(batch):
         "valid_hw": torch.stack([nh, nw], dim=1).long(),
         "text": [b["text"] for b in batch],
         "image_id": [b["image_id"] for b in batch],
+        "density_kind": [b["density_kind"] for b in batch],
     }
 
 

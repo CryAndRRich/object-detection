@@ -124,14 +124,17 @@ trên cả 2 T4, ≤ 11 giờ, tự eval + vẽ. Server dùng chung từng quá 
 
 R-50 + FPN (mọi lớp conv train, BN đóng băng), mỗi box nhiễu lấy RoIAlign thành 1 token, 6 stage
 là tầng decoder của Diffusion Policy cross-attend memory `[t ; text ; (ảnh)]`, head / loss /
-khuếch tán kiểu DiffusionDet, N = 200. Đầu vào letterbox 512 như CE-Loc gốc, không augmentation.
-Ba config chỉ khác `model.memory`:
+khuếch tán kiểu DiffusionDet, N = 200. Đầu vào letterbox 1024 góc trên-trái như CE-Loc gốc, không
+augmentation. ALPHA0/1/2 chỉ khác `model.memory`; ALPHA3 cần chỉ mục density dựng một lần
+(`tools/build_density_index.py` → `../data/density_index.json`):
 
 | config | memory |
 |---|---|
 | `config/alpha0.yaml` | `[t ; text]` |
 | `config/alpha1.yaml` | `[t ; text ; 1 token SpatialSoftmax(P5)]` |
 | `config/alpha2.yaml` | `[t ; text ; lưới ô P5 16×16 + PE 2D]` |
+| `config/alpha3_1.yaml` | ALPHA0 + density kênh 4 (conv1 khởi tạo 0); train density cố định (bản đầy đủ nhất) |
+| `config/alpha3_2.yaml` | như trên; train density không cố định (1/3 đầy đủ · 1/3 thiếu vật · 1/3 trống) |
 
 Kế hoạch, cửa chặn G1–G4, lệnh chạy đầy đủ (server + Kaggle `torchrun`) và bảng kết quả:
 `docs/EXPERIMENT_ALPHA.md` (gốc `multi_condition/`). Test: `tests/ce_localization/test_alpha.py`.

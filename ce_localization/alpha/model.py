@@ -2,7 +2,8 @@
 
 `forward(images, text_raw, valid_hw, boxes, t)` là MỘT lượt khử nhiễu: ảnh + text + box nhiễu
 (xyxy tuyệt đối) + t -> đầu ra mọi stage. Train gọi thẳng qua DDP; suy luận gọi qua
-`sample()` (DDIM, phần ảnh chỉ tính một lần mỗi ảnh).
+`sample()` (DDIM, phần ảnh chỉ tính một lần mỗi ảnh). ALPHA3: `model.in_channels: 4` -> ảnh
+[B,4,H,W] = RGB chuẩn hoá + density (kênh 4 của conv1 khởi tạo 0).
 """
 
 import torch
@@ -19,9 +20,9 @@ __all__ = ["AlphaDetector", "build_model"]
 class AlphaDetector(nn.Module):
     def __init__(self, memory="none", d_model=256, n_stage=6, n_head=4, dim_feedforward=1024,
                  dropout=0.3, text_dim=512, prior_prob=0.01, pretrained_backbone=True,
-                 num_timesteps=1000, snr_scale=2.0, grid_size=None):
+                 num_timesteps=1000, snr_scale=2.0, grid_size=None, in_channels=3):
         super().__init__()
-        self.backbone = ResNet50FPN(d_model, pretrained=pretrained_backbone)
+        self.backbone = ResNet50FPN(d_model, pretrained=pretrained_backbone, in_channels=in_channels)
         self.memory = MemoryEncoder(memory, d_model, text_dim, feat_channels=d_model, feat_stride=32,
                                     grid_size=grid_size)
         self.head = AlphaHead(n_stage, d_model, n_head, dim_feedforward, dropout, prior_prob)
@@ -60,4 +61,5 @@ def build_model(cfg, pretrained_backbone=None):
         memory=m["memory"], d_model=m["d_model"], n_stage=m["n_stage"], n_head=m["n_head"],
         dim_feedforward=m["dim_feedforward"], dropout=m["dropout"], text_dim=m.get("text_dim", 512),
         prior_prob=cfg["loss"]["prior_prob"], pretrained_backbone=pre,
-        num_timesteps=d["num_timesteps"], snr_scale=d["snr_scale"], grid_size=m.get("grid_size"))
+        num_timesteps=d["num_timesteps"], snr_scale=d["snr_scale"], grid_size=m.get("grid_size"),
+        in_channels=m.get("in_channels", 3))

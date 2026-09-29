@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Train EXPERIMENT ALPHA (ALPHA0/1/2 chỉ khác `model.memory` trong config) — docs/EXPERIMENT_ALPHA.md.
+"""Train EXPERIMENT ALPHA (ALPHA0/1/2 chỉ khác `model.memory` trong config; ALPHA3.1/3.2 = ALPHA0 +
+density kênh 4, khác nhau ở `data.density`: full / mix) — docs/EXPERIMENT_ALPHA.md.
 
 Train theo ITERATION (12k iter, batch TOÀN CỤC 2), lịch lr WarmupMultiStep, clip grad toàn mô hình.
 Mỗi `eval_every` iter: eval THẬT trên val (DDIM từ nhiễu thuần, N=200, 1 bước) -> `oracle_recall`
@@ -32,8 +33,10 @@ from torch.utils.data import DataLoader, Subset
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from ce_localization.alpha.backbone import density_weight_ratio  # noqa: E402
 from ce_localization.alpha.criterion import AlphaCriterion, build_targets  # noqa: E402
 from ce_localization.alpha.data import AlphaCE130, collate, to_device  # noqa: E402
+from ce_localization.alpha.density import DensityIndex  # noqa: E402
 from ce_localization.alpha.diffusion import prepare_train_boxes  # noqa: E402
 from ce_localization.alpha.evaluate import predict, score  # noqa: E402
 from ce_localization.alpha.model import build_model  # noqa: E402
@@ -44,15 +47,16 @@ from ce_localization.utils.grad_monitor import GradMonitor  # noqa: E402
 from ce_localization.utils.log import fmt_time, print_banner, run_env  # noqa: E402
 
 # Nhánh config quyết định kiến trúc / bài toán: khác checkpoint thì KHÔNG resume. `training` /
-# `eval` được phép khác (chỉ cảnh báo); `data.num_workers` / `data.root` không ảnh hưởng phép toán
-# (Kaggle gắn dataset ở đường dẫn khác nhau giữa các phiên).
+# `eval` được phép khác (chỉ cảnh báo); `data.num_workers` / đường dẫn dữ liệu không ảnh hưởng phép
+# toán (Kaggle gắn dataset ở đường dẫn khác nhau giữa các phiên).
 MUST_MATCH = ("model", "diffusion", "matcher", "data", "loss")
+DATA_FREE = ("num_workers", "root", "density_root", "density_index")
 
 
 def config_diff(saved, cfg):
     """-> (lỗi, cảnh báo): nhánh config khác nhau giữa checkpoint và lần chạy này."""
     strip = lambda b, d: {k: v for k, v in (d or {}).items()  # noqa: E731
-                          if not (b == "data" and k in ("num_workers", "root"))}
+                          if not (b == "data" and k in DATA_FREE)}
     errors = [k for k in MUST_MATCH if strip(k, saved.get(k)) != strip(k, cfg.get(k))]
     warns = [k for k in ("training", "eval") if saved.get(k) != cfg.get(k)]
     return errors, warns
@@ -61,6 +65,19 @@ def config_diff(saved, cfg):
 def build_text_table(names, cfg, dev):
     """Tách ra hàm riêng để test thay bằng embedding giả (không tải CLIP)."""
     return TextTable(encode_class_names(names, cfg["model"]["clip_text"], device=str(dev)))
+
+
+def density_setup(cfg):
+    """-> DensityIndex hoặc None. Kiểm `data.density` khớp `model.in_channels` (4 <=> có density)."""
+    mode, ch = cfg["data"].get("density"), cfg["model"].get("in_channels", 3)
+    if (mode is not None) != (ch == 4):
+        sys.exit(f"config mâu thuẫn: data.density={mode} nhưng model.in_channels={ch} (density <=> 4 kênh)")
+    if mode is None:
+        return None
+    try:
+        return DensityIndex(cfg["data"]["density_index"], cfg["data"]["density_root"])
+    except FileNotFoundError as e:
+        sys.exit(str(e))
 
 
 def make_eval_loader(ds, cfg, num_workers):
@@ -143,6 +160,8 @@ def main():
     ap.add_argument("--eval-limit", type=int, default=None, help="chỉ eval N ảnh đầu (chạy thử)")
     ap.add_argument("--num-workers", type=int, default=None)
     ap.add_argument("--data-root", default=None, help="ghi đè data.root (vd. Kaggle)")
+    ap.add_argument("--density-root", default=None, help="ALPHA3: ghi đè data.density_root (thư mục samples/)")
+    ap.add_argument("--density-index", default=None, help="ALPHA3: ghi đè data.density_index (.json)")
     ap.add_argument("--max-hours", type=float, default=0.0,
                     help="dừng sạch (ghi last.pth) nếu đoạn kế tiếp có thể vượt N giờ; 0 = tắt")
     ap.add_argument("--bench", type=int, default=0, help="G4: đo N iter rồi thoát, không ghi gì")
@@ -167,6 +186,10 @@ def main():
         cfg["eval"]["split"] = a.eval_split
     if a.data_root:
         cfg["data"]["root"] = a.data_root
+    if a.density_root:
+        cfg["data"]["density_root"] = a.density_root
+    if a.density_index:
+        cfg["data"]["density_index"] = a.density_index
     nw = cfg["data"]["num_workers"] if a.num_workers is None else a.num_workers
 
     t_boot = time.time()
@@ -194,24 +217,30 @@ def main():
 
     # ------------------------------------------------------------------ dữ liệu
     root, size = cfg["data"]["root"], cfg["data"]["image_size"]
-    ds_tr = AlphaCE130(root, "train", size)
+    dindex = density_setup(cfg)
+    d_tr = cfg["data"].get("density")
+    # eval định kỳ (chọn best.pth) luôn với density ĐẦY ĐỦ, kể cả ALPHA3.2 (train mix)
+    d_ev = cfg["eval"].get("density", "full") if d_tr else None
+    ds_tr = AlphaCE130(root, "train", size, density=d_tr, density_index=dindex, seed=tr["seed"])
     if cfg["data"].get("limit"):
         ds_tr.items = ds_tr.items[: cfg["data"]["limit"]]
     ev_split = cfg["eval"]["split"]
     if ev_split == "train":
-        ds_ev = AlphaCE130(root, "train", size)
+        ds_ev = AlphaCE130(root, "train", size, density=d_ev, density_index=dindex)
         ds_ev.items = ds_tr.items[:]                   # G3: eval trên CHÍNH các ảnh đã train
     else:
-        ds_ev = AlphaCE130(root, ev_split, size)
+        ds_ev = AlphaCE130(root, ev_split, size, density=d_ev, density_index=dindex)
     if a.eval_limit:
         ds_ev.items = ds_ev.items[: a.eval_limit]
     ipe = len(ds_tr) // tr["batch_size"]
     if ipe == 0:
         sys.exit(f"train chỉ có {len(ds_tr)} ảnh < batch_size {tr['batch_size']}")
     log(f"[data] train {len(ds_tr)} ảnh ({ipe} iter/epoch, batch {bpr}/GPU × {world}) | "
-        f"eval {ev_split} {len(ds_ev)} ảnh | {fmt_time(time.time() - t_boot)}")
+        f"eval {ev_split} {len(ds_ev)} ảnh | density train {d_tr} / eval {d_ev} | "
+        f"{fmt_time(time.time() - t_boot)}")
 
     def loader_fn(epoch, start_batch):
+        ds_tr.epoch = epoch                            # density `mix`: RNG theo (seed, epoch, ảnh)
         bl = epoch_batches(len(ds_tr), bpr, rank, world, tr["seed"], epoch)[start_batch:]
         return DataLoader(ds_tr, batch_sampler=bl, num_workers=nw, collate_fn=collate,
                           pin_memory=dev.type == "cuda")
@@ -237,7 +266,7 @@ def main():
         model, device_ids=[dev.index] if dev.type == "cuda" else None,
         find_unused_parameters=True) if world > 1 else model
     n_learn = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    log(f"[model] memory={cfg['model']['memory']} | {n_learn / 1e6:.2f}M tham số train | "
+    log(f"[model] memory={cfg['model']['memory']} | in_channels {model.backbone.in_channels} | {n_learn / 1e6:.2f}M tham số train | "
         f"N={cfg['diffusion']['num_proposals']} | {fmt_time(time.time() - t)}")
     opt = torch.optim.AdamW(model.parameters(), lr=float(tr["lr"]), weight_decay=float(tr["weight_decay"]))
     sched = torch.optim.lr_scheduler.LambdaLR(
@@ -349,14 +378,17 @@ def main():
                         best = {"iter": it, sm: val, "oracle_recall": res["oracle_recall"],
                                 "AP50": res["AP50"], "score_AUC": res["score_AUC"]}
                     stage = " ".join(f"{v:.3f}" for v in res["oracle_recall_per_stage"])
+                    dw = density_weight_ratio(model.backbone)
                     log(f"[eval it {it}] {ev_split}: oracle_recall {res['oracle_recall']:.4f} | "
                         f"score_AUC {res['score_AUC']:.4f} | AP50 {res['AP50']:.4f} | "
                         f"AP75 {res['AP75']:.4f} | trần AP50 {res['oracle_score']['AP50']:.4f} | "
                         f"recall/stage {stage} | {fmt_time(res['eval_sec'])}"
+                        + ("" if dw is None else f" | ‖W density‖/‖W RGB‖ conv1 {dw:.4f}")
                         + (" | *best" if is_best else ""))
                     history.append({"iter": it, "eval": {k: v for k, v in res.items()
                                                          if k not in ("oracle_score",)},
-                                    "eval_oracle_AP50": res["oracle_score"]["AP50"]})
+                                    "eval_oracle_AP50": res["oracle_score"]["AP50"],
+                                    "density_weight_ratio": dw})
                 if world > 1:
                     dist.barrier()
             if is_ckpt:

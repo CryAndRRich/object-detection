@@ -6,6 +6,7 @@ Giao thức (docs/EXPERIMENT_ALPHA.md mục 6.2): test, N=200, top-k 100, NMS 0,
   --oracle-score : trần khi score = IoU thật với GT (cùng box) — chênh do box hay do xếp hạng.
   --steps 1 4    : 1 bước (chính) và 4 bước (renewal + ensemble; chạy batch 1).
   --attn-diag K  : chẩn đoán attention cross-attn trên K batch (mục 6.3).
+  --density M    : ALPHA3 (4 kênh): density đưa vào — full (mặc định) / partial / empty (mục 5).
 Config lấy từ checkpoint (an toàn hơn), trừ khi truyền --config.
 
   cd object-detection/ce_localization
@@ -28,7 +29,9 @@ from torch.utils.data import DataLoader
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from ce_localization.alpha.backbone import density_weight_ratio  # noqa: E402
 from ce_localization.alpha.data import AlphaCE130, collate  # noqa: E402
+from ce_localization.alpha.density import EVAL_MODES  # noqa: E402
 from ce_localization.alpha.evaluate import attention_diagnostics, predict, score  # noqa: E402
 from ce_localization.alpha.model import build_model  # noqa: E402
 from ce_localization.utils.log import fmt_time  # noqa: E402
@@ -62,6 +65,10 @@ def main():
     ap.add_argument("--config", default=None, help="mặc định dùng config LƯU TRONG checkpoint")
     ap.add_argument("--split", default="test")
     ap.add_argument("--data-root", default=None, help="ghi đè data.root (vd. Kaggle)")
+    ap.add_argument("--density", default=None, choices=EVAL_MODES,
+                    help="chỉ model 4 kênh (ALPHA3); mặc định full")
+    ap.add_argument("--density-root", default=None, help="ghi đè data.density_root")
+    ap.add_argument("--density-index", default=None, help="ghi đè data.density_index")
     ap.add_argument("--num-proposals", type=int, default=None)
     ap.add_argument("--top-k", type=int, default=None)
     ap.add_argument("--nms", action="store_true")
@@ -89,23 +96,41 @@ def main():
         cfg = ck["config"]
     if a.data_root:
         cfg["data"]["root"] = a.data_root
+    if a.density_root:
+        cfg["data"]["density_root"] = a.density_root
+    if a.density_index:
+        cfg["data"]["density_index"] = a.density_index
+    dindex = train_alpha.density_setup(cfg)
+    if dindex is None and a.density:
+        sys.exit(f"--density {a.density} nhưng checkpoint là model 3 kênh (không density)")
+    density = (a.density or "full") if dindex is not None else None
     n_prop = a.num_proposals or cfg["diffusion"]["num_proposals"]
     top_k = a.top_k or cfg["eval"]["top_k"]
     nms_thr = a.nms_thr if a.nms else None
 
-    ds = AlphaCE130(cfg["data"]["root"], a.split, cfg["data"]["image_size"])
+    ds = AlphaCE130(cfg["data"]["root"], a.split, cfg["data"]["image_size"], density=density,
+                    density_index=dindex)
     if a.limit:
         ds.items = ds.items[: a.limit]
     text_table = train_alpha.build_text_table(ds.classes(), cfg, dev)
     model = build_model(cfg, pretrained_backbone=False).to(dev)
     model.load_state_dict(ck["model"])
     model.eval()
-    print(f"[eval] {a.ckpt} (iter {ck.get('iter')}) | memory={cfg['model']['memory']} | split={a.split} "
+    kinds = {}
+    if density is not None:                          # loại density thực tế (partial -> full khi ảnh chỉ có 1 bản)
+        for it in ds.items:
+            k = dindex.pick(it["image_id"], density)[1]
+            kinds[k] = kinds.get(k, 0) + 1
+    dw = density_weight_ratio(model.backbone)
+    print(f"[eval] {a.ckpt} (iter {ck.get('iter')}) | memory={cfg['model']['memory']} | "
+          f"density={density} {kinds or ''}"
+          + ("" if dw is None else f" (‖W density‖/‖W RGB‖ conv1 {dw:.4f})") + f" | split={a.split} "
           f"({len(ds)} ảnh) | N={n_prop} | top_k={top_k} | nms={nms_thr} | steps={a.steps} | "
           f"khởi động {fmt_time(time.time() - t0)}", flush=True)
 
     out = {"ckpt": a.ckpt, "iter": ck.get("iter"), "split": a.split, "n_proposals": n_prop,
-           "top_k": top_k, "nms_thr": nms_thr, "memory": cfg["model"]["memory"], "results": {}}
+           "top_k": top_k, "nms_thr": nms_thr, "memory": cfg["model"]["memory"],
+           "density": density, "density_kinds": kinds, "density_weight_ratio": dw, "results": {}}
     for steps in a.steps:
         bs = a.batch_size if steps == 1 else 1
         loader = DataLoader(ds, batch_size=bs, shuffle=False, num_workers=a.num_workers,

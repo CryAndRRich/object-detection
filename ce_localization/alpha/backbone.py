@@ -7,36 +7,60 @@
   tham số -> không có gì để SyncBN.
 - FPN: `torchvision.ops.FeaturePyramidNetwork` (lateral 1x1 + output 3x3, top-down nearest,
   cộng), không thêm P6 vì head chỉ lấy P2..P5 như DiffusionDet (`Base-DiffusionDet.yaml`).
+- `in_channels=4` (ALPHA3): conv1 thêm kênh density, weight kênh mới khởi tạo **0** (người dùng
+  chốt 2026-09-29) nên ở bước 0 mô hình trùng R-50 3 kênh. CE-Loc gốc khởi tạo kênh này bằng
+  trung bình weight RGB (`legacy/celoc_vision.py`). conv1 được thay SAU khi dựng FPN để thứ tự
+  rút RNG khởi tạo trùng bản 3 kênh (cùng seed -> cùng weight, có test).
 """
 
 from collections import OrderedDict
 
+import torch
 import torch.nn as nn
 import torchvision
 from torchvision.ops import FeaturePyramidNetwork
 from torchvision.ops.misc import FrozenBatchNorm2d
 
-__all__ = ["ResNet50FPN", "STRIDES", "LEVELS"]
+__all__ = ["ResNet50FPN", "STRIDES", "LEVELS", "density_weight_ratio"]
 
 LEVELS = ("p2", "p3", "p4", "p5")
 STRIDES = (4, 8, 16, 32)
 
 
 class ResNet50FPN(nn.Module):
-    def __init__(self, out_channels=256, pretrained=True):
+    def __init__(self, out_channels=256, pretrained=True, in_channels=3):
         super().__init__()
+        if in_channels not in (3, 4):
+            raise ValueError(f"in_channels phải là 3 hoặc 4, nhận {in_channels}")
         weights = torchvision.models.ResNet50_Weights.IMAGENET1K_V1 if pretrained else None
         r = torchvision.models.resnet50(weights=weights, norm_layer=FrozenBatchNorm2d)
-        self.stem = nn.Sequential(r.conv1, r.bn1, r.relu, r.maxpool)
+        fpn = FeaturePyramidNetwork([256, 512, 1024, 2048], out_channels)   # rút RNG như bản 3 kênh
+        conv1 = r.conv1
+        if in_channels == 4:
+            conv1 = nn.Conv2d(4, 64, kernel_size=7, stride=2, padding=3, bias=False)
+            with torch.no_grad():
+                conv1.weight.zero_()
+                conv1.weight[:, :3] = r.conv1.weight
+        self.stem = nn.Sequential(conv1, r.bn1, r.relu, r.maxpool)
         self.layer1, self.layer2, self.layer3, self.layer4 = r.layer1, r.layer2, r.layer3, r.layer4
-        self.fpn = FeaturePyramidNetwork([256, 512, 1024, 2048], out_channels)
+        self.fpn = fpn                          # đăng ký SAU layer4 như cũ: thứ tự tham số không đổi
         self.out_channels = out_channels
+        self.in_channels = in_channels
 
     def forward(self, x):
-        """[B,3,H,W] -> OrderedDict p2..p5, stride 4/8/16/32."""
+        """[B,C,H,W] (C = in_channels) -> OrderedDict p2..p5, stride 4/8/16/32."""
         c2 = self.layer1(self.stem(x))
         c3 = self.layer2(c2)
         c4 = self.layer3(c3)
         c5 = self.layer4(c4)
         out = self.fpn(OrderedDict(zip(LEVELS, (c2, c3, c4, c5))))
         return out
+
+
+def density_weight_ratio(backbone):
+    """‖W_conv1[:, density]‖ / ‖W_conv1[:, RGB]‖ — kênh density có học không (khởi tạo 0).
+    None nếu backbone 3 kênh."""
+    if backbone.in_channels != 4:
+        return None
+    w = backbone.stem[0].weight.detach()
+    return float(w[:, 3:].norm() / w[:, :3].norm().clamp_min(1e-12))
