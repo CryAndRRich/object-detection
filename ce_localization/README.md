@@ -33,8 +33,8 @@ Loss như DiffusionDet (5·L1 + 2·GIoU + 2·Focal, SimOTA), đặt ở mọi t�
 | `models/` | `clip_encoder`, `dit_blocks` (DiTBlock, update_box, mask), `roi_sampler`, `detector` (BoxDiT, CELocDetector, DDIM), `criterion` |
 | `data/` | `ce130_dataset` (đọc CE-130, cache), `loader` (DataLoader) |
 | `utils/` | hình học box + khuếch tán (bản torch và bản numpy tham chiếu), matcher, `metrics_np` (chấm điểm), `checkpoint`, `grad_monitor`, `log` |
-| `tools/` | `build_cache`, `check_data_facts`, `visualize_data`, `inspect_spatial_softmax` (soi CE-Loc GỐC) |
-| `legacy/` | CE-Loc GỐC (bài add) viết lại đúng công thức, nạp strict `weights/celoc/best_paper.pth`: `celoc_vision` (ResNet18 + SpatialSoftmax), `celoc_model` (CLIP text, U-Net 1D, sampler, IoU), `celoc_data`, `train.py`, `eval.py` |
+| `tools/` | `build_cache`, `check_data_facts`, `visualize_data`, `inspect_spatial_softmax` (soi CE-Loc GỐC), `inspect_dp_spatial_softmax` (soi Diffusion Policy, Push-T) |
+| `legacy/` | CE-Loc GỐC (bài add) viết lại đúng công thức, nạp strict `weights/celoc/best_paper.pth`: `celoc_vision` (ResNet18 + SpatialSoftmax), `celoc_model` (CLIP text, U-Net 1D, sampler, IoU), `celoc_data`, `train.py`, `eval.py`; `dp_vision` = encoder Diffusion Policy (robomimic `VisualCore` + GroupNorm), nạp strict checkpoint Push-T |
 | `checkpoints/` | không vào git |
 
 Test ở `object-detection/tests/ce_localization/`.
@@ -89,6 +89,14 @@ done
 (ảnh | Density Map | SpatialSoftmax Output, 512 chấm = 512 kênh, màu = độ nhọn), lỗ inpaint nét
 đứt đỏ. Density được sinh lại trên từng ảnh inpaint (hai nhánh lệch nhau nhiều blob) nên không
 ghép được map "đủ mọi vật". Kết luận ở `CLAUDE.md` mục Trạng thái.
+
+**Soi SpatialSoftmax của Diffusion Policy** (Push-T; checkpoint `../weights/diffusion_policy/epoch=1850-test_mean_score=0.898.ckpt`,
+data `../data/pusht/pusht_cchi_v7_replay.zarr`, cả hai tải từ `diffusion-policy.cs.columbia.edu/data/`; cần thêm
+`zarr<3`, `dill`, `omegaconf`; CPU ~35 giây):
+```bash
+python tools/inspect_dp_spatial_softmax.py --episode 116 --out ../../output/spatial_softmax/diffusion_policy
+```
+Ba hình 3 hàng × 2 cột: data thật (đầu / giữa / cuối episode), chỉ vùng đích (dời), chỉ khối T (dời).
 
 **Train lại CE-Loc gốc, có / không density** (`legacy/`). Công thức suy từ checkpoint gốc:
 AdamW lr 5e-5 wd 0,01, cosine `T_max` 300 theo epoch, batch toàn cục 32, best = loss train nhỏ

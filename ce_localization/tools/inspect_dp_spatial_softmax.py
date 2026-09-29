@@ -2,30 +2,21 @@
 """Soi SpatialSoftmax của Diffusion Policy (Push-T ảnh, CNN hybrid, checkpoint công bố epoch 1850,
 score 0,898) — đối chiếu với `inspect_spatial_softmax.py` của CE-Loc.
 
-Vì sao cần MỐC: vùng đích (chữ T xanh) luôn ở giữa khung, và 32 keypoint (lưới layer4 chỉ 3×3)
-mặc định cũng tụ ở giữa khung -> nhìn toạ độ tuyệt đối không phân biệt được "nhìn chữ T xanh" với
-"mặc định ở giữa". Mốc = KHUNG TRỐNG: median các khung đầu của 206 episode (khối T và agent ở chỗ
-ngẫu nhiên nên bị lọc) -> chỉ còn nền + chữ T xanh.
+Ba hình, cùng 3 hàng × 2 cột (Original | SpatialSoftmax Output), crop giữa 84×84 = thứ encoder thấy:
+  pusht_episode_XXX.png   data thật: khung ĐẦU / GIỮA / CUỐI của một episode
+  goal_only.png           xoá khối T xám + agent; chữ T xanh (vùng đích) ở giữa / dời ↖ / dời ↘
+  block_only.png          xoá chữ T xanh + agent; khối T xám ở trên-trái / giữa / dưới-phải
+Cột 2 = 32 chấm, mỗi chấm là toạ độ kỳ vọng của MỘT keypoint; màu = số ô hiệu dụng của softmax
+keypoint đó trên lưới 3×3 (vàng = nhọn, 1 ô; tím = trải đều 9 ô).
 
-Hai loại hình, cùng 2 cột (Original | SpatialSoftmax Output), crop giữa 84×84 = thứ encoder thấy:
-  controls.png        4 hàng: khung trống / xoá chữ T xanh / dời chữ T xanh lên-trái / xuống-phải.
-                      Chấm đi theo chữ T xanh -> encoder nhìn nó; đứng yên -> chỉ là vị trí mặc định.
-  episode_XXX.png     3 hàng: khung ĐẦU / GIỮA / CUỐI của episode.
-Cột 2: vòng rỗng xám = vị trí keypoint trên khung trống (mốc), chấm = vị trí trên ảnh này, vạch nối
-hai vị trí; màu chấm = độ dịch so với mốc (pixel crop 84). Vạch chĩa về khối T xám = keypoint đó
-mã hoá khối.
+Nền sạch = median các khung đầu của 206 episode (khối, agent ở chỗ ngẫu nhiên nên bị lọc) -> chỉ còn
+nền + chữ T xanh. Khối T xám cho block_only cắt từ khung đầu đầu tiên mà khối không chạm chữ T xanh
+lẫn agent, dán lên nền đã xoá chữ T xanh.
 
-Số đo (log + metrics.json; trọng số w_k = ||W_lin[:, 2k:2k+2]||):
-  shift_px        độ dịch trung bình so với mốc (pixel crop 84)
-  toward_block    cos giữa hướng dịch và hướng mốc -> tâm khối T xám, trọng số w_k·|dịch|
-                  (1 = mọi chấm dịch thẳng về khối, 0 = hướng ngẫu nhiên); toward_agent tương tự
-  eff_cells       số ô hiệu dụng exp(entropy) của softmax, 1..9
+Số đo (log + metrics.json; trọng số w_k = ||W_lin[:, 2k:2k+2]||): center_dist_px (khoảng cách chấm ->
+tâm ảnh), frac_center_cell (tỉ lệ chấm nằm trong ô giữa), eff_cells (1..9).
 
-Episode: split theo đúng config (val_ratio 0,02, max_train_episodes 90, seed 42) -> train / val /
-unused (không vào train).
-
-  python tools/inspect_dp_spatial_softmax.py --episodes 116 --controls --out ../../output/spatial_softmax/diffusion_policy
-  python tools/inspect_dp_spatial_softmax.py --n 20 --out ../../output/spatial_softmax/diffusion_policy
+  python tools/inspect_dp_spatial_softmax.py --episode 116 --out ../../output/spatial_softmax/diffusion_policy
 """
 
 import argparse
@@ -33,7 +24,6 @@ import json
 import os
 import sys
 import time
-import warnings
 
 import numpy as np
 import torch
@@ -42,15 +32,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from ce_localization.legacy.dp_vision import CROP, RAW, grid_to_crop, load_dp_encoder, preprocess  # noqa: E402
 
-ROWS = ["start", "middle", "end"]
-ROW_LABELS = {"start": "Start", "middle": "Middle", "end": "End"}
-CONTROLS = ["goal", "no_goal", "goal_up_left", "goal_down_right"]
-CONTROL_LABELS = {"goal": "Empty scene", "no_goal": "Goal removed", "goal_up_left": "Goal moved ↖",
-                  "goal_down_right": "Goal moved ↘"}
-CONTROL_SHIFT = 24                     # pixel ảnh 96
-MAX_SHIFT = 20                         # thang màu độ dịch (pixel crop 84)
 FONT = {"family": "DejaVu Sans", "size": 12, "weight": "normal"}   # MỌI chữ trên hình, như CE-Loc
 O = (RAW - CROP) // 2                  # lề crop giữa
+GOAL_SHIFT = 24                        # pixel ảnh 96
+BLOCK_CENTERS = {"top_left": (27, 27), "center": (48, 48), "bottom_right": (69, 69)}   # (ngang, dọc), ảnh 96
+FIGURES = {
+    "episode": (["start", "middle", "end"], {"start": "Start", "middle": "Middle", "end": "End"}),
+    "goal_only": (["center", "up_left", "down_right"], {"center": "Center", "up_left": "Moved ↖",
+                                                         "down_right": "Moved ↘"}),
+    "block_only": (list(BLOCK_CENTERS), {"top_left": "Top-left", "center": "Center",
+                                          "bottom_right": "Bottom-right"}),
+}
+TITLES = {"goal_only": "Goal only (block removed)", "block_only": "Block only (goal removed)"}
 
 
 # ----------------------------------------------------------------------------- dữ liệu
@@ -79,12 +72,7 @@ def object_masks(img):
     return {"block": block, "agent": agent, "goal": goal}
 
 
-def empty_scene(frames):
-    """Median các khung [N,96,96,3] uint8 -> nền + chữ T xanh (khối, agent bị lọc)."""
-    return np.median(frames, axis=0).round().astype(np.uint8)
-
-
-def _dilate(mask, r=1):
+def dilate(mask, r=1):
     out = mask.copy()
     for dy in range(-r, r + 1):
         for dx in range(-r, r + 1):
@@ -92,19 +80,53 @@ def _dilate(mask, r=1):
     return out
 
 
-def control_scenes(scene, shift=CONTROL_SHIFT):
-    """Khung trống -> {tên: ảnh}: giữ / xoá / dời chữ T xanh (chỉ chữ T xanh, viền khung giữ nguyên)."""
-    g = _dilate(object_masks(scene)["goal"])            # nở 1 px để xoá cả viền khử răng cưa
+def empty_scene(frames):
+    """Median các khung [N,96,96,3] uint8 -> nền + chữ T xanh (khối, agent bị lọc)."""
+    return np.median(frames, axis=0).round().astype(np.uint8)
+
+
+def paste(bg, ys, xs, vals, dy, dx):
+    out = bg.copy()
+    ok = (ys + dy >= 0) & (ys + dy < bg.shape[0]) & (xs + dx >= 0) & (xs + dx < bg.shape[1])
+    out[ys[ok] + dy, xs[ok] + dx] = vals[ok]
+    return out
+
+
+def remove_goal(scene):
+    g = dilate(object_masks(scene)["goal"])             # nở 1 px để xoá cả viền khử răng cưa
     blank = scene.copy()
     blank[g] = 255
-    out = {"goal": scene, "no_goal": blank}
+    return blank, g
+
+
+def goal_scenes(scene, shift=GOAL_SHIFT):
+    """Nền + chữ T xanh -> chữ T xanh ở giữa / dời ↖ / dời ↘ (viền khung giữ nguyên)."""
+    blank, g = remove_goal(scene)
     ys, xs = np.nonzero(g)
-    for name, d in (("goal_up_left", -shift), ("goal_down_right", shift)):
-        im = blank.copy()
-        ok = (ys + d >= 0) & (ys + d < RAW) & (xs + d >= 0) & (xs + d < RAW)
-        im[ys[ok] + d, xs[ok] + d] = scene[ys[ok], xs[ok]]
-        out[name] = im
-    return out
+    vals = scene[ys, xs]
+    return {"center": scene, "up_left": paste(blank, ys, xs, vals, -shift, -shift),
+            "down_right": paste(blank, ys, xs, vals, shift, shift)}
+
+
+def block_sprite(frame):
+    """Khung thật -> (ys, xs, màu) của khối T xám, hoặc None nếu khối chạm chữ T xanh / agent / mép."""
+    m = object_masks(frame)
+    if m["block"].sum() == 0 or (dilate(m["block"], 2) & (m["goal"] | m["agent"])).any():
+        return None
+    ys, xs = np.nonzero(m["block"])
+    if ys.min() < 2 or xs.min() < 2 or ys.max() > RAW - 3 or xs.max() > RAW - 3:
+        return None
+    sel = dilate(m["block"])                             # lấy cả viền khử răng cưa
+    ys, xs = np.nonzero(sel)
+    return ys, xs, frame[ys, xs]
+
+
+def block_scenes(scene, sprite, centers=BLOCK_CENTERS):
+    """Nền đã xoá chữ T xanh + khối T xám dán sao cho tâm khối ở từng vị trí (ngang, dọc)."""
+    blank, _ = remove_goal(scene)
+    ys, xs, vals = sprite
+    cy, cx = ys.mean(), xs.mean()
+    return {k: paste(blank, ys, xs, vals, int(round(y - cy)), int(round(x - cx))) for k, (x, y) in centers.items()}
 
 
 # ----------------------------------------------------------------------------- chạy
@@ -118,61 +140,41 @@ def encode(enc, imgs):
     return grid_to_crop(kp.numpy(), att.shape[-1]), eff
 
 
-def toward(base, kp, target, w):
-    """cos(hướng dịch, hướng mốc -> target), trọng số w·|dịch|. target (ngang, dọc) pixel crop."""
-    d = kp - base
-    v = np.asarray(target)[None] - base
-    n = np.linalg.norm(d, axis=-1)
-    cos = (d * v).sum(-1) / (n * np.linalg.norm(v, axis=-1) + 1e-9)
-    return float((w * n * cos).sum() / ((w * n).sum() + 1e-12))
-
-
-def centroid(mask):
-    ys, xs = np.nonzero(mask)
-    return None if len(xs) == 0 else (xs.mean() + 0.5, ys.mean() + 0.5)
-
-
-def measure(imgs, kp, base, eff, w, names):
+def measure(kp, eff, w, names):
+    third = CROP / 3
     rows = {}
     for i, name in enumerate(names):
-        masks = object_masks(imgs[i][O:O + CROP, O:O + CROP])
-        r = {"shift_px": float((w * np.linalg.norm(kp[i] - base, axis=-1)).sum() / w.sum()),
-             "eff_cells": float((w * eff[i]).sum() / w.sum())}
-        for obj in ("block", "agent", "goal"):
-            c = centroid(masks[obj])
-            r[f"toward_{obj}"] = float("nan") if c is None else toward(base, kp[i], c, w)
-        rows[name] = r
+        d = np.linalg.norm(kp[i] - CROP / 2, axis=-1)
+        inside = ((kp[i] >= third) & (kp[i] <= 2 * third)).all(-1)
+        rows[name] = {"center_dist_px": float((w * d).sum() / w.sum()),
+                      "frac_center_cell": float((w * inside).sum() / w.sum()),
+                      "eff_cells": float((w * eff[i]).sum() / w.sum())}
     return rows
 
 
 # ----------------------------------------------------------------------------- vẽ
 
-def plot_rows(imgs, kp, base, labels, title, path):
+def plot_rows(imgs, kp, eff, labels, title, path):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm
     plt.rcParams.update({"font.family": FONT["family"], "font.size": FONT["size"],
                          "font.weight": FONT["weight"], "axes.titleweight": FONT["weight"],
                          "axes.labelweight": FONT["weight"], "figure.titleweight": FONT["weight"],
                          "axes.titlesize": FONT["size"], "axes.labelsize": FONT["size"],
                          "figure.titlesize": FONT["size"], "xtick.labelsize": FONT["size"],
-                         "ytick.labelsize": FONT["size"], "legend.fontsize": FONT["size"]})
+                         "ytick.labelsize": FONT["size"]})
     ext = [0, CROP, CROP, 0]
-    n = len(labels)
-    fig, axes = plt.subplots(n, 2, figsize=(2 * 3.2, n * 3.2), squeeze=False)
+    fig, axes = plt.subplots(len(labels), 2, figsize=(2 * 3.2, len(labels) * 3.2), squeeze=False)
     for i, lab in enumerate(labels):
         rgb = imgs[i][O:O + CROP, O:O + CROP] / 255.0
         a0, a1 = axes[i]
         a0.imshow(rgb, extent=ext)
         a1.imshow(rgb * 0.45, extent=ext)
-        shift = np.linalg.norm(kp[i] - base, axis=-1)
-        for b, p in zip(base, kp[i]):
-            a1.plot([b[0], p[0]], [b[1], p[1]], color="white", lw=0.7, alpha=0.8, zorder=2)
-        ring = a1.scatter(base[:, 0], base[:, 1], s=30, facecolors="none", edgecolors="0.8", linewidths=0.8,
-                          zorder=3, label="Empty scene")
-        order = np.argsort(shift)                                        # chấm dịch nhiều vẽ sau
-        sc = a1.scatter(kp[i, order, 0], kp[i, order, 1], s=30, c=shift[order], cmap="viridis",
-                        vmin=0, vmax=MAX_SHIFT, edgecolors="white", linewidths=0.3, zorder=4, label="This image")
+        order = np.argsort(-eff[i])                                      # chấm nhọn vẽ sau (nằm trên)
+        sc = a1.scatter(kp[i, order, 0], kp[i, order, 1], s=30, c=eff[i, order], cmap="viridis_r",
+                        norm=LogNorm(vmin=1, vmax=9), edgecolors="white", linewidths=0.3)
         a0.set_ylabel(lab)
         for a in (a0, a1):
             a.set_xlim(0, CROP)
@@ -181,11 +183,11 @@ def plot_rows(imgs, kp, base, labels, title, path):
             a.set_yticks([])
     for a, t in zip(axes[0], ["Original", "SpatialSoftmax Output"]):
         a.set_title(t)
-    fig.subplots_adjust(top=1 - 0.9 / fig.get_figheight(), bottom=0.7 / fig.get_figheight(), right=0.84,
-                        wspace=0.05, hspace=0.08)
+    fig.subplots_adjust(top=1 - 0.9 / fig.get_figheight(), right=0.84, wspace=0.05, hspace=0.08)
     cb = fig.colorbar(sc, cax=fig.add_axes([0.87, 0.3, 0.025, 0.4]))
-    cb.set_label("Shift from empty scene (px)")
-    fig.legend(handles=[ring, sc], loc="lower center", ncol=2, frameon=False)
+    cb.set_ticks([1, 2, 3, 5, 9], labels=["1", "2", "3", "5", "9"])
+    cb.minorticks_off()
+    cb.set_label("Effective cells")
     fig.suptitle(title)
     fig.savefig(path, dpi=100, bbox_inches="tight")
     plt.close(fig)
@@ -198,15 +200,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", default="../weights/diffusion_policy/epoch=1850-test_mean_score=0.898.ckpt")
     ap.add_argument("--zarr", default="../data/pusht/pusht_cchi_v7_replay.zarr")
-    ap.add_argument("--n", type=int, default=20, help="số episode (chọn ngẫu nhiên theo --seed)")
-    ap.add_argument("--episodes", nargs="*", type=int, help="chỉ định episode, vd 0 17")
-    ap.add_argument("--controls", action="store_true", help="vẽ thêm controls.png (dời / xoá chữ T xanh)")
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--episode", type=int, default=116, help="episode cho hình data thật")
     ap.add_argument("--no-ema", action="store_true", help="dùng weight model thường thay vì EMA")
     ap.add_argument("--no-figures", action="store_true")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
-    warnings.filterwarnings("ignore", message="All-NaN slice")    # vật vắng khỏi mọi khung -> NaN
     os.makedirs(args.out, exist_ok=True)
     t0 = time.time()
 
@@ -220,54 +218,34 @@ def main():
     starts = np.r_[0, ends[:-1]]
     img = root["data/img"]
     to_u8 = lambda a: np.asarray(a).round().clip(0, 255).astype(np.uint8)   # noqa: E731
-    scene = empty_scene(np.stack([to_u8(img[int(s)]) for s in starts]))
-    base = encode(enc, scene[None])[0][0]                                # [K, 2] mốc
+    firsts = np.stack([to_u8(img[int(s)]) for s in starts])
+    scene = empty_scene(firsts)
+    src = next((e for e in range(len(ends)) if block_sprite(firsts[e]) is not None), None)
+    if src is None:
+        raise RuntimeError("không tìm được khung đầu nào có khối T xám tách rời chữ T xanh và agent")
     split = episode_splits(len(ends))
-    eps = args.episodes if args.episodes is not None else sorted(
-        np.random.default_rng(args.seed).permutation(len(ends))[: args.n].tolist())
-    print(f"[{time.time() - t0:5.1f}s] {len(ends)} episode (train {np.sum(split == 'train')}, "
-          f"val {np.sum(split == 'val')}, unused {np.sum(split == 'unused')}); soi {len(eps)}", flush=True)
+    e = args.episode
+    frames = [int(starts[e]), int((starts[e] + ends[e] - 1) // 2), int(ends[e] - 1)]
+    print(f"[{time.time() - t0:5.1f}s] episode {e} ({split[e]}) khung {frames}; khối T xám cắt từ khung đầu "
+          f"episode {src}", flush=True)
 
+    sets = {"episode": np.stack([to_u8(img[f]) for f in frames]),
+            "goal_only": np.stack(list(goal_scenes(scene).values())),
+            "block_only": np.stack(list(block_scenes(scene, block_sprite(firsts[src])).values()))}
+    files = {"episode": f"pusht_episode_{e:03d}.png", "goal_only": "goal_only.png", "block_only": "block_only.png"}
     result = dict(args=vars(args), checkpoint={k: str(v) for k, v in info.items()}, w_k=w.tolist(),
-                  base_kp=base.tolist())
-    if args.controls:
-        sc = control_scenes(scene)
-        ims = np.stack([sc[k] for k in CONTROLS])
+                  episode_info=dict(id=e, split=str(split[e]), frames=frames), block_source_episode=int(src))
+    for name, ims in sets.items():
+        keys, labels = FIGURES[name]
         kp, eff = encode(enc, ims)
-        result["controls"] = measure(ims, kp, base, eff, w, CONTROLS)
-        for k in CONTROLS:
-            r = result["controls"][k]
-            print(f"  control {k:>16} | shift {r['shift_px']:5.1f}px toward_goal {r['toward_goal']:+.2f} "
-                  f"eff {r['eff_cells']:.2f}", flush=True)
+        result[name] = measure(kp, eff, w, keys)
+        for k in keys:
+            r = result[name][k]
+            print(f"  {name:>10} {k:>12} | cách tâm {r['center_dist_px']:5.1f}px | trong ô giữa "
+                  f"{r['frac_center_cell']:.0%} | eff {r['eff_cells']:.2f}", flush=True)
         if not args.no_figures:
-            plot_rows(ims, kp, base, [CONTROL_LABELS[k] for k in CONTROLS], "Goal controls",
-                      os.path.join(args.out, "controls.png"))
-
-    per_ep = []
-    for k, e in enumerate(eps):
-        frames = [int(starts[e]), int((starts[e] + ends[e] - 1) // 2), int(ends[e] - 1)]
-        ims = np.stack([to_u8(img[f]) for f in frames])
-        kp, eff = encode(enc, ims)
-        rows = measure(ims, kp, base, eff, w, ROWS)
-        per_ep.append(dict(episode=int(e), split=str(split[e]), frames=frames, rows=rows))
-        if not args.no_figures:
-            plot_rows(ims, kp, base, [ROW_LABELS[r] for r in ROWS], f"Episode {e} ({split[e]})",
-                      os.path.join(args.out, f"episode_{e:03d}.png"))
-        el = time.time() - t0
-        print(f"[{el:5.1f}s | ETA {el / (k + 1) * (len(eps) - k - 1):4.0f}s] {k + 1}/{len(eps)} ep {e:3d} "
-              f"{split[e]:>6} | " + " | ".join(
-                  f"{n} shift {rows[n]['shift_px']:4.1f}px block {rows[n]['toward_block']:+.2f} "
-                  f"agent {rows[n]['toward_agent']:+.2f}" for n in ROWS), flush=True)
-
-    cols = ["shift_px", "toward_block", "toward_agent", "toward_goal", "eff_cells"]
-    if per_ep:
-        print("\nTRUNG VỊ trên các episode (toward: 1 = dịch thẳng về vật, 0 = ngẫu nhiên):")
-        print(f"{'row':>8} " + " ".join(f"{c:>13}" for c in cols))
-        summary = {}
-        for n in ROWS:
-            summary[n] = {c: float(np.nanmedian([p["rows"][n][c] for p in per_ep])) for c in cols}
-            print(f"{n:>8} " + " ".join(f"{summary[n][c]:13.3f}" for c in cols))
-        result.update(median=summary, episodes=per_ep)
+            title = f"Episode {e}" if name == "episode" else TITLES[name]
+            plot_rows(ims, kp, eff, [labels[k] for k in keys], title, os.path.join(args.out, files[name]))
     with open(os.path.join(args.out, "metrics.json"), "w") as f:
         json.dump(result, f, indent=1)
     print(f"[{time.time() - t0:5.1f}s] xong -> {args.out}")

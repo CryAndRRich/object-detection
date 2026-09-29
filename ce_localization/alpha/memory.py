@@ -9,6 +9,8 @@ Ba biến thể (docs/EXPERIMENT_ALPHA.md mục 3), chọn bằng `model.memory`
     none            [t ; text]                                   ALPHA0
     spatial_softmax [t ; text ; 1 token SpatialSoftmax(P5)]      ALPHA1
     grid            [t ; text ; mỗi ô P5 thật là 1 token + PE2D] ALPHA2
+                    `grid_size=G`: cắt ĐÚNG vùng ảnh thật trên P5 rồi adaptive_avg_pool về G×G
+                    -> luôn G² token, không cần mask (canvas 1024: P5 32×32 -> 16×16)
 
 Chỉ tạo module mà biến thể dùng: DDP chạy `find_unused_parameters=False`.
 """
@@ -17,6 +19,7 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from ce_localization.models.dit_blocks import SinusoidalTimeEmbedding
 
@@ -80,11 +83,13 @@ def sine_pos_2d(valid, num_pos_feats=128, temperature=10000.0):
 class MemoryEncoder(nn.Module):
     """Dựng memory [B, M, d] + key_padding_mask [B, M] (True = CHE) hoặc None."""
 
-    def __init__(self, kind="none", d_model=256, text_dim=512, feat_channels=256, feat_stride=32):
+    def __init__(self, kind="none", d_model=256, text_dim=512, feat_channels=256, feat_stride=32,
+                 grid_size=None):
         super().__init__()
         if kind not in MEMORY_KINDS:
             raise ValueError(f"model.memory={kind!r}, phải là một trong {MEMORY_KINDS}")
         self.kind, self.d_model, self.stride = kind, d_model, feat_stride
+        self.grid_size = grid_size
         self.time_emb = SinusoidalTimeEmbedding(d_model)          # thô, như DP: không MLP riêng
         self.text_proj = nn.Linear(text_dim, d_model)
         n_fixed = 3 if kind == "spatial_softmax" else 2            # [t ; text (; ss)]
@@ -117,9 +122,35 @@ class MemoryEncoder(nn.Module):
             xy = masked_spatial_softmax(p5, valid, valid_hw, self.stride)          # [B,C,2]
             tok = self.ss_proj(xy.flatten(1))[:, None] + self.cond_pos_emb[:, 2:3]
             return tok, None
+        if self.grid_size:
+            G = self.grid_size
+            rows, cols = valid.any(2).sum(1), valid.any(1).sum(1)                  # số hàng / cột thật
+            p5 = torch.cat([F.adaptive_avg_pool2d(p5[b:b + 1, :, :int(rows[b]), :int(cols[b])], G)
+                            for b in range(B)])                                     # [B,C,G,G]
+            valid = torch.ones(B, G, G, dtype=torch.bool, device=p5.device)
         pos = sine_pos_2d(valid, self.d_model // 2)                                # [B,d,H,W]
         tok = self.grid_proj(p5.flatten(2).transpose(1, 2)) + pos.flatten(2).transpose(1, 2)
-        return tok, ~valid.flatten(1)
+        return tok, (None if self.grid_size else ~valid.flatten(1))
+
+    def grid_geometry(self, valid_hw, H, W):
+        """Tâm (pixel canvas) + mask thật của từng token lưới -> (cx [B,K], cy [B,K], valid [B,K]).
+        Dùng cho chẩn đoán attention; khớp cách `image_tokens` dựng lưới (có / không pool)."""
+        dev = valid_hw.device
+        if self.grid_size:
+            G = self.grid_size
+            f = (torch.arange(G, device=dev, dtype=torch.float32) + 0.5) / G
+            nh, nw = valid_hw[:, 0].float(), valid_hw[:, 1].float()
+            rows = torch.ceil(nh / self.stride) * self.stride                      # vùng pool phủ
+            cols = torch.ceil(nw / self.stride) * self.stride
+            cy = (f[None, :, None] * rows[:, None, None]).expand(-1, G, G)
+            cx = (f[None, None, :] * cols[:, None, None]).expand(-1, G, G)
+            return cx.flatten(1), cy.flatten(1), torch.ones(len(nh), G * G, dtype=torch.bool, device=dev)
+        c_y = (torch.arange(H, device=dev) + 0.5) * self.stride
+        c_x = (torch.arange(W, device=dev) + 0.5) * self.stride
+        cy, cx = torch.meshgrid(c_y, c_x, indexing="ij")
+        B = valid_hw.shape[0]
+        valid = valid_cells_mask(valid_hw, H, W, self.stride).flatten(1)
+        return cx.flatten()[None].expand(B, -1), cy.flatten()[None].expand(B, -1), valid
 
     def forward(self, t, text_raw, img_tok=None, img_mask=None):
         """t [B] long, text_raw [B,512] -> (memory [B,M,d], key_padding_mask [B,M] | None)."""

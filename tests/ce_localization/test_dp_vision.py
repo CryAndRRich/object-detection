@@ -19,11 +19,12 @@ from ce_localization.legacy.dp_vision import (
     preprocess,
 )
 from ce_localization.tools.inspect_dp_spatial_softmax import (
-    control_scenes,
+    block_scenes,
+    block_sprite,
     empty_scene,
     episode_splits,
+    goal_scenes,
     object_masks,
-    toward,
 )
 
 CKPT = os.path.join(os.path.dirname(__file__), "..", "..", "weights", "diffusion_policy",
@@ -122,23 +123,35 @@ def test_empty_scene_filters_moving_objects():
     assert m["goal"].sum() == 100 and m["block"].sum() == 0
 
 
-def test_control_scenes_remove_and_move_only_goal():
+def _scene():
     scene = np.full((96, 96, 3), 255, np.uint8)
     scene[0, :] = 233                                      # viền khung (không phải đích)
     scene[40:50, 40:50] = (144, 238, 144)
-    sc = control_scenes(scene, shift=24)
-    assert object_masks(sc["no_goal"])["goal"].sum() == 0
-    assert (sc["no_goal"][0] == 233).all()                 # viền giữ nguyên
-    for name, d in (("goal_up_left", -24), ("goal_down_right", 24)):
+    return scene
+
+
+def test_goal_scenes_move_only_goal():
+    sc = goal_scenes(_scene(), shift=24)
+    assert list(sc) == ["center", "up_left", "down_right"]
+    for name, d in (("center", 0), ("up_left", -24), ("down_right", 24)):
         ys, xs = np.nonzero(object_masks(sc[name])["goal"])
         assert ys.min() == 40 + d and xs.min() == 40 + d and len(ys) == 100
+        assert (sc[name][0, :60] == 233).all() or d < 0    # viền giữ nguyên (trừ chỗ đích đè lên)
 
 
-def test_toward_is_one_for_moves_straight_at_target_and_zero_mean_for_perpendicular():
-    base = np.array([[10.0, 10.0], [30.0, 10.0]])
-    w = np.ones(2)
-    assert toward(base, base + [[5, 0], [-5, 0]], (20.0, 10.0), w) == pytest.approx(1.0)
-    assert toward(base, base + [[0, 5], [0, -5]], (20.0, 10.0), w) == pytest.approx(0.0, abs=1e-6)
+def test_block_sprite_rejects_touching_and_block_scenes_place_centroid():
+    frame = np.full((96, 96, 3), 255, np.uint8)
+    frame[10:20, 10:16] = (119, 136, 153)
+    sprite = block_sprite(frame)
+    assert sprite is not None
+    touching = frame.copy()
+    touching[21:25, 10:16] = (65, 105, 225)                # agent sát khối -> loại
+    assert block_sprite(touching) is None
+    sc = block_scenes(_scene(), sprite, centers={"a": (30, 60)})
+    m = object_masks(sc["a"])
+    ys, xs = np.nonzero(m["block"])
+    assert m["goal"].sum() == 0 and m["block"].sum() == 60
+    assert abs(xs.mean() + 0.0 - 30) <= 1 and abs(ys.mean() - 60) <= 1
 
 
 def test_full_tool_flow_on_fake_checkpoint_and_zarr(tmp_path, monkeypatch):
@@ -148,22 +161,21 @@ def test_full_tool_flow_on_fake_checkpoint_and_zarr(tmp_path, monkeypatch):
     root = zarr.open(str(tmp_path / "pusht.zarr"), "w")
     img = np.full((206 * 3, 96, 96, 3), 255, np.float32)
     img[:, 40:60, 30:50] = (144, 238, 144)
-    img[:, 20:30, 50:60] = (119, 136, 153)
     img[:, 10:16, 70:76] = (65, 105, 225)
-    img[::7, 20:30, 50:60] = 255                           # khối vắng ở vài khung đầu -> median lọc được
+    img[::3][::2, 15:25, 10:20] = (119, 136, 153)          # khối ở khung đầu của nửa số episode
     root["data/img"] = img
     root["meta/episode_ends"] = np.arange(1, 207) * 3
     import ce_localization.tools.inspect_dp_spatial_softmax as tool
     out = str(tmp_path / "out")
     monkeypatch.setattr(sys, "argv", ["x", "--ckpt", ck, "--zarr", str(tmp_path / "pusht.zarr"),
-                                      "--episodes", "0", "5", "--controls", "--out", out])
+                                      "--episode", "5", "--out", out])
     tool.main()
-    assert sorted(os.listdir(out)) == ["controls.png", "episode_000.png", "episode_005.png", "metrics.json"]
+    assert sorted(os.listdir(out)) == ["block_only.png", "goal_only.png", "metrics.json", "pusht_episode_005.png"]
     m = json.load(open(os.path.join(out, "metrics.json")))
-    assert [e["frames"] for e in m["episodes"]] == [[0, 1, 2], [15, 16, 17]]
-    assert m["controls"]["goal"]["shift_px"] == pytest.approx(0.0, abs=1e-5)
-    r = m["episodes"][0]["rows"]["middle"]                 # khung 1: có khối
-    assert r["shift_px"] >= 0 and 1 <= r["eff_cells"] <= 9 and -1 <= r["toward_block"] <= 1
+    assert m["episode_info"]["frames"] == [15, 16, 17] and m["block_source_episode"] == 0
+    for name in ("episode", "goal_only", "block_only"):
+        for r in m[name].values():
+            assert 0 <= r["frac_center_cell"] <= 1 and 1 <= r["eff_cells"] <= 9
 
 
 @pytest.mark.skipif(not os.path.exists(CKPT), reason="thiếu weights/diffusion_policy/epoch=1850-*.ckpt")

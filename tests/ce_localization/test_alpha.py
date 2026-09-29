@@ -320,6 +320,27 @@ def test_memory_encoder_kinds():
             assert mask is None
 
 
+def test_grid_pooling_uses_only_real_region_and_fixed_tokens():
+    """grid_size=G: cắt vùng thật của P5 rồi pool về G×G -> luôn G² token, không mask, và giá trị ở
+    hàng đệm không ảnh hưởng (canvas 1024: P5 32×32 -> 16×16)."""
+    torch.manual_seed(0)
+    enc = MemoryEncoder("grid", grid_size=4)
+    p5 = torch.randn(2, 256, 8, 8)
+    vh = torch.tensor([[5 * 32 - 10, 256], [256, 256]])              # ảnh 0: 5 hàng thật (hàng cuối lẻ)
+    tok, mask = enc.image_tokens(p5, vh)
+    assert tok.shape == (2, 16, 256) and mask is None
+    p5b = p5.clone()
+    p5b[0, :, 5:] = 1e3                                              # đổi hàng đệm của ảnh 0
+    tok_b, _ = enc.image_tokens(p5b, vh)
+    assert torch.allclose(tok, tok_b)
+    ref = torch.nn.functional.adaptive_avg_pool2d(p5[0:1, :, :5, :], 4)
+    pos = sine_pos_2d(torch.ones(1, 4, 4, dtype=torch.bool), 128)
+    want = enc.grid_proj(ref.flatten(2).transpose(1, 2)) + pos.flatten(2).transpose(1, 2)
+    assert torch.allclose(tok[0:1], want, atol=1e-5)
+    cx, cy, valid = enc.grid_geometry(vh, 8, 8)
+    assert cx.shape == (2, 16) and valid.all() and cy[0].max() < 5 * 32 and cx[0].max() < 256
+
+
 # ----------------------------------------------------------------------------- model
 
 @pytest.mark.parametrize("kind", ["none", "spatial_softmax", "grid"])

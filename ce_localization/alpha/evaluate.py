@@ -18,7 +18,6 @@ import torch
 
 from ce_localization.alpha.data import to_device
 from ce_localization.alpha.diffusion import prepare_train_boxes
-from ce_localization.alpha.memory import valid_cells_mask
 from ce_localization.eval import postprocess, score_records, with_oracle_scores
 from ce_localization.utils.box_ops_np import box_iou as box_iou_np
 from ce_localization.utils.box_ops_np import cxcywh_to_xyxy as c2x_np
@@ -28,7 +27,8 @@ from ce_localization.utils.metrics_np import oracle_hits
 
 __all__ = ["SIZE_BINS", "predict", "score", "size_recall", "attention_diagnostics"]
 
-# cạnh sqrt(w·h) của GT, pixel canvas: < 1 ô P5 | 1–4 ô | > 4 ô
+# cạnh sqrt(w·h) của GT, pixel QUY VỀ CANVAS 512 (để so được giữa canvas 512 và 1024):
+# < 1 ô P5 của canvas 512 (32 px) | 1–4 ô | > 4 ô
 SIZE_BINS = ((0, 32, "<1 ô P5"), (32, 128, "1-4 ô P5"), (128, 1e9, ">4 ô P5"))
 
 
@@ -55,6 +55,7 @@ def predict(model, loader, text_table, num_proposals, steps=1, top_k=100, nms_th
         boxes = out["boxes"].float().cpu().numpy()
         scores = out["scores"].float().cpu().numpy()
         stage = out["stage_boxes"].float().cpu().numpy()                  # [S,B,N,4]
+        to512 = 512.0 / batch["images"].shape[-1]
         if stage_hit is None:
             stage_hit = np.zeros(stage.shape[0])
         for i in range(len(batch["image_id"])):
@@ -66,8 +67,8 @@ def predict(model, loader, text_table, num_proposals, steps=1, top_k=100, nms_th
             b = _norm_cxcywh(boxes[i], whwh[i])
             records.append({"image_id": batch["image_id"][i], "boxes": b, "scores": scores[i],
                             "keep": postprocess(b, scores[i], top_k, nms_thr), "gt": gt,
-                            "gt_size_px": np.sqrt(np.clip(gt_abs[:, 2] - gt_abs[:, 0], 0, None)
-                                                  * np.clip(gt_abs[:, 3] - gt_abs[:, 1], 0, None))})
+                            "gt_size_px": to512 * np.sqrt(np.clip(gt_abs[:, 2] - gt_abs[:, 0], 0, None)
+                                                          * np.clip(gt_abs[:, 3] - gt_abs[:, 1], 0, None))})
         done = len(records)
         if log_every and (bi % log_every == 0 or done == n_img):
             el = time.time() - t0
@@ -157,15 +158,13 @@ def attention_diagnostics(model, loader, text_table, num_proposals, ts=(99, 499,
                 gin = None
                 if kind == "grid":
                     H = W = batch["images"].shape[-1] // 32
-                    valid = valid_cells_mask(batch["valid_hw"], H, W, 32).flatten(1)      # [B,HW]
-                    c = (torch.arange(H, device=dev) + 0.5) * 32
-                    cy, cx = torch.meshgrid(c, c, indexing="ij")
+                    cxs, cys, valid = model.memory.grid_geometry(batch["valid_hw"], H, W)  # [B,K]
                     gin = []
-                    for gt in batch["boxes"]:
-                        inside = ((cx.flatten()[None] > gt[:, :1]) & (cx.flatten()[None] < gt[:, 2:3])
-                                  & (cy.flatten()[None] > gt[:, 1:2]) & (cy.flatten()[None] < gt[:, 3:4]))
+                    for gt, cx, cy in zip(batch["boxes"], cxs, cys):
+                        inside = ((cx[None] > gt[:, :1]) & (cx[None] < gt[:, 2:3])
+                                  & (cy[None] > gt[:, 1:2]) & (cy[None] < gt[:, 3:4]))
                         gin.append(inside.any(0))
-                    gin = torch.stack(gin) & valid                                       # [B,HW]
+                    gin = torch.stack(gin) & valid                                       # [B,K]
                 for s, w in enumerate(catcher.store):                                     # w [B,N,M]
                     m = w.mean(1)                                                         # [B,M]
                     rec = acc.setdefault(s, {"time": [], "text": [], "ss": [], "grid": [], "lift": []})
