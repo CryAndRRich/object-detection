@@ -13,7 +13,7 @@ Hai cách chạy, CÙNG phép toán:
 Chạy > 5 phút => nohup nền, xem docs/EXPERIMENT_ALPHA.md mục 9.
 
 Cửa chặn:
-  G3 overfit: --limit 16 --max-iter 1500 --eval-split train --eval-every 500
+  G3 overfit: --limit 16 --max-iter 1500 --eval-split train --eval-every 500 [--lr 1e-4]
   G4 bench  : --bench 50  (không ghi gì, in s/iter tách đọc dữ liệu / tính toán + bộ nhớ đỉnh)
 """
 
@@ -134,6 +134,8 @@ def main():
     ap.add_argument("--resume", action="store_true",
                     help="train tiếp từ <save-dir>/last.pth. Không có cờ này mà last.pth đã có thì DỪNG")
     ap.add_argument("--max-iter", type=int, default=None, help="ghi đè training.max_iter (vd. G3)")
+    ap.add_argument("--lr", type=float, default=None,
+                    help="ghi đè training.lr (vd. G3 kiểm 'code sai hay lr chậm'); ghi vào config của checkpoint")
     ap.add_argument("--eval-every", type=int, default=None)
     ap.add_argument("--ckpt-every", type=int, default=None)
     ap.add_argument("--limit", type=int, default=None, help="chỉ lấy N ảnh train đầu (G3 overfit)")
@@ -153,6 +155,8 @@ def main():
     if a.max_iter:
         tr["max_iter"] = a.max_iter
         tr["steps"] = [s for s in tr["steps"] if s < a.max_iter]
+    if a.lr:
+        tr["lr"] = a.lr
     if a.eval_every:
         tr["eval_every"] = a.eval_every
     if a.ckpt_every:

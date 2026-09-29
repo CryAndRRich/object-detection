@@ -441,6 +441,17 @@ def test_resume_refuses_changed_model_config(tmp_path, monkeypatch):
         _run_train(monkeypatch, ["--config", p1, "--save-dir", save, "--resume"])
 
 
+def test_lr_override_used_and_recorded(tmp_path, monkeypatch):
+    root = str(tmp_path / "all_phase2_V2")
+    _fake_ce130(root, n_train=2, n_val=1, n_test=1)
+    p0, _ = _test_cfg(tmp_path, "none", root)
+    save = str(tmp_path / "lr")
+    _run_train(monkeypatch, ["--config", p0, "--save-dir", save, "--max-iter", "2", "--lr", "1e-4"])
+    ck = torch.load(os.path.join(save, "last.pth"), weights_only=False)
+    assert ck["config"]["training"]["lr"] == 1e-4
+    assert ck["optimizer"]["param_groups"][0]["initial_lr"] == 1e-4
+
+
 def test_bench_writes_nothing(tmp_path, monkeypatch, capsys):
     root = str(tmp_path / "all_phase2_V2")
     _fake_ce130(root, n_train=2, n_val=1, n_test=1)
