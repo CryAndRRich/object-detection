@@ -18,7 +18,13 @@ from ce_localization.legacy.dp_vision import (
     load_dp_encoder,
     preprocess,
 )
-from ce_localization.tools.inspect_dp_spatial_softmax import episode_splits, object_masks
+from ce_localization.tools.inspect_dp_spatial_softmax import (
+    control_scenes,
+    empty_scene,
+    episode_splits,
+    object_masks,
+    toward,
+)
 
 CKPT = os.path.join(os.path.dirname(__file__), "..", "..", "weights", "diffusion_policy",
                     "epoch=1850-test_mean_score=0.898.ckpt")
@@ -107,26 +113,57 @@ def _fake_ckpt(path):
     torch.save({"cfg": None, "state_dicts": {"model": sd, "ema_model": sd}, "pickles": {}}, path, pickle_module=dill)
 
 
+def test_empty_scene_filters_moving_objects():
+    frames = np.full((5, 96, 96, 3), 255, np.uint8)
+    frames[:, 40:50, 40:50] = (144, 238, 144)             # đích cố định
+    for i in range(5):                                     # khối ở chỗ khác nhau mỗi khung
+        frames[i, 5 + 15 * i:10 + 15 * i, 5:10] = (119, 136, 153)
+    m = object_masks(empty_scene(frames))
+    assert m["goal"].sum() == 100 and m["block"].sum() == 0
+
+
+def test_control_scenes_remove_and_move_only_goal():
+    scene = np.full((96, 96, 3), 255, np.uint8)
+    scene[0, :] = 233                                      # viền khung (không phải đích)
+    scene[40:50, 40:50] = (144, 238, 144)
+    sc = control_scenes(scene, shift=24)
+    assert object_masks(sc["no_goal"])["goal"].sum() == 0
+    assert (sc["no_goal"][0] == 233).all()                 # viền giữ nguyên
+    for name, d in (("goal_up_left", -24), ("goal_down_right", 24)):
+        ys, xs = np.nonzero(object_masks(sc[name])["goal"])
+        assert ys.min() == 40 + d and xs.min() == 40 + d and len(ys) == 100
+
+
+def test_toward_is_one_for_moves_straight_at_target_and_zero_mean_for_perpendicular():
+    base = np.array([[10.0, 10.0], [30.0, 10.0]])
+    w = np.ones(2)
+    assert toward(base, base + [[5, 0], [-5, 0]], (20.0, 10.0), w) == pytest.approx(1.0)
+    assert toward(base, base + [[0, 5], [0, -5]], (20.0, 10.0), w) == pytest.approx(0.0, abs=1e-6)
+
+
 def test_full_tool_flow_on_fake_checkpoint_and_zarr(tmp_path, monkeypatch):
     zarr = pytest.importorskip("zarr")
     ck = str(tmp_path / "fake.ckpt")
     _fake_ckpt(ck)
     root = zarr.open(str(tmp_path / "pusht.zarr"), "w")
     img = np.full((206 * 3, 96, 96, 3), 255, np.float32)
-    img[:, 40:60, 30:50] = (119, 136, 153)
+    img[:, 40:60, 30:50] = (144, 238, 144)
+    img[:, 20:30, 50:60] = (119, 136, 153)
     img[:, 10:16, 70:76] = (65, 105, 225)
+    img[::7, 20:30, 50:60] = 255                           # khối vắng ở vài khung đầu -> median lọc được
     root["data/img"] = img
     root["meta/episode_ends"] = np.arange(1, 207) * 3
     import ce_localization.tools.inspect_dp_spatial_softmax as tool
     out = str(tmp_path / "out")
     monkeypatch.setattr(sys, "argv", ["x", "--ckpt", ck, "--zarr", str(tmp_path / "pusht.zarr"),
-                                      "--episodes", "0", "5", "--out", out])
+                                      "--episodes", "0", "5", "--controls", "--out", out])
     tool.main()
-    assert sorted(os.listdir(out)) == ["episode_000.png", "episode_005.png", "metrics.json"]
+    assert sorted(os.listdir(out)) == ["controls.png", "episode_000.png", "episode_005.png", "metrics.json"]
     m = json.load(open(os.path.join(out, "metrics.json")))
     assert [e["frames"] for e in m["episodes"]] == [[0, 1, 2], [15, 16, 17]]
-    r = m["episodes"][0]["rows"]["start"]
-    assert r["area_block"] > 0 and r["area_agent"] > 0 and 1 <= r["eff_cells"] <= 9
+    assert m["controls"]["goal"]["shift_px"] == pytest.approx(0.0, abs=1e-5)
+    r = m["episodes"][0]["rows"]["middle"]                 # khung 1: có khối
+    assert r["shift_px"] >= 0 and 1 <= r["eff_cells"] <= 9 and -1 <= r["toward_block"] <= 1
 
 
 @pytest.mark.skipif(not os.path.exists(CKPT), reason="thiếu weights/diffusion_policy/epoch=1850-*.ckpt")
