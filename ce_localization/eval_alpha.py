@@ -70,7 +70,8 @@ def main():
     ap.add_argument("--steps", type=int, nargs="+", default=[1])
     ap.add_argument("--no-renewal", action="store_true", help="tắt box renewal khi nhiều bước")
     ap.add_argument("--attn-diag", type=int, default=0, help="số batch cho chẩn đoán attention; 0 = tắt")
-    ap.add_argument("--batch-size", type=int, default=8, help="chỉ cho 1 bước; nhiều bước luôn batch 1")
+    ap.add_argument("--batch-size", type=int, default=2,
+                    help="chỉ cho 1 bước (nhiều bước luôn batch 1); @1024 batch 8 OOM trên GPU dùng chung")
     ap.add_argument("--num-workers", type=int, default=4)
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--seed", type=int, default=0)
