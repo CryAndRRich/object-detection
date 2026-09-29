@@ -166,9 +166,7 @@ def main():
     nw = cfg["data"]["num_workers"] if a.num_workers is None else a.num_workers
 
     t_boot = time.time()
-    rank, world, dev = setup_dist()
-    if a.device and world == 1:
-        dev = torch.device(a.device)
+    rank, world, dev = setup_dist(a.device)
     main_proc = rank == 0
     log = (lambda *s: print(*s, flush=True)) if main_proc else (lambda *s: None)
     if tr["batch_size"] % world:

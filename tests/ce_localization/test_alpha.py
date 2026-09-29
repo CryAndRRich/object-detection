@@ -2,6 +2,9 @@
 train -> dừng -> --resume -> eval trên CE-130 giả, và DDP 2 tiến trình (gloo, CPU).
 
 Không tải gì: backbone `pretrained_backbone: false`, text thay bằng embedding giả.
+Mọi lượt train / eval trong test ép `--device cpu`: trên GPU, backward của conv (cuDNN) và
+`roi_align` không tất định (resume lệch ~1e-5 so với train liền) và GPU server dùng chung có thể
+hết bộ nhớ (đã gặp 2026-09-29).
 """
 
 import json
@@ -379,7 +382,7 @@ def test_epoch_batches_disjoint_across_ranks_and_reproducible():
 def _run_train(monkeypatch, argv):
     import ce_localization.train_alpha as ta
     monkeypatch.setattr(ta, "build_text_table", _fake_text_table)
-    monkeypatch.setattr(sys, "argv", ["train_alpha.py"] + argv)
+    monkeypatch.setattr(sys, "argv", ["train_alpha.py"] + argv + ["--device", "cpu"])
     ta.main()
 
 
@@ -414,7 +417,7 @@ def test_full_flow_train_resume_eval(tmp_path, monkeypatch, kind):
     monkeypatch.setattr(sys, "argv", ["eval_alpha.py", "--ckpt", os.path.join(a, "best.pth"),
                                       "--split", "test", "--nms", "--oracle-score", "--steps", "1", "4",
                                       "--attn-diag", "1", "--batch-size", "2", "--num-workers", "0",
-                                      "--out", out])
+                                      "--out", out, "--device", "cpu"])
     ea.main()
     with open(out) as f:
         res = json.load(f)
@@ -453,7 +456,7 @@ def _ddp_worker(rank, world, port, argv):
     os.environ.update(RANK=str(rank), LOCAL_RANK=str(rank), WORLD_SIZE=str(world),
                       MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port))
     ta.build_text_table = _fake_text_table
-    sys.argv = ["train_alpha.py"] + argv
+    sys.argv = ["train_alpha.py"] + argv + ["--device", "cpu"]
     ta.main()
 
 

@@ -14,14 +14,23 @@ __all__ = ["setup_dist", "PthCheckpoints", "warmup_multistep", "epoch_batches", 
            "noise_seed"]
 
 
-def setup_dist():
+def setup_dist(device=None):
     """-> (rank, world, dev). torchrun đặt WORLD_SIZE/RANK/LOCAL_RANK; không có thì 1 tiến trình.
-    (cùng khuôn `ce_localization/legacy/train.py:66-78`)"""
+    (cùng khuôn `ce_localization/legacy/train.py:66-78`)
+
+    `device="cpu"`: ép CPU kể cả khi có CUDA (nhiều tiến trình thì dùng gloo) — test chạy trên
+    server có GPU dùng chung phải tất định và không phụ thuộc bộ nhớ GPU còn trống."""
     world = int(os.environ.get("WORLD_SIZE", "1"))
+    use_cuda = torch.cuda.is_available() and device != "cpu"
     if world == 1:
-        return 0, 1, torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return 0, 1, torch.device(device or ("cuda" if use_cuda else "cpu"))
     local = int(os.environ["LOCAL_RANK"])
-    if torch.cuda.is_available():
+    if use_cuda:
+        n = torch.cuda.device_count()
+        if local >= n:
+            raise SystemExit(f"LOCAL_RANK {local} nhưng chỉ thấy {n} GPU "
+                             f"(CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}): "
+                             f"--nproc_per_node phải <= số GPU nhìn thấy")
         torch.cuda.set_device(local)
         dev = torch.device("cuda", local)
     else:
