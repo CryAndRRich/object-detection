@@ -754,3 +754,24 @@ def test_full_flow_density_train_resume_eval(tmp_path, monkeypatch, mode):
                                       "--density", "full", "--device", "cpu", "--num-workers", "0"])
     with pytest.raises(SystemExit):
         ea.main()
+
+
+def test_nan_debug_pinpoints_nan_input_channel(tmp_path, monkeypatch, capsys):
+    """--nan-debug: NaN ở kênh density -> báo đúng kênh 3 + module đầu tiên (conv1) rồi DỪNG."""
+    import ce_localization.train_alpha as ta
+    root = str(tmp_path / "all_phase2_V2")
+    _fake_ce130(root)
+    _fake_density(str(tmp_path))
+    cfg_path, _ = _test_cfg(tmp_path, "none", root, density="full")
+    orig = AlphaCE130.__getitem__
+
+    def poisoned(self, i):
+        s = orig(self, i)
+        s["image"][3, 0, 0] = float("nan")
+        return s
+    monkeypatch.setattr(AlphaCE130, "__getitem__", poisoned)
+    with pytest.raises(SystemExit, match="NaN đầu tiên"):
+        _run_train(monkeypatch, ["--config", cfg_path, "--save-dir", str(tmp_path / "d"), "--nan-debug"])
+    out = capsys.readouterr().out
+    assert "ảnh kênh 3: không hữu hạn 2/" in out and "ảnh kênh 0: không hữu hạn 0/" in out
+    assert "module ĐẦU TIÊN ra không hữu hạn: backbone.stem.0 (Conv2d) | đầu vào hữu hạn [False]" in out

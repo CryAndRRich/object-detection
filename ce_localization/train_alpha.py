@@ -40,6 +40,7 @@ from ce_localization.alpha.density import DensityIndex  # noqa: E402
 from ce_localization.alpha.diffusion import prepare_train_boxes  # noqa: E402
 from ce_localization.alpha.evaluate import predict, score  # noqa: E402
 from ce_localization.alpha.model import build_model  # noqa: E402
+from ce_localization.alpha import nan_debug  # noqa: E402
 from ce_localization.alpha.text import TextTable, encode_class_names  # noqa: E402
 from ce_localization.alpha.train_utils import (PthCheckpoints, alpha_group, epoch_batches,  # noqa: E402
                                                noise_seed, setup_dist, warmup_multistep)
@@ -165,6 +166,9 @@ def main():
     ap.add_argument("--max-hours", type=float, default=0.0,
                     help="dừng sạch (ghi last.pth) nếu đoạn kế tiếp có thể vượt N giờ; 0 = tắt")
     ap.add_argument("--bench", type=int, default=0, help="G4: đo N iter rồi thoát, không ghi gì")
+    ap.add_argument("--nan-debug", action="store_true",
+                    help="in loss/grad MỖI bước, kiểm weight sau mỗi step; lần NaN đầu tiên: báo đầu vào / "
+                         "tham số / buffer / module đầu tiên ra NaN rồi DỪNG (1 tiến trình)")
     ap.add_argument("--device", default=None)
     a = ap.parse_args()
 
@@ -198,8 +202,8 @@ def main():
     log = (lambda *s: print(*s, flush=True)) if main_proc else (lambda *s: None)
     if tr["batch_size"] % world:
         sys.exit(f"batch_size {tr['batch_size']} không chia hết cho {world} GPU")
-    if a.bench and world > 1:
-        sys.exit("--bench chỉ chạy 1 tiến trình")
+    if (a.bench or a.nan_debug) and world > 1:
+        sys.exit("--bench / --nan-debug chỉ chạy 1 tiến trình")
     bpr = tr["batch_size"] // world
 
     ckm = PthCheckpoints(a.save_dir) if not a.bench else None
@@ -330,11 +334,31 @@ def main():
             loss.backward()
             gmon.maybe_record(it)
             gn = torch.nn.utils.clip_grad_norm_(model.parameters(), tr["grad_clip"])
-            if not torch.isfinite(gn) or not torch.isfinite(loss):
+            finite = bool(torch.isfinite(gn)) and bool(torch.isfinite(loss))
+            if a.nan_debug:
+                log(f"  [nan-debug] it {it} | loss {float(loss):.4f} | grad trước clip {float(gn):.4g} | "
+                    f"lr {sched.get_last_lr()[0]:.3e} | density {batch.get('density_kind')} | ảnh {batch['image_id']}")
+                if not finite:
+                    gen.manual_seed(noise_seed(tr["seed"], it, rank))     # tái tạo đúng box / t của bước lỗi
+                    boxes, t = prepare_train_boxes(batch["boxes"], batch["whwh"],
+                                                   cfg["diffusion"]["num_proposals"], model.alphas_cumprod,
+                                                   model.snr_scale, gen)
+                    nan_debug.report(model, batch, boxes, t, text_table(batch["text"], dev), log)
+                    sys.exit(f"[nan-debug] dừng ở NaN đầu tiên, it {it}")
+            if not finite:
                 win["skip"] += 1                        # bước NaN sẽ ghi NaN vào mọi weight
                 opt.zero_grad(set_to_none=True)
             else:
                 opt.step()
+                if a.nan_debug:
+                    bp = nan_debug.bad_params(model)
+                    if bp:
+                        for n, p in list(model.named_parameters()):
+                            if n in bp[:10]:
+                                log(f"  [nan-debug] {n}: weight {nan_debug.tensor_stats(p)} | grad "
+                                    f"{nan_debug.tensor_stats(p.grad) if p.grad is not None else None}")
+                        sys.exit(f"[nan-debug] opt.step() với grad hữu hạn làm {len(bp)} tham số thành "
+                                 f"không hữu hạn ở it {it}: {bp[:10]}")
             sched.step()
             win["loss"] += float(st["loss"])
             win["n"] += 1
