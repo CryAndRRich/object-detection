@@ -105,7 +105,7 @@ def _check_train_resume_predict(cfg, out, img_root, tmp_path, monkeypatch, name)
     assert dumps == want
     for d in dumps:
         dump = json.load(open(os.path.join(pred_dir, d)))
-        assert len(dump["pred"]) == 2 and dump["meta"]["iter"] == 3 and dump["meta"]["run"] == run
+        assert len(dump["pred"]) == 2 and dump["meta"]["iter"] == 4 and dump["meta"]["run"] == run
         assert all(len(p["scores"]) <= (40 if d.endswith("s2.json") else 20) for p in dump["pred"].values())
         m = json.load(open(os.path.join(pred_dir, d[:-5] + "_metrics.json")))
         r = next(iter(m["results"].values()))

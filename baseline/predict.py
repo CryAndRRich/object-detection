@@ -52,6 +52,8 @@ def run_model(cfg, weights, dataset, limit=None, seed=0, log=print):
     model.eval()
     extra = DetectionCheckpointer(model).load(weights)
     iteration = extra.get("iteration") if isinstance(extra, dict) else None
+    if iteration is not None:                     # checkpoint lưu chỉ số 0-based của iter cuối -> số iter đã train
+        iteration += 1
     loader = build_detection_test_loader(cfg, dataset, mapper=DiffusionDetDatasetMapper(cfg, is_train=False))
     n_total = min(len(loader.dataset), limit) if limit else len(loader.dataset)
     torch.manual_seed(seed)                      # DiffusionDet lấy mẫu box nhiễu -> tái lập được
