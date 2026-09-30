@@ -16,8 +16,8 @@ Mỗi project là một **package**, import theo tên đầy đủ (`ce_localiza
 tự thêm `object-detection/` vào `sys.path`, nên vẫn chạy `python train.py` trong thư mục project.
 
 ```bash
-python -m pytest tests -q                      # từ object-detection/, ~2 phút CPU
-cd ce_localization && python ../tools/run_on_free_gpu.py -- train.py --save-dir checkpoints/x
+python -m pytest tests -q                      # từ object-detection/, ~15–20 phút CPU server
+cd ce_localization && python ../tools/run_on_free_gpu.py -- train.py --config config/alpha/alpha0.yaml --save-dir checkpoints/x
 ```
 
 ## `weights/` và `data/`

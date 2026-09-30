@@ -1,4 +1,4 @@
-"""Tiện ích log: thời gian thực tế, phân phối, thông tin môi trường chạy.
+"""Tiện ích log: thời gian thực tế, thông tin môi trường chạy.
 
 Mọi job chạy lâu phải in tiến độ kèm thời gian THỰC TẾ và ETA — im lặng vài phút không
 phân biệt được với treo.
@@ -9,10 +9,9 @@ import socket
 import sys
 from datetime import datetime
 
-import numpy as np
 import torch
 
-__all__ = ["fmt_time", "array_stats", "run_env", "print_banner"]
+__all__ = ["fmt_time", "run_env", "print_banner"]
 
 
 def fmt_time(seconds):
@@ -20,18 +19,6 @@ def fmt_time(seconds):
     seconds = int(max(seconds, 0))
     h, m, s = seconds // 3600, (seconds % 3600) // 60, seconds % 60
     return f"{h}h{m:02d}m{s:02d}s" if h else (f"{m}m{s:02d}s" if m else f"{s}s")
-
-
-def array_stats(x):
-    """Phân phối đầy đủ (mean/std/min/max/phân vị) — trung bình che mất đuôi."""
-    x = np.asarray(x, dtype=np.float64)
-    if x.size == 0:
-        return {}
-    q = np.percentile(x, [1, 25, 50, 75, 99])
-    return {"mean": float(x.mean()), "std": float(x.std()),
-            "min": float(x.min()), "max": float(x.max()),
-            "p1": float(q[0]), "p25": float(q[1]), "p50": float(q[2]),
-            "p75": float(q[3]), "p99": float(q[4])}
 
 
 def run_env(cfg, dev):

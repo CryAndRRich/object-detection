@@ -23,7 +23,7 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from ce_localization.legacy.celoc_vision import TARGET, resize_and_pad
+from ce_localization.celoc_paper.celoc_vision import TARGET, resize_and_pad
 
 META = "meta.json"
 

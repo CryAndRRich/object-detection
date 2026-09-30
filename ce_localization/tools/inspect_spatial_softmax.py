@@ -17,7 +17,7 @@ không ghép được một map "đủ mọi vật". Nên:
 Mỗi ảnh gốc một ca.
 
 Hình: mỗi ca 4 hàng (density) x 3 cột (Original | Density Map | SpatialSoftmax Output).
-Checkpoint KHÔNG density (conv1 3 kênh, `legacy/train.py --no-density`): model không đọc density ->
+Checkpoint KHÔNG density (conv1 3 kênh, `celoc_paper/train.py --no-density`): model không đọc density ->
 1 hàng x 2 cột (ảnh | SpatialSoftmax Output), bỏ mọi số đo theo density (lift_blobs_full, shift_px,
 cos_emb). Density vẫn dùng ở bước CHỌN nhánh để ra đúng bộ ảnh như bản có density (so được từng ảnh).
 Cột 3 = 512 chấm, mỗi chấm là toạ độ kỳ vọng của MỘT kênh; màu = số ô hiệu dụng của softmax
@@ -49,7 +49,7 @@ from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from ce_localization.legacy.celoc_vision import TARGET, grid_to_canvas, load_vision_encoder, to_input  # noqa: E402
+from ce_localization.celoc_paper.celoc_vision import TARGET, grid_to_canvas, load_vision_encoder, to_input  # noqa: E402
 
 BG = np.array([0, 0, 127])            # nền jet của density = "không có vật"
 SETTINGS = ["full", "minus1", "minus2", "empty"]

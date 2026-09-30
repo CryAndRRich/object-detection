@@ -1,17 +1,6 @@
-"""Phân rã grad norm theo NHÓM MODULE — biết con số tổng đến từ đâu.
-
-VÌ SAO TỒN TẠI: log train chỉ in MỘT con số (~100, trước clip) và cảnh báo "rất lớn". Một
-con số tổng không phân biệt được ba giả thuyết rất khác nhau:
-
-  (a) CHUỖI CỘNG DỒN: `x` không detach giữa các tầng (có chủ đích — box là luồng chính),
-      nên `box_delta` tầng 1 nhận gradient từ loss của CẢ 6 tầng. Nếu đúng thì
-      `box_delta[0]` phải lớn hơn hẳn `box_delta[5]`.
-  (b) ĐẦU VÀO CLIP THÔ: `patch_raw` là `last_hidden_state` TRƯỚC `post_layernorm`, luồng
-      dư của ViT có vài kênh outlier rất lớn. Gradient của `Linear` tỉ lệ với đầu vào,
-      nên nếu đúng thì `proj_patch` / `roi.proj_point` áp đảo.
-  (c) HEAD SCORE / focal.
-
-Lấy mẫu mỗi `every` batch rồi `.item()` — không đồng bộ GPU mỗi bước.
+"""Phân rã grad norm theo NHÓM MODULE — biết con số tổng (trước clip) đến từ đâu: backbone, FPN,
+chiếu RoI, decoder hay head của từng stage. Lấy mẫu mỗi `every` batch rồi `.item()` — không đồng bộ
+GPU mỗi bước.
 """
 
 import re
@@ -22,30 +11,29 @@ import torch
 
 __all__ = ["GradMonitor", "group_of"]
 
-_LAYER = re.compile(r"decoder\.layers\.(\d+)\.(\w+)")
+_STAGE = re.compile(r"head\.stages\.(\d+)\.(\w+)")
 
 
 def group_of(name):
-    """Tên tham số -> tên nhóm. `box_delta` tách theo tầng; phần khác gộp qua các tầng."""
-    m = _LAYER.match(name)
+    """Tên tham số của `models.detector.Detector` -> nhóm."""
+    if name.startswith("backbone.fpn."):
+        return "fpn"
+    if name.startswith("backbone."):
+        return "resnet"
+    if name.startswith("memory."):
+        return "memory." + name.split(".")[1]
+    m = _STAGE.match(name)
     if m:
         i, sub = int(m.group(1)), m.group(2)
-        if sub == "box_delta":
-            return f"box_delta[{i}]"
-        if sub == "roi":
-            return "roi.out" if ".roi.out." in name else "roi.proj_point"
-        return sub                                  # self_attn, cross_attn, ff_h, ...
-    if name.startswith("encoder."):
-        return name.split(".")[1]                   # proj_patch, proj_text
-    if name.startswith("decoder.score_head"):
-        return "score_head"
-    return "embed/khác"                             # box_embed, time_cond, pos_emb...
+        if sub in ("roi_proj", "decoder"):
+            return f"{sub}[{i}]"
+        return f"heads[{i}]"
+    return "khác"
 
 
 class GradMonitor:
     def __init__(self, model, every=10, group_fn=group_of):
-        """`group_fn`: tên tham số -> tên nhóm. Mặc định theo tên tham số của CE-Loc vòng 2;
-        model khác (vd. ALPHA) truyền hàm riêng."""
+        """`group_fn`: tên tham số -> tên nhóm."""
         self.every = every
         self.groups = defaultdict(list)
         for n, p in model.named_parameters():

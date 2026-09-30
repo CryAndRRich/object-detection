@@ -1,4 +1,4 @@
-"""Vision encoder CE-Loc GỐC viết lại (ce_localization/legacy) + phép đo của
+"""Vision encoder CE-Loc GỐC viết lại (ce_localization/celoc_paper) + phép đo của
 tools/inspect_spatial_softmax.py."""
 
 import os
@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
-from ce_localization.legacy.celoc_vision import (
+from ce_localization.celoc_paper.celoc_vision import (
     SpatialSoftmax,
     SpatialVisualEncoder,
     grid_to_canvas,
@@ -145,8 +145,8 @@ import json as _json
 import math as _math
 import sys as _sys
 
-from ce_localization.legacy.celoc_data import ObjectPlacementDataset
-from ce_localization.legacy.celoc_model import (
+from ce_localization.celoc_paper.celoc_data import ObjectPlacementDataset
+from ce_localization.celoc_paper.celoc_model import (
     ObjectPlacementPolicy,
     iou_original_formula,
     iou_pixels,
@@ -305,10 +305,10 @@ def test_loss_backward_trains_vision_and_unet_not_clip():
 
 @pytest.mark.parametrize("no_density", [False, True])
 def test_train_then_resume_then_eval_full_flow(tmp_path, monkeypatch, no_density):
-    """Chạy TRỌN legacy/train.py (1 epoch + eval) -> --resume thêm 1 epoch -> legacy/eval.py.
+    """Chạy TRỌN celoc_paper/train.py (1 epoch + eval) -> --resume thêm 1 epoch -> celoc_paper/eval.py.
     T = 50 cho DDPM nhanh trên CPU (kiến trúc không đổi)."""
-    import ce_localization.legacy.eval as ev
-    import ce_localization.legacy.train as tr
+    import ce_localization.celoc_paper.eval as ev
+    import ce_localization.celoc_paper.train as tr
 
     data = str(tmp_path / "samples")
     _fake_samples(data, 3)
@@ -364,7 +364,7 @@ def _load_tiny(path, use_density):
 
 
 def test_train_bench_mode_runs_and_writes_nothing(tmp_path, monkeypatch, capsys):
-    import ce_localization.legacy.train as tr
+    import ce_localization.celoc_paper.train as tr
     data = str(tmp_path / "samples")
     _fake_samples(data, 4)
     monkeypatch.setattr(tr, "ObjectPlacementPolicy", lambda use_density: _tiny_policy(use_density, 50))
@@ -378,7 +378,7 @@ def test_train_bench_mode_runs_and_writes_nothing(tmp_path, monkeypatch, capsys)
 
 
 def test_train_max_hours_stops_cleanly_after_one_epoch(tmp_path, monkeypatch, capsys):
-    import ce_localization.legacy.train as tr
+    import ce_localization.celoc_paper.train as tr
     data = str(tmp_path / "samples")
     _fake_samples(data, 2)
     save = str(tmp_path / "ck")
@@ -395,7 +395,7 @@ def test_train_max_hours_stops_cleanly_after_one_epoch(tmp_path, monkeypatch, ca
 # cache uint8, --stop-epoch, DDP 2 tiến trình, visualize
 # ============================================================================
 
-from ce_localization.legacy.celoc_data import build_cache, to_model_input
+from ce_localization.celoc_paper.celoc_data import build_cache, to_model_input
 
 
 def _original_float_item(ds, i):
@@ -453,7 +453,7 @@ def _train_argv(save, data, *extra):
 
 
 def test_stop_epoch_keeps_schedule_but_stops(tmp_path, monkeypatch):
-    import ce_localization.legacy.train as tr
+    import ce_localization.celoc_paper.train as tr
     data = str(tmp_path / "samples")
     _fake_samples(data, 2)
     save = str(tmp_path / "ck")
@@ -470,7 +470,7 @@ def test_stop_epoch_keeps_schedule_but_stops(tmp_path, monkeypatch):
 
 
 def _ddp_worker(rank, world, port, save, data, cache):
-    import ce_localization.legacy.train as tr
+    import ce_localization.celoc_paper.train as tr
     os.environ.update(RANK=str(rank), LOCAL_RANK=str(rank), WORLD_SIZE=str(world),
                       MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port))
     tr.ObjectPlacementPolicy = lambda use_density: _tiny_policy(use_density, 50)
@@ -499,7 +499,7 @@ def test_ddp_two_processes_train_with_cache(tmp_path):
 
 
 def test_eval_visualize_writes_png(tmp_path):
-    import ce_localization.legacy.eval as ev
+    import ce_localization.celoc_paper.eval as ev
     data = str(tmp_path / "samples")
     _fake_samples(data, 2)
     m = _tiny_policy(True, 50).eval()

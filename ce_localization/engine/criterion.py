@@ -25,13 +25,23 @@ Số hạng tâm chỉ cho gradient vào dx, dy của `apply_deltas`; số hạn
 import torch
 import torch.nn.functional as F
 
-from ce_localization.models.criterion import sigmoid_focal_loss
 from ce_localization.utils.box_ops import box_iou, cxcywh_to_xyxy, generalized_box_iou, xyxy_to_cxcywh
 
-__all__ = ["MODES", "build_targets", "get_in_boxes_info", "dynamic_k_matching", "match",
-           "point_terms", "AlphaCriterion"]
+__all__ = ["MODES", "sigmoid_focal_loss", "build_targets", "get_in_boxes_info", "dynamic_k_matching", "match",
+           "point_terms", "Criterion"]
 
 MODES = ("box", "point")
+
+
+def sigmoid_focal_loss(logits, targets, alpha=0.25, gamma=2.0):
+    """Sigmoid focal như DiffusionDet (`use_focal=True`), từng phần tử (chưa cộng)."""
+    p = logits.sigmoid()
+    ce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+    p_t = p * targets + (1 - p) * (1 - targets)
+    loss = ce * ((1 - p_t) ** gamma)
+    if alpha >= 0:
+        loss = (alpha * targets + (1 - alpha) * (1 - targets)) * loss
+    return loss
 MIN_SIZE_PX = 1e-3                                       # sàn cho log(w), log(h) của box dự đoán
 
 
@@ -145,7 +155,7 @@ def match(pred_logits, pred_boxes, targets, alpha=0.25, gamma=2.0, w_cls=2.0, w_
     return indices
 
 
-class AlphaCriterion:
+class Criterion:
     """Loss ở MỌI stage (deep supervision, bắt buộc vì box detach giữa các stage), matcher chạy
     lại ở từng stage, CỘNG các stage.
       mode="box"   (ALPHA): 2·focal + 5·L1(xyxy) + 2·GIoU

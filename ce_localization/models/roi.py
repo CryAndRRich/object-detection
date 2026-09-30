@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 from torchvision.ops import roi_align
 
-from ce_localization.alpha.backbone import STRIDES
+from ce_localization.models.backbone import STRIDES
 
 __all__ = ["assign_levels", "MultiLevelRoIAlign"]
 

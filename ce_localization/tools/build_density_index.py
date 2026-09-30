@@ -24,7 +24,7 @@ from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from ce_localization.alpha.density import build_index  # noqa: E402
+from ce_localization.data.density import build_index  # noqa: E402
 
 
 def main():

@@ -21,12 +21,25 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ce_localization.models.dit_blocks import SinusoidalTimeEmbedding
-
-__all__ = ["MEMORY_KINDS", "valid_cells_mask", "masked_spatial_softmax", "sine_pos_2d",
+__all__ = ["MEMORY_KINDS", "SinusoidalTimeEmbedding", "valid_cells_mask", "masked_spatial_softmax", "sine_pos_2d",
            "MemoryEncoder"]
 
 MEMORY_KINDS = ("none", "spatial_softmax", "grid")
+
+
+class SinusoidalTimeEmbedding(nn.Module):
+    """Time embedding DDPM chuẩn = `SinusoidalPosEmb` của Diffusion Policy."""
+
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, t):
+        half = self.dim // 2
+        f = math.log(10000) / (half - 1)
+        f = torch.exp(torch.arange(half, device=t.device, dtype=torch.float32) * -f)
+        a = t.float()[:, None] * f[None]
+        return torch.cat([a.sin(), a.cos()], dim=-1)
 
 
 def valid_cells_mask(valid_hw, H, W, stride):

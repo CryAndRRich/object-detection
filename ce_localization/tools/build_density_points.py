@@ -13,8 +13,8 @@ của ALPHA3, `tools/build_density_index.py`). Đỉnh: `alpha/points.find_peaks
      box GT chứa >= 2 đỉnh (đỉnh thừa) ; đỉnh nằm trong >= 2 box GT
 3. Cỡ giả (TRAIN): tỉ số kNN(đỉnh) / sqrt(w·h) của box GT được ghép -> đề xuất `beta` = 1 / trung vị;
    `min_frac` / `max_frac` = p2 / p98 của sqrt(w·h) / H trên box GT train. In sẵn dòng yaml cho
-   `data.pseudo_size` của config/beta0.yaml (đây là 3 số vô hướng lấy từ box GT, ghi rõ khi báo cáo).
-4. `--config-in config/beta0.yaml --config-out <file>`: ghi một BẢN config đã điền `data.pseudo_size`
+   `data.pseudo_size` của config/beta/beta0.yaml (đây là 3 số vô hướng lấy từ box GT, ghi rõ khi báo cáo).
+4. `--config-in config/beta/beta0.yaml --config-out <file>`: ghi một BẢN config đã điền `data.pseudo_size`
    (đề xuất ở bước 3, hoặc `--pseudo-size knn beta min_frac max_frac`) và `data.points` = `--out`
    (đường dẫn tuyệt đối). Train / eval dùng bản này — không sửa file config trong git.
 
@@ -23,7 +23,7 @@ của ALPHA3, `tools/build_density_index.py`). Đỉnh: `alpha/points.find_peaks
   LOG=/mnt/disk1/aiotlab/haitn/log/beta_g0_points_$(date +%m%d_%H%M).log
   nohup python tools/build_density_points.py --out ../data/density_points.json \\
       --report /mnt/disk1/aiotlab/haitn/output/beta0/g0_points_report.json --workers 8 \\
-      --config-in config/beta0.yaml --config-out /mnt/disk1/aiotlab/haitn/output/beta0/config_beta0.yaml > $LOG 2>&1 &
+      --config-in config/beta/beta0.yaml --config-out /mnt/disk1/aiotlab/haitn/output/beta0/config_beta0.yaml > $LOG 2>&1 &
   echo "PID $! -> $LOG"
 """
 
@@ -39,10 +39,10 @@ import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from ce_localization.alpha.density import DensityIndex, load_density_levels  # noqa: E402
-from ce_localization.alpha.evaluate import DENSITY_BINS  # noqa: E402
-from ce_localization.alpha.points import find_peaks, knn_distance, match_points_to_boxes  # noqa: E402
-from ce_localization.data.ce130_dataset import CE130Detection  # noqa: E402
+from ce_localization.data.density import DensityIndex, load_density_levels  # noqa: E402
+from ce_localization.engine.evaluate import DENSITY_BINS  # noqa: E402
+from ce_localization.data.points import find_peaks, knn_distance, match_points_to_boxes  # noqa: E402
+from ce_localization.data.dataset import scan_ce130  # noqa: E402
 from ce_localization.utils.log import fmt_time  # noqa: E402
 
 SPLITS = ("train", "val", "test")
@@ -116,7 +116,7 @@ def main():
     ap.add_argument("--knn", type=int, default=3)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--limit", type=int, default=None, help="chỉ N ảnh đầu mỗi split (chạy thử)")
-    ap.add_argument("--config-in", default=None, help="config gốc (vd. config/beta0.yaml) để ghi bản đã điền")
+    ap.add_argument("--config-in", default=None, help="config gốc (vd. config/beta/beta0.yaml) để ghi bản đã điền")
     ap.add_argument("--config-out", default=None, help="bản config đã điền data.pseudo_size + data.points")
     ap.add_argument("--pseudo-size", type=float, nargs=4, default=None, metavar=("KNN", "BETA", "MIN_FRAC", "MAX_FRAC"),
                     help="ép pseudo_size thay cho đề xuất của G0")
@@ -133,7 +133,7 @@ def main():
     items = {}
     for split in SPLITS:
         t = time.time()
-        its = CE130Detection(a.ce130, split).items
+        its = scan_ce130(a.ce130, split)
         if a.limit:
             its = its[: a.limit]
         items[split] = its

@@ -23,7 +23,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ce_localization.legacy.celoc_vision import TARGET, SpatialVisualEncoder
+from ce_localization.celoc_paper.celoc_vision import TARGET, SpatialVisualEncoder
 
 __all__ = ["CLIPTextEncoder", "ConditionalUnet1D", "ObjectPlacementPolicy", "load_policy",
            "sample_mock", "sample_ddpm", "iou_pixels", "iou_original_formula", "denormalize"]
@@ -227,7 +227,7 @@ class ObjectPlacementPolicy(nn.Module):
 
 
 def load_policy(ckpt_path, device="cpu", pretrained_text=True):
-    """Nạp checkpoint gốc hoặc checkpoint của `legacy/train.py`. Density suy từ conv1.
+    """Nạp checkpoint gốc hoặc checkpoint của `celoc_paper/train.py`. Density suy từ conv1.
     Chỉ tha `position_ids` của CLIP (buffer, có/không tuỳ phiên bản transformers)."""
     ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     sd = ck["model_state_dict"]

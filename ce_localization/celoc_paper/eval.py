@@ -11,7 +11,7 @@ Hai sampler: `mock` (vòng lặp gốc, 100 bước "x -= eps/100" — số so �
                   của bài, chỉ để đối chiếu số đã công bố)
 Mốc `prior`: N target_bbox lấy ngẫu nhiên từ samples/train, KHÔNG nhìn ảnh — model phải hơn nó.
 
-  python ../tools/run_on_free_gpu.py -- legacy/eval.py --ckpt checkpoints/celoc_density/best.pth \\
+  python ../tools/run_on_free_gpu.py -- celoc_paper/eval.py --ckpt checkpoints/celoc_density/best.pth \\
       --out /mnt/disk1/aiotlab/haitn/output/celoc_density_test.json
 """
 
@@ -28,10 +28,10 @@ from torch.utils.data import DataLoader, Subset
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from ce_localization.legacy.celoc_data import ObjectPlacementDataset, to_model_input  # noqa: E402
-from ce_localization.legacy.celoc_model import (  # noqa: E402
+from ce_localization.celoc_paper.celoc_data import ObjectPlacementDataset, to_model_input  # noqa: E402
+from ce_localization.celoc_paper.celoc_model import (  # noqa: E402
     iou_original_formula, iou_pixels, load_policy, sample_ddpm, sample_mock)
-from ce_localization.legacy.celoc_vision import TARGET  # noqa: E402
+from ce_localization.celoc_paper.celoc_vision import TARGET  # noqa: E402
 from ce_localization.utils.log import fmt_time  # noqa: E402
 
 SAMPLERS = ("mock", "ddpm")
@@ -98,7 +98,7 @@ def visualize(model, ds, idxs, path, n_samples=30, seed=0):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.patches import Rectangle
-    from ce_localization.legacy.celoc_model import denormalize
+    from ce_localization.celoc_paper.celoc_model import denormalize
 
     dev = next(model.parameters()).device
     g = torch.Generator(device=dev).manual_seed(seed)
@@ -145,7 +145,7 @@ def print_table(summary, title=""):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ckpt", required=True, help="best.pth / last.pth của legacy/train.py, hoặc weights/celoc/best_paper.pth (của bài)")
+    ap.add_argument("--ckpt", required=True, help="best.pth / last.pth của celoc_paper/train.py, hoặc weights/celoc/best_paper.pth (của bài)")
     ap.add_argument("--data", default="../data/samples/test")
     ap.add_argument("--prior-from", default="../data/samples/train", help="'' = bỏ mốc prior")
     ap.add_argument("--n-samples", type=int, default=30)

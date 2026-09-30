@@ -114,8 +114,8 @@ done
   Xem: `visualize_ce130_coco.py ... --suspect-only`.
 - **Các branch cùng ảnh bất đồng GT** ở `fixed_annotation.json` (86,5 % ảnh val, 79,7 % test;
   lệch toạ độ tới 374 px, số box gần như không đổi). Converter chọn branch chỉ số nhỏ nhất
-  (khớp `ce_localization/data/ce130_dataset.py`) và in số ảnh bất đồng.
-- Converter khớp `CE130Detection.stats()` từng số: 1.911 / 908 / 779 ảnh, **71.767** / 38.289 /
+  (khớp `scan_ce130` trong `ce_localization/data/dataset.py`) và in số ảnh bất đồng.
+- Converter khớp số ảnh / box của bộ quét CE-130 cũ (`CE130Detection.stats()`, đã xoá 2026-09-30) từng số: 1.911 / 908 / 779 ảnh, **71.767** / 38.289 /
   37.812 annotation (train có 85 box thoái hoá bị lọc từ 71.852 box thô).
 
 **Bug đã bắt** (đều có test hoặc đã sửa): `datasets.py` từng đọc json/ảnh thừa một `..` so với

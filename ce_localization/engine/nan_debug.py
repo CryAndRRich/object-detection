@@ -1,4 +1,4 @@
-"""Chẩn đoán NaN cho `train_alpha.py --nan-debug` (ALPHA3.1 lần đầu: NaN từ bước 3, 2026-09-30).
+"""Chẩn đoán NaN cho `train.py --nan-debug` (ALPHA3.1 lần đầu: NaN từ bước 3, 2026-09-30).
 
 Hai câu hỏi phải tách:
   (a) một bước optimizer với grad HỮU HẠN có làm weight thành không hữu hạn không -> `bad_params`

@@ -17,9 +17,9 @@ import math
 import torch
 import torch.nn as nn
 
-from ce_localization.alpha.roi import MultiLevelRoIAlign
+from ce_localization.models.roi import MultiLevelRoIAlign
 
-__all__ = ["apply_deltas", "AlphaStage", "AlphaHead", "BBOX_WEIGHTS", "SCALE_CLAMP"]
+__all__ = ["apply_deltas", "DecoderStage", "DecoderHead", "BBOX_WEIGHTS", "SCALE_CLAMP"]
 
 BBOX_WEIGHTS = (2.0, 2.0, 1.0, 1.0)
 SCALE_CLAMP = math.log(100000.0 / 16)
@@ -50,7 +50,7 @@ def _tower(d, n):
     return nn.Sequential(*layers)
 
 
-class AlphaStage(nn.Module):
+class DecoderStage(nn.Module):
     def __init__(self, d_model=256, n_head=4, dim_feedforward=1024, dropout=0.3,
                  roi_channels=256, roi_size=7, num_cls=1, num_reg=3, first=False):
         super().__init__()
@@ -79,13 +79,13 @@ class AlphaStage(nn.Module):
         return logits, pred, q
 
 
-class AlphaHead(nn.Module):
+class DecoderHead(nn.Module):
     def __init__(self, n_stage=6, d_model=256, n_head=4, dim_feedforward=1024, dropout=0.3,
                  prior_prob=0.01):
         super().__init__()
         self.pooler = MultiLevelRoIAlign(output_size=7, sampling_ratio=2)
         self.stages = nn.ModuleList([
-            AlphaStage(d_model, n_head, dim_feedforward, dropout, first=(i == 0))
+            DecoderStage(d_model, n_head, dim_feedforward, dropout, first=(i == 0))
             for i in range(n_stage)])
         self._init(prior_prob)
 

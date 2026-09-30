@@ -30,7 +30,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from ce_localization.legacy.dp_vision import CROP, RAW, grid_to_crop, load_dp_encoder, preprocess  # noqa: E402
+from ce_localization.celoc_paper.dp_vision import CROP, RAW, grid_to_crop, load_dp_encoder, preprocess  # noqa: E402
 
 FONT = {"family": "DejaVu Sans", "size": 12, "weight": "normal"}   # MỌI chữ trên hình, như CE-Loc
 O = (RAW - CROP) // 2                  # lề crop giữa

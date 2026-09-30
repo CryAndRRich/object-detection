@@ -1,4 +1,4 @@
-"""Dữ liệu ALPHA: ảnh gốc CE-130 (`ground_truth.jpg`) + mọi box của lớp đó.
+"""Dữ liệu: ảnh gốc CE-130 (`ground_truth.jpg`) + mọi box của lớp đó.
 
 Đầu vào y như CE-Loc gốc (`refs/repos/Count-Editing/CE-LocModel/data/dataset.py:27-46`):
   scale = min(T/W, T/H) ; nw, nh = int(W·scale), int(H·scale)
@@ -6,40 +6,78 @@
 KHÔNG augmentation (CE-Loc gốc không có). Khác CE-Loc gốc đúng một chỗ: chuẩn hoá mean/std
 ImageNet, vì BatchNorm của R-50 bị đóng băng (docs/EXPERIMENT_ALPHA.md mục 2.1).
 
-Box: `all_bboxes` xyxy pixel ẢNH GỐC (qua `CE130Detection._scan`: dedupe theo ảnh, KHÔNG trừ
+Box: `all_bboxes` xyxy pixel ẢNH GỐC (qua `scan_ce130`: dedupe theo ảnh, KHÔNG trừ
 `inpainted_bboxes`, bỏ box suy biến) -> nhân `scale` -> kẹp vào vùng ảnh thật [0,nw]×[0,nh]
 -> bỏ box rỗng sau kẹp. Box ra là xyxy PIXEL CANVAS (tuyệt đối), đúng quy ước head DiffusionDet.
 
 CE-130 cao 384, rộng >= 384 nên nw = T và phần đệm LUÔN ở đáy; nhưng code không giả định điều
 đó — `valid_hw = (nh, nw)` đi kèm mỗi ảnh.
 
-ALPHA3 (`density` khác None): nối density [0,1] (letterbox NEAREST, `alpha/density.py`) làm kênh
+ALPHA3 (`density` khác None): nối density [0,1] (letterbox NEAREST, `data/density.py`) làm kênh
 thứ 4 -> ảnh [4,T,T]. Kênh density KHÔNG chuẩn hoá mean/std (như CE-Loc gốc: chỉ /255). Chế độ
 `mix` rút bản density theo RNG seed (seed, epoch, chỉ số ảnh): tái lập khi resume, không phụ thuộc
 số worker (cạm bẫy 12). `epoch` do vòng train gán TRƯỚC khi tạo DataLoader của epoch đó.
 
 BETA (`targets="point"`, docs/EXPERIMENT_BETA.md): đích train `boxes` là BOX GIẢ dựng từ điểm density
-(`alpha/points.py`: điểm × scale letterbox, bỏ điểm ngoài vùng thật, cỡ giả kNN theo pixel canvas,
+(`data/points.py`: điểm × scale letterbox, bỏ điểm ngoài vùng thật, cỡ giả kNN theo pixel canvas,
 kẹp theo `nh`); box GT KHÔNG vào đích. `gt_boxes` (mọi chế độ) = box GT, CHỈ để chấm.
 """
+
+import glob
+import json
+import os
 
 import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from ce_localization.alpha.density import MODES, letterbox_density, load_density_levels
-from ce_localization.alpha.points import pseudo_boxes, pseudo_sizes
-from ce_localization.data.ce130_dataset import CE130Detection
+from ce_localization.data.density import MODES, letterbox_density, load_density_levels
+from ce_localization.data.points import pseudo_boxes, pseudo_sizes
+from ce_localization.utils.box_ops_np import filter_degenerate
 
-__all__ = ["IMAGENET_MEAN", "IMAGENET_STD", "TARGETS", "letterbox", "scale_boxes", "scale_points",
-           "AlphaCE130", "collate", "to_device"]
+__all__ = ["IMAGENET_MEAN", "IMAGENET_STD", "TARGETS", "scan_ce130", "letterbox", "scale_boxes", "scale_points",
+           "CE130Dataset", "collate", "to_device"]
 
 TARGETS = ("box", "point")
 
 # Chuẩn ImageNet của torchvision (weight IMAGENET1K_V1 được học trên ảnh chuẩn hoá thế này).
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+
+def _read_annotation(branch_dir):
+    """`fixed_annotation.json` chỉ có ở val/test -> không có thì dùng `annotation.json`."""
+    for name in ("fixed_annotation.json", "annotation.json"):
+        path = os.path.join(branch_dir, name)
+        if os.path.exists(path):
+            with open(path) as f:
+                return json.load(f)
+    return None
+
+
+def scan_ce130(root, split):
+    """`<root>/<split>/<iid>_b*/` -> list ảnh (dedupe theo iid: mọi nhánh cùng ảnh gốc như nhau nên
+    lấy nhánh đầu, KIỂM TRƯỚC khi đọc JSON — đọc hết ~3 nhánh/ảnh từng làm khởi động mất 13–14 phút
+    trên đĩa server). Mỗi phần tử: image_id, img_path, boxes_xyxy_px (`all_bboxes`, KHÔNG trừ
+    `inpainted_bboxes`, bỏ 14/37.110 box suy biến w/h <= 0), text (`class_based_caption`)."""
+    by_image = {}
+    for br in sorted(glob.glob(os.path.join(root, split, "*"))):
+        iid = os.path.basename(br).split("_b")[0]
+        if iid in by_image:
+            continue
+        ann = _read_annotation(br)
+        if ann is not None:
+            by_image[iid] = (br, ann)
+    items = []
+    for iid, (br, ann) in sorted(by_image.items()):
+        img_path = os.path.join(br, "ground_truth.jpg")
+        if not os.path.exists(img_path):
+            continue
+        boxes, _ = filter_degenerate(np.asarray(ann.get("all_bboxes", []), dtype=np.float64).reshape(-1, 4))
+        items.append({"image_id": iid, "img_path": img_path, "boxes_xyxy_px": boxes,
+                      "text": ann.get("class_based_caption", "")})
+    return items
 
 
 def letterbox(img, target=512):
@@ -74,14 +112,12 @@ def normalize(canvas_uint8):
     return ((x - IMAGENET_MEAN) / IMAGENET_STD).transpose(2, 0, 1)
 
 
-class AlphaCE130(Dataset):
+class CE130Dataset(Dataset):
     """Một phần tử = một ẢNH (đã dedupe) với mọi box của lớp trong ảnh."""
 
     def __init__(self, root, split, image_size=512, density=None, density_index=None, seed=0,
                  targets="box", points=None, pseudo=None):
-        # target của CE130Detection không dùng ở đây: chỉ lấy danh sách ảnh + box từ `_scan`.
-        self.ds = CE130Detection(root, split, target=image_size)
-        self.items = self.ds.items
+        self.items = scan_ce130(root, split)
         self.image_size = image_size
         if targets not in TARGETS:
             raise ValueError(f"targets {targets!r} không thuộc {TARGETS}")

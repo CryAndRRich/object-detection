@@ -1,7 +1,7 @@
 """Đánh giá ALPHA — docs/EXPERIMENT_ALPHA.md mục 6.2 / 6.3.
 
 Suy luận thật: DDIM từ nhiễu thuần (KHÔNG dùng chỉ số trong log train — cạm bẫy 9). Mọi thứ sau
-model là numpy, chấm bằng `ce_localization/utils/metrics_np.py` qua `eval.score_records`:
+model là numpy, chấm bằng `ce_localization/utils/metrics_np.py` qua `score_records`:
   oracle_recall / score_AUC / mean_bestIoU trên TOÀN BỘ box trước NMS ; AP trên top-k sau NMS.
 Box được chuẩn hoá theo vùng ảnh thật (whwh) trước khi chấm; IoU không đổi qua phép co giãn
 theo trục nên chuẩn hoá không làm đổi số.
@@ -20,16 +20,16 @@ import time
 import numpy as np
 import torch
 
-from ce_localization.alpha.data import to_device
-from ce_localization.alpha.diffusion import prepare_train_boxes
-from ce_localization.eval import postprocess, score_records
+from ce_localization.data.dataset import to_device
+from ce_localization.engine.diffusion import prepare_train_boxes
 from ce_localization.utils.box_ops_np import box_iou as box_iou_np
 from ce_localization.utils.box_ops_np import cxcywh_to_xyxy as c2x_np
 from ce_localization.utils.box_ops_np import xyxy_to_cxcywh as x2c_np
 from ce_localization.utils.log import fmt_time
-from ce_localization.utils.metrics_np import ap_from_pr, nms_class_agnostic, oracle_hits, roc_auc
+from ce_localization.utils.metrics_np import (COCO_THR, ap_from_pr, evaluate, nms_class_agnostic, oracle_hits,
+                                              quality, roc_auc, summarise)
 
-__all__ = ["SIZE_BINS", "DENSITY_BINS", "POSTPROCESS", "postprocess_nms_first", "predict", "score",
+__all__ = ["SIZE_BINS", "DENSITY_BINS", "POSTPROCESS", "postprocess", "postprocess_nms_first", "score_records", "predict", "score",
            "size_recall", "density_recall", "point_metrics", "attention_diagnostics"]
 
 # cạnh sqrt(w·h) của GT, pixel QUY VỀ CANVAS 512 (để so được giữa canvas 512 và 1024):
@@ -86,9 +86,40 @@ def predict(model, loader, text_table, num_proposals, steps=1, top_k=100, nms_th
 DENSITY_BINS = ((0, 30, "<=30 vật"), (31, 100, "31-100 vật"), (101, 10 ** 9, ">100 vật"))
 
 
+def postprocess(boxes_cxcywh, scores, top_k, nms_thr=None):
+    """Một ảnh -> chỉ số box giữ lại: TOP-K theo score, rồi NMS nếu bật."""
+    keep = np.argsort(-np.asarray(scores), kind="stable")[:top_k]
+    if nms_thr is not None and len(keep):
+        keep = keep[nms_class_agnostic(c2x_np(boxes_cxcywh[keep]), scores[keep], nms_thr)]
+    return keep
+
+
+def score_records(records):
+    """Bản ghi numpy (boxes / scores / keep / gt, cxcywh) -> mọi chỉ số. Hàm thuần.
+    oracle_recall / score_AUC / mean_bestIoU trên TOÀN BỘ box; AP / precision / recall trên `keep`."""
+    preds = [(c2x_np(r["boxes"][r["keep"]]), r["scores"][r["keep"]], c2x_np(r["gt"])) for r in records]
+    ap_by_thr = {f"AP{int(round(100 * t))}": evaluate(preds, t)["AP"] for t in COCO_THR}
+    at50 = evaluate(preds, 0.5)
+    best_all, hits, n_gt, aucs = [], 0, 0, []
+    for r in records:
+        best, hit, ng, auc = quality(r["boxes"], r["scores"], r["gt"], size=1)
+        best_all.append(best)
+        hits, n_gt = hits + hit, n_gt + ng
+        aucs.append(auc)
+    res = summarise(best_all, hits, n_gt, aucs, recall_scored=at50["recall"])
+    res.update(ap_by_thr)
+    res["AP_coco"] = float(np.mean(list(ap_by_thr.values())))
+    res.update({k: at50[k] for k in ("precision", "recall", "f1", "n_pred", "n_gt")})
+    # ngưỡng IoU thấp (không gộp vào AP_coco): recall tăng vọt khi hạ ngưỡng = box nằm trên vật
+    # nhưng chưa khít; đứng yên = bỏ sót vật hẳn
+    for t in (0.1, 0.3):
+        res[f"recall{int(100 * t)}"] = evaluate(preds, t)["recall"]
+    return res
+
+
 def postprocess_nms_first(boxes_cxcywh, scores, top_k, nms_thr=None):
     """Thứ tự của DiffusionDet + COCO: NMS trên TOÀN BỘ box trước, rồi giữ top-k theo score.
-    (`eval.postprocess` làm ngược lại: top-k trước rồi NMS — với matcher một-nhiều như SimOTA,
+    (`postprocess` làm ngược lại: top-k trước rồi NMS — với matcher một-nhiều như SimOTA,
     top-k toàn bản trùng, NMS xong mỗi ảnh chỉ còn ~25 box; docs mục 12.3.)"""
     scores = np.asarray(scores)
     if nms_thr is None or not len(scores):
@@ -227,7 +258,7 @@ def point_metrics(records):
 
 def score(records, stage_recall, top_k=100, nms_thr=0.5, oracle=True, order="topk_first"):
     """Mọi chỉ số của một lượt eval -> dict (float thuần, ghi JSON được).
-    `order`: "topk_first" (quy ước cũ, `eval.postprocess`) | "nms_first" (như DiffusionDet)."""
+    `order`: "topk_first" (quy ước cũ, `postprocess`) | "nms_first" (như DiffusionDet)."""
     records = rekeep(records, top_k, nms_thr, order)
     res = score_records(records)
     res["postprocess"] = order

@@ -1,260 +1,284 @@
-"""Train (checkpoint/resume, grad monitor, chọn checkpoint) và eval chạy TRỌN LUỒNG
-(predict -> score_records, AP tính tay, trần oracle-score)."""
+"""TRỌN LUỒNG `train.py` -> dừng -> `--resume` -> `eval.py` trên CE-130 giả cho mọi loại config (memory,
+density, đích điểm), DDP 2 tiến trình, `--bench`, `--nan-debug`, và kiểm các config chỉ khác nhau đúng
+chỗ đã chốt. Mọi lượt train / eval ép `--device cpu`: backward conv (cuDNN) và `roi_align` trên GPU
+không tất định (resume lệch ~1e-5) và GPU server dùng chung có thể hết bộ nhớ (2026-09-29).
+"""
 
+import json
 import os
 import sys
 
-import numpy as np
 import pytest
 import torch
+import yaml
 
-from ce_localization.models.criterion import SetCriterion
-from ce_localization.models.dit_blocks import (                                    
-    MIN_WH,
-    BoxCoordEmbedder,
-    DiTBlock,
-    build_cross_mask,
-    clamp_to_valid,
-    update_box,
-)
-
-PROJECT = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "ce_localization")
-
-# ============================================================================
-# từ test_experiment_a.py
-# ============================================================================
-
-B, N, D, P, DIN = 2, 5, 32, 64, 24          # P=64 -> lưới 8x8, là số chính phương
+from ce_localization.data.dataset import CE130Dataset
+from tests.ce_localization.helpers import (CFG0, CFG3, CFG_B0, _fake_ce130, _fake_text_table, _test_cfg,
+                                           _run_train, _fake_density, _beta_cfg, _run_g0)
 
 
-def _toy_train_state(seed=0):
-    torch.manual_seed(seed)
-    net = torch.nn.Linear(4, 2)
-    opt = torch.optim.AdamW(net.parameters(), lr=1e-2)
-    return net, opt
+@pytest.mark.parametrize("kind", ["none", "spatial_softmax", "grid"])
+def test_full_flow_train_resume_eval(tmp_path, monkeypatch, kind):
+    """train 2 iter -> dừng -> --resume tới 4 iter == train liền 4 iter ; rồi eval ghi JSON."""
+    root = str(tmp_path / "all_phase2_V2")
+    _fake_ce130(root)
+    cfg_path, _ = _test_cfg(tmp_path, kind, root)
+    a, b = str(tmp_path / "a"), str(tmp_path / "b")
+
+    _run_train(monkeypatch, ["--config", cfg_path, "--save-dir", a, "--max-iter", "2"])
+    ck = torch.load(os.path.join(a, "last.pth"), weights_only=False)
+    assert ck["iter"] == 2 and ck["best"]["iter"] == 2
+    with pytest.raises(SystemExit):                                  # last.pth có rồi mà thiếu --resume
+        _run_train(monkeypatch, ["--config", cfg_path, "--save-dir", a])
+    _run_train(monkeypatch, ["--config", cfg_path, "--save-dir", a, "--resume"])
+    _run_train(monkeypatch, ["--config", cfg_path, "--save-dir", b])
+    ka = torch.load(os.path.join(a, "last.pth"), weights_only=False)
+    kb = torch.load(os.path.join(b, "last.pth"), weights_only=False)
+    assert ka["iter"] == kb["iter"] == 4
+    for k in kb["model"]:
+        assert torch.allclose(ka["model"][k].float(), kb["model"][k].float(), atol=1e-5), k
+    assert sorted(os.listdir(a)) == ["best.pth", "history.json", "last.pth"]
+    with open(os.path.join(a, "last.pth"), "rb") as f:               # pickle, KHÔNG zip (Kaggle)
+        assert f.read(2) != b"PK"
+
+    import ce_localization.eval as ea
+    import ce_localization.train as ta
+    monkeypatch.setattr(ta, "build_text_table", _fake_text_table)
+    out = str(tmp_path / "res.json")
+    monkeypatch.setattr(sys, "argv", ["eval.py", "--ckpt", os.path.join(a, "best.pth"),
+                                      "--split", "test", "--nms", "--oracle-score", "--steps", "1", "4",
+                                      "--attn-diag", "1", "--batch-size", "2", "--num-workers", "0",
+                                      "--out", out, "--device", "cpu"])
+    ea.main()
+    with open(out) as f:
+        res = json.load(f)
+    assert set(res["results"]) == {"steps1", "steps4", "steps1_nmsfirst", "steps4_nmsfirst"}
+    for s in res["results"]:
+        r = res["results"][s]
+        assert set(r["density_recall"]) == {"<=30 vật", "31-100 vật", ">100 vật"}
+        assert 0 <= r["oracle_recall"] <= 1 and len(r["oracle_recall_per_stage"]) == 6
+        assert "AP50" in r["oracle_score"] and set(r["size_recall"]) == {"<1 ô P5", "1-4 ô P5", ">4 ô P5"}
+    att = res["attention"]["999"]
+    assert len(att["time"]) == 6
+    assert ("ss" in att) == (kind == "spatial_softmax") and ("grid_lift_in_gt" in att) == (kind == "grid")
 
 
-def _one_step(net, opt, gen):
-    x = torch.randn(8, 4, generator=gen)
-    opt.zero_grad()
-    net(x).pow(2).mean().backward()
-    opt.step()
+def test_resume_refuses_changed_model_config(tmp_path, monkeypatch):
+    root = str(tmp_path / "all_phase2_V2")
+    _fake_ce130(root, n_train=2, n_val=1, n_test=1)
+    p0, cfg = _test_cfg(tmp_path, "none", root)
+    save = str(tmp_path / "s")
+    _run_train(monkeypatch, ["--config", p0, "--save-dir", save, "--max-iter", "2"])
+    p1, _ = _test_cfg(tmp_path, "grid", root)
+    with pytest.raises(SystemExit):
+        _run_train(monkeypatch, ["--config", p1, "--save-dir", save, "--resume"])
 
 
-def test_checkpoint_save_ghi_last_va_chi_chep_best_khi_cai_thien(tmp_path):
-    from ce_localization.utils.checkpoint import CheckpointManager
-
-    m = CheckpointManager(str(tmp_path))
-    m.save({"epoch": 0, "v": 1}, is_best=True)
-    m.save({"epoch": 1, "v": 2}, is_best=False)
-    assert m.load_last()["epoch"] == 1
-    best = torch.load(m.best_path, weights_only=False)
-    assert best["epoch"] == 0                      # best KHÔNG bị ghi đè bởi epoch tệ hơn
-    assert not list(tmp_path.glob("*.tmp"))        # không để lại file tạm
-
-
-def test_checkpoint_ghi_nguyen_tu_giu_file_cu_khi_ghi_hong(tmp_path, monkeypatch):
-    """Bị ngắt giữa lúc ghi thì last.pt CŨ phải còn nguyên — đó là lý do tồn tại."""
-    import pytest
-
-    from ce_localization.utils.checkpoint import CheckpointManager
-
-    m = CheckpointManager(str(tmp_path))
-    m.save({"epoch": 5}, is_best=False)
-
-    def hong(obj, path):
-        with open(path, "wb") as f:
-            f.write(b"dang ghi do")
-        raise KeyboardInterrupt                    # giả lập bị kill giữa chừng
-    monkeypatch.setattr(torch, "save", hong)
-    with pytest.raises(KeyboardInterrupt):
-        m.save({"epoch": 6}, is_best=False)
-    monkeypatch.undo()
-    assert m.load_last()["epoch"] == 5
+def test_lr_override_used_and_recorded(tmp_path, monkeypatch):
+    root = str(tmp_path / "all_phase2_V2")
+    _fake_ce130(root, n_train=2, n_val=1, n_test=1)
+    p0, _ = _test_cfg(tmp_path, "none", root)
+    save = str(tmp_path / "lr")
+    _run_train(monkeypatch, ["--config", p0, "--save-dir", save, "--max-iter", "2", "--lr", "1e-4"])
+    ck = torch.load(os.path.join(save, "last.pth"), weights_only=False)
+    assert ck["config"]["training"]["lr"] == 1e-4
+    assert ck["optimizer"]["param_groups"][0]["initial_lr"] == 1e-4
 
 
-def test_resume_cho_ket_qua_trung_khit_train_lien_tuc(tmp_path):
-    """Train 4 bước liền == train 2 bước, lưu, nạp vào model MỚI, train tiếp 2 bước.
-    Kiểm cả optimizer (moment của AdamW) lẫn RNG — thiếu cái nào cũng lệch."""
-    from ce_localization.utils.checkpoint import CheckpointManager, rng_state, set_rng_state
-
-    net_a, opt_a = _toy_train_state()
-    gen_a = torch.Generator().manual_seed(1)
-    for _ in range(4):
-        _one_step(net_a, opt_a, gen_a)
-
-    net_b, opt_b = _toy_train_state()
-    gen_b = torch.Generator().manual_seed(1)
-    for _ in range(2):
-        _one_step(net_b, opt_b, gen_b)
-    m = CheckpointManager(str(tmp_path))
-    m.save({"model": net_b.state_dict(), "optimizer": opt_b.state_dict(),
-            "rng": rng_state(gen_b), "epoch": 1}, is_best=False)
-
-    net_c, opt_c = _toy_train_state(seed=123)      # khởi tạo KHÁC, phải bị ghi đè hết
-    gen_c = torch.Generator().manual_seed(999)
-    st = m.load_last()
-    net_c.load_state_dict(st["model"])
-    opt_c.load_state_dict(st["optimizer"])
-    set_rng_state(st["rng"], gen_c)
-    for _ in range(2):
-        _one_step(net_c, opt_c, gen_c)
-
-    for pa, pc in zip(net_a.parameters(), net_c.parameters()):
-        assert torch.equal(pa, pc)
+def test_bench_writes_nothing(tmp_path, monkeypatch, capsys):
+    root = str(tmp_path / "all_phase2_V2")
+    _fake_ce130(root, n_train=2, n_val=1, n_test=1)
+    p0, _ = _test_cfg(tmp_path, "none", root)
+    save = str(tmp_path / "bench")
+    _run_train(monkeypatch, ["--config", p0, "--save-dir", save, "--bench", "2"])
+    assert "[bench]" in capsys.readouterr().out
+    assert not os.path.exists(os.path.join(save, "last.pth"))
 
 
-def test_config_mismatch_chan_doi_kien_truc_cho_phep_doi_batch():
-    from ce_localization.utils.checkpoint import CheckpointManager
-
-    cu = {"model": {"n_layer": 6}, "diffusion": {}, "matcher": {},
-          "data": {"image_size": 1024, "num_workers": 8}, "training": {"batch_size": 2}}
-    doi_batch = {**cu, "training": {"batch_size": 6},
-                 "data": {"image_size": 1024, "num_workers": 4}}
-    doi_anh = {**cu, "data": {"image_size": 512, "num_workers": 8}}
-
-    assert CheckpointManager.config_mismatch(cu, doi_batch) == ([], ["training"])
-    assert CheckpointManager.config_mismatch(cu, doi_anh)[0] == ["data"]
+def _ddp_worker(rank, world, port, argv):
+    import ce_localization.train as ta
+    os.environ.update(RANK=str(rank), LOCAL_RANK=str(rank), WORLD_SIZE=str(world),
+                      MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port))
+    ta.build_text_table = _fake_text_table
+    sys.argv = ["train.py"] + argv + ["--device", "cpu"]
+    ta.main()
 
 
-def test_grad_monitor_nhom_va_ti_phan():
-    from ce_localization.utils.grad_monitor import GradMonitor, group_of
-
-    assert group_of("decoder.layers.0.box_delta.weight") == "box_delta[0]"
-    assert group_of("decoder.layers.5.roi.proj_point.weight") == "roi.proj_point"
-    assert group_of("decoder.layers.2.roi.out.bias") == "roi.out"
-    assert group_of("decoder.layers.3.cross_attn.in_proj_weight") == "cross_attn"
-    assert group_of("encoder.proj_patch.weight") == "proj_patch"
-    assert group_of("decoder.score_head.4.weight") == "score_head"
-    assert group_of("decoder.cond_pos_emb") == "embed/khác"
-
-    net = torch.nn.Module()
-    net.encoder = torch.nn.Module()
-    net.encoder.proj_patch = torch.nn.Linear(4, 4)
-    net.encoder.proj_text = torch.nn.Linear(4, 4)
-    x = torch.randn(3, 4)
-    (net.encoder.proj_patch(x * 100).sum() + net.encoder.proj_text(x).sum()).backward()
-    mon = GradMonitor(net, every=1)
-    mon.maybe_record(0)
-    s = mon.summary()
-    assert list(s)[0] == "proj_patch"          # đầu vào to x100 -> gradient áp đảo
-    sh = GradMonitor.share(s)
-    assert abs(sum(sh.values()) - 1.0) < 1e-6
-    assert mon.summary() == {}                 # summary xoá mẫu để đo epoch sau
+def test_ddp_two_processes(tmp_path):
+    """torchrun 2 tiến trình (gloo, CPU): batch toàn cục 2 = 1/GPU, chỉ rank 0 ghi, eval + dừng đúng."""
+    import socket
+    import torch.multiprocessing as tmp
+    root = str(tmp_path / "all_phase2_V2")
+    _fake_ce130(root)
+    p0, _ = _test_cfg(tmp_path, "none", root)     # ALPHA0: P5 không có RoI -> tham số không dùng
+    save = str(tmp_path / "ddp")
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    tmp.spawn(_ddp_worker, args=(2, port, ["--config", p0, "--save-dir", save, "--max-iter", "2"]),
+              nprocs=2, join=True)
+    ck = torch.load(os.path.join(save, "last.pth"), weights_only=False)
+    assert ck["iter"] == 2 and ck["best"] is not None
+    assert sorted(os.listdir(save)) == ["best.pth", "history.json", "last.pth"]
 
 
-class _FakeSampler(torch.nn.Module):
-    """ddim_sample trả về đúng box/score định sẵn cho từng ảnh."""
-
-    def __init__(self, per_image):
-        super().__init__()
-        self.per_image = per_image                     # list[(boxes [N,4], logits [N])]
-        self.i = 0
-
-    def ddim_sample(self, n, valid_h=None, generator=None, return_all_layers=False,
-                    **kw):
-        B = kw["patch_raw"].shape[0]
-        items = self.per_image[self.i:self.i + B]
-        self.i += B
-        boxes = torch.stack([b for b, _ in items])
-        logits = torch.stack([l for _, l in items])
-        # 2 "tầng": tầng đầu lệch hẳn, tầng cuối là dự đoán thật
-        return [(boxes + 0.3, logits), (boxes, logits)]
+def test_config_diff_ignores_data_root_and_workers():
+    """Kaggle gắn dataset ở đường dẫn khác nhau giữa các phiên: resume vẫn phải chạy."""
+    from ce_localization.train import config_diff
+    with open(CFG0) as f:
+        cfg = yaml.safe_load(f)
+    other = json.loads(json.dumps(cfg))
+    other["data"].update(root="/kaggle/input/x/all_phase2_V2", num_workers=2,
+                         density_root="/kaggle/input/y/samples", density_index="/kaggle/temp/i.json")
+    other["training"]["max_iter"] = 99
+    assert config_diff(cfg, other) == ([], ["training"])
+    other["model"]["memory"] = "grid"
+    assert config_diff(cfg, other)[0] == ["model"]
 
 
-class _FakeLoader:
-    def __init__(self, batches):
-        self.batches = batches
-        self.dataset = [None] * sum(len(b["boxes"]) for b in batches)
-
-    def __iter__(self):
-        return iter(self.batches)
-
-    def __len__(self):
-        return len(self.batches)
-
-
-def _batch(gts, ids):
-    B = len(gts)
-    return {"boxes": [torch.tensor(g, dtype=torch.float32) for g in gts],
-            "labels": [torch.zeros(len(g), dtype=torch.long) for g in gts],
-            "text": ["x"] * B, "valid_h": [1.0] * B, "image_id": ids,
-            "patch_raw": torch.zeros(B, 4, 8), "text_raw": torch.zeros(B, 1, 8)}
+def test_alpha3_configs_only_differ_from_alpha0_by_density():
+    with open(CFG0) as f:
+        c0 = yaml.safe_load(f)
+    for mode, p in CFG3.items():
+        with open(p) as f:
+            c = yaml.safe_load(f)
+        assert c["data"].pop("density") == mode and c["model"].pop("in_channels") == 4
+        assert c["eval"].pop("density") == "full"
+        c["data"].pop("density_root"), c["data"].pop("density_index")
+        for k in ("experiment", "description"):
+            c.pop(k), c0.get(k)
+        assert {k: v for k, v in c.items()} == {k: v for k, v in c0.items() if k not in ("experiment", "description")}
 
 
-def test_eval_tron_luong_du_doan_hoan_hao():
-    from ce_localization import eval as ev
-
-    gt0 = [[0.2, 0.2, 0.1, 0.1], [0.6, 0.6, 0.1, 0.1]]
-    gt1 = [[0.5, 0.3, 0.2, 0.1]]
-    far = [0.9, 0.9, 0.05, 0.05]
-    per = [(torch.tensor(gt0 + [far, far]), torch.tensor([5.0, 5.0, -5.0, -5.0])),
-           (torch.tensor(gt1 + [far, far, far]), torch.tensor([5.0, -5.0, -5.0, -5.0]))]
-    loader = _FakeLoader([_batch([gt0, gt1], ["a", "b"])])
-    recs, rec_layer = ev.predict(_FakeSampler(per), loader, 4, torch.device("cpu"),
-                                 top_k=100, nms_thr=0.5)
-    res = ev.score_records(recs)
-
-    assert res["AP50"] == pytest.approx(1.0)
-    assert res["oracle_recall"] == pytest.approx(1.0)
-    assert res["score_AUC"] == pytest.approx(1.0)
-    assert rec_layer[-1] == pytest.approx(1.0) and rec_layer[0] < 1.0
-    # NMS gộp các box `far` trùng nhau: 4 box -> còn 3 ở ảnh 0 (2 GT + 1 far)
-    assert len(recs[0]["keep"]) == 3
+def test_beta0_config_only_differs_from_alpha0_by_beta_keys():
+    with open(CFG0) as f:
+        c0 = yaml.safe_load(f)
+    with open(CFG_B0) as f:
+        c = yaml.safe_load(f)
+    assert c["data"].pop("targets") == "point" and c["data"].pop("points").endswith("density_points.json")
+    assert set(c["data"].pop("pseudo_size")) == {"knn", "beta", "min_frac", "max_frac"}
+    assert c["loss"].pop("center_weight") == c0["loss"]["l1_weight"] and "size_weight" in c["loss"]
+    c["loss"].pop("size_weight")
+    assert c["eval"].pop("select_metric") == "oracle_recall_pt"
+    c0["eval"].pop("select_metric")
+    for k in ("experiment", "description"):
+        c.pop(k), c0.pop(k)
+    assert c == c0
 
 
-def test_eval_ap_tinh_tay():
-    """2 GT; dự đoán theo score: TP 0.9, FP 0.8, TP 0.7.
-    recall [.5 .5 1], precision [1 .5 .667] -> AP = .5*1 + .5*.667 = 0,8333."""
-    from ce_localization.utils.metrics_np import evaluate
+@pytest.mark.parametrize("mode", ["full", "mix"])
+def test_full_flow_density_train_resume_eval(tmp_path, monkeypatch, mode):
+    """ALPHA3.1 / 3.2: train 2 -> --resume tới 4 == train liền 4 (mix phải tái lập qua resume);
+    eval full / partial / empty ghi đúng điều kiện; model 3 kênh + --density bị từ chối."""
+    root = str(tmp_path / "all_phase2_V2")
+    _fake_ce130(root)
+    _fake_density(str(tmp_path))
+    cfg_path, _ = _test_cfg(tmp_path, "none", root, density=mode)
+    a, b = str(tmp_path / "a"), str(tmp_path / "b")
+    _run_train(monkeypatch, ["--config", cfg_path, "--save-dir", a, "--max-iter", "2"])
+    _run_train(monkeypatch, ["--config", cfg_path, "--save-dir", a, "--resume"])
+    _run_train(monkeypatch, ["--config", cfg_path, "--save-dir", b])
+    ka = torch.load(os.path.join(a, "last.pth"), weights_only=False)
+    kb = torch.load(os.path.join(b, "last.pth"), weights_only=False)
+    assert ka["iter"] == kb["iter"] == 4
+    for k in kb["model"]:
+        assert torch.allclose(ka["model"][k].float(), kb["model"][k].float(), atol=1e-5), k
+    w = kb["model"]["backbone.stem.0.weight"]
+    assert w.shape[1] == 4 and w[:, 3].abs().max() > 0          # kênh density có gradient, đã học
+    ev = [h for h in kb["history"] if "eval" in h]
+    assert ev and ev[-1]["density_weight_ratio"] > 0
 
-    gt = np.array([[0.0, 0.0, 0.1, 0.1], [0.5, 0.5, 0.6, 0.6]])
-    boxes = np.array([[0.0, 0.0, 0.1, 0.1], [0.8, 0.8, 0.9, 0.9], [0.5, 0.5, 0.6, 0.6]])
-    r = evaluate([(boxes, np.array([0.9, 0.8, 0.7]), gt)], 0.5)
-    assert r["AP"] == pytest.approx(0.5 + 0.5 * 2 / 3)
-    assert r["recall"] == pytest.approx(1.0)
+    import ce_localization.eval as ea
+    import ce_localization.train as ta
+    monkeypatch.setattr(ta, "build_text_table", _fake_text_table)
+    for cond in (None, "partial", "empty"):
+        out = str(tmp_path / f"res_{cond}.json")
+        argv = ["eval.py", "--ckpt", os.path.join(a, "best.pth"), "--split", "test", "--nms",
+                "--steps", "1", "--batch-size", "2", "--num-workers", "0", "--out", out, "--device", "cpu"]
+        monkeypatch.setattr(sys, "argv", argv + ([] if cond is None else ["--density", cond]))
+        ea.main()
+        with open(out) as f:
+            res = json.load(f)
+        assert res["density"] == (cond or "full") and sum(res["density_kinds"].values()) == 2
+        assert res["density_weight_ratio"] > 0 and set(res["results"]) == {"steps1", "steps1_nmsfirst"}
+    with open(str(tmp_path / "res_partial.json")) as f:
+        assert json.load(f)["density_kinds"] == {"full": 1, "partial": 1}   # ảnh đầu test chỉ 1 bản
+
+    p0, _ = _test_cfg(tmp_path, "none", root)
+    c3 = str(tmp_path / "c3")
+    _run_train(monkeypatch, ["--config", p0, "--save-dir", c3, "--max-iter", "2"])
+    monkeypatch.setattr(sys, "argv", ["eval.py", "--ckpt", os.path.join(c3, "best.pth"),
+                                      "--density", "full", "--device", "cpu", "--num-workers", "0"])
+    with pytest.raises(SystemExit):
+        ea.main()
 
 
-def test_postprocess_top_k_truoc_roi_nms():
-    from ce_localization import eval as ev
+def test_nan_debug_pinpoints_nan_input_channel(tmp_path, monkeypatch, capsys):
+    """--nan-debug: NaN ở kênh density -> báo đúng kênh 3 + module đầu tiên (conv1) rồi DỪNG."""
+    import ce_localization.train as ta
+    root = str(tmp_path / "all_phase2_V2")
+    _fake_ce130(root)
+    _fake_density(str(tmp_path))
+    cfg_path, _ = _test_cfg(tmp_path, "none", root, density="full")
+    orig = CE130Dataset.__getitem__
 
-    b = np.array([[0.5, 0.5, 0.2, 0.2], [0.5, 0.5, 0.2, 0.2], [0.1, 0.1, 0.05, 0.05]])
-    s = np.array([0.9, 0.8, 0.1])
-    assert ev.postprocess(b, s, top_k=2).tolist() == [0, 1]
-    assert ev.postprocess(b, s, top_k=2, nms_thr=0.5).tolist() == [0]   # trùng bị gộp
-    assert ev.postprocess(b, s, top_k=3, nms_thr=0.5).tolist() == [0, 2]
-
-
-def test_oracle_score_tach_loi_xep_hang_khoi_loi_box():
-    """Box đúng nhưng score đảo ngược: AP thật thấp, TRẦN phải về 1.
-    Box sai hoàn toàn: trần cũng 0 — sửa score vô ích."""
-    from ce_localization import eval as ev
-
-    gt = np.array([[0.2, 0.2, 0.1, 0.1], [0.6, 0.6, 0.1, 0.1]])
-    far = [0.9, 0.9, 0.05, 0.05]
-    boxes = np.array(gt.tolist() + [far, far])
-    bad_sc = np.array([0.1, 0.2, 0.9, 0.8])            # box sai lại điểm cao
-    rec = {"image_id": "a", "boxes": boxes, "scores": bad_sc, "classes": None,
-           "gt": gt, "keep": ev.postprocess(boxes, bad_sc, 100, None)}
-
-    that = ev.score_records([rec])
-    tran = ev.score_records(ev.with_oracle_scores([rec], 100, None))
-    # FP, FP, TP, TP -> precision đơn điệu 0,5 ở cả hai mức recall -> AP = 0,5
-    assert that["AP50"] == pytest.approx(0.5)
-    assert tran["AP50"] == pytest.approx(1.0)
-
-    orc = ev.with_oracle_scores([rec], 100, None)[0]
-    assert np.array_equal(orc["boxes"], boxes)          # box giữ nguyên từng bit
-    assert orc["scores"][:2] == pytest.approx([1.0, 1.0]) and orc["scores"][2] == 0.0
-
-    sai = {**rec, "boxes": np.array([far] * 4)}
-    assert ev.score_records(ev.with_oracle_scores([sai], 100, None))["AP50"] == 0.0
+    def poisoned(self, i):
+        s = orig(self, i)
+        s["image"][3, 0, 0] = float("nan")
+        return s
+    monkeypatch.setattr(CE130Dataset, "__getitem__", poisoned)
+    with pytest.raises(SystemExit, match="NaN đầu tiên"):
+        _run_train(monkeypatch, ["--config", cfg_path, "--save-dir", str(tmp_path / "d"), "--nan-debug"])
+    out = capsys.readouterr().out
+    assert "ảnh kênh 3: không hữu hạn 2/" in out and "ảnh kênh 0: không hữu hạn 0/" in out
+    assert "module ĐẦU TIÊN ra không hữu hạn: backbone.stem.0 (Conv2d) | đầu vào hữu hạn [False]" in out
 
 
-def test_select_metric():
-    from ce_localization.train import select_metric
-    assert select_metric({}) == "oracle_recall"
-    assert select_metric({"eval": {"select_metric": "score_AUC"}}) == "score_AUC"
-    with pytest.raises(ValueError):
-        select_metric({"eval": {"select_metric": "iou_matched"}})   # cạm bẫy 3
+def test_full_flow_beta0_train_resume_eval_and_gt_never_in_loss(tmp_path, monkeypatch):
+    """G0 -> train 2 iter -> --resume tới 4 == train liền 4 ; eval ghi chỉ số điểm. Đổi box GT của
+    ảnh train (giữ điểm) -> weight sau train Y HỆT: box GT không vào loss."""
+    base = str(tmp_path)
+    root = os.path.join(base, "all_phase2_V2")
+    _fake_ce130(root)
+    _fake_density(base)
+    pts = str(tmp_path / "density_points.json")
+    _run_g0(monkeypatch, base, pts, str(tmp_path / "rep.json"))
+    cfg_path = _beta_cfg(tmp_path, root, pts)
+    a, b = str(tmp_path / "a"), str(tmp_path / "b")
+    _run_train(monkeypatch, ["--config", cfg_path, "--save-dir", a, "--max-iter", "2"])
+    _run_train(monkeypatch, ["--config", cfg_path, "--save-dir", a, "--resume"])
+    _run_train(monkeypatch, ["--config", cfg_path, "--save-dir", b])
+    ka = torch.load(os.path.join(a, "last.pth"), weights_only=False)
+    kb = torch.load(os.path.join(b, "last.pth"), weights_only=False)
+    assert ka["iter"] == kb["iter"] == 4
+    for k in kb["model"]:
+        assert torch.allclose(ka["model"][k].float(), kb["model"][k].float(), atol=1e-5), k
+    assert "oracle_recall_pt" in kb["best"] and kb["config"]["data"]["targets"] == "point"
 
+    for br in os.listdir(os.path.join(root, "train")):                        # box GT train khác hẳn
+        p = os.path.join(root, "train", br, "annotation.json")
+        with open(p) as f:
+            ann = json.load(f)
+        ann["all_bboxes"] = [[1.0, 1.0, 9.0, 9.0]]
+        with open(p, "w") as f:
+            json.dump(ann, f)
+    c = str(tmp_path / "c")
+    _run_train(monkeypatch, ["--config", cfg_path, "--save-dir", c])
+    kc = torch.load(os.path.join(c, "last.pth"), weights_only=False)
+    for k in kb["model"]:
+        assert torch.equal(kb["model"][k], kc["model"][k]), k
+
+    import ce_localization.eval as ea
+    import ce_localization.train as ta
+    monkeypatch.setattr(ta, "build_text_table", _fake_text_table)
+    out = str(tmp_path / "res.json")
+    monkeypatch.setattr(sys, "argv", ["eval.py", "--ckpt", os.path.join(a, "best.pth"), "--split", "test",
+                                      "--nms", "--steps", "1", "--batch-size", "2", "--num-workers", "0",
+                                      "--out", out, "--device", "cpu"])
+    ea.main()
+    with open(out) as f:
+        res = json.load(f)
+    for key in ("steps1", "steps1_nmsfirst"):
+        p = res["results"][key]["point"]
+        assert 0 <= p["oracle_recall_pt"] <= 1 and 0 <= p["AP_pt"] <= 1
+        assert set(p["by_density"]) == {"<=30 vật", "31-100 vật", ">100 vật"}

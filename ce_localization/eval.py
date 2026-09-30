@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
-"""Eval CE-Loc: suy luận DDIM từ nhiễu thuần -> AP + các chỉ số tách box khỏi xếp hạng.
+"""Eval CE-Loc detector (mọi config của train.py): DDIM từ nhiễu thuần -> AP + các chỉ số tách box khỏi xếp hạng.
 
-Mọi thứ sau model là numpy, chấm bằng `utils/metrics_np.py` — cùng giao thức với bảng
-vòng 1 và baseline D.1. SỐ ĐỂ SO VỚI D.1 (AP50 58,13):
-    --split test --num-proposals 300 --top-k 100 --nms
+Giao thức (docs/EXPERIMENT_ALPHA.md mục 6.2): test, N=200, top-k 100, NMS 0,5.
+  oracle_recall / score_AUC / mean_bestIoU trên TOÀN BỘ box trước NMS ; AP trên top-k sau NMS.
+  --oracle-score : trần khi score = IoU thật với GT (cùng box) — chênh do box hay do xếp hạng.
+  --steps 1 4    : 1 bước (chính) và 4 bước (renewal + ensemble; chạy batch 1).
+  --attn-diag K  : chẩn đoán attention cross-attn trên K batch (mục 6.3).
+  --density M    : model 4 kênh (ALPHA3): density đưa vào — full (mặc định) / partial / empty (mục 5).
+Config lấy từ checkpoint (an toàn hơn), trừ khi truyền --config.
 
-Đọc số:
-  oracle_recall    GT được ít nhất một trong N box phủ — chất lượng BOX, không dùng score.
-  score_AUC        box khớp GT có score cao hơn box còn lại không — chất lượng XẾP HẠNG.
-  --oracle-score   thay score bằng IoU thật với GT, CÙNG box -> trần AP khi xếp hạng hoàn
-                   hảo. Trần >> thật: nút thắt là xếp hạng; trần cũng thấp: là box.
-  N=30 (mặc định config) có trần oracle_recall chỉ 83,8/82,4/76,1 % (train/val/test).
-
-Chạy (~1–3 phút, trực tiếp được):
   cd object-detection/ce_localization
-  python ../tools/run_on_free_gpu.py -- eval.py --ckpt checkpoints/<tên>/best.pt \\
-      --split test --num-proposals 300 --top-k 100 --nms --oracle-score \\
-      --out /mnt/disk1/aiotlab/haitn/output/<tên>_test_N300.json
+  LOG=/mnt/disk1/aiotlab/haitn/log/alpha0_eval_$(date +%m%d_%H%M).log
+  nohup python ../tools/run_on_free_gpu.py -- eval.py --ckpt checkpoints/alpha0/best.pth \\
+      --split test --num-proposals 200 --top-k 100 --nms --oracle-score --steps 1 4 --attn-diag 20 \\
+      --out /mnt/disk1/aiotlab/haitn/output/alpha0_test_N200.json > $LOG 2>&1 &
+  echo "PID $! -> $LOG"
 """
 
 import argparse
@@ -25,185 +23,159 @@ import os
 import sys
 import time
 
-import numpy as np
 import torch
 import yaml
+from torch.utils.data import DataLoader
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from ce_localization.data.ce130_dataset import CE130Detection  # noqa: E402
-from ce_localization.data.loader import make_loader, model_inputs  # noqa: E402
+from ce_localization.data.dataset import CE130Dataset, collate  # noqa: E402
+from ce_localization.data.density import EVAL_MODES  # noqa: E402
+from ce_localization.engine.evaluate import attention_diagnostics, predict, score  # noqa: E402
+from ce_localization.models.backbone import density_weight_ratio  # noqa: E402
 from ce_localization.models.detector import build_model  # noqa: E402
-from ce_localization.utils.box_ops_np import box_iou, cxcywh_to_xyxy  # noqa: E402
 from ce_localization.utils.log import fmt_time  # noqa: E402
-from ce_localization.utils.metrics_np import (COCO_THR, evaluate,  # noqa: E402
-                                              nms_class_agnostic, oracle_hits,
-                                              quality, summarise)
+import ce_localization.train as train_mod  # noqa: E402
 
-# Mốc để in cạnh kết quả (test, N=300, top-k 100, NMS 0,5).
-REFERENCES = [("BASELINE D.1 (DiffusionDet)", 0.5813, 0.6734, 0.9371, 0.5974),
-              ("A vòng 2 (last.pt)", 0.1036, 0.4045, 0.6148, 0.4120)]
+KEYS = ("AP50", "AP75", "AP_coco", "precision", "recall", "recall10", "recall30",
+        "oracle_recall", "score_AUC", "mean_bestIoU", "score_head_cost")
 
 
-def postprocess(boxes_cxcywh, scores, top_k, nms_thr=None):
-    """Một ảnh -> chỉ số box giữ lại: TOP-K theo score, rồi NMS nếu bật (thứ tự như vòng 1)."""
-    keep = np.argsort(-np.asarray(scores), kind="stable")[:top_k]
-    if nms_thr is not None and len(keep):
-        keep = keep[nms_class_agnostic(cxcywh_to_xyxy(boxes_cxcywh[keep]), scores[keep],
-                                       nms_thr)]
-    return keep
-
-
-@torch.no_grad()
-def predict(model, loader, n_prop, dev, top_k, nms_thr=None):
-    """DDIM từ nhiễu thuần -> (bản ghi numpy mỗi ảnh, oracle_recall theo tầng).
-
-    Bản ghi giữ CẢ N box (cho oracle_recall / score_AUC) lẫn `keep` sau top-k/NMS (cho AP).
-    """
-    model.eval()
-    records, layer_hit, n_gt = [], None, 0
-    gen = torch.Generator(device=dev.type).manual_seed(0)
-    n_img, t0 = len(loader.dataset), time.time()
-
-    for bi, batch in enumerate(loader):
-        vh = torch.as_tensor(batch["valid_h"], dtype=torch.float32, device=dev)
-        layers = model.ddim_sample(n_prop, valid_h=vh, generator=gen,
-                                   return_all_layers=True, **model_inputs(batch, dev))
-        if layer_hit is None:
-            layer_hit = np.zeros(len(layers))
-        boxes_f, logits_f = layers[-1]
-
-        for i, gt in enumerate(batch["boxes"]):
-            gt = gt.numpy()
-            n_gt += len(gt)
-            for li, (lb, _) in enumerate(layers):
-                layer_hit[li] += oracle_hits(lb[i].float().cpu().numpy(), gt)[0]
-            b = boxes_f[i].float().cpu().numpy()
-            sc = logits_f[i].float().sigmoid().cpu().numpy()
-            records.append({"image_id": batch["image_id"][i], "boxes": b, "scores": sc,
-                            "keep": postprocess(b, sc, top_k, nms_thr), "gt": gt})
-
-        done = len(records)
-        if bi % max(len(loader) // 10, 1) == 0 or done == n_img:
-            el = time.time() - t0
-            print(f"  [{done:5d}/{n_img}] {el / done * 1000:.0f} ms/ảnh | "
-                  f"đã chạy {fmt_time(el)} | còn ~{fmt_time(el / done * (n_img - done))}",
-                  flush=True)
-    return records, (layer_hit / max(n_gt, 1)).tolist()
-
-
-def with_oracle_scores(records, top_k, nms_thr=None):
-    """Score = IoU thật lớn nhất với GT, rồi top-k/NMS lại. Box giữ nguyên từng bit."""
-    out = []
-    for r in records:
-        if len(r["gt"]) and len(r["boxes"]):
-            sc = box_iou(cxcywh_to_xyxy(r["boxes"]), cxcywh_to_xyxy(r["gt"]))[0].max(axis=1)
-        else:
-            sc = np.zeros(len(r["boxes"]))
-        out.append({**r, "scores": sc, "keep": postprocess(r["boxes"], sc, top_k, nms_thr)})
-    return out
-
-
-def score_records(records):
-    """Bản ghi numpy -> mọi chỉ số. Hàm thuần, test được."""
-    preds = [(cxcywh_to_xyxy(r["boxes"][r["keep"]]), r["scores"][r["keep"]],
-              cxcywh_to_xyxy(r["gt"])) for r in records]
-    ap_by_thr = {f"AP{int(round(100 * t))}": evaluate(preds, t)["AP"] for t in COCO_THR}
-    at50 = evaluate(preds, 0.5)
-
-    best_all, hits, n_gt, aucs = [], 0, 0, []
-    for r in records:
-        best, hit, ng, auc = quality(r["boxes"], r["scores"], r["gt"], size=1)
-        best_all.append(best)
-        hits, n_gt = hits + hit, n_gt + ng
-        aucs.append(auc)
-    res = summarise(best_all, hits, n_gt, aucs, recall_scored=at50["recall"])
-
-    res.update(ap_by_thr)
-    res["AP_coco"] = float(np.mean(list(ap_by_thr.values())))
-    res.update({k: at50[k] for k in ("precision", "recall", "f1", "n_pred", "n_gt")})
-    # Ngưỡng IoU thấp (không gộp vào AP_coco): recall tăng vọt khi hạ ngưỡng = box nằm
-    # trên vật nhưng chưa khít; đứng yên = bỏ sót vật hẳn.
-    for t in (0.1, 0.3):
-        res[f"recall{int(100 * t)}"] = evaluate(preds, t)["recall"]
-    return res
-
-
-def print_results(res, rec_layer, n_prop, oracle=None):
-    print()
-    for k in ("AP50", "AP75", "AP_coco", "precision", "recall", "recall10", "recall30",
-              "oracle_recall", "score_AUC", "mean_bestIoU", "score_head_cost"):
+def print_results(tag, res):
+    print(f"\n  === {tag} ===")
+    for k in KEYS:
         print(f"  {k:16s} {res[k]:.4f}")
-    print(f"  {'recall/tầng':16s} {' '.join(f'{v:.3f}' for v in rec_layer)}")
-
-    print(f"\n  {'mốc (test, N=300)':28s} {'AP50':>7} {'or_recall':>10} {'AUC':>7} {'bestIoU':>8}")
-    for name, ap, orc, auc, biou in REFERENCES:
-        print(f"  {name:28s} {ap:7.4f} {orc:10.4f} {auc:7.4f} {biou:8.4f}")
-    if n_prop == 30:
-        print("  ⚠️ N=30: trần oracle_recall chỉ 83,8/82,4/76,1 % (train/val/test).")
-
-    if oracle is not None:
-        print("\n  TRẦN khi score = IoU thật với GT (cùng box, cùng top-k/NMS):")
+    print(f"  {'recall/stage':16s} {' '.join(f'{v:.3f}' for v in res['oracle_recall_per_stage'])}")
+    print(f"  {'box giữ/ảnh':16s} {res['kept_per_image']:.1f}  (hậu xử lý {res['postprocess']})")
+    for name, v in res["size_recall"].items():
+        print(f"  {'recall ' + name:16s} {v['oracle_recall']:.4f}  (n_gt {v['n_gt']})")
+    for name, v in res["density_recall"].items():
+        print(f"  {'ảnh ' + name:16s} oracle_recall {v['oracle_recall']:.4f} | box giữ lại phủ "
+              f"{v['kept_recall']:.4f}  ({v['n_img']} ảnh, n_gt {v['n_gt']})")
+    p = res["point"]
+    print("  ĐIỂM (tâm box dự đoán nằm trong box GT):")
+    for k in ("oracle_recall_pt", "AP_pt", "recall_pt", "precision_pt", "score_AUC_pt",
+              "count_MAE@0.3", "count_MAE@0.5"):
+        print(f"  {k:16s} {p[k]:.4f}")
+    for name, v in p["by_density"].items():
+        print(f"  {'ảnh ' + name:16s} oracle_recall_pt {v['oracle_recall_pt']:.4f} | giữ lại trúng "
+              f"{v['kept_recall_pt']:.4f}  ({v['n_img']} ảnh, n_gt {v['n_gt']})")
+    if "oracle_score" in res:
+        o = res["oracle_score"]
+        print("  TRẦN khi score = IoU thật (cùng box, cùng top-k/NMS):")
         for k in ("AP50", "AP75", "AP_coco", "recall"):
-            print(f"  {k:16s} thật {res[k]:.4f}  |  trần {oracle[k]:.4f}  "
-                  f"({res[k] / max(oracle[k], 1e-9) * 100:.0f} % trần)")
+            print(f"  {k:16s} thật {res[k]:.4f} | trần {o[k]:.4f} ({res[k] / max(o[k], 1e-9) * 100:.0f} % trần)")
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True)
-    ap.add_argument("--config", default=None,
-                    help="mặc định dùng config LƯU TRONG checkpoint — an toàn hơn")
-    ap.add_argument("--cache", default="../data/cache_clip_1024")
-    ap.add_argument("--split", default="val")
+    ap.add_argument("--config", default=None, help="mặc định dùng config LƯU TRONG checkpoint")
+    ap.add_argument("--split", default="test")
+    ap.add_argument("--data-root", default=None, help="ghi đè data.root (vd. Kaggle)")
+    ap.add_argument("--density", default=None, choices=EVAL_MODES,
+                    help="chỉ model 4 kênh (ALPHA3); mặc định full")
+    ap.add_argument("--density-root", default=None, help="ghi đè data.density_root")
+    ap.add_argument("--density-index", default=None, help="ghi đè data.density_index")
     ap.add_argument("--num-proposals", type=int, default=None)
     ap.add_argument("--top-k", type=int, default=None)
-    ap.add_argument("--nms", action="store_true", help="NMS không phân lớp sau top-k")
+    ap.add_argument("--nms", action="store_true")
     ap.add_argument("--nms-thr", type=float, default=0.5)
-    ap.add_argument("--oracle-score", action="store_true",
-                    help="in thêm TRẦN AP khi score = IoU thật (không chạy lại model)")
+    ap.add_argument("--oracle-score", action="store_true")
+    ap.add_argument("--steps", type=int, nargs="+", default=[1])
+    ap.add_argument("--no-renewal", action="store_true", help="tắt box renewal khi nhiều bước")
+    ap.add_argument("--attn-diag", type=int, default=0, help="số batch cho chẩn đoán attention; 0 = tắt")
+    ap.add_argument("--batch-size", type=int, default=2,
+                    help="chỉ cho 1 bước (nhiều bước luôn batch 1); @1024 batch 8 OOM trên GPU dùng chung")
+    ap.add_argument("--num-workers", type=int, default=4)
     ap.add_argument("--limit", type=int, default=None)
-    ap.add_argument("--batch-size", type=int, default=8)
+    ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default=None)
     ap.add_argument("--out", default=None, help="file .json trong /mnt/disk1/aiotlab/haitn/output/")
     a = ap.parse_args()
 
+    t0 = time.time()
     dev = torch.device(a.device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    ckpt = torch.load(a.ckpt, map_location="cpu", weights_only=False)
+    ck = torch.load(a.ckpt, map_location="cpu", weights_only=False)
     if a.config:
         with open(a.config) as f:
             cfg = yaml.safe_load(f)
     else:
-        cfg = ckpt["config"]
-    n_prop = a.num_proposals or cfg["diffusion"]["num_proposals_eval"]
+        cfg = ck["config"]
+    if a.data_root:
+        cfg["data"]["root"] = a.data_root
+    if a.density_root:
+        cfg["data"]["density_root"] = a.density_root
+    if a.density_index:
+        cfg["data"]["density_index"] = a.density_index
+    dindex = train_mod.density_setup(cfg)
+    if dindex is None and a.density:
+        sys.exit(f"--density {a.density} nhưng checkpoint là model 3 kênh (không density)")
+    density = (a.density or "full") if dindex is not None else None
+    n_prop = a.num_proposals or cfg["diffusion"]["num_proposals"]
     top_k = a.top_k or cfg["eval"]["top_k"]
     nms_thr = a.nms_thr if a.nms else None
 
-    ds = CE130Detection.from_config(cfg, a.split)
+    ds = CE130Dataset(cfg["data"]["root"], a.split, cfg["data"]["image_size"], density=density,
+                    density_index=dindex)
     if a.limit:
         ds.items = ds.items[: a.limit]
-    loader = make_loader(ds, a.cache, a.split, a.batch_size, cfg["data"]["num_workers"],
-                         dev, train=False)
-    model = build_model(cfg, dropout=0.0).to(dev)
-    model.load_state_dict(ckpt["model"])
-    print(f"[eval] ckpt epoch={ckpt.get('epoch')} | split={a.split} ({len(ds)} ảnh) | "
-          f"N={n_prop} | top_k={top_k} | nms={nms_thr}", flush=True)
+    text_table = train_mod.build_text_table(ds.classes(), cfg, dev)
+    model = build_model(cfg, pretrained_backbone=False).to(dev)
+    model.load_state_dict(ck["model"])
+    model.eval()
+    kinds = {}
+    if density is not None:                          # loại density thực tế (partial -> full khi ảnh chỉ có 1 bản)
+        for it in ds.items:
+            k = dindex.pick(it["image_id"], density)[1]
+            kinds[k] = kinds.get(k, 0) + 1
+    dw = density_weight_ratio(model.backbone)
+    print(f"[eval] {a.ckpt} (iter {ck.get('iter')}) | memory={cfg['model']['memory']} | "
+          f"density={density} {kinds or ''}"
+          + ("" if dw is None else f" (‖W density‖/‖W RGB‖ conv1 {dw:.4f})") + f" | split={a.split} "
+          f"({len(ds)} ảnh) | N={n_prop} | top_k={top_k} | nms={nms_thr} | steps={a.steps} | "
+          f"khởi động {fmt_time(time.time() - t0)}", flush=True)
 
-    records, rec_layer = predict(model, loader, n_prop, dev, top_k, nms_thr)
-    res = score_records(records)
-    res["oracle_recall_per_layer"] = rec_layer
-    oracle = score_records(with_oracle_scores(records, top_k, nms_thr)) if a.oracle_score else None
-    if oracle is not None:
-        res["oracle_score"] = oracle
-    print_results(res, rec_layer, n_prop, oracle)
+    out = {"ckpt": a.ckpt, "iter": ck.get("iter"), "split": a.split, "n_proposals": n_prop,
+           "top_k": top_k, "nms_thr": nms_thr, "memory": cfg["model"]["memory"],
+           "density": density, "density_kinds": kinds, "density_weight_ratio": dw, "results": {}}
+    for steps in a.steps:
+        bs = a.batch_size if steps == 1 else 1
+        loader = DataLoader(ds, batch_size=bs, shuffle=False, num_workers=a.num_workers,
+                            collate_fn=collate)
+        t = time.time()
+        rec, stage = predict(model, loader, text_table, n_prop, steps=steps, top_k=top_k,
+                             nms_thr=nms_thr, renewal=not a.no_renewal, seed=a.seed,
+                             log_every=max(len(loader) // 10, 1))
+        el = time.time() - t
+        # có NMS thì báo CẢ HAI thứ tự hậu xử lý (người dùng chốt 2026-09-29): khoá cũ `steps{k}` =
+        # top-k trước (so được với bảng cũ), `steps{k}_nmsfirst` = NMS trước như DiffusionDet
+        orders = ["topk_first", "nms_first"] if nms_thr is not None else ["topk_first"]
+        for order in orders:
+            res = score(rec, stage, top_k, nms_thr, oracle=a.oracle_score, order=order)
+            res["eval_sec"] = el
+            key = f"steps{steps}" + ("_nmsfirst" if order == "nms_first" else "")
+            print_results(f"{steps} bước, {order} ({fmt_time(el)})", res)
+            out["results"][key] = res
+
+    if a.attn_diag:
+        loader = DataLoader(ds, batch_size=a.batch_size, shuffle=False, num_workers=a.num_workers,
+                            collate_fn=collate)
+        t = time.time()
+        diag = attention_diagnostics(model, loader, text_table, n_prop, max_batches=a.attn_diag,
+                                     seed=a.seed)
+        print(f"\n  === chẩn đoán attention ({fmt_time(time.time() - t)}) — khối lượng TB theo stage ===")
+        for tt, d in diag.items():
+            for k, v in d.items():
+                print(f"  t={tt:4d} {k:16s} {' '.join('—' if x is None else f'{x:.3f}' for x in v)}")
+        out["attention"] = diag
 
     if a.out:
         os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
         with open(a.out, "w") as f:
-            json.dump({"ckpt": a.ckpt, "epoch": ckpt.get("epoch"), "split": a.split,
-                       "n_proposals": n_prop, "top_k": top_k, "nms_thr": nms_thr,
-                       "results": res}, f, indent=2, ensure_ascii=False)
+            json.dump(out, f, indent=2, ensure_ascii=False, default=float)
         print(f"  -> {a.out}")
+    print(f"[eval] xong {fmt_time(time.time() - t0)}", flush=True)
 
 
 if __name__ == "__main__":

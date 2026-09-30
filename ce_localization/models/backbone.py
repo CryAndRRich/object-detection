@@ -9,7 +9,7 @@
   cộng), không thêm P6 vì head chỉ lấy P2..P5 như DiffusionDet (`Base-DiffusionDet.yaml`).
 - `in_channels=4` (ALPHA3): conv1 thêm kênh density, weight kênh mới khởi tạo **0** (người dùng
   chốt 2026-09-29) nên ở bước 0 mô hình trùng R-50 3 kênh. CE-Loc gốc khởi tạo kênh này bằng
-  trung bình weight RGB (`legacy/celoc_vision.py`). conv1 được thay SAU khi dựng FPN để thứ tự
+  trung bình weight RGB (`celoc_paper/celoc_vision.py`). conv1 được thay SAU khi dựng FPN để thứ tự
   rút RNG khởi tạo trùng bản 3 kênh (cùng seed -> cùng weight, có test).
 """
 

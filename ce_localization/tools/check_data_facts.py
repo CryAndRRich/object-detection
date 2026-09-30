@@ -6,6 +6,10 @@ là 1,96 ô @512px). Cần số chính xác thì chạy tool này, đừng tríc
 Không train, không GPU, không CLIP — chỉ đọc annotation.
 
   python tools/check_data_facts.py --out /mnt/disk1/aiotlab/haitn/output/data_facts.json
+
+Hình học theo letterbox của `data/dataset.py` (scale = min(T/W, T/H), box kẹp vào vùng ảnh thật).
+Mặc định `--image-size 512 --cell 16` = lưới 32×32 ô 16 px, đơn vị của con số "1,96 ô" trong
+CLAUDE.md; ô P5 ở canvas 1024 là `--image-size 1024 --cell 32`.
 """
 
 import argparse
@@ -14,11 +18,11 @@ import os
 import sys
 
 import numpy as np
-import yaml
+from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from ce_localization.data.ce130_dataset import CE130Detection  # noqa: E402
+from ce_localization.data.dataset import scale_boxes, scan_ce130  # noqa: E402
 
 
 def pct(x, q):
@@ -27,28 +31,27 @@ def pct(x, q):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="config/default.yaml")
-    ap.add_argument("--data-root", default=None)
+    ap.add_argument("--data-root", default="../data/all_phase2_V2")
+    ap.add_argument("--image-size", type=int, default=512)
+    ap.add_argument("--cell", type=int, default=16, help="cạnh một ô lưới, pixel canvas")
     ap.add_argument("--out", default="data_facts.json")
     a = ap.parse_args()
 
-    with open(a.config) as f:
-        cfg = yaml.safe_load(f)
-    root = a.data_root or cfg["data"]["root"]
-    size = cfg["data"]["image_size"]
-    grid = size // 16                      # ViT-B/16 -> 32 ô mỗi chiều
-    print(f"root={root}  image_size={size}  grid={grid}x{grid}", flush=True)
+    root, size = a.data_root, a.image_size
+    grid = size // a.cell
+    print(f"root={root}  image_size={size}  grid={grid}x{grid} (ô {a.cell} px)", flush=True)
 
     res = {}
     for split in ("train", "val", "test"):
-        ds = CE130Detection(root, split, size)
+        items = scan_ce130(root, split)
         n_per_img, w_cells, h_cells, area_pct, nn_dist_rel = [], [], [], [], []
         n_over_half = 0
 
-        for i in range(len(ds)):
-            # need_image=False: KHÔNG giải mã JPEG, chỉ cần annotation.
-            s = ds.__getitem__(i, need_image=False)
-            b = np.asarray(s["boxes"], dtype=np.float64)   # cxcywh trong [0,1]
+        for it in items:
+            W, H = Image.open(it["img_path"]).size        # chỉ đọc header, không giải mã JPEG
+            sc = min(size / W, size / H)
+            bx = scale_boxes(it["boxes_xyxy_px"], sc, int(W * sc), int(H * sc)) / size
+            b = np.concatenate([(bx[:, :2] + bx[:, 2:]) / 2, bx[:, 2:] - bx[:, :2]], 1)   # cxcywh [0,1]
             n_per_img.append(len(b))
             if len(b) == 0:
                 continue
@@ -73,7 +76,7 @@ def main():
         nn_dist_rel = np.asarray(nn_dist_rel)
 
         res[split] = {
-            "n_images": len(ds),
+            "n_images": len(items),
             "n_boxes_total": int(n_per_img.sum()),
             "boxes_per_image": {
                 "median": float(np.median(n_per_img)), "mean": float(n_per_img.mean()),
@@ -98,7 +101,7 @@ def main():
                 "median": float(np.median(nn_dist_rel)) if len(nn_dist_rel) else float("nan"),
                 "p10": pct(nn_dist_rel, 10), "p90": pct(nn_dist_rel, 90),
             },
-            "n_classes": len({it["text"] for it in ds.items}),
+            "n_classes": len({it["text"] for it in items}),
         }
 
     # ------------------------------------------------------------------ in

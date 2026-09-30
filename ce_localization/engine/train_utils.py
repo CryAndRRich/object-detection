@@ -3,20 +3,19 @@
 import bisect
 import datetime
 import os
-import re
 
 import torch
 import torch.distributed as dist
 
 from ce_localization.utils.checkpoint import CheckpointManager
 
-__all__ = ["setup_dist", "PthCheckpoints", "warmup_multistep", "epoch_batches", "alpha_group",
+__all__ = ["setup_dist", "PthCheckpoints", "warmup_multistep", "epoch_batches",
            "noise_seed"]
 
 
 def setup_dist(device=None):
     """-> (rank, world, dev). torchrun đặt WORLD_SIZE/RANK/LOCAL_RANK; không có thì 1 tiến trình.
-    (cùng khuôn `ce_localization/legacy/train.py:66-78`)
+    (cùng khuôn `ce_localization/celoc_paper/train.py:66-78`)
 
     `device="cpu"`: ép CPU kể cả khi có CUDA (nhiều tiến trình thì dùng gloo) — test chạy trên
     server có GPU dùng chung phải tất định và không phụ thuộc bộ nhớ GPU còn trống."""
@@ -80,23 +79,3 @@ def epoch_batches(n, batch_per_rank, rank, world, seed, epoch):
 def noise_seed(seed, it, rank):
     """Seed của t / nhiễu khuếch tán ở iteration `it` — tái lập khi resume."""
     return (seed * 1000003 + it * 101 + rank) % (2 ** 63 - 1)
-
-
-_STAGE = re.compile(r"head\.stages\.(\d+)\.(\w+)")
-
-
-def alpha_group(name):
-    """Tên tham số ALPHA -> nhóm cho GradMonitor."""
-    if name.startswith("backbone.fpn."):
-        return "fpn"
-    if name.startswith("backbone."):
-        return "resnet"
-    if name.startswith("memory."):
-        return "memory." + name.split(".")[1]
-    m = _STAGE.match(name)
-    if m:
-        i, sub = int(m.group(1)), m.group(2)
-        if sub in ("roi_proj", "decoder"):
-            return f"{sub}[{i}]"
-        return f"heads[{i}]"
-    return "khác"

@@ -1,4 +1,4 @@
-"""Vision encoder Diffusion Policy (Push-T) viết lại (ce_localization/legacy/dp_vision.py) +
+"""Vision encoder Diffusion Policy (Push-T) viết lại (ce_localization/celoc_paper/dp_vision.py) +
 trọn luồng tools/inspect_dp_spatial_softmax.py trên checkpoint / zarr giả."""
 
 import json
@@ -10,7 +10,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from ce_localization.legacy.dp_vision import (
+from ce_localization.celoc_paper.dp_vision import (
     IMAGE_KEY,
     DPSpatialSoftmax,
     DPVisualCore,

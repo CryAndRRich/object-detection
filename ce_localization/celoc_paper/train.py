@@ -10,8 +10,8 @@ Công thức suy từ checkpoint gốc (train_w_args.py không có trong repo):
   bản gốc nhiều khả năng cũng dừng sớm).
 
 Hai cách chạy, CÙNG phép toán (batch TOÀN CỤC 32):
-  1 GPU (server, qua run_on_free_gpu):  python legacy/train.py --save-dir ...
-  nhiều GPU (Kaggle T4×2, DDP):          torchrun --standalone --nproc_per_node=2 legacy/train.py ...
+  1 GPU (server, qua run_on_free_gpu):  python celoc_paper/train.py --save-dir ...
+  nhiều GPU (Kaggle T4×2, DDP):          torchrun --standalone --nproc_per_node=2 celoc_paper/train.py ...
   DDP chia 32 = 16/GPU; BatchNorm đổi thành SyncBatchNorm để thống kê vẫn trên đủ 32 ảnh; gradient
   trung bình 2 GPU = gradient của trung bình 32 (hai nửa bằng nhau, kể cả batch cuối 30 = 15+15).
 
@@ -22,7 +22,7 @@ Checkpoint: `last.pth` mỗi epoch + `best.pth`, định dạng pickle KHÔNG zi
 như với .pth dạng zip). Eval định kỳ trên tập con test cố định (chỉ để xem hội tụ).
 
   export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache TORCH_HOME=/mnt/disk1/aiotlab/haitn/torch_cache
-  python ../tools/run_on_free_gpu.py -- legacy/train.py --save-dir checkpoints/celoc_nodensity --no-density
+  python ../tools/run_on_free_gpu.py -- celoc_paper/train.py --save-dir checkpoints/celoc_nodensity --no-density
 """
 
 import argparse
@@ -39,9 +39,9 @@ from torch.utils.data import DataLoader, DistributedSampler, RandomSampler, Subs
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from ce_localization.legacy.celoc_data import ObjectPlacementDataset, to_model_input  # noqa: E402
-from ce_localization.legacy.celoc_model import ObjectPlacementPolicy  # noqa: E402
-from ce_localization.legacy.eval import print_table, run_eval, summarize  # noqa: E402
+from ce_localization.celoc_paper.celoc_data import ObjectPlacementDataset, to_model_input  # noqa: E402
+from ce_localization.celoc_paper.celoc_model import ObjectPlacementPolicy  # noqa: E402
+from ce_localization.celoc_paper.eval import print_table, run_eval, summarize  # noqa: E402
 from ce_localization.utils.checkpoint import CheckpointManager  # noqa: E402
 from ce_localization.utils.log import fmt_time  # noqa: E402
 
@@ -125,7 +125,7 @@ def main():
     ap.add_argument("--no-density", action="store_true", help="bỏ density map (vision 3 kênh)")
     ap.add_argument("--data", default="../data/samples/train")
     ap.add_argument("--eval-data", default="../data/samples/test")
-    ap.add_argument("--cache-dir", default=None, help="cache uint8 của --data (legacy/build_cache.py)")
+    ap.add_argument("--cache-dir", default=None, help="cache uint8 của --data (celoc_paper/build_cache.py)")
     ap.add_argument("--epochs", type=int, default=300, help="độ dài lịch cosine (T_max)")
     ap.add_argument("--stop-epoch", type=int, default=0, help="dừng sau N epoch (0 = chạy hết --epochs)")
     ap.add_argument("--batch-size", type=int, default=32, help="batch TOÀN CỤC (chia đều cho các GPU)")
