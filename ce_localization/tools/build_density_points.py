@@ -14,12 +14,16 @@ của ALPHA3, `tools/build_density_index.py`). Đỉnh: `alpha/points.find_peaks
 3. Cỡ giả (TRAIN): tỉ số kNN(đỉnh) / sqrt(w·h) của box GT được ghép -> đề xuất `beta` = 1 / trung vị;
    `min_frac` / `max_frac` = p2 / p98 của sqrt(w·h) / H trên box GT train. In sẵn dòng yaml cho
    `data.pseudo_size` của config/beta0.yaml (đây là 3 số vô hướng lấy từ box GT, ghi rõ khi báo cáo).
+4. `--config-in config/beta0.yaml --config-out <file>`: ghi một BẢN config đã điền `data.pseudo_size`
+   (đề xuất ở bước 3, hoặc `--pseudo-size knn beta min_frac max_frac`) và `data.points` = `--out`
+   (đường dẫn tuyệt đối). Train / eval dùng bản này — không sửa file config trong git.
 
 ~3.600 PNG + quét annotation 3 split (4–6 phút trên đĩa dùng chung) ⇒ ước 5–15 phút, chạy NỀN:
   cd /mnt/disk1/aiotlab/haitn/object-detection/ce_localization
   LOG=/mnt/disk1/aiotlab/haitn/log/beta_g0_points_$(date +%m%d_%H%M).log
   nohup python tools/build_density_points.py --out ../data/density_points.json \\
-      --report /mnt/disk1/aiotlab/haitn/output/beta_g0_points.json --workers 8 > $LOG 2>&1 &
+      --report /mnt/disk1/aiotlab/haitn/output/beta0/g0_points_report.json --workers 8 \\
+      --config-in config/beta0.yaml --config-out /mnt/disk1/aiotlab/haitn/output/beta0/config_beta0.yaml > $LOG 2>&1 &
   echo "PID $! -> $LOG"
 """
 
@@ -31,6 +35,7 @@ import time
 from multiprocessing import Pool
 
 import numpy as np
+import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -77,6 +82,26 @@ def summarise(counts):
             "peaks_per_gt_p10_p50_p90": [float(np.percentile(per_img, q)) for q in (10, 50, 90)] if per_img else []}
 
 
+def write_config(a, suggested, log):
+    """Bản config đã điền `data.pseudo_size` (đề xuất G0 hoặc `--pseudo-size`) + `data.points`."""
+    if a.pseudo_size is not None:
+        k, b, lo, hi = a.pseudo_size
+        ps, src = {"knn": int(k), "beta": b, "min_frac": lo, "max_frac": hi}, "--pseudo-size"
+    elif suggested:
+        ps, src = suggested, "đề xuất G0"
+    else:
+        sys.exit("không có đề xuất pseudo_size (train không có cặp đỉnh–GT nào) — truyền --pseudo-size")
+    with open(a.config_in) as f:
+        cfg = yaml.safe_load(f)
+    cfg["data"]["pseudo_size"] = {"knn": int(ps["knn"]), "beta": round(float(ps["beta"]), 4),
+                                  "min_frac": round(float(ps["min_frac"]), 5), "max_frac": round(float(ps["max_frac"]), 5)}
+    cfg["data"]["points"] = os.path.abspath(a.out)
+    os.makedirs(os.path.dirname(os.path.abspath(a.config_out)), exist_ok=True)
+    with open(a.config_out, "w") as f:
+        yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
+    log(f"-> {a.config_out} (pseudo_size {cfg['data']['pseudo_size']} từ {src}; points {cfg['data']['points']})")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ce130", default="../data/all_phase2_V2")
@@ -91,7 +116,13 @@ def main():
     ap.add_argument("--knn", type=int, default=3)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--limit", type=int, default=None, help="chỉ N ảnh đầu mỗi split (chạy thử)")
+    ap.add_argument("--config-in", default=None, help="config gốc (vd. config/beta0.yaml) để ghi bản đã điền")
+    ap.add_argument("--config-out", default=None, help="bản config đã điền data.pseudo_size + data.points")
+    ap.add_argument("--pseudo-size", type=float, nargs=4, default=None, metavar=("KNN", "BETA", "MIN_FRAC", "MAX_FRAC"),
+                    help="ép pseudo_size thay cho đề xuất của G0")
     a = ap.parse_args()
+    if (a.config_in is None) != (a.config_out is None):
+        sys.exit("--config-in và --config-out phải đi cùng nhau")
     if (a.tau is None) != (a.radius is None):
         sys.exit("--tau và --radius phải đi cùng nhau")
     taus, radii = ([a.tau], [a.radius]) if a.tau is not None else (a.taus, a.radii)
@@ -203,6 +234,8 @@ def main():
         with open(a.report, "w") as f:
             json.dump(report, f, indent=1, ensure_ascii=False)
         log(f"-> {a.report}")
+    if a.config_out:
+        write_config(a, report.get("pseudo_size"), log)
     log(f"[G0] xong {fmt_time(time.time() - t0)}")
 
 

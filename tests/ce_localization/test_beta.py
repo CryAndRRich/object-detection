@@ -250,12 +250,12 @@ def _beta_cfg(tmp_path, root, points):
     return p
 
 
-def _run_g0(monkeypatch, base, out, report):
+def _run_g0(monkeypatch, base, out, report, extra=()):
     import ce_localization.tools.build_density_points as g0
     monkeypatch.setattr(sys, "argv", ["build_density_points.py", "--ce130", os.path.join(base, "all_phase2_V2"),
                                       "--samples", os.path.join(base, "samples"),
                                       "--density-index", os.path.join(base, "density_index.json"),
-                                      "--out", out, "--report", report, "--workers", "0"])
+                                      "--out", out, "--report", report, "--workers", "0", *extra])
     g0.main()
 
 
@@ -276,6 +276,23 @@ def test_g0_tool_writes_points_and_report(tmp_path, monkeypatch, capsys):
     # blob giả vẽ tại tâm MỌI box (bản full) -> nhãn gần như đủ và đúng
     assert tr["precision"] > 0.8 and tr["recall"] > 0.6 and set(r["chosen"]) == {"train", "val", "test"}
     assert {"beta", "min_frac", "max_frac"} <= set(r["pseudo_size"])
+
+    # --config-in/--config-out: bản config đã điền; phần còn lại y hệt beta0.yaml
+    cout = str(tmp_path / "cfg_out.yaml")
+    _run_g0(monkeypatch, base, out, rep, ["--config-in", CFG_B0, "--config-out", cout])
+    with open(cout) as f:
+        c = yaml.safe_load(f)
+    with open(CFG_B0) as f:
+        c0 = yaml.safe_load(f)
+    ps = c["data"].pop("pseudo_size")
+    assert ps["beta"] == pytest.approx(r["pseudo_size"]["beta"], abs=1e-4) and ps["knn"] == 3
+    assert c["data"].pop("points") == os.path.abspath(out)
+    c0["data"].pop("pseudo_size"), c0["data"].pop("points")
+    assert c == c0
+    _run_g0(monkeypatch, base, out, rep, ["--config-in", CFG_B0, "--config-out", cout,
+                                          "--pseudo-size", "3", "0.8", "0.01", "0.4"])
+    with open(cout) as f:
+        assert yaml.safe_load(f)["data"]["pseudo_size"] == {"knn": 3, "beta": 0.8, "min_frac": 0.01, "max_frac": 0.4}
 
 
 def test_full_flow_beta0_train_resume_eval_and_gt_never_in_loss(tmp_path, monkeypatch):
