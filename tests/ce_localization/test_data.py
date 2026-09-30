@@ -1,5 +1,5 @@
 """Dữ liệu (`data/`): letterbox + quét CE-130, density (giải mã jet, letterbox, chỉ mục, chọn bản),
-điểm density + cỡ giả, dataset với đích box / điểm, tool dựng điểm density.
+điểm density + cỡ giả, dataset với đích box / điểm, tool dựng điểm density, tool trần AP tâm + cỡ (G1).
 """
 
 import json
@@ -238,3 +238,51 @@ def test_g0_tool_writes_points_and_report(tmp_path, monkeypatch, capsys):
                                           "--pseudo-size", "3", "0.8", "0.01", "0.4"])
     with open(cout) as f:
         assert yaml.safe_load(f)["data"]["pseudo_size"] == {"knn": 3, "beta": 0.8, "min_frac": 0.01, "max_frac": 0.4}
+
+
+def test_g1_box_sets_by_hand():
+    """Bộ box của cửa G1: tâm gt + cỡ gt = chính GT; đỉnh không ghép được lấy cỡ chung của ảnh;
+    knn_sq = đúng box giả BETA0; img_sq / img_wh / knn_rel_sq theo trung bình nhân của GT."""
+    from ce_localization.tools.point_box_ceiling import SIZES, box_sets
+    gt = np.array([[0, 0, 10, 40], [50, 50, 90, 60], [100, 0, 120, 20]], dtype=float)   # s = 20, 20, 20
+    c = (gt[:, :2] + gt[:, 2:]) / 2
+    peaks = np.vstack([c[:2] + 1.0, [[300.0, 300.0]]])        # ghép GT0, GT1; đỉnh thứ 3 ngoài mọi box
+    b = box_sets(gt, peaks, 400, PSEUDO)
+    assert set(b) == {(src, sz) for src in ("gt", "peaks") for sz in SIZES}
+    assert np.allclose(b[("gt", "gt_wh")], gt)
+    assert np.allclose(b[("gt", "obj_sq")], np.concatenate([c - 10, c + 10], 1))
+    assert np.allclose(b[("gt", "img_sq")], b[("gt", "obj_sq")])                         # mọi s = 20
+    iw, ih = np.exp(np.log([10, 40, 20]).mean()), np.exp(np.log([40, 10, 20]).mean())
+    assert np.allclose(b[("gt", "img_wh")][:, 2:] - b[("gt", "img_wh")][:, :2], [[iw, ih]] * 3)
+    k = pseudo_sizes(c, PSEUDO["knn"], PSEUDO["beta"], PSEUDO["min_frac"] * 400, PSEUDO["max_frac"] * 400)
+    assert np.allclose(b[("gt", "knn_sq")], pseudo_boxes(c, k))
+    rel = b[("gt", "knn_rel_sq")][:, 2] - b[("gt", "knn_rel_sq")][:, 0]
+    assert np.allclose(rel / rel[0], k / k[0]) and np.isclose(np.exp(np.log(rel).mean()), 20)
+    pw = b[("peaks", "gt_wh")]
+    assert np.allclose(pw[:2, 2:] - pw[:2, :2], [[10, 40], [40, 10]])                   # cỡ GT được ghép
+    assert np.allclose(pw[2, 2:] - pw[2, :2], [iw, ih])                                 # không ghép -> cỡ ảnh
+    assert np.allclose((pw[:, :2] + pw[:, 2:]) / 2, peaks)                              # tâm luôn = đỉnh
+    empty = box_sets(gt, np.zeros((0, 2)), 400, PSEUDO)
+    assert all(len(empty[("peaks", sz)]) == 0 for sz in SIZES)
+
+
+def test_g1_tool_full_run(tmp_path, monkeypatch):
+    """Trọn luồng cửa G1 trên CE-130 giả: điểm từ G0 -> báo cáo; tâm gt + cỡ gt chấm đúng AP = 1."""
+    import sys
+    import ce_localization.tools.point_box_ceiling as g1
+    base = str(tmp_path)
+    _fake_ce130(os.path.join(base, "all_phase2_V2"))
+    _fake_density(base)
+    pts, rep = str(tmp_path / "density_points.json"), str(tmp_path / "g1.json")
+    _run_g0(monkeypatch, base, pts, str(tmp_path / "g0.json"))
+    monkeypatch.setattr(sys, "argv", ["point_box_ceiling.py", "--ce130", os.path.join(base, "all_phase2_V2"),
+                                      "--config", CFG_B0, "--points", pts, "--workers", "0", "--report", rep])
+    g1.main()
+    with open(rep) as f:
+        r = json.load(f)
+    assert set(r["splits"]) == {"train", "val", "test"}
+    for split, res in r["splits"].items():
+        assert len(res) == 12
+        assert res["gt/gt_wh"]["AP50"] == pytest.approx(1.0) and res["gt/gt_wh"]["AP75"] == pytest.approx(1.0)
+        for v in res.values():
+            assert 0.0 <= v["AP75"] <= v["AP50"] <= 1.0 and set(v["by_density@0.5"]) == {"<=30 vật", "31-100 vật", ">100 vật"}
