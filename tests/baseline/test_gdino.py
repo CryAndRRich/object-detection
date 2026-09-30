@@ -119,7 +119,7 @@ def test_prepare_odvg_and_internal_val(tmp_path):
 
 
 def test_build_command_batch_split_and_options(tmp_path):
-    cfg = yaml.safe_load(open(os.path.join(CFG_DIR, "baseline3b_gdino_finetune.yaml")))
+    cfg = yaml.safe_load(open(os.path.join(CFG_DIR, "baseline3_2_gdino_finetune.yaml")))
     cmd, opt = build_command(cfg, "/og", "/out", "/out/data/datasets.json", nproc=2, num_workers=2, python="py")
     assert cmd[:3] == ["py", "-m", "torch.distributed.run"] and "--nproc_per_node=2" in cmd
     assert opt["batch_size"] == 1 and opt["epochs"] == 13 and opt["use_coco_eval"] is True
@@ -133,10 +133,10 @@ def test_build_command_batch_split_and_options(tmp_path):
 
 
 def test_zero_shot_and_finetune_share_the_same_model():
-    a = yaml.safe_load(open(os.path.join(CFG_DIR, "baseline3a_gdino_zeroshot.yaml")))
-    b = yaml.safe_load(open(os.path.join(CFG_DIR, "baseline3b_gdino_finetune.yaml")))
+    a = yaml.safe_load(open(os.path.join(CFG_DIR, "baseline3_1_gdino_zeroshot.yaml")))
+    b = yaml.safe_load(open(os.path.join(CFG_DIR, "baseline3_2_gdino_finetune.yaml")))
     assert a["og"] == b["og"] and a["text_encoder"] == b["text_encoder"] and a["weights"] == b["weights"]
     assert a["finetune"] is None and b["finetune"]["batch_total"] == 2
-    assert a["name"] == "BASELINE3a" and b["name"] == "BASELINE3b"
+    assert a["name"] == "BASELINE3.1" and b["name"] == "BASELINE3.2"
     assert runtime.resolve(a["og"]["repo"]).endswith(os.path.join("baseline", "third_party", "Open-GroundingDino"))
     assert "Open-GroundingDino" in runtime.clone_cmd(a) and a["og"]["commit"] in runtime.clone_cmd(a)

@@ -5,7 +5,7 @@ Code của dự án `multi_condition` (bối cảnh: [`../CLAUDE.md`](../CLAUDE.
 | | nội dung |
 |---|---|
 | [`ce_localization/`](ce_localization/README.md) | **CE-Loc — trọng tâm.** Chọn box cho count editing trên CE-130 bằng khuếch tán trên toạ độ box |
-| [`baseline/`](baseline/README.md) | Baseline detector trên CE-130: BASELINE0 DiffusionDet (gồm code DiffusionDet + D.1 cũ), 1 Sparse R-CNN, 2 Faster R-CNN, 3a/3b Grounding DINO — kế hoạch `../docs/BASELINES.md` |
+| [`baseline/`](baseline/README.md) | Baseline detector trên CE-130: BASELINE0 DiffusionDet (gồm code DiffusionDet + D.1 cũ), 1 Sparse R-CNN, 2 Faster R-CNN, 3.1/3.2 Grounding DINO — kế hoạch `../docs/BASELINES.md` |
 | [`diffuse2seg/`](diffuse2seg/README.md) | Diffuse2Seg training-free (arXiv 2609.06491), đứng ngoài luồng CE-Loc |
 | `tests/` | **toàn bộ test**, chia thư mục con theo project |
 | `tools/run_on_free_gpu.py` | chạy một script trên GPU có nhiều bộ nhớ trống nhất — dùng chung |

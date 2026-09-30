@@ -9,8 +9,8 @@ cuối vẫn là CE-Loc — baseline chỉ là thước.
 | BASELINE0 | DiffusionDet R50-FPN (ICCV 2023), train lại công thức D.1 | `configs/baseline0_diffusiondet.yaml` | `train_net.py` / `predict.py` |
 | BASELINE1 | Sparse R-CNN R50-FPN (CVPR 2021), 300 proposal | `configs/baseline1_sparsercnn.yaml` | 〃 |
 | BASELINE2 | Faster R-CNN R50-FPN (NeurIPS 2015) | `configs/baseline2_fasterrcnn.yaml` | 〃 |
-| BASELINE3a | Grounding DINO Swin-T (ECCV 2024), zero-shot, prompt = tên lớp | `configs/baseline3a_gdino_zeroshot.yaml` | `gdino/predict.py` |
-| BASELINE3b | Grounding DINO Swin-T finetune CE-130 train | `configs/baseline3b_gdino_finetune.yaml` | `gdino/train.py` / `gdino/predict.py` |
+| BASELINE3.1 | Grounding DINO Swin-T (ECCV 2024), zero-shot, prompt = tên lớp | `configs/baseline3_1_gdino_zeroshot.yaml` | `gdino/predict.py` |
+| BASELINE3.2 | Grounding DINO Swin-T finetune CE-130 train | `configs/baseline3_2_gdino_finetune.yaml` | `gdino/train.py` / `gdino/predict.py` |
 
 Chung cho BASELINE0–2 (`configs/Base-CE130.yaml`): R-50 ImageNet (torchvision), 12.000 iter × batch
 toàn cục 2, augmentation như D.1 (cùng `DiffusionDetDatasetMapper`), eval val mỗi 2.000 iter,
@@ -58,7 +58,7 @@ export DETECTRON2_DISABLE_CV2=1     # ~/.local có thư mục cv2/ mồ côi (ch
    ```bash
    git clone https://github.com/longzw1997/Open-GroundingDino.git third_party/Open-GroundingDino
    git -C third_party/Open-GroundingDino checkout d248268ac9cab808d4aa2691f4a76972ec5d9ab4
-   pip install addict yapf==0.40.1 supervision==0.6.0 jsonlines timm colorlog submitit   # requirements.txt của repo, trừ torch
+   pip install addict yapf==0.40.1 colorlog "numpy==1.26.4"   # đúng phần main.py / model import (ngoài torch, timm, transformers, scipy, pycocotools, matplotlib đã có); KHÔNG supervision / opencv-python: kéo numpy 2
    mkdir -p ../weights/gdino && wget -O ../weights/gdino/groundingdino_swint_ogc.pth \
        https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth
    ```
@@ -100,29 +100,29 @@ Mỗi lượt ghi `<run>_test[_N{N}_s{bước}].json` (dump) + `..._metrics.json
 ngân sách (`B200` = 200 box điểm cao nhất — hàng chính; `Ball` = mọi box). Override config: `--opts KEY VALUE`
 ở CUỐI lệnh. Chấm lại một dump: `tools/score_predictions.py --pred <dump.json>`.
 
-**BASELINE3a** (không train) — Swin-T, op PyTorch thuần trên server: ước 10–30 phút cho 779 ảnh:
+**BASELINE3.1** (không train) — Swin-T, op PyTorch thuần trên server: ước 10–30 phút cho 779 ảnh:
 ```bash
-LOG=/mnt/disk1/aiotlab/haitn/log/baseline3a_predict_$(date +%m%d_%H%M).log
-nohup python ../tools/run_on_free_gpu.py -- gdino/predict.py --config configs/baseline3a_gdino_zeroshot.yaml \
+LOG=/mnt/disk1/aiotlab/haitn/log/baseline3_1_predict_$(date +%m%d_%H%M).log
+nohup python ../tools/run_on_free_gpu.py -- gdino/predict.py --config configs/baseline3_1_gdino_zeroshot.yaml \
     --split test --out-dir /mnt/disk1/aiotlab/haitn/output/baselines --where "zero-shot" > $LOG 2>&1 &
 echo "PID $! -> $LOG"
 ```
 
-**BASELINE3b** — chạy Kaggle là chính (build được CUDA op). Server: op PyTorch thuần, ước 4–8 giờ, bench trước:
+**BASELINE3.2** — chạy Kaggle là chính (build được CUDA op). Server: op PyTorch thuần, ước 4–8 giờ, bench trước:
 ```bash
-LOG=/mnt/disk1/aiotlab/haitn/log/baseline3b_$(date +%m%d_%H%M).log
-nohup python ../tools/run_on_free_gpu.py -- gdino/train.py --config configs/baseline3b_gdino_finetune.yaml > $LOG 2>&1 &
+LOG=/mnt/disk1/aiotlab/haitn/log/baseline3_2_$(date +%m%d_%H%M).log
+nohup python ../tools/run_on_free_gpu.py -- gdino/train.py --config configs/baseline3_2_gdino_finetune.yaml > $LOG 2>&1 &
 echo "PID $! -> $LOG"          # ngắt: chạy lại đúng lệnh -> main.py tự nối tiếp từ checkpoint.pth
 # chọn checkpoint trên val (oracle_recall), rồi test checkpoint đó:
-python gdino/predict.py --config configs/baseline3b_gdino_finetune.yaml --split val \
-    --weights checkpoints/baseline3b/checkpoint0009.pth checkpoints/baseline3b/checkpoint.pth \
-    --out-dir /mnt/disk1/aiotlab/haitn/output/baselines --select-out /mnt/disk1/aiotlab/haitn/output/baselines/baseline3b_select.json
+python gdino/predict.py --config configs/baseline3_2_gdino_finetune.yaml --split val \
+    --weights checkpoints/baseline3_2/checkpoint0009.pth checkpoints/baseline3_2/checkpoint.pth \
+    --out-dir /mnt/disk1/aiotlab/haitn/output/baselines --select-out /mnt/disk1/aiotlab/haitn/output/baselines/baseline3_2_select.json
 ```
 
 ## Kaggle T4×2
 
 `notebooks/baseline_kaggle.ipynb` (gitignore, chỉ ở local), khuôn `ce_localization/notebooks/train_kaggle.ipynb`:
-đổi `RUN` ở ô 1 (`baseline0` / `baseline1` / `baseline2` / `baseline3a` / `baseline3b`) và `BRANCH`. Mỗi lần
+đổi `RUN` ở ô 1 (`baseline0` / `baseline1` / `baseline2` / `baseline3_1` / `baseline3_2`) và `BRANCH`. Mỗi lần
 Save & Run All **một** baseline, cả 2 GPU (detectron2 `--num-gpus 2`, batch toàn cục vẫn 2; Grounding DINO
 `torch.distributed.run`), toàn notebook ≤ 11 giờ (`--max-hours`), output `last.pth` + `best.pth` + `results/`
 (dump, metrics, log). Input: dataset `ce130-gt.zip` của ALPHA; Internet On (R-50, weight GD, BERT).

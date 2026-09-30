@@ -1,5 +1,5 @@
-# BASELINE3b — Grounding DINO Swin-T FINETUNE trên CE-130 train (72 lớp), test trên 28 lớp chưa thấy.
-# Khởi tạo từ weight chính thức (như 3a), train bằng main.py của Open-GroundingDino (gdino/train.py),
+# BASELINE3.2 — Grounding DINO Swin-T FINETUNE trên CE-130 train (72 lớp), test trên 28 lớp chưa thấy.
+# Khởi tạo từ weight chính thức (như 3.1), train bằng main.py của Open-GroundingDino (gdino/train.py),
 # giữ công thức cfg_odvg.py (AdamW lr 1e-4 / backbone 1e-5, BERT đóng băng, clip 0,1, aug lật + đa tỉ lệ
 # 480–800 + crop 384–600 — cùng họ aug với BASELINE0–2). Ngân sách như mọi baseline: ≈ 12,6 epoch ×
 # batch toàn cục 2 (~12k iter), lr ×0,1 ở epoch 10 (StepLR). lr giữ 1e-4 của cfg dù batch nhỏ hơn.
@@ -7,7 +7,7 @@
 # Checkpoint: checkpoint.pth mỗi epoch (nối tiếp), checkpoint0009.pth trước khi giảm lr,
 # checkpoint_best_regular.pth theo mAP val nội bộ (prompt "object", chỉ để main.py chạy được) ->
 # chọn bằng gdino/predict.py --split val --select-out (oracle_recall, prompt đúng lớp từng ảnh).
-name: "BASELINE3b"
+name: "BASELINE3.2"
 og:
   repo: "third_party/Open-GroundingDino"
   url: "https://github.com/longzw1997/Open-GroundingDino.git"
@@ -19,7 +19,7 @@ weights_url: "https://github.com/IDEA-Research/GroundingDINO/releases/download/v
 predict:
   prompt: "{name} ."
 finetune:
-  output_dir: "checkpoints/baseline3b"
+  output_dir: "checkpoints/baseline3_2"
   batch_total: 2
   epochs: 13
   lr_drop: 10

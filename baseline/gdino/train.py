@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""BASELINE3b — finetune Grounding DINO Swin-T trên CE-130 train (72 lớp) bằng Open-GroundingDino.
+"""BASELINE3.2 — finetune Grounding DINO Swin-T trên CE-130 train (72 lớp) bằng Open-GroundingDino.
 
 1. dựng dữ liệu ODVG + label map + val nội bộ (`gdino/data.py`) vào `<output_dir>/data/`;
 2. chạy `main.py` của Open-GroundingDino (qua `gdino/launch.py`) với cfg Swin-T `config/cfg_odvg.py` +
@@ -10,8 +10,8 @@ Chọn checkpoint sau khi train: `gdino/predict.py --split val --weights <các c
 Server (không có nvcc -> op PyTorch thuần, chậm; bench trước), từ object-detection/baseline/:
 
   export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache
-  LOG=/mnt/disk1/aiotlab/haitn/log/baseline3b_$(date +%m%d_%H%M).log
-  nohup python ../tools/run_on_free_gpu.py -- gdino/train.py --config configs/baseline3b_gdino_finetune.yaml \\
+  LOG=/mnt/disk1/aiotlab/haitn/log/baseline3_2_$(date +%m%d_%H%M).log
+  nohup python ../tools/run_on_free_gpu.py -- gdino/train.py --config configs/baseline3_2_gdino_finetune.yaml \\
       > $LOG 2>&1 &
   echo "PID $! -> $LOG"
 
@@ -65,7 +65,7 @@ def main():
 
     cfg = load_config(a.config)
     if not cfg.get("finetune"):
-        ap.error(f"{a.config} không có mục finetune (BASELINE3a là zero-shot: dùng gdino/predict.py)")
+        ap.error(f"{a.config} không có mục finetune (BASELINE3.1 là zero-shot: dùng gdino/predict.py)")
     repo = check_repo(cfg)
     weights = resolve(cfg["weights"])
     if not os.path.exists(weights):

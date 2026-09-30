@@ -49,6 +49,6 @@ def test_three_baselines():
 def test_no_stray_configs():
     top = sorted(os.path.basename(p) for p in glob.glob(os.path.join(CFG_DIR, "*.yaml")))
     assert top == ["Base-CE130.yaml", "baseline0_diffusiondet.yaml", "baseline1_sparsercnn.yaml",
-                   "baseline2_fasterrcnn.yaml", "baseline3a_gdino_zeroshot.yaml", "baseline3b_gdino_finetune.yaml"]
+                   "baseline2_fasterrcnn.yaml", "baseline3_1_gdino_zeroshot.yaml", "baseline3_2_gdino_finetune.yaml"]
     bench = sorted(os.path.basename(p) for p in glob.glob(os.path.join(CFG_DIR, "benchmarks", "*.yaml")))
     assert "Base-Kaggle-T4x2.yaml" in bench and len(bench) == 5

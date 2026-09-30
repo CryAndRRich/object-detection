@@ -1,4 +1,4 @@
-"""Dữ liệu cho BASELINE3b (finetune Grounding DINO bằng Open-GroundingDino, định dạng ODVG):
+"""Dữ liệu cho BASELINE3.2 (finetune Grounding DINO bằng Open-GroundingDino, định dạng ODVG):
 
 - `train_odvg.jsonl`: mỗi dòng một ảnh train CE-130, instance = box GT (xyxy pixel ảnh gốc, kẹp vào
   ảnh như `scale_boxes`) mang tên lớp thật (`class_based_caption`);

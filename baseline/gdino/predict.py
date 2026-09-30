@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""BASELINE3a / 3b — dump dự đoán Grounding DINO trên CE-130 (prompt = tên lớp CỦA TỪNG ẢNH) rồi chấm
+"""BASELINE3.1 / 3.2 — dump dự đoán Grounding DINO trên CE-130 (prompt = tên lớp CỦA TỪNG ẢNH) rồi chấm
 bằng bộ chấm chung (`scoring.py`). 900 query / ảnh, không NMS nội bộ; bộ chấm lấy 200 box điểm cao nhất
 (N = 200 của docs/SCORE.md) và mọi box ('all').
 
 Nhiều `--weights` + `--select-out`: chạy lần lượt (thường trên val) rồi ghi checkpoint có `oracle_recall`
-cao nhất (200 box) — cách chọn checkpoint của BASELINE3b (cạm bẫy 3: chọn bằng chỉ số matcher không thấy).
+cao nhất (200 box) — cách chọn checkpoint của BASELINE3.2 (cạm bẫy 3: chọn bằng chỉ số matcher không thấy).
 
 Từ object-detection/baseline/, `export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache` (BERT), ~10–30 phút ⇒ nền:
 
-  LOG=/mnt/disk1/aiotlab/haitn/log/baseline3a_predict_$(date +%m%d_%H%M).log
-  nohup python ../tools/run_on_free_gpu.py -- gdino/predict.py --config configs/baseline3a_gdino_zeroshot.yaml \\
+  LOG=/mnt/disk1/aiotlab/haitn/log/baseline3_1_predict_$(date +%m%d_%H%M).log
+  nohup python ../tools/run_on_free_gpu.py -- gdino/predict.py --config configs/baseline3_1_gdino_zeroshot.yaml \\
       --split test --out-dir /mnt/disk1/aiotlab/haitn/output/baselines --where "zero-shot" > $LOG 2>&1 &
   echo "PID $! -> $LOG"
 """
@@ -47,7 +47,7 @@ def main():
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--device", default=None)
     ap.add_argument("--select-out", default=None, help="ghi checkpoint có oracle_recall (200 box) cao nhất")
-    ap.add_argument("--where", default="—", help="nơi chạy / GPU lúc TRAIN (3b) hoặc 'zero-shot' (3a)")
+    ap.add_argument("--where", default="—", help="nơi chạy / GPU lúc TRAIN (3.2) hoặc 'zero-shot' (3.1)")
     ap.add_argument("--train-time", default="—")
     a = ap.parse_args()
 
