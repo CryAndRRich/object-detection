@@ -25,8 +25,9 @@ import yaml
 BASELINE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 __all__ = ["BASELINE_DIR", "load_config", "resolve", "check_repo", "clone_cmd", "setup_og",
-           "install_msda_fallback", "og_args", "build_gdino", "load_weights", "make_transform", "prompt_of",
-           "phrase_positive_map", "phrase_scores", "cxcywh_to_xyxy_px", "predict_image"]
+           "install_msda_fallback", "check_transformers", "og_args", "build_gdino", "load_weights",
+           "make_transform", "prompt_of", "phrase_positive_map", "phrase_scores", "cxcywh_to_xyxy_px",
+           "predict_image"]
 
 
 def resolve(path):
@@ -60,11 +61,12 @@ def check_repo(cfg):
 
 def install_msda_fallback(module_name="models.GroundingDINO.ms_deform_attn"):
     """Không có CUDA op -> dùng bản PyTorch thuần của chính Open-GroundingDino. -> True nếu đã cài shim."""
+    import torch  # noqa: F401  (.so của op link libc10 / libtorch: import torch TRƯỚC, không thì ImportError)
     try:
         import MultiScaleDeformableAttention  # noqa: F401  (op đã build: dùng op thật)
         return False
-    except Exception:  # ImportError, hoặc .so build lệch phiên bản CUDA
-        pass
+    except Exception as e:  # ImportError, hoặc .so build lệch phiên bản CUDA
+        reason = f"{type(e).__name__}: {e}"
     sys.modules["MultiScaleDeformableAttention"] = types.ModuleType("MultiScaleDeformableAttention")
     import importlib
     msda = importlib.import_module(module_name)
@@ -76,14 +78,27 @@ def install_msda_fallback(module_name="models.GroundingDINO.ms_deform_attn"):
                                                             attention_weights)
 
     msda.MultiScaleDeformableAttnFunction = _PytorchMSDA
-    warnings.warn("MultiScaleDeformableAttention (CUDA op) chưa build -> dùng bản PyTorch thuần "
-                  "(multi_scale_deformable_attn_pytorch): chậm hơn, cùng công thức")
+    warnings.warn(f"MultiScaleDeformableAttention (CUDA op) không import được ({reason}) -> dùng bản PyTorch "
+                  "thuần (multi_scale_deformable_attn_pytorch): chậm hơn, cùng công thức")
     return True
+
+
+def check_transformers():
+    """`bertwarper.py` của Open-GroundingDino gọi API BERT của transformers 4.x (`get_head_mask`,
+    `get_extended_attention_mask`, chữ ký `encoder(...)`) — transformers 5 đã bỏ (Kaggle 2026-10-01:
+    AttributeError 'BertModel' object has no attribute 'get_head_mask'). Dừng sớm kèm lệnh sửa."""
+    import transformers
+
+    if int(transformers.__version__.split(".")[0]) >= 5:
+        raise RuntimeError(f"transformers {transformers.__version__}: Open-GroundingDino cần 4.x -> "
+                           "pip install 'transformers<5'")
+    return transformers.__version__
 
 
 def setup_og(repo):
     """Đưa repo vào sys.path (code Open-GroundingDino import `models`, `util`, `datasets` ở mức gốc)
     rồi cài shim nếu cần. -> True nếu đang dùng shim."""
+    check_transformers()
     if repo not in sys.path:
         sys.path.insert(0, repo)
     return install_msda_fallback()

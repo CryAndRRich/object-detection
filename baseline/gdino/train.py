@@ -29,7 +29,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from baseline.gdino.data import prepare  # noqa: E402
-from baseline.gdino.runtime import check_repo, load_config, resolve  # noqa: E402
+from baseline.gdino.runtime import check_repo, check_transformers, load_config, resolve  # noqa: E402
 
 LAUNCH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "launch.py")
 
@@ -67,6 +67,7 @@ def main():
     if not cfg.get("finetune"):
         ap.error(f"{a.config} không có mục finetune (BASELINE3.1 là zero-shot: dùng gdino/predict.py)")
     repo = check_repo(cfg)
+    print(f"[gdino train] transformers {check_transformers()}", flush=True)     # dừng trước khi dựng dữ liệu / DDP
     weights = resolve(cfg["weights"])
     if not os.path.exists(weights):
         raise FileNotFoundError(f"thiếu weight {weights} — tải: wget -O {weights} {cfg['weights_url']}")

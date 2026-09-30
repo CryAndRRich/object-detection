@@ -4,7 +4,9 @@ có đúng hành vi của file gốc (raise lúc import khi thiếu op, chọn n
 
 import json
 import os
+import subprocess
 import sys
+import types
 
 import numpy as np
 import pytest
@@ -13,7 +15,8 @@ import yaml
 
 from baseline.gdino import runtime
 from baseline.gdino.data import build_label_map, prepare
-from baseline.gdino.runtime import cxcywh_to_xyxy_px, install_msda_fallback, phrase_scores, prompt_of
+from baseline.gdino.runtime import (check_transformers, cxcywh_to_xyxy_px, install_msda_fallback,
+                                    phrase_scores, prompt_of)
 from baseline.gdino.train import build_command
 from ce_localization.data.dataset import scan_ce130
 from tests.ce_localization.helpers import _fake_ce130
@@ -73,6 +76,38 @@ def test_shim_not_installed_when_op_present(fake_og, monkeypatch):
     import models.GroundingDINO.ms_deform_attn as m
     assert m.forward("v") == ("cuda", "v")
 
+
+
+def test_real_op_loads_in_fresh_process_without_torch(tmp_path):
+    """.so của op link libtorch -> chỉ import được SAU `import torch`. launch.py gọi shim trong tiến trình mới
+    chưa nạp torch: bản cũ rơi sang shim dù op đã build (Kaggle 2026-10-01). Op giả dưới đây bắt chước đúng
+    điều kiện đó."""
+    og = tmp_path / "og" / "models" / "GroundingDINO"
+    og.mkdir(parents=True)
+    (tmp_path / "og" / "models" / "__init__.py").write_text("", encoding="utf-8")
+    (og / "__init__.py").write_text("", encoding="utf-8")
+    (og / "ms_deform_attn.py").write_text(FAKE_MSDA, encoding="utf-8")
+    ops = tmp_path / "ops"
+    ops.mkdir()
+    (ops / "MultiScaleDeformableAttention.py").write_text(
+        "import sys\nif 'torch' not in sys.modules:\n    raise ImportError('libc10.so: cannot open shared object')\n"
+        "def ms_deform_attn_forward(v):\n    return v\n", encoding="utf-8")
+    project = os.path.join(os.path.dirname(__file__), "..", "..")
+    code = ("import sys; from baseline.gdino.runtime import install_msda_fallback; "
+            "assert 'torch' not in sys.modules; print(install_msda_fallback()); "
+            "import models.GroundingDINO.ms_deform_attn as m; print(m.forward('v'))")
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(tmp_path / "og"), str(ops), os.path.abspath(project)]))
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split() == ["False", "('cuda',", "'v')"], r.stdout
+
+
+def test_check_transformers_rejects_v5(monkeypatch):
+    monkeypatch.setitem(sys.modules, "transformers", types.SimpleNamespace(__version__="5.0.0"))
+    with pytest.raises(RuntimeError, match="transformers<5"):
+        check_transformers()
+    monkeypatch.setitem(sys.modules, "transformers", types.SimpleNamespace(__version__="4.46.3"))
+    assert check_transformers() == "4.46.3"
 
 def test_phrase_score_is_mean_sigmoid_over_phrase_tokens():
     logits = torch.randn(7, 256)
