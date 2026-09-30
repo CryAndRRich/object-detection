@@ -48,6 +48,7 @@ dữ liệu giả dùng chung ở `helpers.py`.
 | `alpha/alpha2.yaml` | `model.memory: grid` (lưới ô P5 16×16 + PE 2D) | 〃 |
 | `alpha/alpha3_1.yaml` | `model.in_channels: 4`, `data.density: full` (density kênh 4, cố định bản đầy đủ nhất) | 〃 mục 5 |
 | `alpha/alpha3_2.yaml` | như trên, `data.density: mix` (1/3 đầy đủ · 1/3 thiếu vật · 1/3 trống) | 〃 mục 5 |
+| `alpha/alpha3_2_36k.yaml` | như `alpha3_2`, train 36k iter (steps 27k / 33k) | 〃 mục 12.5 |
 | `beta/beta0.yaml` | `data.targets: point` (đích = box giả từ điểm density, box GT chỉ để chấm) | `docs/EXPERIMENT_BETA.md` |
 
 ## Chạy

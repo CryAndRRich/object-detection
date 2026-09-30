@@ -17,7 +17,7 @@ from baseline.gdino import runtime
 from baseline.gdino.data import build_label_map, prepare
 from baseline.gdino.runtime import (check_transformers, cxcywh_to_xyxy_px, install_msda_fallback,
                                     phrase_scores, prompt_of)
-from baseline.gdino.train import build_command
+from baseline.gdino.train import OG_CFG_OVERRIDES, build_command, write_og_config
 from ce_localization.data.dataset import scan_ce130
 from tests.ce_localization.helpers import _fake_ce130
 
@@ -152,21 +152,44 @@ def test_prepare_odvg_and_internal_val(tmp_path):
             assert 0 <= x1 < x2 <= ln["width"] and 0 <= y1 < y2 <= ln["height"]
             assert label_map[str(obj["label"])] == obj["category"] == items[iid]["text"]
     coco = json.load(open(va["anno"], encoding="utf-8"))
-    assert len(coco["images"]) == 1 and coco["categories"] == [{"id": 1, "name": "object", "supercategory": "object"}]
+    assert len(coco["images"]) == 1 and coco["categories"] == [{"id": 0, "name": "object", "supercategory": "object"}]
+    # PostProcess của Open-GroundingDino (use_coco_eval False) trả nhãn = chỉ số trong label_list -> category id của
+    # val nội bộ phải trùng đúng chỉ số đó (bản cũ: use_coco_eval True -> bảng 80 lớp COCO -> IndexError)
+    assert OG_CFG_OVERRIDES["use_coco_eval"] is False
+    names = OG_CFG_OVERRIDES["label_list"]
+    assert isinstance(names, list) and {c["id"]: c["name"] for c in coco["categories"]} == dict(enumerate(names))
+    assert {a["category_id"] for a in coco["annotations"]} <= set(range(len(names)))
 
 
 def test_build_command_batch_split_and_options(tmp_path):
     cfg = yaml.safe_load(open(os.path.join(CFG_DIR, "baseline3_2_gdino_finetune.yaml"), encoding="utf-8"))
-    cmd, opt = build_command(cfg, "/og", "/out", "/out/data/datasets.json", nproc=2, num_workers=2, python="py")
+    cmd, opt = build_command(cfg, "/out/data/c.py", "/out", "/out/data/datasets.json", nproc=2, num_workers=2,
+                             python="py")
     assert cmd[:3] == ["py", "-m", "torch.distributed.run"] and "--nproc_per_node=2" in cmd
-    assert opt["batch_size"] == 1 and opt["epochs"] == 13 and opt["use_coco_eval"] is True
+    assert opt["batch_size"] == 1 and opt["epochs"] == 13
     assert "batch_size=1" in cmd and "--pretrain_model_path" in cmd
-    assert cmd[cmd.index("-c") + 1] == "/og/config/cfg_odvg.py"
+    assert cmd[cmd.index("-c") + 1] == "/out/data/c.py"
+    # list / bool không đi qua --options (DictAction: 'label_list=object' -> chuỗi) — nằm trong cfg dẫn xuất
+    assert not set(OG_CFG_OVERRIDES) & set(opt) and not [a for a in cmd if a.startswith(("label_list", "use_coco"))]
     cmd1, opt1 = build_command(cfg, "/og", "/out", "d.json", nproc=1, num_workers=2, python="py")
     assert cmd1[0] == "py" and cmd1[1].endswith("launch.py") and opt1["batch_size"] == 2
     cfg["finetune"]["batch_total"] = 3
     with pytest.raises(ValueError):
         build_command(cfg, "/og", "/out", "d.json", nproc=2, num_workers=2)
+
+
+def test_write_og_config_keeps_base_and_overrides(tmp_path):
+    cfg = yaml.safe_load(open(os.path.join(CFG_DIR, "baseline3_2_gdino_finetune.yaml"), encoding="utf-8"))
+    repo = tmp_path / "og"
+    (repo / "config").mkdir(parents=True)
+    (repo / "config" / "cfg_odvg.py").write_text("num_queries = 900\nuse_coco_eval = True\nlr = 0.0001\n",
+                                                 encoding="utf-8")
+    path = write_og_config(str(repo), cfg, str(tmp_path / "data"))
+    ns = {}
+    exec(compile(open(path, encoding="utf-8").read(), path, "exec"), ns)      # SLConfig nạp .py y như vậy
+    assert ns["num_queries"] == 900 and ns["lr"] == 0.0001                      # phần gốc giữ nguyên
+    assert ns["use_coco_eval"] is False and ns["label_list"] == ["object"]      # ghi đè thắng (gán sau)
+    assert (repo / "config" / "cfg_odvg.py").read_text(encoding="utf-8").count("use_coco_eval = True") == 1
 
 
 def test_zero_shot_and_finetune_share_the_same_model():

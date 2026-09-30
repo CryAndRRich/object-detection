@@ -4,7 +4,8 @@
   ảnh như `scale_boxes`) mang tên lớp thật (`class_based_caption`);
 - `label_map.json`: {"0": tên, ...} — 72 lớp train, sắp xếp. Caption lúc train = lớp thật của ảnh + lớp
   âm rút từ bảng này (`max_labels`), do ODVGDataset của Open-GroundingDino dựng;
-- `val_internal_coco.json`: vài chục ảnh val dạng COCO, một category "object" — CHỈ để main.py của
+- `val_internal_coco.json`: vài chục ảnh val dạng COCO, một category "object" **id 0** (= nhãn 0 mà PostProcess
+  trả ra với `label_list = ["object"]`, `use_coco_eval = False` — gdino/train.py) — CHỈ để main.py của
   Open-GroundingDino chạy được vòng eval mỗi epoch (nó bắt buộc có val). Không dùng để chọn checkpoint:
   chọn bằng `gdino/predict.py --split val` với prompt đúng lớp của từng ảnh (oracle_recall);
 - `datasets.json`: file `--datasets` của main.py.
@@ -64,11 +65,11 @@ def write_coco_subset(items, root, out_json, n_images, seed=0):
         images.append({"id": img_id, "file_name": os.path.relpath(it["img_path"], root), "width": w, "height": h})
         for b in boxes:
             bw, bh = float(b[2] - b[0]), float(b[3] - b[1])
-            anns.append({"id": len(anns) + 1, "image_id": img_id, "category_id": 1, "iscrowd": 0,
+            anns.append({"id": len(anns) + 1, "image_id": img_id, "category_id": 0, "iscrowd": 0,
                          "bbox": [float(b[0]), float(b[1]), bw, bh], "area": bw * bh})
     with open(out_json, "w", encoding="utf-8") as f:
         json.dump({"images": images, "annotations": anns,
-                   "categories": [{"id": 1, "name": "object", "supercategory": "object"}]}, f)
+                   "categories": [{"id": 0, "name": "object", "supercategory": "object"}]}, f)
     return len(images), len(anns)
 
 

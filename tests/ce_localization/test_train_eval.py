@@ -150,6 +150,20 @@ def test_alpha3_configs_only_differ_from_alpha0_by_density():
         assert {k: v for k, v in c.items()} == {k: v for k, v in c0.items() if k not in ("experiment", "description")}
 
 
+def test_alpha3_2_36k_only_differs_from_alpha3_2_by_schedule():
+    with open(CFG3["mix"]) as f:
+        c0 = yaml.safe_load(f)
+    with open(os.path.join(os.path.dirname(CFG3["mix"]), "alpha3_2_36k.yaml")) as f:
+        c = yaml.safe_load(f)
+    t, t0 = c.pop("training"), c0.pop("training")
+    assert t.pop("max_iter") == 3 * t0.pop("max_iter")
+    assert t.pop("steps") == [3 * s for s in t0.pop("steps")]
+    assert t == t0
+    for k in ("experiment", "description"):
+        c.pop(k), c0.pop(k)
+    assert c == c0
+
+
 def test_beta0_config_only_differs_from_alpha0_by_beta_keys():
     with open(CFG0) as f:
         c0 = yaml.safe_load(f)
