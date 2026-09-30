@@ -43,7 +43,7 @@ class CrowdHumanEvaluator(DatasetEvaluator):
 
     def _load_gt(self):
         """Nạp GT từ chính json đã đăng ký; ``iscrowd=1`` là vùng ignore."""
-        with open(self._json_file) as f:
+        with open(self._json_file, encoding="utf-8") as f:
             coco = json.load(f)
         by_img = defaultdict(lambda: ([], []))     # image_id -> (person, ignore)
         for ann in coco["annotations"]:
@@ -91,7 +91,7 @@ class CrowdHumanEvaluator(DatasetEvaluator):
 
         if self._output_dir:
             os.makedirs(self._output_dir, exist_ok=True)
-            with open(os.path.join(self._output_dir, "crowdhuman_metrics.json"), "w") as f:
+            with open(os.path.join(self._output_dir, "crowdhuman_metrics.json"), "w", encoding="utf-8") as f:
                 json.dump(res, f, indent=2)
 
         return OrderedDict({"crowdhuman": res})

@@ -54,7 +54,7 @@ def score_dump_file(pred_path, data_root, budgets, out=None, log=print, gt=None)
         out_all["score_rows"][tag] = row
     out = out or os.path.splitext(pred_path)[0] + "_metrics.json"
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
-    with open(out, "w") as f:
+    with open(out, "w", encoding="utf-8") as f:
         json.dump(out_all, f, indent=1, ensure_ascii=False, default=float)
     log(f"  -> {out}")
     return out_all

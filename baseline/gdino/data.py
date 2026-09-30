@@ -47,7 +47,7 @@ def odvg_line(it, root, label_of):
 def write_odvg(items, root, out_jsonl, label_map):
     label_of = {n: int(k) for k, n in label_map.items()}
     n_box = 0
-    with open(out_jsonl, "w") as f:
+    with open(out_jsonl, "w", encoding="utf-8") as f:
         for it in items:
             line = odvg_line(it, root, label_of)
             n_box += len(line["detection"]["instances"])
@@ -66,7 +66,7 @@ def write_coco_subset(items, root, out_json, n_images, seed=0):
             bw, bh = float(b[2] - b[0]), float(b[3] - b[1])
             anns.append({"id": len(anns) + 1, "image_id": img_id, "category_id": 1, "iscrowd": 0,
                          "bbox": [float(b[0]), float(b[1]), bw, bh], "area": bw * bh})
-    with open(out_json, "w") as f:
+    with open(out_json, "w", encoding="utf-8") as f:
         json.dump({"images": images, "annotations": anns,
                    "categories": [{"id": 1, "name": "object", "supercategory": "object"}]}, f)
     return len(images), len(anns)
@@ -81,11 +81,11 @@ def prepare(root, data_dir, internal_val_images=50, seed=0, log=print):
     paths = {k: os.path.join(data_dir, f) for k, f in (("odvg", "train_odvg.jsonl"), ("label_map", "label_map.json"),
                                                         ("val", "val_internal_coco.json"),
                                                         ("datasets", "datasets.json"))}
-    with open(paths["label_map"], "w") as f:
+    with open(paths["label_map"], "w", encoding="utf-8") as f:
         json.dump(label_map, f, indent=1, ensure_ascii=False)
     n_img, n_box = write_odvg(train, root, paths["odvg"], label_map)
     v_img, v_box = write_coco_subset(val, root, paths["val"], internal_val_images, seed)
-    with open(paths["datasets"], "w") as f:
+    with open(paths["datasets"], "w", encoding="utf-8") as f:
         json.dump({"train": [{"root": root, "anno": paths["odvg"], "label_map": paths["label_map"],
                               "dataset_mode": "odvg"}],
                    "val": [{"root": root, "anno": paths["val"], "label_map": None, "dataset_mode": "coco"}]}, f,

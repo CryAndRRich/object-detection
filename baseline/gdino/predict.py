@@ -102,7 +102,7 @@ def main():
     if a.select_out:
         best = max(by_weights, key=by_weights.get)
         os.makedirs(os.path.dirname(os.path.abspath(a.select_out)), exist_ok=True)
-        with open(a.select_out, "w") as f:
+        with open(a.select_out, "w", encoding="utf-8") as f:
             json.dump({"split": a.split, "metric": "oracle_recall (200 box)", "best": best,
                        "by_weights": by_weights}, f, indent=1)
         print(f"[gdino predict] chọn {best} (oracle_recall {by_weights[best]:.4f}) -> {a.select_out}", flush=True)

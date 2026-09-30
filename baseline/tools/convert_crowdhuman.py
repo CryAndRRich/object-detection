@@ -52,7 +52,7 @@ def convert(odgt_path, image_dir, out_path, box_type):
     ann_id = 1
     n_ignore = n_pos = n_dropped = 0
 
-    with open(odgt_path) as f:
+    with open(odgt_path, encoding="utf-8") as f:
         records = [json.loads(line) for line in f if line.strip()]
 
     # đọc kích thước ảnh: odgt không chứa width/height nên phải mở ảnh
@@ -95,7 +95,7 @@ def convert(odgt_path, image_dir, out_path, box_type):
     }
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with open(out_path, "w") as f:
+    with open(out_path, "w", encoding="utf-8") as f:
         json.dump(coco, f)
 
     print(f"  {os.path.basename(out_path)}: {len(images)} ảnh, "

@@ -119,7 +119,7 @@ def save_atomic(checkpointer, name, tag_last=False, **extra):
 
 
 def write_json_atomic(path, obj):
-    with open(path + ".tmp", "w") as f:
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=1, default=float)
     os.replace(path + ".tmp", path)
 
@@ -151,7 +151,7 @@ class HistoryAndBest(hooks.HookBase):
         start = self.trainer.start_iter
         self._h = {"train": [], "eval": [], "best": None, "metric": self._metric}
         if start > 0 and os.path.exists(self._path):
-            with open(self._path) as f:
+            with open(self._path, encoding="utf-8") as f:
                 old = json.load(f)
             self._h["train"] = [r for r in old.get("train", []) if r["iter"] <= start]
             self._h["eval"] = [r for r in old.get("eval", []) if r["iter"] <= start]
@@ -478,7 +478,7 @@ def main(args):
             if args.dump_results:
                 # Ghi kết quả ra json để script/notebook đọc bằng máy (parse log thì dễ vỡ).
                 os.makedirs(os.path.dirname(os.path.abspath(args.dump_results)), exist_ok=True)
-                with open(args.dump_results, "w") as f:
+                with open(args.dump_results, "w", encoding="utf-8") as f:
                     json.dump(res, f, indent=2, default=float)
                 logging.getLogger("detectron2").info(f"đã ghi kết quả -> {args.dump_results}")
         return res

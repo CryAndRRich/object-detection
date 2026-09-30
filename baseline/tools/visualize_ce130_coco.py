@@ -52,7 +52,7 @@ def main():
 
     from PIL import Image, ImageDraw, ImageFont
 
-    with open(args.json) as f:
+    with open(args.json, encoding="utf-8") as f:
         coco = json.load(f)
 
     cat_name = {c["id"]: c["name"] for c in coco["categories"]}
@@ -62,7 +62,7 @@ def main():
 
     pred = None
     if args.pred:
-        with open(args.pred) as f:
+        with open(args.pred, encoding="utf-8") as f:
             pred = json.load(f)["pred"]
 
     images = coco["images"]

@@ -1,6 +1,8 @@
 """Config BASELINE0–2: đúng ngân sách D.1 (12k iter × batch 2), đúng LR co theo batch, đúng giới hạn box.
-Đọc YAML thô (không cần detectron2); `test_train_predict.py` kiểm lại bằng chính detectron2."""
+Đọc YAML thô (không cần detectron2); `test_train_predict.py` kiểm lại bằng chính detectron2.
+Kèm kiểm tĩnh mã nguồn `baseline/` (không cần torch)."""
 
+import ast
 import glob
 import math
 import os
@@ -11,7 +13,7 @@ CFG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "baseline", "confi
 
 
 def _load(name):
-    with open(os.path.join(CFG_DIR, name)) as f:
+    with open(os.path.join(CFG_DIR, name), encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -52,3 +54,29 @@ def test_no_stray_configs():
                    "baseline2_fasterrcnn.yaml", "baseline3_1_gdino_zeroshot.yaml", "baseline3_2_gdino_finetune.yaml"]
     bench = sorted(os.path.basename(p) for p in glob.glob(os.path.join(CFG_DIR, "benchmarks", "*.yaml")))
     assert "Base-Kaggle-T4x2.yaml" in bench and len(bench) == 5
+
+
+def test_text_open_has_utf8_encoding():
+    """Mọi open() dạng text trong baseline/ và tests/baseline/ phải ghi rõ encoding="utf-8": locale của
+    server là ASCII -> json.dump(..., ensure_ascii=False) vỡ ở ký tự '—' (UnicodeEncodeError, BASELINE3.1
+    2026-09-30); đọc YAML / nguồn có chữ Việt cũng vỡ."""
+    project = os.path.join(os.path.dirname(__file__), "..", "..")
+    skip = {"third_party", "checkpoints", "notebooks", "__pycache__"}
+    bad = []
+    for dirpath, dirs, files in (w for sub in ("baseline", "tests/baseline") for w in os.walk(os.path.join(project, sub))):
+        dirs[:] = [d for d in dirs if d not in skip]
+        for fn in files:
+            if not fn.endswith(".py"):
+                continue
+            path = os.path.join(dirpath, fn)
+            with open(path, encoding="utf-8") as f:
+                tree = ast.parse(f.read(), path)
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "open"):
+                    continue
+                mode = node.args[1] if len(node.args) > 1 else next(
+                    (k.value for k in node.keywords if k.arg == "mode"), None)
+                binary = isinstance(mode, ast.Constant) and "b" in str(mode.value)
+                if not binary and not any(k.arg == "encoding" for k in node.keywords):
+                    bad.append(f"{os.path.relpath(path, project)}:{node.lineno}")
+    assert not bad, f"open() dạng text thiếu encoding: {bad}"

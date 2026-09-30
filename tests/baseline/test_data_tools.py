@@ -42,7 +42,7 @@ def main():
     import re
     src_path = os.path.join(PROJECT,
                             "objdet", "datasets.py")
-    with open(src_path) as f:
+    with open(src_path, encoding="utf-8") as f:
         src = f.read()
 
     def default_of(func_name, env_name):
@@ -108,13 +108,13 @@ def _make_branch(root, split, iid, bnum, boxes_xyxy, category, w=200, h=150,
     }
     if extra_ann_fields:
         ann.update(extra_ann_fields)
-    with open(os.path.join(br, "annotation.json"), "w") as f:
+    with open(os.path.join(br, "annotation.json"), "w", encoding="utf-8") as f:
         json.dump(ann, f)
     if fixed:
         # fixed_annotation.json khác nội dung để test dễ phân biệt được cái nào đã đọc
         ann_fixed = dict(ann)
         ann_fixed["class_based_caption"] = category + "_FIXED"
-        with open(os.path.join(br, "fixed_annotation.json"), "w") as f:
+        with open(os.path.join(br, "fixed_annotation.json"), "w", encoding="utf-8") as f:
             json.dump(ann_fixed, f)
     return br
 

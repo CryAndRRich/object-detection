@@ -47,6 +47,7 @@ df -h /mnt/disk1
 export OBJDET_DATA_ROOT=../data HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache TORCH_HOME=/mnt/disk1/aiotlab/haitn/torch_cache
 export FVCORE_CACHE=/mnt/disk1/aiotlab/haitn/torch_cache/iopath TMPDIR=/mnt/disk1/aiotlab/haitn/tmp
 export DETECTRON2_DISABLE_CV2=1     # ~/.local có thư mục cv2/ mồ côi (chỉ còn qt/) -> import detectron2 vỡ; baseline không cần OpenCV
+export PYTHONUTF8=1                # locale server là ASCII: open() không ghi encoding thì vỡ ở chữ Việt / "—"
 ```
 
 1. **detectron2** (BASELINE0–2) — env `ce-locmodel` hiện không import được; dựng lại theo

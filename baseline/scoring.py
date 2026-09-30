@@ -105,12 +105,12 @@ def write_dump(path, meta, pred, ndigits=2):
                                          ndigits).tolist(),
                   "scores": np.round(np.asarray(p["scores"], dtype=np.float64), 6).tolist()}
             for iid, p in pred.items()}
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump({"meta": meta, "pred": slim}, f)
 
 
 def read_dump(path):
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         d = json.load(f)
     return d["meta"], d["pred"]
 

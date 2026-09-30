@@ -37,7 +37,7 @@ def ce130(tmp_path_factory):
     for split in ("train", "val", "test"):
         coco, _ = build_coco(scan_dedup(os.path.join(img_root, split), verbose=False), "class-agnostic",
                              image_root_for_relpath=img_root)
-        with open(root / "ce130_coco" / f"ce130_agnostic_{split}.json", "w") as f:
+        with open(root / "ce130_coco" / f"ce130_agnostic_{split}.json", "w", encoding="utf-8") as f:
             json.dump(coco, f)
     register_all(str(root))          # đăng ký một lần; main() gọi lại thì bỏ qua (đã có)
     return str(root), img_root
@@ -52,7 +52,7 @@ def _train(cfg, out, max_iter, resume=False):
 
 def _last_iter(out):
     import torch
-    with open(os.path.join(out, "last_checkpoint")) as f:
+    with open(os.path.join(out, "last_checkpoint"), encoding="utf-8") as f:
         name = f.read().strip()
     return torch.load(os.path.join(out, name), map_location="cpu", weights_only=False)["iteration"]
 
@@ -74,7 +74,7 @@ def _check_train_resume_predict(cfg, out, img_root, tmp_path, monkeypatch, name)
     assert {"last.pth", "best.pth", "history.json", "last_checkpoint"} <= files
     assert not [f for f in files if f.startswith("model_") or f.endswith(".tmp")]     # không checkpoint định kỳ
     assert not ({"metrics.json", "inference"} & files) and not [f for f in files if f.startswith("events.")]
-    h1 = json.load(open(os.path.join(out, "history.json")))
+    h1 = json.load(open(os.path.join(out, "history.json"), encoding="utf-8"))
     assert [e["iter"] for e in h1["eval"]] == [2] and "ce130/oracle_recall" in h1["eval"][0]
     assert h1["best"]["iter"] == 2 and h1["train"][-1]["iter"] == 2 and "total_loss" in h1["train"][-1]
     import torch
@@ -83,7 +83,7 @@ def _check_train_resume_predict(cfg, out, img_root, tmp_path, monkeypatch, name)
 
     _train(cfg, out, 4, resume=True)
     assert _last_iter(out) == 3                                      # nối tiếp từ iter 2, không train lại từ 0
-    h2 = json.load(open(os.path.join(out, "history.json")))
+    h2 = json.load(open(os.path.join(out, "history.json"), encoding="utf-8"))
     assert [e["iter"] for e in h2["eval"]] == [2, 4]                 # history cũ giữ, eval mới nối thêm
     assert [r["iter"] for r in h2["train"]] == [2, 4]
     assert h2["best"]["iter"] in (2, 4)
@@ -104,10 +104,10 @@ def _check_train_resume_predict(cfg, out, img_root, tmp_path, monkeypatch, name)
             else [f"{run}_test.json"])
     assert dumps == want
     for d in dumps:
-        dump = json.load(open(os.path.join(pred_dir, d)))
+        dump = json.load(open(os.path.join(pred_dir, d), encoding="utf-8"))
         assert len(dump["pred"]) == 2 and dump["meta"]["iter"] == 4 and dump["meta"]["run"] == run
         assert all(len(p["scores"]) <= (40 if d.endswith("s2.json") else 20) for p in dump["pred"].values())
-        m = json.load(open(os.path.join(pred_dir, d[:-5] + "_metrics.json")))
+        m = json.load(open(os.path.join(pred_dir, d[:-5] + "_metrics.json"), encoding="utf-8"))
         r = next(iter(m["results"].values()))
         assert set(r) == {"topk_first", "nms_first"} and 0.0 <= r["nms_first"]["oracle_recall"] <= 1.0
 

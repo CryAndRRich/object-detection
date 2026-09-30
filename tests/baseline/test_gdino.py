@@ -97,12 +97,12 @@ def test_prepare_odvg_and_internal_val(tmp_path):
     root = str(tmp_path / "all_phase2_V2")
     _fake_ce130(root)
     ds = prepare(root, str(tmp_path / "data"), internal_val_images=1, seed=0, log=lambda *a: None)
-    meta = json.load(open(ds))
+    meta = json.load(open(ds, encoding="utf-8"))
     tr, va = meta["train"][0], meta["val"][0]
     assert tr["dataset_mode"] == "odvg" and va["dataset_mode"] == "coco" and va["label_map"] is None
-    label_map = json.load(open(tr["label_map"]))
+    label_map = json.load(open(tr["label_map"], encoding="utf-8"))
     assert label_map == {"0": "apple", "1": "egg"} == build_label_map(scan_ce130(root, "train"))
-    lines = [json.loads(l) for l in open(tr["anno"])]
+    lines = [json.loads(l) for l in open(tr["anno"], encoding="utf-8")]
     items = {it["image_id"]: it for it in scan_ce130(root, "train")}
     assert len(lines) == len(items)
     for ln in lines:
@@ -114,12 +114,12 @@ def test_prepare_odvg_and_internal_val(tmp_path):
             x1, y1, x2, y2 = obj["bbox"]
             assert 0 <= x1 < x2 <= ln["width"] and 0 <= y1 < y2 <= ln["height"]
             assert label_map[str(obj["label"])] == obj["category"] == items[iid]["text"]
-    coco = json.load(open(va["anno"]))
+    coco = json.load(open(va["anno"], encoding="utf-8"))
     assert len(coco["images"]) == 1 and coco["categories"] == [{"id": 1, "name": "object", "supercategory": "object"}]
 
 
 def test_build_command_batch_split_and_options(tmp_path):
-    cfg = yaml.safe_load(open(os.path.join(CFG_DIR, "baseline3_2_gdino_finetune.yaml")))
+    cfg = yaml.safe_load(open(os.path.join(CFG_DIR, "baseline3_2_gdino_finetune.yaml"), encoding="utf-8"))
     cmd, opt = build_command(cfg, "/og", "/out", "/out/data/datasets.json", nproc=2, num_workers=2, python="py")
     assert cmd[:3] == ["py", "-m", "torch.distributed.run"] and "--nproc_per_node=2" in cmd
     assert opt["batch_size"] == 1 and opt["epochs"] == 13 and opt["use_coco_eval"] is True
@@ -133,8 +133,8 @@ def test_build_command_batch_split_and_options(tmp_path):
 
 
 def test_zero_shot_and_finetune_share_the_same_model():
-    a = yaml.safe_load(open(os.path.join(CFG_DIR, "baseline3_1_gdino_zeroshot.yaml")))
-    b = yaml.safe_load(open(os.path.join(CFG_DIR, "baseline3_2_gdino_finetune.yaml")))
+    a = yaml.safe_load(open(os.path.join(CFG_DIR, "baseline3_1_gdino_zeroshot.yaml"), encoding="utf-8"))
+    b = yaml.safe_load(open(os.path.join(CFG_DIR, "baseline3_2_gdino_finetune.yaml"), encoding="utf-8"))
     assert a["og"] == b["og"] and a["text_encoder"] == b["text_encoder"] and a["weights"] == b["weights"]
     assert a["finetune"] is None and b["finetune"]["batch_total"] == 2
     assert a["name"] == "BASELINE3.1" and b["name"] == "BASELINE3.2"

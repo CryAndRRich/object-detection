@@ -87,7 +87,7 @@ def read_annotation(branch_dir):
     for name in ("fixed_annotation.json", "annotation.json"):
         p = os.path.join(branch_dir, name)
         if os.path.exists(p):
-            with open(p) as f:
+            with open(p, encoding="utf-8") as f:
                 return json.load(f)
     return None
 
@@ -374,7 +374,7 @@ def main():
             coco, stats = build_coco(items, mode="class-agnostic",
                                       image_root_for_relpath=image_root)
             out_path = os.path.join(out_dir, f"ce130_agnostic_{split}.json")
-            with open(out_path, "w") as f:
+            with open(out_path, "w", encoding="utf-8") as f:
                 json.dump(coco, f)
             print(f"[{split}] {stats}  -> {out_path}")
 
@@ -401,7 +401,7 @@ def main():
                                       image_root_for_relpath=image_root,
                                       cat_id_of=cat_id_of)
             out_path = os.path.join(out_dir, f"ce130_closedset_{name}.json")
-            with open(out_path, "w") as f:
+            with open(out_path, "w", encoding="utf-8") as f:
                 json.dump(coco, f)
             print(f"[{name}] {stats}  -> {out_path}")
 

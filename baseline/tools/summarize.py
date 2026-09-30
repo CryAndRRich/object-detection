@@ -29,7 +29,7 @@ def load_baselines():
         import yaml
     except ImportError:
         sys.exit("cần PyYAML: pip install pyyaml")
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -48,7 +48,7 @@ def read_metrics(output_dir):
     """
     dump = os.path.join(output_dir, "eval_results.json")
     if os.path.isfile(dump):
-        with open(dump) as f:
+        with open(dump, encoding="utf-8") as f:
             res = json.load(f)
         bbox = res.get("bbox", {})
         if bbox:
@@ -60,7 +60,7 @@ def read_metrics(output_dir):
     if not os.path.isfile(path):
         return {}
     best = {}
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -79,7 +79,7 @@ def read_metrics(output_dir):
 def read_crowdhuman(output_dir):
     path = os.path.join(output_dir, "inference/crowdhuman_metrics.json")
     if os.path.isfile(path):
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     return {}
 

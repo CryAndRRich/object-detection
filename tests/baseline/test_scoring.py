@@ -141,6 +141,6 @@ def test_full_flow_dump_then_score(tmp_path):
     out = score_dump_file(path, root, [200, None], log=lambda *a, **k: None)
     assert list(out["results"]) == ["Ball"]        # dump < 200 box/ảnh: B200 trùng Ball -> chỉ chấm một lần
     assert out["results"]["Ball"]["nms_first"]["AP50"] == pytest.approx(1.0)
-    with open(os.path.splitext(path)[0] + "_metrics.json") as f:
+    with open(os.path.splitext(path)[0] + "_metrics.json", encoding="utf-8") as f:
         saved = json.load(f)
     assert saved["score_rows"]["Ball"].startswith("| BASELINEX |")
