@@ -14,8 +14,10 @@ So với train_net.py của DiffusionDet gốc:
    (đường cong) + `CE130BoxQualityEvaluator` (`oracle_recall` để chọn checkpoint); VOC -> VOC07
    11-point; CrowdHuman -> COCO + mMR/Recall.
 2. `check_num_classes`: số lớp của config khớp dataset (sai thì vẫn train, kết quả vô nghĩa).
-3. CE-130: `BestCheckpointerKeepLast` giữ `model_best.pth` theo `ce130/oracle_recall` trên val
-   (không làm lệch `last_checkpoint` -> `--resume` vẫn nối tiếp checkpoint mới nhất).
+3. OUTPUT_DIR chỉ có `last.pth` (model + optimizer + scheduler, ghi đè mỗi CHECKPOINT_PERIOD, để
+   `--resume`), `best.pth` (CHỈ model, theo `ce130/oracle_recall` val) và `history.json` (loss / lr mỗi 20
+   iter + mọi lần eval + best) — ghi nguyên tử (file tạm rồi `os.replace`). Không `model_XXXXXXX.pth`,
+   không `metrics.json` / tensorboard / `inference/` như mặc định detectron2.
 4. Faster R-CNN dùng optimizer chuẩn của detectron2 (SGD, không weight decay cho norm);
    DiffusionDet / Sparse R-CNN giữ optimizer của repo gốc (AdamW, clip toàn mô hình).
 5. `--max-hours`: dừng sạch (ghi checkpoint, `--resume` được) — cho phiên Kaggle ≤ 11 giờ.
@@ -27,13 +29,14 @@ Chạy (từ object-detection/baseline/, `export OBJDET_DATA_ROOT=../data`):
     python train_net.py --num-gpus 1 --config-file configs/baseline0_diffusiondet.yaml [--resume]
     python train_net.py --num-gpus 2 --config-file ... OUTPUT_DIR /kaggle/working/ckpt --max-hours 9.5
     # eval COCO + oracle_recall trên một dataset đã đăng ký (số báo cáo: predict.py)
-    python train_net.py --config-file ... --eval-only MODEL.WEIGHTS checkpoints/baseline0/model_best.pth \\
+    python train_net.py --config-file ... --eval-only MODEL.WEIGHTS checkpoints/baseline0/best.pth \\
         DATASETS.TEST '("ce130_agnostic_test",)' --dump-results /mnt/disk1/aiotlab/haitn/output/x.json
 """
 
 import itertools
 import json
 import logging
+import math
 import os
 import sys
 import time
@@ -67,6 +70,7 @@ from detectron2.evaluation import (
 )
 from detectron2.modeling import build_model
 from detectron2.solver.build import maybe_add_gradient_clipping
+from detectron2.utils.events import CommonMetricPrinter
 from detectron2.utils.logger import setup_logger
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # object-detection/
@@ -96,8 +100,106 @@ class StopTraining(Exception):
     """Hết ngân sách giờ (`--max-hours`): đã ghi checkpoint, chạy lại với --resume."""
 
 
+def save_atomic(checkpointer, name, tag_last=False, **extra):
+    """Ghi `<save_dir>/<name>.pth` như `Checkpointer.save` (model + checkpointables + extra) nhưng NGUYÊN TỬ
+    (file tạm rồi os.replace: đứt giữa chừng không làm hỏng bản cũ) và chỉ trỏ `last_checkpoint` khi
+    `tag_last` — `Checkpointer.save` luôn trỏ, nên lưu best qua nó làm `--resume` nạp nhầm best."""
+    if not comm.is_main_process():
+        return
+    data = {"model": checkpointer.model.state_dict()}
+    for key, obj in checkpointer.checkpointables.items():
+        data[key] = obj.state_dict()
+    data.update(extra)
+    path = os.path.join(checkpointer.save_dir, f"{name}.pth")
+    with open(path + ".tmp", "wb") as f:
+        torch.save(data, f)
+    os.replace(path + ".tmp", path)
+    if tag_last:
+        checkpointer.tag_last_checkpoint(f"{name}.pth")
+
+
+def write_json_atomic(path, obj):
+    with open(path + ".tmp", "w") as f:
+        json.dump(obj, f, indent=1, default=float)
+    os.replace(path + ".tmp", path)
+
+
+class LastCheckpointer(hooks.HookBase):
+    """`last.pth` (model + optimizer + scheduler + iteration) mỗi `period` iter và ở iter cuối; `--resume`
+    nạp nó. Thay `PeriodicCheckpointer` (giữ nhiều `model_XXXXXXX.pth` + `model_final.pth`)."""
+
+    def __init__(self, checkpointer, period):
+        self._ck, self._period = checkpointer, period
+
+    def after_step(self):
+        it = self.trainer.iter
+        if (it + 1) % self._period == 0 or it + 1 >= self.trainer.max_iter:
+            save_atomic(self._ck, "last", tag_last=True, iteration=it)
+
+
+class HistoryAndBest(hooks.HookBase):
+    """`history.json` = {"train": loss / lr (trung vị 20 iter), "eval": mọi lần eval, "best"} và `best.pth`
+    (CHỈ model) khi `metric` của lần eval mới cao hơn best. Đứng SAU EvalHook (đọc kết quả eval từ storage).
+    `--resume`: nạp history cũ, bỏ bản ghi sau iter nối tiếp; best cũ giữ nguyên (best.pth vẫn đúng weight đó)."""
+
+    EVAL_PREFIX = ("bbox/", "ce130/")
+
+    def __init__(self, path, best_checkpointer, metric=SELECT_METRIC, period=20):
+        self._path, self._best_ck, self._metric, self._period = path, best_checkpointer, metric, period
+
+    def before_train(self):
+        start = self.trainer.start_iter
+        self._h = {"train": [], "eval": [], "best": None, "metric": self._metric}
+        if start > 0 and os.path.exists(self._path):
+            with open(self._path) as f:
+                old = json.load(f)
+            self._h["train"] = [r for r in old.get("train", []) if r["iter"] <= start]
+            self._h["eval"] = [r for r in old.get("eval", []) if r["iter"] <= start]
+            self._h["best"] = old.get("best")
+        self._last_eval = -1
+
+    def _check_eval(self):
+        latest = self.trainer.storage.latest()
+        ev = {k: v for k, v in latest.items() if k.startswith(self.EVAL_PREFIX)}
+        if not ev:
+            return False
+        it = max(i for _, i in ev.values())
+        if it <= self._last_eval:
+            return False
+        self._last_eval = it
+        # số iter đã train lúc eval: eval định kỳ ghi ở storage.iter = it (0-based) -> it + 1; eval cuối
+        # (EvalHook.after_train) ghi ở storage.iter = max_iter -> max_iter
+        done = min(it + 1, self.trainer.max_iter)
+        rec = {"iter": done, **{k: float(v) for k, (v, i) in ev.items() if i == it}}
+        self._h["eval"].append(rec)
+        val = rec.get(self._metric)
+        best = self._h["best"]
+        if val is not None and math.isfinite(val) and (best is None or val > best[self._metric]):
+            save_atomic(self._best_ck, "best", iteration=done - 1, **{self._metric: val})
+            self._h["best"] = {"iter": done, self._metric: val}
+            logging.getLogger("detectron2").info(f"best.pth <- iter {done} ({self._metric} {val:.4f})")
+        return True
+
+    def after_step(self):
+        it = self.trainer.iter
+        changed = self._check_eval()
+        if (it + 1) % self._period == 0 or it + 1 >= self.trainer.max_iter:
+            sm = self.trainer.storage.latest_with_smoothing_hint(self._period)
+            rec = {"iter": it + 1}
+            rec.update({k: float(v) for k, (v, _) in sm.items()
+                        if k in ("total_loss", "lr", "time") or k.startswith("loss")})
+            self._h["train"].append(rec)
+            changed = True
+        if changed:
+            write_json_atomic(self._path, self._h)
+
+    def after_train(self):
+        self._check_eval()                          # eval cuối của EvalHook.after_train
+        write_json_atomic(self._path, self._h)
+
+
 class TimeLimit(hooks.HookBase):
-    """Quá `hours` thì ghi checkpoint của iter hiện tại rồi dừng. Mọi rank cùng quyết định (all_gather
+    """Quá `hours` thì ghi `last.pth` của iter hiện tại rồi dừng. Mọi rank cùng quyết định (all_gather
     mỗi 20 iter) — một rank dừng một mình thì DDP treo."""
 
     def __init__(self, hours, every=20):
@@ -115,21 +217,9 @@ class TimeLimit(hooks.HookBase):
             over = any(comm.all_gather(over))
         if over:
             it = self.trainer.iter
-            self.trainer.checkpointer.save(f"model_{it:07d}", iteration=it)
+            save_atomic(self.trainer.checkpointer, "last", tag_last=True, iteration=it)
             comm.synchronize()
-            raise StopTraining(f"hết {self._limit / 3600:.2f} giờ ở iter {it} — đã ghi model_{it:07d}.pth")
-
-
-class BestCheckpointerKeepLast(hooks.BestCheckpointer):
-    """`hooks.BestCheckpointer` nhưng KHÔNG đổi con trỏ `last_checkpoint`. Bản gốc lưu qua
-    `Checkpointer.save`, hàm này luôn trỏ `last_checkpoint` sang file vừa lưu -> `--resume` nạp
-    model_best.pth (iteration của lần eval, sau train là max_iter) thay vì checkpoint mới nhất."""
-
-    def _best_checking(self):
-        prev = self._checkpointer.get_checkpoint_file()
-        super()._best_checking()
-        if prev and self._checkpointer.get_checkpoint_file() != prev:
-            self._checkpointer.tag_last_checkpoint(os.path.basename(prev))
+            raise StopTraining(f"hết {self._limit / 3600:.2f} giờ ở iter {it} — đã ghi last.pth")
 
 
 class Trainer(DefaultTrainer):
@@ -158,6 +248,7 @@ class Trainer(DefaultTrainer):
         kwargs = {"trainer": weakref.proxy(self)}
         kwargs.update(may_get_ema_checkpointer(cfg, model))
         self.checkpointer = DetectionCheckpointer(model, cfg.OUTPUT_DIR, **kwargs)
+        self.best_checkpointer = DetectionCheckpointer(model, cfg.OUTPUT_DIR)      # best.pth: chỉ model
         self.start_iter = 0
         self.max_iter = cfg.SOLVER.MAX_ITER
         self.cfg = cfg
@@ -190,9 +281,9 @@ class Trainer(DefaultTrainer):
             ])
 
         if dataset_name.startswith("ce130"):
-            # COCO chỉ để xem đường cong; oracle_recall để chọn model_best.pth
+            # COCO chỉ để xem đường cong (không ghi inference/); oracle_recall để chọn best.pth
             return DatasetEvaluators([
-                COCOEvaluator(dataset_name, output_dir=output_folder),
+                COCOEvaluator(dataset_name, output_dir=None),
                 CE130BoxQualityEvaluator(dataset_name),
             ])
 
@@ -294,12 +385,7 @@ class Trainer(DefaultTrainer):
         ]
 
         if comm.is_main_process():
-            # max_to_keep: /kaggle/working chỉ 20GB -> phải giới hạn, vẫn đủ để resume.
-            ret.append(hooks.PeriodicCheckpointer(
-                self.checkpointer,
-                cfg.SOLVER.CHECKPOINT_PERIOD,
-                max_to_keep=cfg.SOLVER.CHECKPOINT_MAX_TO_KEEP,
-            ))
+            ret.append(LastCheckpointer(self.checkpointer, cfg.SOLVER.CHECKPOINT_PERIOD))
 
         def test_and_save_results():
             self._last_eval_results = self.test(self.cfg, self.model)
@@ -307,19 +393,21 @@ class Trainer(DefaultTrainer):
 
         ret.append(hooks.EvalHook(cfg.TEST.EVAL_PERIOD, test_and_save_results))
 
-        if comm.is_main_process() and any(n.startswith("ce130") for n in cfg.DATASETS.TEST):
-            # PHẢI đứng sau EvalHook: đọc "ce130/oracle_recall" EvalHook vừa ghi vào storage
-            ret.append(BestCheckpointerKeepLast(cfg.TEST.EVAL_PERIOD, self.checkpointer, SELECT_METRIC, "max",
-                                                file_prefix="model_best"))
-
         if comm.is_main_process():
+            # PHẢI đứng sau EvalHook: đọc kết quả eval (vd "ce130/oracle_recall") EvalHook vừa ghi vào storage
+            ret.append(HistoryAndBest(os.path.join(cfg.OUTPUT_DIR, "history.json"), self.best_checkpointer))
             ret.append(hooks.PeriodicWriter(self.build_writers(), period=20))
         return ret
+
+    def build_writers(self):
+        """Chỉ in log (dòng "eta: ... iter ... loss ..."); số liệu vào history.json, không metrics.json /
+        tensorboard."""
+        return [CommonMetricPrinter(self.max_iter)]
 
 
 def add_baseline_configs(cfg):
     """Config bổ sung của repo này (không có trong detectron2 / DiffusionDet / Sparse R-CNN gốc)."""
-    # số checkpoint giữ lại; None/0 = giữ tất cả (dễ đầy đĩa trên Kaggle)
+    # không còn dùng (chỉ ghi last.pth / best.pth); giữ khoá để config benchmark cũ (Base-Kaggle-T4x2) nạp được
     cfg.SOLVER.CHECKPOINT_MAX_TO_KEEP = 3
     # tên hàng trong docs/SCORE.md ("BASELINE0"...), predict.py ghi vào dump
     cfg.BASELINE = CN()

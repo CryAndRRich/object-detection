@@ -14,7 +14,8 @@ cuối vẫn là CE-Loc — baseline chỉ là thước.
 
 Chung cho BASELINE0–2 (`configs/Base-CE130.yaml`): R-50 ImageNet (torchvision), 12.000 iter × batch
 toàn cục 2, augmentation như D.1 (cùng `DiffusionDetDatasetMapper`), eval val mỗi 2.000 iter,
-`model_best.pth` theo `oracle_recall` val. AMP **tắt**.
+OUTPUT_DIR chỉ có `last.pth` (để `--resume`), `best.pth` (chỉ model, theo `oracle_recall` val) và
+`history.json` (loss mỗi 20 iter + mọi lần eval + best). AMP **tắt**.
 
 ## Cấu trúc
 
@@ -83,14 +84,15 @@ LOG=/mnt/disk1/aiotlab/haitn/log/baseline${K}_$(date +%m%d_%H%M).log
 nohup python ../tools/run_on_free_gpu.py -- train_net.py --num-gpus 1 --config-file $CFG > $LOG 2>&1 &
 echo "PID $! -> $LOG"          # bị ngắt: chạy lại đúng lệnh + --resume
 ```
-Checkpoint ở `checkpoints/baseline${K}/` (`model_best.pth` theo `oracle_recall` val, `model_final.pth`).
+`checkpoints/baseline${K}/`: `last.pth` (~1,3 GB, có optimizer, ghi đè mỗi 1000 iter), `best.pth` (chỉ model),
+`history.json`. Đường val: `python -c "import json; [print(e) for e in json.load(open('checkpoints/baseline0/history.json'))['eval']]"`.
 
 **Dump + chấm test** — 5–15 phút mỗi lượt (quét GT 1 split vài phút + suy luận 779 ảnh):
 ```bash
 O=/mnt/disk1/aiotlab/haitn/output/baselines
 LOG=/mnt/disk1/aiotlab/haitn/log/baseline${K}_predict_$(date +%m%d_%H%M).log
 nohup python ../tools/run_on_free_gpu.py -- predict.py --config-file $CFG \
-    --weights checkpoints/baseline${K}/model_best.pth --split test --out-dir $O \
+    --weights checkpoints/baseline${K}/best.pth --split test --out-dir $O \
     --where "A30 server" --train-time <thời lượng train> > $LOG 2>&1 &     # BASELINE0: thêm --num-proposals 200 300 --steps 1 4
 echo "PID $! -> $LOG"
 ```
@@ -139,8 +141,10 @@ torchvision < 0.7 trong `util/misc.py` (so version sai nên luôn true).
   `ensemble_coord.append`) — 4 bước gộp 3 × N box.
 - `USE_NMS True` mặc định (NMS 0,5 trong `detector.py`) — `predict.py` tắt để có N box thô như ALPHA.
 - `DiffusionDetDatasetMapper(is_train=False)` **xoá GT** — evaluator đọc GT từ `DatasetCatalog`.
-- `hooks.BestCheckpointer` gốc của detectron2 trỏ `last_checkpoint` sang `model_best.pth` -> `--resume`
-  nối tiếp sai chỗ; `train_net.py` dùng `BestCheckpointerKeepLast` (có test).
+- `Checkpointer.save` của detectron2 LUÔN trỏ `last_checkpoint` sang file vừa lưu -> lưu best qua nó (như
+  `hooks.BestCheckpointer`) làm `--resume` nạp nhầm best (có test bắt được). `train_net.py` lưu `last.pth` /
+  `best.pth` bằng `save_atomic` (file tạm + `os.replace`, chỉ `last` được trỏ tới).
+- Eval cuối (`EvalHook.after_train`) ghi vào storage ở iter = `max_iter` (không phải `max_iter − 1`).
 - COCO-minitrain có nhiều bản — chỉ split của `giddyyupp/coco-minitrain` so được với 27,7 AP.
 - CrowdHuman dùng `fbox` (baseline Table 7 là fbox).
 

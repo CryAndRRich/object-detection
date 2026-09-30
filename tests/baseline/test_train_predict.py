@@ -17,8 +17,8 @@ from baseline.tools.convert_ce130 import build_coco, scan_dedup  # noqa: E402
 from tests.ce_localization.helpers import _fake_ce130  # noqa: E402
 
 CFG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "baseline", "configs")
-# CHECKPOINT_PERIOD lớn: chỉ ghi model_final + model_best (mỗi checkpoint R-50 kèm optimizer hàng trăm MB —
-# /mnt/disk1 của server có lúc chỉ còn vài GB); --resume vẫn được thử vì model_final của lượt 1 mang iteration 1.
+# CHECKPOINT_PERIOD lớn: last.pth chỉ ghi ở iter cuối (checkpoint R-50 kèm optimizer hàng trăm MB — /mnt/disk1
+# của server có lúc chỉ còn vài GB); --resume vẫn được thử vì last.pth của lượt 1 mang iteration 1.
 SMALL = ["MODEL.WEIGHTS", "", "MODEL.DEVICE", "cpu", "SOLVER.IMS_PER_BATCH", "2", "SOLVER.WARMUP_ITERS", "1",
          "SOLVER.CHECKPOINT_PERIOD", "1000", "TEST.EVAL_PERIOD", "2", "DATALOADER.NUM_WORKERS", "0",
          "INPUT.MIN_SIZE_TRAIN", "(160,)", "INPUT.MAX_SIZE_TRAIN", "256", "INPUT.MIN_SIZE_TEST", "160",
@@ -70,16 +70,31 @@ def test_train_resume_predict_score(ce130, tmp_path, monkeypatch, name):
 
 def _check_train_resume_predict(cfg, out, img_root, tmp_path, monkeypatch, name):
     _train(cfg, out, 2)
-    assert os.path.exists(os.path.join(out, "model_final.pth"))
-    assert os.path.exists(os.path.join(out, "model_best.pth"))      # BestCheckpointer đọc được ce130/oracle_recall
+    files = set(os.listdir(out))
+    assert {"last.pth", "best.pth", "history.json", "last_checkpoint"} <= files
+    assert not [f for f in files if f.startswith("model_") or f.endswith(".tmp")]     # không checkpoint định kỳ
+    assert not ({"metrics.json", "inference"} & files) and not [f for f in files if f.startswith("events.")]
+    h1 = json.load(open(os.path.join(out, "history.json")))
+    assert [e["iter"] for e in h1["eval"]] == [2] and "ce130/oracle_recall" in h1["eval"][0]
+    assert h1["best"]["iter"] == 2 and h1["train"][-1]["iter"] == 2 and "total_loss" in h1["train"][-1]
+    import torch
+    best = torch.load(os.path.join(out, "best.pth"), map_location="cpu", weights_only=False)
+    assert set(best) == {"model", "iteration", "ce130/oracle_recall"}         # best.pth: CHỈ model (+ iteration, metric)
+
     _train(cfg, out, 4, resume=True)
     assert _last_iter(out) == 3                                      # nối tiếp từ iter 2, không train lại từ 0
+    h2 = json.load(open(os.path.join(out, "history.json")))
+    assert [e["iter"] for e in h2["eval"]] == [2, 4]                 # history cũ giữ, eval mới nối thêm
+    assert [r["iter"] for r in h2["train"]] == [2, 4]
+    assert h2["best"]["iter"] in (2, 4)
+    assert torch.load(os.path.join(out, "best.pth"), map_location="cpu", weights_only=False)["iteration"] + 1 \
+        == h2["best"]["iter"]
 
     import baseline.predict as P
     pred_dir = str(tmp_path / "pred")
     extra = (["--num-proposals", "20", "--steps", "1", "2"] if name.startswith("baseline0") else [])
     monkeypatch.setattr(sys, "argv", ["predict.py", "--config-file", cfg, "--weights",
-                                      os.path.join(out, "model_final.pth"), "--split", "test", "--out-dir", pred_dir,
+                                      os.path.join(out, "last.pth"), "--split", "test", "--out-dir", pred_dir,
                                       "--data-root", img_root, "--device", "cpu", *extra, "--opts",
                                       "INPUT.MIN_SIZE_TEST", "160", "INPUT.MAX_SIZE_TEST", "256"] + PROPS[name])
     P.main()

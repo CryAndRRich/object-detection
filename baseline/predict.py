@@ -13,7 +13,7 @@ Chạy (từ object-detection/baseline/, `export OBJDET_DATA_ROOT=../data`), ~5�
 
   LOG=/mnt/disk1/aiotlab/haitn/log/baseline0_predict_$(date +%m%d_%H%M).log
   nohup python ../tools/run_on_free_gpu.py -- predict.py --config-file configs/baseline0_diffusiondet.yaml \\
-      --weights checkpoints/baseline0/model_best.pth --split test --num-proposals 200 300 --steps 1 4 \\
+      --weights checkpoints/baseline0/best.pth --split test --num-proposals 200 300 --steps 1 4 \\
       --out-dir /mnt/disk1/aiotlab/haitn/output/baselines --where "A30 server" --train-time 1h10m > $LOG 2>&1 &
   echo "PID $! -> $LOG"
 """
