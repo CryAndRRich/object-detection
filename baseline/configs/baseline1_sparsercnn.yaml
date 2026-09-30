@@ -1,0 +1,29 @@
+_BASE_: "Base-CE130.yaml"
+# BASELINE1 — Sparse R-CNN R50-FPN (Sun et al., CVPR 2021) = DiffusionDet KHÔNG khuếch tán:
+# cùng DynamicHead 6 stage, loss set-prediction, nhưng 300 proposal box + feature HỌC ĐƯỢC cố định
+# (không box nhiễu, không t). Số proposal lúc suy luận = lúc train. Optimizer như repo gốc (AdamW,
+# clip toàn mô hình), LR co theo batch như BASELINE0: 2,5e-5 × √(2/16).
+BASELINE:
+  NAME: "BASELINE1"
+MODEL:
+  META_ARCHITECTURE: "SparseRCNN"
+  ROI_HEADS:
+    IN_FEATURES: ["p2", "p3", "p4", "p5"]
+    NUM_CLASSES: 1
+  ROI_BOX_HEAD:
+    POOLER_TYPE: "ROIAlignV2"
+    POOLER_RESOLUTION: 7
+    POOLER_SAMPLING_RATIO: 2
+  SparseRCNN:
+    NUM_CLASSES: 1
+    NUM_PROPOSALS: 300
+SOLVER:
+  OPTIMIZER: "ADAMW"
+  BASE_LR: 0.0000088388
+  BACKBONE_MULTIPLIER: 1.0
+  CLIP_GRADIENTS:
+    ENABLED: True
+    CLIP_TYPE: "full_model"
+    CLIP_VALUE: 1.0
+    NORM_TYPE: 2.0
+OUTPUT_DIR: "checkpoints/baseline1"

@@ -1,0 +1,30 @@
+_BASE_: "Base-CE130.yaml"
+# BASELINE0 — DiffusionDet R50-FPN (Chen et al., ICCV 2023), TRAIN LẠI công thức D.1.
+# D.1 (2026-09-09) chạy 12k iter, batch 2, LR 8,84e-6 bằng tham số DÒNG LỆNH (config cũ ghi 6000 iter /
+# batch 4) -> ở đây ghi tường minh. LR = 1,25e-5 (Base-Kaggle, batch 4) × √(2/4) = 2,5e-5 × √(2/16).
+# Khác D.1: eval định kỳ trên val (D.1: test) và giữ model_best.pth theo oracle_recall val.
+BASELINE:
+  NAME: "BASELINE0"
+MODEL:
+  META_ARCHITECTURE: "DiffusionDet"
+  ROI_HEADS:
+    IN_FEATURES: ["p2", "p3", "p4", "p5"]
+    NUM_CLASSES: 1
+  ROI_BOX_HEAD:
+    POOLER_TYPE: "ROIAlignV2"
+    POOLER_RESOLUTION: 7
+    POOLER_SAMPLING_RATIO: 2
+  DiffusionDet:
+    NUM_CLASSES: 1
+    NUM_PROPOSALS: 300                # lúc train (như D.1); lúc suy luận đổi tự do (predict.py)
+    SAMPLE_STEP: 1
+SOLVER:
+  OPTIMIZER: "ADAMW"
+  BASE_LR: 0.0000088388
+  BACKBONE_MULTIPLIER: 1.0
+  CLIP_GRADIENTS:
+    ENABLED: True
+    CLIP_TYPE: "full_model"
+    CLIP_VALUE: 1.0
+    NORM_TYPE: 2.0
+OUTPUT_DIR: "checkpoints/baseline0"

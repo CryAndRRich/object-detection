@@ -11,12 +11,19 @@ Không cần detectron2 — chỉ đọc thẳng json + PIL, độc lập hoàn 
 để không có chuyện lỗi ở loader che giấu lỗi ở converter (hai đường đọc khác nhau, cùng
 ra một kết quả mới đáng tin).
 
-Chạy (từ ``object-detection/diffusiondet/``):
+Chạy (từ ``object-detection/baseline/``, CPU, < 1 phút):
 
     python tools/visualize_ce130_coco.py \\
         --json ../data/ce130_coco/ce130_agnostic_train.json \\
         --image-root ../data/all_phase2_V2 \\
-        --out /tmp/ce130_viz --n 12
+        --out /mnt/disk1/aiotlab/haitn/output/ce130_viz --n 12
+
+Cửa G2 của baseline (docs/BASELINES.md): ``--pred <dump.json>`` vẽ thêm box DỰ ĐOÁN (đỏ, score >=
+``--min-score``, tối đa ``--topk``) chồng lên GT (xanh) — bắt lỗi toạ độ / quy đổi của dump:
+
+    python tools/visualize_ce130_coco.py --json ../data/ce130_coco/ce130_agnostic_test.json \\
+        --image-root ../data/all_phase2_V2 --pred /mnt/disk1/aiotlab/haitn/output/baselines/BASELINE2_test.json \\
+        --out /mnt/disk1/aiotlab/haitn/output/baseline_viz/BASELINE2 --n 12
 """
 
 import argparse
@@ -38,6 +45,9 @@ def main():
                         "ảnh). Split test có 16 ảnh như vậy (855 box, 4,2%% GT của test) "
                         "trong khi train/val có 0 — random 12 ảnh gần như không bao giờ "
                         "trúng, nên phải xem riêng.")
+    p.add_argument("--pred", default=None, help="dump dự đoán của predict.py / gdino/predict.py (vẽ màu đỏ)")
+    p.add_argument("--min-score", type=float, default=0.3, help="chỉ vẽ box dự đoán có score >= ngưỡng")
+    p.add_argument("--topk", type=int, default=100, help="tối đa số box dự đoán vẽ mỗi ảnh")
     args = p.parse_args()
 
     from PIL import Image, ImageDraw, ImageFont
@@ -49,6 +59,11 @@ def main():
     ann_by_image = {}
     for ann in coco["annotations"]:
         ann_by_image.setdefault(ann["image_id"], []).append(ann)
+
+    pred = None
+    if args.pred:
+        with open(args.pred) as f:
+            pred = json.load(f)["pred"]
 
     images = coco["images"]
     if args.suspect_only:
@@ -95,9 +110,18 @@ def main():
         n_total_box_drawn += len(anns)
 
         ce130_id = im_info.get("ce130_image_id", im_info["id"])
+        n_pred = 0
+        if pred is not None:
+            p_img = pred.get(str(ce130_id), {"boxes_xyxy": [], "scores": []})
+            ranked = sorted(zip(p_img["scores"], p_img["boxes_xyxy"]), key=lambda t: -t[0])[:args.topk]
+            for sc, (x1, y1, x2, y2) in ranked:
+                if sc >= args.min_score:
+                    draw.rectangle([x1, y1, x2, y2], outline=(255, 0, 0), width=2)
+                    n_pred += 1
         out_path = os.path.join(args.out, f"{ce130_id}.jpg")
         img.save(out_path, quality=90)
-        print(f"  {out_path}  ({len(anns)} box, {im_info['width']}x{im_info['height']})")
+        print(f"  {out_path}  ({len(anns)} box GT" + (f", {n_pred} box dự đoán >= {args.min_score}" if pred is not None else "")
+              + f", {im_info['width']}x{im_info['height']})")
 
     print(f"\n{len(sample)} ảnh, {n_total_box_drawn} box vẽ được, "
           f"{n_no_box} ảnh KHÔNG có box nào (kiểm tra lại nếu > 0 và dataset không rỗng)")

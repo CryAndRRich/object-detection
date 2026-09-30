@@ -1,10 +1,10 @@
 """Phần bổ sung của repo này quanh DiffusionDet gốc: đăng ký dataset và evaluator.
 
 Import lazy (PEP 562): ``objdet.mmr`` là numpy thuần nên phải import được mà không cần
-detectron2 — nhờ vậy chạy được ``tests/test_mmr.py`` ở máy không cài detectron2.
+detectron2 — nhờ vậy chạy được ``tests/baseline/`` ở máy không cài detectron2.
 """
 
-__all__ = ["DATA_ROOT", "register_all", "dataset_num_classes", "CrowdHumanEvaluator"]
+__all__ = ["DATA_ROOT", "register_all", "dataset_num_classes", "CrowdHumanEvaluator", "CE130BoxQualityEvaluator"]
 
 
 def __getattr__(name):
@@ -14,4 +14,7 @@ def __getattr__(name):
     if name == "CrowdHumanEvaluator":
         from .crowdhuman_eval import CrowdHumanEvaluator
         return CrowdHumanEvaluator
+    if name == "CE130BoxQualityEvaluator":
+        from .ce130_eval import CE130BoxQualityEvaluator
+        return CE130BoxQualityEvaluator
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -2,33 +2,33 @@
 # Dựa trên train_net.py của DiffusionDet (Shoufa Chen) và Sparse R-CNN (Peize Sun),
 # bản thân chúng dựa trên tools/train_net.py của detectron2.
 # Copyright (c) Facebook, Inc. and its affiliates.
-"""Script train/eval DiffusionDet cho 3 dataset của repo này.
+"""Train / eval chung cho các baseline detectron2 — một script, một config mỗi baseline:
 
-Khác bản gốc của DiffusionDet ở mấy điểm, đều để chạy được trên Kaggle và trên 3 dataset
-đã chọn:
+    BASELINE0  configs/baseline0_diffusiondet.yaml   META_ARCHITECTURE DiffusionDet
+    BASELINE1  configs/baseline1_sparsercnn.yaml     META_ARCHITECTURE SparseRCNN
+    BASELINE2  configs/baseline2_fasterrcnn.yaml     META_ARCHITECTURE GeneralizedRCNN (Faster R-CNN)
+    (configs/benchmarks/: 3 benchmark DiffusionDet cũ — COCO-minitrain / VOC / CrowdHuman, lưu trữ)
 
-1. Tự đăng ký dataset (COCO-minitrain / VOC 07+12 / CrowdHuman) qua ``objdet.register_all``.
-2. Chọn evaluator theo ``evaluator_type``: COCO -> COCOEvaluator, VOC ->
-   PascalVOCDetectionEvaluator (VOC07 11-point, đúng giao thức baseline), CrowdHuman ->
-   COCOEvaluator + CrowdHumanEvaluator (mMR/Recall).
-3. Kiểm tra ``MODEL.DiffusionDet.NUM_CLASSES`` khớp số class thật của dataset — sai chỗ này
-   thì train vẫn chạy nhưng kết quả vô nghĩa.
-4. Giới hạn số checkpoint giữ lại (``SOLVER.CHECKPOINT_MAX_TO_KEEP``) vì /kaggle/working
-   chỉ có 20GB mà mỗi checkpoint DiffusionDet ~0,5GB.
-5. Bỏ nhánh LVIS (repo này không dùng LVIS).
+So với train_net.py của DiffusionDet gốc:
+1. Tự đăng ký dataset (`objdet.register_all`), evaluator theo loại dataset: CE-130 -> COCOEvaluator
+   (đường cong) + `CE130BoxQualityEvaluator` (`oracle_recall` để chọn checkpoint); VOC -> VOC07
+   11-point; CrowdHuman -> COCO + mMR/Recall.
+2. `check_num_classes`: số lớp của config khớp dataset (sai thì vẫn train, kết quả vô nghĩa).
+3. CE-130: `BestCheckpointerKeepLast` giữ `model_best.pth` theo `ce130/oracle_recall` trên val
+   (không làm lệch `last_checkpoint` -> `--resume` vẫn nối tiếp checkpoint mới nhất).
+4. Faster R-CNN dùng optimizer chuẩn của detectron2 (SGD, không weight decay cho norm);
+   DiffusionDet / Sparse R-CNN giữ optimizer của repo gốc (AdamW, clip toàn mô hình).
+5. `--max-hours`: dừng sạch (ghi checkpoint, `--resume` được) — cho phiên Kaggle ≤ 11 giờ.
+6. Giới hạn số checkpoint giữ lại (`SOLVER.CHECKPOINT_MAX_TO_KEEP`).
+AMP phải TẮT (`SOLVER.AMP.ENABLED False`): DiffusionDet vỡ cấu trúc với fp16.
 
-Dùng:
+Chạy (từ object-detection/baseline/, `export OBJDET_DATA_ROOT=../data`):
 
-    # train (2 GPU T4 trên Kaggle)
-    python tools/train_net.py --num-gpus 2 --config-file configs/diffdet.minitrain.res50.yaml
-
-    # train tiếp từ session trước
-    python tools/train_net.py --num-gpus 2 --config-file ... --resume
-
-    # eval, đổi số box / số bước sampling mà không cần train lại
-    python tools/train_net.py --num-gpus 2 --config-file ... --eval-only \\
-        MODEL.WEIGHTS output/.../model_final.pth \\
-        MODEL.DiffusionDet.NUM_PROPOSALS 1000 MODEL.DiffusionDet.SAMPLE_STEP 4
+    python train_net.py --num-gpus 1 --config-file configs/baseline0_diffusiondet.yaml [--resume]
+    python train_net.py --num-gpus 2 --config-file ... OUTPUT_DIR /kaggle/working/ckpt --max-hours 9.5
+    # eval COCO + oracle_recall trên một dataset đã đăng ký (số báo cáo: predict.py)
+    python train_net.py --config-file ... --eval-only MODEL.WEIGHTS checkpoints/baseline0/model_best.pth \\
+        DATASETS.TEST '("ce130_agnostic_test",)' --dump-results /mnt/disk1/aiotlab/haitn/output/x.json
 """
 
 import itertools
@@ -36,6 +36,7 @@ import json
 import logging
 import os
 import sys
+import time
 import weakref
 from collections import OrderedDict
 from typing import Any, Dict, List, Set
@@ -45,6 +46,7 @@ from fvcore.nn.precise_bn import get_bn_modules
 
 import detectron2.utils.comm as comm
 from detectron2.checkpoint import DetectionCheckpointer
+from detectron2.config import CfgNode as CN
 from detectron2.config import get_cfg
 from detectron2.data import MetadataCatalog, build_detection_train_loader
 from detectron2.engine import (
@@ -67,10 +69,10 @@ from detectron2.modeling import build_model
 from detectron2.solver.build import maybe_add_gradient_clipping
 from detectron2.utils.logger import setup_logger
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # object-detection/
 
-from diffusiondet import DiffusionDetDatasetMapper, DiffusionDetWithTTA, add_diffusiondet_config
-from diffusiondet.util.model_ema import (
+from baseline.diffusiondet import DiffusionDetDatasetMapper, DiffusionDetWithTTA, add_diffusiondet_config  # noqa: E402
+from baseline.diffusiondet.util.model_ema import (  # noqa: E402
     EMADetectionCheckpointer,
     EMAHook,
     add_model_ema_configs,
@@ -78,12 +80,60 @@ from diffusiondet.util.model_ema import (
     may_build_model_ema,
     may_get_ema_checkpointer,
 )
-from objdet import dataset_num_classes, register_all
-from objdet.crowdhuman_eval import CrowdHumanEvaluator
+from baseline.objdet import dataset_num_classes, register_all  # noqa: E402
+from baseline.objdet.ce130_eval import CE130BoxQualityEvaluator  # noqa: E402
+from baseline.objdet.crowdhuman_eval import CrowdHumanEvaluator  # noqa: E402
+from baseline.sparsercnn import add_sparsercnn_config  # noqa: E402  (import = đăng ký META_ARCH SparseRCNN)
+
+# khoá số lớp theo kiến trúc
+NUM_CLASSES_KEY = {"DiffusionDet": ("DiffusionDet", "NUM_CLASSES"),
+                   "SparseRCNN": ("SparseRCNN", "NUM_CLASSES"),
+                   "GeneralizedRCNN": ("ROI_HEADS", "NUM_CLASSES")}
+SELECT_METRIC = "ce130/oracle_recall"
+
+
+class StopTraining(Exception):
+    """Hết ngân sách giờ (`--max-hours`): đã ghi checkpoint, chạy lại với --resume."""
+
+
+class TimeLimit(hooks.HookBase):
+    """Quá `hours` thì ghi checkpoint của iter hiện tại rồi dừng. Mọi rank cùng quyết định (all_gather
+    mỗi 20 iter) — một rank dừng một mình thì DDP treo."""
+
+    def __init__(self, hours, every=20):
+        self._limit = hours * 3600 if hours else None
+        self._every = every
+
+    def before_train(self):
+        self._t0 = time.time()
+
+    def after_step(self):
+        if self._limit is None or (self.trainer.iter + 1) % self._every:
+            return
+        over = time.time() - self._t0 > self._limit
+        if comm.get_world_size() > 1:
+            over = any(comm.all_gather(over))
+        if over:
+            it = self.trainer.iter
+            self.trainer.checkpointer.save(f"model_{it:07d}", iteration=it)
+            comm.synchronize()
+            raise StopTraining(f"hết {self._limit / 3600:.2f} giờ ở iter {it} — đã ghi model_{it:07d}.pth")
+
+
+class BestCheckpointerKeepLast(hooks.BestCheckpointer):
+    """`hooks.BestCheckpointer` nhưng KHÔNG đổi con trỏ `last_checkpoint`. Bản gốc lưu qua
+    `Checkpointer.save`, hàm này luôn trỏ `last_checkpoint` sang file vừa lưu -> `--resume` nạp
+    model_best.pth (iteration của lần eval, sau train là max_iter) thay vì checkpoint mới nhất."""
+
+    def _best_checking(self):
+        prev = self._checkpointer.get_checkpoint_file()
+        super()._best_checking()
+        if prev and self._checkpointer.get_checkpoint_file() != prev:
+            self._checkpointer.tag_last_checkpoint(os.path.basename(prev))
 
 
 class Trainer(DefaultTrainer):
-    """DefaultTrainer của detectron2, chỉnh cho DiffusionDet (giữ nguyên cách làm gốc)."""
+    """DefaultTrainer của detectron2, chỉnh cho DiffusionDet / Sparse R-CNN (giữ cách làm gốc)."""
 
     def __init__(self, cfg):
         # gọi __init__ của TrainerBase, bỏ qua của DefaultTrainer (giống bản gốc
@@ -139,15 +189,26 @@ class Trainer(DefaultTrainer):
                 CrowdHumanEvaluator(dataset_name, output_dir=output_folder),
             ])
 
+        if dataset_name.startswith("ce130"):
+            # COCO chỉ để xem đường cong; oracle_recall để chọn model_best.pth
+            return DatasetEvaluators([
+                COCOEvaluator(dataset_name, output_dir=output_folder),
+                CE130BoxQualityEvaluator(dataset_name),
+            ])
+
         return COCOEvaluator(dataset_name, output_dir=output_folder)
 
     @classmethod
     def build_train_loader(cls, cfg):
+        # CÙNG mapper (lật + đa tỉ lệ + crop như D.1) cho mọi kiến trúc: augmentation giống nhau
         mapper = DiffusionDetDatasetMapper(cfg, is_train=True)
         return build_detection_train_loader(cfg, mapper=mapper)
 
     @classmethod
     def build_optimizer(cls, cfg, model):
+        if cfg.MODEL.META_ARCHITECTURE == "GeneralizedRCNN":
+            # Faster R-CNN: optimizer chuẩn của detectron2 (SGD momentum, WEIGHT_DECAY_NORM)
+            return super().build_optimizer(cfg, model)
         params: List[Dict[str, Any]] = []
         memo: Set[torch.nn.parameter.Parameter] = set()
         for key, value in model.named_parameters(recurse=True):
@@ -233,8 +294,7 @@ class Trainer(DefaultTrainer):
         ]
 
         if comm.is_main_process():
-            # max_to_keep: /kaggle/working chỉ 20GB, mỗi checkpoint ~0,5GB nên phải giới hạn.
-            # Vẫn giữ đủ để resume qua nhiều session.
+            # max_to_keep: /kaggle/working chỉ 20GB -> phải giới hạn, vẫn đủ để resume.
             ret.append(hooks.PeriodicCheckpointer(
                 self.checkpointer,
                 cfg.SOLVER.CHECKPOINT_PERIOD,
@@ -247,39 +307,63 @@ class Trainer(DefaultTrainer):
 
         ret.append(hooks.EvalHook(cfg.TEST.EVAL_PERIOD, test_and_save_results))
 
+        if comm.is_main_process() and any(n.startswith("ce130") for n in cfg.DATASETS.TEST):
+            # PHẢI đứng sau EvalHook: đọc "ce130/oracle_recall" EvalHook vừa ghi vào storage
+            ret.append(BestCheckpointerKeepLast(cfg.TEST.EVAL_PERIOD, self.checkpointer, SELECT_METRIC, "max",
+                                                file_prefix="model_best"))
+
         if comm.is_main_process():
             ret.append(hooks.PeriodicWriter(self.build_writers(), period=20))
         return ret
 
 
-def add_kaggle_configs(cfg):
-    """Config bổ sung của repo này (không có trong DiffusionDet gốc)."""
+def add_baseline_configs(cfg):
+    """Config bổ sung của repo này (không có trong detectron2 / DiffusionDet / Sparse R-CNN gốc)."""
     # số checkpoint giữ lại; None/0 = giữ tất cả (dễ đầy đĩa trên Kaggle)
     cfg.SOLVER.CHECKPOINT_MAX_TO_KEEP = 3
+    # tên hàng trong docs/SCORE.md ("BASELINE0"...), predict.py ghi vào dump
+    cfg.BASELINE = CN()
+    cfg.BASELINE.NAME = ""
+
+
+def num_classes_of(cfg):
+    arch = cfg.MODEL.META_ARCHITECTURE
+    if arch not in NUM_CLASSES_KEY:
+        raise ValueError(f"META_ARCHITECTURE {arch} chưa hỗ trợ: {sorted(NUM_CLASSES_KEY)}")
+    node, key = NUM_CLASSES_KEY[arch]
+    return getattr(getattr(cfg.MODEL, node), key)
 
 
 def check_num_classes(cfg):
     """Bắt lỗi cấu hình số class sai — lỗi này không crash mà chỉ cho kết quả rác."""
+    got = num_classes_of(cfg)
     for split, names in (("TRAIN", cfg.DATASETS.TRAIN), ("TEST", cfg.DATASETS.TEST)):
         for name in names:
             expected = dataset_num_classes(name)
-            if expected is None:
-                continue
-            got = cfg.MODEL.DiffusionDet.NUM_CLASSES
-            if got != expected:
+            if expected is not None and got != expected:
+                node, key = NUM_CLASSES_KEY[cfg.MODEL.META_ARCHITECTURE]
                 raise ValueError(
                     f"DATASETS.{split} có '{name}' cần {expected} class nhưng "
-                    f"MODEL.DiffusionDet.NUM_CLASSES = {got}. Sửa config trước khi train."
+                    f"MODEL.{node}.{key} = {got}. Sửa config trước khi train."
                 )
+    if cfg.SOLVER.AMP.ENABLED:
+        raise ValueError("SOLVER.AMP.ENABLED phải False: DiffusionDet vỡ cấu trúc với fp16 (CLAUDE.md)")
+
+
+def build_cfg(config_file, opts=()):
+    """Config đầy đủ (mọi phần mở rộng) — dùng chung cho train_net.py và predict.py."""
+    cfg = get_cfg()
+    add_diffusiondet_config(cfg)
+    add_sparsercnn_config(cfg)
+    add_model_ema_configs(cfg)
+    add_baseline_configs(cfg)
+    cfg.merge_from_file(config_file)
+    cfg.merge_from_list(list(opts))
+    return cfg
 
 
 def setup(args):
-    cfg = get_cfg()
-    add_diffusiondet_config(cfg)
-    add_model_ema_configs(cfg)
-    add_kaggle_configs(cfg)
-    cfg.merge_from_file(args.config_file)
-    cfg.merge_from_list(args.opts)
+    cfg = build_cfg(args.config_file, args.opts)
     cfg.freeze()
     default_setup(cfg, args)
     return cfg
@@ -304,8 +388,7 @@ def main(args):
         if comm.is_main_process():
             verify_results(cfg, res)
             if args.dump_results:
-                # Ghi kết quả ra json để script/notebook đọc bằng máy. Cần cho việc quét
-                # nhiều cấu hình (số box x số bước sampling): parse log thì dễ vỡ.
+                # Ghi kết quả ra json để script/notebook đọc bằng máy (parse log thì dễ vỡ).
                 os.makedirs(os.path.dirname(os.path.abspath(args.dump_results)), exist_ok=True)
                 with open(args.dump_results, "w") as f:
                     json.dump(res, f, indent=2, default=float)
@@ -313,15 +396,26 @@ def main(args):
         return res
 
     trainer = Trainer(cfg)
+    trainer.register_hooks([TimeLimit(args.max_hours)])
     trainer.resume_or_load(resume=args.resume)
-    return trainer.train()
+    try:
+        return trainer.train()
+    except StopTraining as e:
+        logging.getLogger("detectron2").info(f"DỪNG: {e}")
+        return None
 
 
-if __name__ == "__main__":
+def get_parser():
     parser = default_argument_parser()
     parser.add_argument("--dump-results", default=None,
                         help="ghi kết quả eval ra file json (chỉ dùng với --eval-only)")
-    args = parser.parse_args()
+    parser.add_argument("--max-hours", type=float, default=None,
+                        help="dừng sạch sau số giờ này (ghi checkpoint, chạy lại với --resume)")
+    return parser
+
+
+if __name__ == "__main__":
+    args = get_parser().parse_args()
     print("Command Line Args:", args)
     launch(
         main,

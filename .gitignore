@@ -59,3 +59,6 @@ htmlcov/
 # rác
 tmp.py
 *.log
+
+# baseline/: repo ngoài clone ghim commit (Open-GroundingDino) — không vào git
+baseline/third_party/

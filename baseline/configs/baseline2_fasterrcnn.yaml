@@ -1,0 +1,39 @@
+_BASE_: "Base-CE130.yaml"
+# BASELINE2 — Faster R-CNN R50-FPN (Ren et al., NeurIPS 2015; FPN: Lin et al., CVPR 2017), có sẵn
+# trong detectron2. Nội dung Base-RCNN-FPN + faster_rcnn_R_50_FPN_1x của detectron2 chép vào đây
+# (không phụ thuộc cây nguồn detectron2), trừ: khởi tạo torchvision R-50 như BASELINE0/1 (Base-CE130),
+# 1 lớp, lịch 12k × 2. Optimizer chuẩn detectron2: SGD momentum 0,9, LR 0,02 × 2/16 (co tuyến tính).
+# Giới hạn box: giữ tới 300 box/ảnh, ngưỡng score 0, NMS nội bộ 0,5 (CE-130: tới 505 vật/ảnh).
+BASELINE:
+  NAME: "BASELINE2"
+MODEL:
+  META_ARCHITECTURE: "GeneralizedRCNN"
+  MASK_ON: False
+  ANCHOR_GENERATOR:
+    SIZES: [[32], [64], [128], [256], [512]]
+    ASPECT_RATIOS: [[0.5, 1.0, 2.0]]
+  RPN:
+    IN_FEATURES: ["p2", "p3", "p4", "p5", "p6"]
+    PRE_NMS_TOPK_TRAIN: 2000
+    PRE_NMS_TOPK_TEST: 1000
+    POST_NMS_TOPK_TRAIN: 1000
+    POST_NMS_TOPK_TEST: 1000
+  ROI_HEADS:
+    NAME: "StandardROIHeads"
+    IN_FEATURES: ["p2", "p3", "p4", "p5"]
+    NUM_CLASSES: 1
+    SCORE_THRESH_TEST: 0.0
+    NMS_THRESH_TEST: 0.5
+  ROI_BOX_HEAD:
+    NAME: "FastRCNNConvFCHead"
+    NUM_FC: 2
+    POOLER_RESOLUTION: 7
+SOLVER:
+  OPTIMIZER: "SGD"                    # khoá của DiffusionDet; Faster R-CNN dùng build_optimizer chuẩn (SGD)
+  BASE_LR: 0.0025
+  MOMENTUM: 0.9
+  CLIP_GRADIENTS:
+    ENABLED: False
+TEST:
+  DETECTIONS_PER_IMAGE: 300
+OUTPUT_DIR: "checkpoints/baseline2"

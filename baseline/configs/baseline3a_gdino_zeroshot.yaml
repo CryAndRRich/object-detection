@@ -1,0 +1,18 @@
+# BASELINE3a — Grounding DINO Swin-T (Liu et al., ECCV 2024), ZERO-SHOT: weight chính thức
+# groundingdino_swint_ogc.pth, không train. Prompt = tên lớp CỦA TỪNG ẢNH ("strawberry ."), lớp test
+# chưa thấy với cả model lẫn ALPHA (split CE-130 kế thừa FSC-147). Chạy bằng gdino/predict.py.
+# Code: Open-GroundingDino clone ghim commit (refs/repos/ chỉ để đọc). Model dựng từ cfg Swin-T
+# config/cfg_odvg.py — CÙNG model với BASELINE3b (khác nhau đúng ở weight).
+# Đầu vào: transform val của Open-GroundingDino (cạnh ngắn 800, cạnh dài ≤ 1333), 900 query, không NMS.
+name: "BASELINE3a"
+og:
+  repo: "third_party/Open-GroundingDino"     # tương đối so với baseline/ (gitignore)
+  url: "https://github.com/longzw1997/Open-GroundingDino.git"
+  commit: "d248268ac9cab808d4aa2691f4a76972ec5d9ab4"
+  config: "config/cfg_odvg.py"              # tương đối so với repo
+text_encoder: "bert-base-uncased"           # tải qua HF_HOME
+weights: "../weights/gdino/groundingdino_swint_ogc.pth"
+weights_url: "https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth"
+predict:
+  prompt: "{name} ."
+finetune: null

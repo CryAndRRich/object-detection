@@ -3,7 +3,7 @@
 vật cho mọi ảnh 3 split -> `data/density_points.json`, và đo chất lượng nhãn so với box GT.
 
 Density `full` = bản density diện tích blob lớn nhất của mỗi ảnh (chỉ mục `data/density_index.json`
-của ALPHA3, `tools/build_density_index.py`). Đỉnh: `alpha/points.find_peaks(levels, tau, radius)`.
+của ALPHA3, `tools/build_density_index.py`). Đỉnh: `data/points.find_peaks(levels, tau, radius)`.
 
 1. Quét lưới (tau, radius) trên MỌI ảnh; chọn cặp có F1 (ghép MỘT-MỘT đỉnh <-> box GT chứa nó) cao
    nhất trên TRAIN (val / test chỉ để báo). `--tau --radius` để ép một cặp.
@@ -16,14 +16,14 @@ của ALPHA3, `tools/build_density_index.py`). Đỉnh: `alpha/points.find_peaks
    `data.pseudo_size` của config/beta/beta0.yaml (đây là 3 số vô hướng lấy từ box GT, ghi rõ khi báo cáo).
 4. `--config-in config/beta/beta0.yaml --config-out <file>`: ghi một BẢN config đã điền `data.pseudo_size`
    (đề xuất ở bước 3, hoặc `--pseudo-size knn beta min_frac max_frac`) và `data.points` = `--out`
-   (đường dẫn tuyệt đối). Train / eval dùng bản này — không sửa file config trong git.
+   (đường dẫn tuyệt đối) — dùng khi `pseudo_size` trong git chưa khớp (Kaggle ô 6b). Trên server
+   config/beta/beta0.yaml đã điền số G0 2026-09-30 -> train thẳng bằng file đó.
 
 ~3.600 PNG + quét annotation 3 split (4–6 phút trên đĩa dùng chung) ⇒ ước 5–15 phút, chạy NỀN:
   cd /mnt/disk1/aiotlab/haitn/object-detection/ce_localization
   LOG=/mnt/disk1/aiotlab/haitn/log/beta_g0_points_$(date +%m%d_%H%M).log
   nohup python tools/build_density_points.py --out ../data/density_points.json \\
-      --report /mnt/disk1/aiotlab/haitn/output/beta0/g0_points_report.json --workers 8 \\
-      --config-in config/beta/beta0.yaml --config-out /mnt/disk1/aiotlab/haitn/output/beta0/config_beta0.yaml > $LOG 2>&1 &
+      --report /mnt/disk1/aiotlab/haitn/output/beta_g0_points.json --workers 8 > $LOG 2>&1 &
   echo "PID $! -> $LOG"
 """
 

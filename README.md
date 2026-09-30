@@ -5,7 +5,7 @@ Code của dự án `multi_condition` (bối cảnh: [`../CLAUDE.md`](../CLAUDE.
 | | nội dung |
 |---|---|
 | [`ce_localization/`](ce_localization/README.md) | **CE-Loc — trọng tâm.** Chọn box cho count editing trên CE-130 bằng khuếch tán trên toạ độ box |
-| [`diffusiondet/`](diffusiondet/README.md) | DiffusionDet + **D.1 = baseline** trên CE-130 (AP50 58,13). Không train lại |
+| [`baseline/`](baseline/README.md) | Baseline detector trên CE-130: BASELINE0 DiffusionDet (gồm code DiffusionDet + D.1 cũ), 1 Sparse R-CNN, 2 Faster R-CNN, 3a/3b Grounding DINO — kế hoạch `../docs/BASELINES.md` |
 | [`diffuse2seg/`](diffuse2seg/README.md) | Diffuse2Seg training-free (arXiv 2609.06491), đứng ngoài luồng CE-Loc |
 | `tests/` | **toàn bộ test**, chia thư mục con theo project |
 | `tools/run_on_free_gpu.py` | chạy một script trên GPU có nhiều bộ nhớ trống nhất — dùng chung |
@@ -23,11 +23,12 @@ cd ce_localization && python ../tools/run_on_free_gpu.py -- train.py --config co
 ## `weights/` và `data/`
 
 ```
-weights/diffusiondet/                        7 checkpoint .pth, 5,8 GB
+weights/diffusiondet/                        7 checkpoint .pth, 5,8 GB (3 benchmark DiffusionDet cũ)
+weights/gdino/groundingdino_swint_ogc.pth    Grounding DINO Swin-T chính thức (BASELINE3)
 weights/diffuse2seg/stable-diffusion-v1-5/   SD cho diffuse2seg (hoặc tải qua $HF_HOME)
 data/all_phase2_V2/, samples/                CE-130 (CE-Loc)
 data/cache_clip_1024/                        cache patch token CLIP @1024 (sinh bằng tools/build_cache.py)
-data/ce130_coco/                             CE-130 dạng COCO (diffusiondet, diffuse2seg)
+data/ce130_coco/                             CE-130 dạng COCO (baseline, diffuse2seg)
 data/coco*, voc, crowdhuman, paco            dataset detector / PACO
 ```
 
@@ -41,9 +42,8 @@ khớp driver trước. `diffuse2seg` cần thêm `diffusers` + `accelerate`; PA
 - ⚠️ **`huggingface_hub` phải `< 1.0`** (server: 0.36.2). Bản 1.x làm mọi `import diffusers`
   chết với traceback trỏ vào diffusers, nhưng nguyên nhân ở `transformers`. Sửa:
   `pip install -U "huggingface_hub>=0.34,<1.0"`. Bản 0.x dùng `huggingface-cli`, không có `hf`.
-- ⚠️ **`diffusiondet/` hiện không import được detectron2** trên env này (D.1 từng chạy với
-  `/mnt/disk1/aiotlab/haitn/d2src/detectron2`, đường nối nay đã mất). Chỉ cần khi chạy lại
-  diffusiondet:
+- ⚠️ **`baseline/` (detectron2) hiện không import được detectron2** trên env này (D.1 từng chạy với
+  `/mnt/disk1/aiotlab/haitn/d2src/detectron2`, đường nối nay đã mất). Cần cho BASELINE0–2:
   ```bash
   pip install fvcore iopath pycocotools omegaconf hydra-core cloudpickle tabulate termcolor yacs opencv-python timm
   pip install --no-build-isolation -e /mnt/disk1/aiotlab/haitn/d2src/detectron2   # nhánh main, KHÔNG v0.6

@@ -4,7 +4,7 @@
 Đọc:
 - ``<output>/metrics.json``  — JSONL do detectron2 ghi; lấy bản ghi cuối có "bbox/AP"
 - ``<output>/inference/crowdhuman_metrics.json`` — mMR/Recall nếu là CrowdHuman
-- ``baselines/baselines.yaml``
+- ``published_baselines.yaml``
 
 In kèm số iteration và batch size thật, vì baseline dùng schedule dài hơn ta nhiều nên
 không ghi rõ hai số đó thì bảng so sánh sẽ gây hiểu sai.
@@ -20,11 +20,11 @@ import json
 import os
 import sys
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # baseline/
 
 
 def load_baselines():
-    path = os.path.join(REPO, "baselines/baselines.yaml")
+    path = os.path.join(REPO, "published_baselines.yaml")
     try:
         import yaml
     except ImportError:

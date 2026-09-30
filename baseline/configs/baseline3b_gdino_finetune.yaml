@@ -1,0 +1,31 @@
+# BASELINE3b — Grounding DINO Swin-T FINETUNE trên CE-130 train (72 lớp), test trên 28 lớp chưa thấy.
+# Khởi tạo từ weight chính thức (như 3a), train bằng main.py của Open-GroundingDino (gdino/train.py),
+# giữ công thức cfg_odvg.py (AdamW lr 1e-4 / backbone 1e-5, BERT đóng băng, clip 0,1, aug lật + đa tỉ lệ
+# 480–800 + crop 384–600 — cùng họ aug với BASELINE0–2). Ngân sách như mọi baseline: ≈ 12,6 epoch ×
+# batch toàn cục 2 (~12k iter), lr ×0,1 ở epoch 10 (StepLR). lr giữ 1e-4 của cfg dù batch nhỏ hơn.
+# Caption lúc train = lớp thật + lớp âm rút từ 72 lớp (max_labels 50); lúc suy luận chỉ lớp của ảnh.
+# Checkpoint: checkpoint.pth mỗi epoch (nối tiếp), checkpoint0009.pth trước khi giảm lr,
+# checkpoint_best_regular.pth theo mAP val nội bộ (prompt "object", chỉ để main.py chạy được) ->
+# chọn bằng gdino/predict.py --split val --select-out (oracle_recall, prompt đúng lớp từng ảnh).
+name: "BASELINE3b"
+og:
+  repo: "third_party/Open-GroundingDino"
+  url: "https://github.com/longzw1997/Open-GroundingDino.git"
+  commit: "d248268ac9cab808d4aa2691f4a76972ec5d9ab4"
+  config: "config/cfg_odvg.py"
+text_encoder: "bert-base-uncased"
+weights: "../weights/gdino/groundingdino_swint_ogc.pth"   # điểm khởi tạo
+weights_url: "https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth"
+predict:
+  prompt: "{name} ."
+finetune:
+  output_dir: "checkpoints/baseline3b"
+  batch_total: 2
+  epochs: 13
+  lr_drop: 10
+  lr: 0.0001
+  lr_backbone: 0.00001
+  max_labels: 50
+  save_checkpoint_interval: 100             # chỉ lưu thêm ở lr_drop (checkpoint ~2 GB có optimizer; Kaggle 20 GB)
+  internal_val_images: 50
+  seed: 42

@@ -16,9 +16,9 @@ data:
   points: "../data/density_points.json"   # [BETA] cửa G0: tools/build_density_points.py
   pseudo_size:                      # [BETA] ŝ = clamp(beta · TB khoảng cách tới knn điểm gần nhất,
     knn: 3                          #        min_frac·nh, max_frac·nh), nh = chiều cao vùng ảnh thật
-    beta: 1.0                       # ⚠️ ĐIỀN từ log G0 (dòng "yaml:") trước khi train
-    min_frac: 0.02                  # ⚠️ ĐIỀN từ log G0
-    max_frac: 0.30                  # ⚠️ ĐIỀN từ log G0
+    beta: 0.9128                    # đề xuất G0 (2026-09-30, tau 8 radius 2): 1 / trung vị kNN3/sqrt(wh)
+    min_frac: 0.01841               # p2 của sqrt(wh)/H box GT train
+    max_frac: 0.29036               # p98
 
 model:
   memory: "none"                    # none | spatial_softmax | grid
@@ -67,7 +67,7 @@ training:
   eval_every: 2000
 
 eval:
-  split: "val"                      # eval định kỳ + chọn best.pth; báo cáo trên test (eval_alpha.py)
+  split: "val"                      # eval định kỳ + chọn best.pth; báo cáo trên test (eval.py)
   select_metric: "oracle_recall_pt" # [BETA] tâm trong box GT (box GT chỉ để CHẤM, matcher/loss không thấy)
   sampling_steps: 1                 # chính: 1 bước
   batch_size: 2                     # @1024 batch 8 OOM trên GPU dùng chung (2026-09-29); không đổi kết quả

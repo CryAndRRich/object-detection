@@ -1,0 +1,51 @@
+# Phần CHUNG của BASELINE0–2 trên CE-130 class-agnostic (docs/BASELINES.md mục 3.2).
+# Ngân sách y như D.1 / ALPHA: 12.000 iter × batch toàn cục 2 ≈ 12,6 epoch (1.911 ảnh train).
+# Khởi tạo R-50 ImageNet (torchvision) cho CẢ BA kiến trúc; augmentation y như D.1 (lật + đa tỉ lệ
+# 480–800 + crop absolute_range 384–600 với xác suất 0,5), cùng mapper DiffusionDetDatasetMapper.
+# Eval định kỳ trên VAL (chọn model_best.pth theo oracle_recall); số báo cáo: predict.py trên test.
+# Kaggle T4×2: train_net.py --num-gpus 2, IMS_PER_BATCH vẫn 2 (toàn cục) = 1 ảnh/GPU.
+MODEL:
+  WEIGHTS: "detectron2://ImageNetPretrained/torchvision/R-50.pkl"
+  PIXEL_MEAN: [123.675, 116.280, 103.530]
+  PIXEL_STD: [58.395, 57.120, 57.375]
+  BACKBONE:
+    NAME: "build_resnet_fpn_backbone"
+    FREEZE_AT: 2                      # mặc định detectron2 (stem + res2 đóng băng), như D.1
+  RESNETS:
+    DEPTH: 50
+    STRIDE_IN_1X1: False              # weight torchvision
+    OUT_FEATURES: ["res2", "res3", "res4", "res5"]
+  FPN:
+    IN_FEATURES: ["res2", "res3", "res4", "res5"]
+DATASETS:
+  TRAIN: ("ce130_agnostic_train",)
+  TEST: ("ce130_agnostic_val",)
+INPUT:
+  MIN_SIZE_TRAIN: (480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800)
+  MAX_SIZE_TRAIN: 1333
+  MIN_SIZE_TEST: 800                  # ảnh CE-130 cao 384 -> phóng ~2,1× (letterbox 1024 của ALPHA ~1,9×)
+  MAX_SIZE_TEST: 1333
+  CROP:
+    ENABLED: True
+    TYPE: "absolute_range"
+    SIZE: (384, 600)
+  FORMAT: "RGB"
+SOLVER:
+  IMS_PER_BATCH: 2
+  MAX_ITER: 12000
+  STEPS: (9000, 11000)
+  GAMMA: 0.1
+  WARMUP_FACTOR: 0.01
+  WARMUP_ITERS: 1000
+  WEIGHT_DECAY: 0.0001
+  CHECKPOINT_PERIOD: 1000
+  CHECKPOINT_MAX_TO_KEEP: 3
+  AMP:
+    ENABLED: False                    # KHÔNG BAO GIỜ bật (CLAUDE.md)
+TEST:
+  EVAL_PERIOD: 2000
+DATALOADER:
+  FILTER_EMPTY_ANNOTATIONS: False
+  NUM_WORKERS: 2
+SEED: 40244023
+VERSION: 2
