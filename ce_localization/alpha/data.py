@@ -17,6 +17,10 @@ ALPHA3 (`density` khác None): nối density [0,1] (letterbox NEAREST, `alpha/de
 thứ 4 -> ảnh [4,T,T]. Kênh density KHÔNG chuẩn hoá mean/std (như CE-Loc gốc: chỉ /255). Chế độ
 `mix` rút bản density theo RNG seed (seed, epoch, chỉ số ảnh): tái lập khi resume, không phụ thuộc
 số worker (cạm bẫy 12). `epoch` do vòng train gán TRƯỚC khi tạo DataLoader của epoch đó.
+
+BETA (`targets="point"`, docs/EXPERIMENT_BETA.md): đích train `boxes` là BOX GIẢ dựng từ điểm density
+(`alpha/points.py`: điểm × scale letterbox, bỏ điểm ngoài vùng thật, cỡ giả kNN theo pixel canvas,
+kẹp theo `nh`); box GT KHÔNG vào đích. `gt_boxes` (mọi chế độ) = box GT, CHỈ để chấm.
 """
 
 import numpy as np
@@ -25,10 +29,13 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from ce_localization.alpha.density import MODES, letterbox_density, load_density_levels
+from ce_localization.alpha.points import pseudo_boxes, pseudo_sizes
 from ce_localization.data.ce130_dataset import CE130Detection
 
-__all__ = ["IMAGENET_MEAN", "IMAGENET_STD", "letterbox", "scale_boxes", "AlphaCE130",
-           "collate", "to_device"]
+__all__ = ["IMAGENET_MEAN", "IMAGENET_STD", "TARGETS", "letterbox", "scale_boxes", "scale_points",
+           "AlphaCE130", "collate", "to_device"]
+
+TARGETS = ("box", "point")
 
 # Chuẩn ImageNet của torchvision (weight IMAGENET1K_V1 được học trên ảnh chuẩn hoá thế này).
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -54,6 +61,13 @@ def scale_boxes(boxes_xyxy_px, scale, nw, nh):
     return b[keep]
 
 
+def scale_points(points_px, scale, nw, nh):
+    """Điểm (x, y) pixel ảnh gốc -> pixel canvas; bỏ điểm nằm ngoài vùng ảnh thật [0,nw)×[0,nh)."""
+    p = np.asarray(points_px, dtype=np.float64).reshape(-1, 2) * scale
+    keep = (p[:, 0] >= 0) & (p[:, 0] < nw) & (p[:, 1] >= 0) & (p[:, 1] < nh)
+    return p[keep]
+
+
 def normalize(canvas_uint8):
     """uint8 HWC -> float32 CHW, [0,1] rồi chuẩn hoá ImageNet."""
     x = canvas_uint8.astype(np.float32) / 255.0
@@ -63,11 +77,21 @@ def normalize(canvas_uint8):
 class AlphaCE130(Dataset):
     """Một phần tử = một ẢNH (đã dedupe) với mọi box của lớp trong ảnh."""
 
-    def __init__(self, root, split, image_size=512, density=None, density_index=None, seed=0):
+    def __init__(self, root, split, image_size=512, density=None, density_index=None, seed=0,
+                 targets="box", points=None, pseudo=None):
         # target của CE130Detection không dùng ở đây: chỉ lấy danh sách ảnh + box từ `_scan`.
         self.ds = CE130Detection(root, split, target=image_size)
         self.items = self.ds.items
         self.image_size = image_size
+        if targets not in TARGETS:
+            raise ValueError(f"targets {targets!r} không thuộc {TARGETS}")
+        if targets == "point":
+            if points is None or pseudo is None:
+                raise ValueError("targets='point' cần points (PointTable) và pseudo (cfg data.pseudo_size)")
+            miss = [it["image_id"] for it in self.items if it["image_id"] not in points]
+            if miss:
+                raise ValueError(f"{len(miss)} ảnh {split} không có điểm density (vd. {miss[:5]})")
+        self.targets, self.points, self.pseudo = targets, points, pseudo
         if density is not None:
             if density not in MODES:
                 raise ValueError(f"density {density!r} không thuộc {MODES}")
@@ -89,7 +113,8 @@ class AlphaCE130(Dataset):
         it = self.items[i]
         img = Image.open(it["img_path"]).convert("RGB")
         canvas, scale, nw, nh = letterbox(img, self.image_size)
-        boxes = scale_boxes(it["boxes_xyxy_px"], scale, nw, nh)
+        gt = scale_boxes(it["boxes_xyxy_px"], scale, nw, nh)
+        boxes = gt if self.targets == "box" else self._point_targets(it["image_id"], scale, nw, nh)
         x = normalize(canvas)
         kind = None
         if self.density is not None:
@@ -100,12 +125,20 @@ class AlphaCE130(Dataset):
             x = np.concatenate([x, den[None]], axis=0)
         return {
             "image": torch.from_numpy(x),
-            "boxes": torch.from_numpy(boxes).float(),                    # xyxy pixel canvas
+            "boxes": torch.from_numpy(boxes).float(),                    # ĐÍCH train, xyxy pixel canvas
+            "gt_boxes": torch.from_numpy(gt).float(),                    # box GT, CHỈ để chấm
             "valid_hw": (nh, nw),
             "text": it["text"],
             "image_id": it["image_id"],
             "density_kind": kind,                                        # None | full | partial | empty
         }
+
+    def _point_targets(self, iid, scale, nw, nh):
+        """BETA: điểm density -> box giả xyxy pixel canvas (cỡ giả kNN kẹp [min_frac, max_frac]·nh)."""
+        ps = self.pseudo
+        pts = scale_points(self.points[iid], scale, nw, nh)
+        s = pseudo_sizes(pts, ps["knn"], ps["beta"], ps["min_frac"] * nh, ps["max_frac"] * nh)
+        return pseudo_boxes(pts, s)
 
 
 def collate(batch):
@@ -115,6 +148,7 @@ def collate(batch):
     return {
         "images": torch.stack([b["image"] for b in batch]),
         "boxes": [b["boxes"] for b in batch],
+        "gt_boxes": [b["gt_boxes"] for b in batch],
         # (w, h, w, h) của VÙNG ẢNH THẬT = `images_whwh` của DiffusionDet
         "whwh": torch.stack([nw, nh, nw, nh], dim=1),
         "valid_hw": torch.stack([nh, nw], dim=1).long(),
@@ -129,5 +163,6 @@ def to_device(batch, dev):
     out = dict(batch)
     for k in ("images", "whwh", "valid_hw"):
         out[k] = batch[k].to(dev, non_blocking=nb)
-    out["boxes"] = [b.to(dev, non_blocking=nb) for b in batch["boxes"]]
+    for k in ("boxes", "gt_boxes"):
+        out[k] = [b.to(dev, non_blocking=nb) for b in batch[k]]
     return out

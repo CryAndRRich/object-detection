@@ -52,6 +52,14 @@ def print_results(tag, res):
     for name, v in res["density_recall"].items():
         print(f"  {'ảnh ' + name:16s} oracle_recall {v['oracle_recall']:.4f} | box giữ lại phủ "
               f"{v['kept_recall']:.4f}  ({v['n_img']} ảnh, n_gt {v['n_gt']})")
+    p = res["point"]
+    print("  ĐIỂM (tâm box dự đoán nằm trong box GT):")
+    for k in ("oracle_recall_pt", "AP_pt", "recall_pt", "precision_pt", "score_AUC_pt",
+              "count_MAE@0.3", "count_MAE@0.5"):
+        print(f"  {k:16s} {p[k]:.4f}")
+    for name, v in p["by_density"].items():
+        print(f"  {'ảnh ' + name:16s} oracle_recall_pt {v['oracle_recall_pt']:.4f} | giữ lại trúng "
+              f"{v['kept_recall_pt']:.4f}  ({v['n_img']} ảnh, n_gt {v['n_gt']})")
     if "oracle_score" in res:
         o = res["oracle_score"]
         print("  TRẦN khi score = IoU thật (cùng box, cùng top-k/NMS):")

@@ -16,6 +16,10 @@ Chạy > 5 phút => nohup nền, xem docs/EXPERIMENT_ALPHA.md mục 9.
 Cửa chặn:
   G3 overfit: --limit 16 --max-iter 1500 --eval-split train --eval-every 500 [--lr 1e-4]
   G4 bench  : --bench 50  (không ghi gì, in s/iter tách đọc dữ liệu / tính toán + bộ nhớ đỉnh)
+
+BETA (`data.targets: point`, docs/EXPERIMENT_BETA.md): đích train = box giả từ điểm density
+(`data.points`, `data.pseudo_size`), loss chế độ `point`; eval định kỳ vẫn chấm trên box GT, chọn
+`best.pth` theo `eval.select_metric` (BETA: `oracle_recall_pt`).
 """
 
 import argparse
@@ -40,6 +44,7 @@ from ce_localization.alpha.density import DensityIndex  # noqa: E402
 from ce_localization.alpha.diffusion import prepare_train_boxes  # noqa: E402
 from ce_localization.alpha.evaluate import predict, score  # noqa: E402
 from ce_localization.alpha.model import build_model  # noqa: E402
+from ce_localization.alpha.points import PointTable  # noqa: E402
 from ce_localization.alpha import nan_debug  # noqa: E402
 from ce_localization.alpha.text import TextTable, encode_class_names  # noqa: E402
 from ce_localization.alpha.train_utils import (PthCheckpoints, alpha_group, epoch_batches,  # noqa: E402
@@ -51,7 +56,10 @@ from ce_localization.utils.log import fmt_time, print_banner, run_env  # noqa: E
 # `eval` được phép khác (chỉ cảnh báo); `data.num_workers` / đường dẫn dữ liệu không ảnh hưởng phép
 # toán (Kaggle gắn dataset ở đường dẫn khác nhau giữa các phiên).
 MUST_MATCH = ("model", "diffusion", "matcher", "data", "loss")
-DATA_FREE = ("num_workers", "root", "density_root", "density_index")
+DATA_FREE = ("num_workers", "root", "density_root", "density_index", "points")
+# nhãn số hạng loss trên dòng log (giữ đúng nhãn cũ của ALPHA: ce / l1 / giou / iou)
+LOG_LABEL = {"loss_ce": "ce", "loss_bbox": "l1", "loss_giou": "giou", "iou_matched": "iou",
+             "loss_center": "center", "loss_size": "size", "center_px": "center_px"}
 
 
 def config_diff(saved, cfg):
@@ -77,6 +85,18 @@ def density_setup(cfg):
         return None
     try:
         return DensityIndex(cfg["data"]["density_index"], cfg["data"]["density_root"])
+    except FileNotFoundError as e:
+        sys.exit(str(e))
+
+
+def targets_setup(cfg):
+    """-> (targets 'box'|'point', PointTable | None, pseudo_size dict | None) cho tập TRAIN."""
+    d = cfg["data"]
+    targets = d.get("targets", "box")
+    if targets == "box":
+        return targets, None, None
+    try:
+        return targets, PointTable(d["points"]), d["pseudo_size"]
     except FileNotFoundError as e:
         sys.exit(str(e))
 
@@ -225,7 +245,10 @@ def main():
     d_tr = cfg["data"].get("density")
     # eval định kỳ (chọn best.pth) luôn với density ĐẦY ĐỦ, kể cả ALPHA3.2 (train mix)
     d_ev = cfg["eval"].get("density", "full") if d_tr else None
-    ds_tr = AlphaCE130(root, "train", size, density=d_tr, density_index=dindex, seed=tr["seed"])
+    # BETA: chỉ tập TRAIN đổi đích sang box giả; tập eval luôn chế độ box (chấm trên box GT)
+    targets, ptable, pseudo = targets_setup(cfg)
+    ds_tr = AlphaCE130(root, "train", size, density=d_tr, density_index=dindex, seed=tr["seed"],
+                       targets=targets, points=ptable, pseudo=pseudo)
     if cfg["data"].get("limit"):
         ds_tr.items = ds_tr.items[: cfg["data"]["limit"]]
     ev_split = cfg["eval"]["split"]
@@ -240,8 +263,10 @@ def main():
     if ipe == 0:
         sys.exit(f"train chỉ có {len(ds_tr)} ảnh < batch_size {tr['batch_size']}")
     log(f"[data] train {len(ds_tr)} ảnh ({ipe} iter/epoch, batch {bpr}/GPU × {world}) | "
-        f"eval {ev_split} {len(ds_ev)} ảnh | density train {d_tr} / eval {d_ev} | "
-        f"{fmt_time(time.time() - t_boot)}")
+        f"eval {ev_split} {len(ds_ev)} ảnh | density train {d_tr} / eval {d_ev} | đích train {targets}"
+        + ("" if ptable is None else f" (điểm {cfg['data']['points']}, tham số tách đỉnh {ptable.params}, "
+                                     f"cỡ giả {pseudo})")
+        + f" | {fmt_time(time.time() - t_boot)}")
 
     def loader_fn(epoch, start_batch):
         ds_tr.epoch = epoch                            # density `mix`: RNG theo (seed, epoch, ảnh)
@@ -275,7 +300,7 @@ def main():
     opt = torch.optim.AdamW(model.parameters(), lr=float(tr["lr"]), weight_decay=float(tr["weight_decay"]))
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda it: warmup_multistep(it, tr["steps"], tr["gamma"], tr["warmup_iters"], tr["warmup_factor"]))
-    crit = AlphaCriterion(cfg["loss"], cfg["matcher"])
+    crit = AlphaCriterion(cfg["loss"], cfg["matcher"], mode=targets)
 
     if a.bench:
         return bench(model, net, crit, loader_fn, text_table, cfg, opt, dev, a.bench, log)
@@ -370,10 +395,9 @@ def main():
                 spi = (time.time() - t_last) / max(win["n"], 1)
                 eta = spi * (tr["max_iter"] - it)
                 lps = " ".join(f"{float(x):.2f}" for x in st["loss_per_stage"])
+                terms = " ".join(f"{LOG_LABEL.get(k, k)} {float(st[k + '_final']):.3f}" for k in crit.log_keys)
                 log(f"  it {it:6d}/{tr['max_iter']} | loss {win['loss'] / win['n']:8.3f} (stage {lps}) | "
-                    f"ce {float(st['loss_ce_final']):.3f} l1 {float(st['loss_bbox_final']):.3f} "
-                    f"giou {float(st['loss_giou_final']):.3f} iou {float(st['iou_matched_final']):.3f} "
-                    f"n_match {st['n_matched_final']} | lr {sched.get_last_lr()[0]:.3e} | "
+                    f"{terms} n_match {st['n_matched_final']} | lr {sched.get_last_lr()[0]:.3e} | "
                     f"grad {np.median(win['gn']):.1f} | {spi:.3f} s/iter (đọc {win['data'] / win['n']:.3f}) | "
                     f"đã chạy {fmt_time(el)} | ETA {fmt_time(eta)}"
                     + (f" | ⚠️ bỏ {win['skip']} bước NaN" if win["skip"] else ""))
@@ -400,13 +424,15 @@ def main():
                     is_best = best is None or val > best[sm]
                     if is_best:
                         best = {"iter": it, sm: val, "oracle_recall": res["oracle_recall"],
-                                "AP50": res["AP50"], "score_AUC": res["score_AUC"]}
+                                "AP50": res["AP50"], "score_AUC": res["score_AUC"],
+                                "oracle_recall_pt": res["oracle_recall_pt"], "AP_pt": res["AP_pt"]}
                     stage = " ".join(f"{v:.3f}" for v in res["oracle_recall_per_stage"])
                     dw = density_weight_ratio(model.backbone)
                     log(f"[eval it {it}] {ev_split}: oracle_recall {res['oracle_recall']:.4f} | "
                         f"score_AUC {res['score_AUC']:.4f} | AP50 {res['AP50']:.4f} | "
                         f"AP75 {res['AP75']:.4f} | trần AP50 {res['oracle_score']['AP50']:.4f} | "
-                        f"recall/stage {stage} | {fmt_time(res['eval_sec'])}"
+                        f"recall/stage {stage} | ĐIỂM: oracle_recall_pt {res['oracle_recall_pt']:.4f} "
+                        f"AP_pt {res['AP_pt']:.4f} AUC_pt {res['score_AUC_pt']:.4f} | {fmt_time(res['eval_sec'])}"
                         + ("" if dw is None else f" | ‖W density‖/‖W RGB‖ conv1 {dw:.4f}")
                         + (" | *best" if is_best else ""))
                     history.append({"iter": it, "eval": {k: v for k, v in res.items()

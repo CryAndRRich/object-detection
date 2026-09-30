@@ -9,6 +9,10 @@ theo trục nên chuẩn hoá không làm đổi số.
 Thêm: `oracle_recall` theo từng stage, tách theo cỡ GT (theo ô P5 = 32 px), và chẩn đoán
 attention của cross-attn (khối lượng trên token t / text / SpatialSoftmax, và lift trên ô trong
 box GT ở ALPHA2).
+
+Luôn chấm trên `gt_boxes` (box GT). ALPHA: trùng `boxes`. BETA: `boxes` là box giả (đích train).
+Chỉ số ĐIỂM (`point_metrics`, docs/EXPERIMENT_BETA.md mục 5) tính cho MỌI checkpoint: lấy TÂM box
+dự đoán, "trúng" = tâm nằm trong box GT.
 """
 
 import time
@@ -23,10 +27,10 @@ from ce_localization.utils.box_ops_np import box_iou as box_iou_np
 from ce_localization.utils.box_ops_np import cxcywh_to_xyxy as c2x_np
 from ce_localization.utils.box_ops_np import xyxy_to_cxcywh as x2c_np
 from ce_localization.utils.log import fmt_time
-from ce_localization.utils.metrics_np import nms_class_agnostic, oracle_hits
+from ce_localization.utils.metrics_np import ap_from_pr, nms_class_agnostic, oracle_hits, roc_auc
 
 __all__ = ["SIZE_BINS", "DENSITY_BINS", "POSTPROCESS", "postprocess_nms_first", "predict", "score",
-           "size_recall", "density_recall", "attention_diagnostics"]
+           "size_recall", "density_recall", "point_metrics", "attention_diagnostics"]
 
 # cạnh sqrt(w·h) của GT, pixel QUY VỀ CANVAS 512 (để so được giữa canvas 512 và 1024):
 # < 1 ô P5 của canvas 512 (32 px) | 1–4 ô | > 4 ô
@@ -60,7 +64,7 @@ def predict(model, loader, text_table, num_proposals, steps=1, top_k=100, nms_th
         if stage_hit is None:
             stage_hit = np.zeros(stage.shape[0])
         for i in range(len(batch["image_id"])):
-            gt_abs = batch["boxes"][i].float().cpu().numpy()
+            gt_abs = batch["gt_boxes"][i].float().cpu().numpy()             # box GT (BETA: không phải đích)
             gt = _norm_cxcywh(gt_abs, whwh[i])
             n_gt += len(gt)
             for s in range(stage.shape[0]):
@@ -148,6 +152,79 @@ def size_recall(records, iou_thr=0.5):
     return {name: {"oracle_recall": h / max(n, 1), "n_gt": n} for name, (h, n) in hit.items()}
 
 
+COUNT_THR = (0.3, 0.5)
+
+
+def _centers_inside(boxes_cxcywh, gt_cxcywh):
+    """[P,G] bool: tâm box dự đoán nằm trong box GT (tính cả biên)."""
+    c = np.asarray(boxes_cxcywh)[:, None, :2]
+    g = c2x_np(np.asarray(gt_cxcywh))[None]
+    return ((c[..., 0] >= g[..., 0]) & (c[..., 0] <= g[..., 2])
+            & (c[..., 1] >= g[..., 1]) & (c[..., 1] <= g[..., 3]))
+
+
+def point_metrics(records):
+    """Chỉ số ĐIỂM trên box GT, dùng TÂM box dự đoán (docs/EXPERIMENT_BETA.md mục 5).
+
+    oracle_recall_pt : GT có ít nhất một tâm (mọi box, trước hậu xử lý) nằm trong nó.
+    AP_pt / recall_pt / precision_pt : box GIỮ LẠI (`keep`), xét theo score giảm dần; mỗi dự đoán
+        ghép GT CHƯA ghép chứa tâm của nó (nhiều GT thì GT có tâm gần nhất, khoảng cách chia cỡ GT);
+        không có -> FP. PR gộp mọi ảnh rồi `ap_from_pr` (như AP của `metrics_np.evaluate`).
+    score_AUC_pt : trung bình theo ảnh, nhãn = tâm nằm trong ÍT NHẤT MỘT GT (mọi box, như score_AUC).
+    count_MAE@τ : |số box giữ lại có score > τ − số GT|, trung bình theo ảnh.
+    by_density   : như `density_recall`, bản điểm.
+    """
+    hit_all, n_gt, recs, aucs = 0, 0, [], []
+    mae = {t: [] for t in COUNT_THR}
+    bins = {name: [0, 0, 0, 0] for _, _, name in DENSITY_BINS}         # hit_all, hit_kept, n_gt, n_img
+    for r in records:
+        gt, boxes, scores = np.asarray(r["gt"]), np.asarray(r["boxes"]), np.asarray(r["scores"])
+        keep = np.asarray(r["keep"], dtype=int)
+        g = len(gt)
+        n_gt += g
+        name = next(nm for lo, hi, nm in DENSITY_BINS if lo <= g <= hi)
+        bins[name][2] += g
+        bins[name][3] += 1
+        for t in COUNT_THR:
+            mae[t].append(abs(int((scores[keep] > t).sum()) - g))
+        if not len(boxes):
+            continue
+        if not g:
+            recs += [(s, 0) for s in scores[keep]]
+            continue
+        inside = _centers_inside(boxes, gt)                            # [P,G]
+        h_all = int(inside.any(0).sum())
+        hit_all += h_all
+        bins[name][0] += h_all
+        aucs.append(roc_auc(inside.any(1).astype(int), scores))
+        gw, gh = np.maximum(gt[:, 2], 1e-9), np.maximum(gt[:, 3], 1e-9)
+        used = np.zeros(g, dtype=bool)
+        for i in keep[np.argsort(-scores[keep], kind="stable")]:
+            cand = np.nonzero(inside[i] & ~used)[0]
+            if len(cand):
+                d = ((boxes[i, 0] - gt[cand, 0]) / gw[cand]) ** 2 + ((boxes[i, 1] - gt[cand, 1]) / gh[cand]) ** 2
+                used[cand[int(np.argmin(d))]] = True
+                recs.append((scores[i], 1))
+            else:
+                recs.append((scores[i], 0))
+        bins[name][1] += int(used.sum())
+    out = {"oracle_recall_pt": hit_all / max(n_gt, 1), "n_gt": n_gt,
+           **{f"count_MAE@{t}": float(np.mean(v)) if v else 0.0 for t, v in mae.items()}}
+    a = np.array([x for x in aucs if not np.isnan(x)])
+    out["score_AUC_pt"] = float(a.mean()) if len(a) else float("nan")
+    if recs and n_gt:
+        recs.sort(key=lambda x: -x[0])
+        tp = np.cumsum([x[1] for x in recs])
+        fp = np.cumsum([1 - x[1] for x in recs])
+        rec, prec = tp / n_gt, tp / np.maximum(tp + fp, 1e-9)
+        out.update(AP_pt=ap_from_pr(rec, prec), recall_pt=float(rec[-1]), precision_pt=float(prec[-1]))
+    else:
+        out.update(AP_pt=0.0, recall_pt=0.0, precision_pt=0.0)
+    out["by_density"] = {name: {"oracle_recall_pt": h / max(n, 1), "kept_recall_pt": k / max(n, 1),
+                                "n_gt": n, "n_img": m} for name, (h, k, n, m) in bins.items()}
+    return out
+
+
 def score(records, stage_recall, top_k=100, nms_thr=0.5, oracle=True, order="topk_first"):
     """Mọi chỉ số của một lượt eval -> dict (float thuần, ghi JSON được).
     `order`: "topk_first" (quy ước cũ, `eval.postprocess`) | "nms_first" (như DiffusionDet)."""
@@ -158,6 +235,9 @@ def score(records, stage_recall, top_k=100, nms_thr=0.5, oracle=True, order="top
     res["oracle_recall_per_stage"] = stage_recall
     res["size_recall"] = size_recall(records)
     res["density_recall"] = density_recall(records)
+    res["point"] = point_metrics(records)
+    for k in ("oracle_recall_pt", "AP_pt", "score_AUC_pt"):        # lên cấp trên: chọn checkpoint / in log
+        res[k] = res["point"][k]
     if oracle:
         res["oracle_score"] = score_records(oracle_score_records(records, top_k, nms_thr, order))
     return res
@@ -221,7 +301,7 @@ def attention_diagnostics(model, loader, text_table, num_proposals, ts=(99, 499,
                     H = W = batch["images"].shape[-1] // 32
                     cxs, cys, valid = model.memory.grid_geometry(batch["valid_hw"], H, W)  # [B,K]
                     gin = []
-                    for gt, cx, cy in zip(batch["boxes"], cxs, cys):
+                    for gt, cx, cy in zip(batch["gt_boxes"], cxs, cys):
                         inside = ((cx[None] > gt[:, :1]) & (cx[None] < gt[:, 2:3])
                                   & (cy[None] > gt[:, 1:2]) & (cy[None] < gt[:, 3:4]))
                         gin.append(inside.any(0))
