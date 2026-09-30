@@ -5,6 +5,7 @@ máy không có (local); chạy trên server / Kaggle: `python -m pytest tests/b
 
 import json
 import os
+import shutil
 import sys
 
 import pytest
@@ -16,8 +17,10 @@ from baseline.tools.convert_ce130 import build_coco, scan_dedup  # noqa: E402
 from tests.ce_localization.helpers import _fake_ce130  # noqa: E402
 
 CFG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "baseline", "configs")
+# CHECKPOINT_PERIOD lớn: chỉ ghi model_final + model_best (mỗi checkpoint R-50 kèm optimizer hàng trăm MB —
+# /mnt/disk1 của server có lúc chỉ còn vài GB); --resume vẫn được thử vì model_final của lượt 1 mang iteration 1.
 SMALL = ["MODEL.WEIGHTS", "", "MODEL.DEVICE", "cpu", "SOLVER.IMS_PER_BATCH", "2", "SOLVER.WARMUP_ITERS", "1",
-         "SOLVER.CHECKPOINT_PERIOD", "1", "TEST.EVAL_PERIOD", "2", "DATALOADER.NUM_WORKERS", "0",
+         "SOLVER.CHECKPOINT_PERIOD", "1000", "TEST.EVAL_PERIOD", "2", "DATALOADER.NUM_WORKERS", "0",
          "INPUT.MIN_SIZE_TRAIN", "(160,)", "INPUT.MAX_SIZE_TRAIN", "256", "INPUT.MIN_SIZE_TEST", "160",
          "INPUT.MAX_SIZE_TEST", "256"]
 PROPS = {"baseline0_diffusiondet": ["MODEL.DiffusionDet.NUM_PROPOSALS", "20"],
@@ -59,6 +62,13 @@ def test_train_resume_predict_score(ce130, tmp_path, monkeypatch, name):
     root, img_root = ce130
     cfg = os.path.join(CFG_DIR, f"{name}.yaml")
     out = str(tmp_path / "ckpt")
+    try:
+        _check_train_resume_predict(cfg, out, img_root, tmp_path, monkeypatch, name)
+    finally:
+        shutil.rmtree(out, ignore_errors=True)            # checkpoint lớn: không để lại trên đĩa dùng chung
+
+
+def _check_train_resume_predict(cfg, out, img_root, tmp_path, monkeypatch, name):
     _train(cfg, out, 2)
     assert os.path.exists(os.path.join(out, "model_final.pth"))
     assert os.path.exists(os.path.join(out, "model_best.pth"))      # BestCheckpointer đọc được ce130/oracle_recall

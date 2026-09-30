@@ -44,11 +44,14 @@ Mọi lệnh ở `/mnt/disk1/aiotlab/haitn/object-detection/baseline`, sau `git 
 cd /mnt/disk1/aiotlab/haitn/object-detection/baseline
 df -h /mnt/disk1
 export OBJDET_DATA_ROOT=../data HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache TORCH_HOME=/mnt/disk1/aiotlab/haitn/torch_cache
+export FVCORE_CACHE=/mnt/disk1/aiotlab/haitn/torch_cache/iopath TMPDIR=/mnt/disk1/aiotlab/haitn/tmp
+export DETECTRON2_DISABLE_CV2=1     # ~/.local có thư mục cv2/ mồ côi (chỉ còn qt/) -> import detectron2 vỡ; baseline không cần OpenCV
 ```
 
 1. **detectron2** (BASELINE0–2) — env `ce-locmodel` hiện không import được; dựng lại theo
    `../README.md` mục "Môi trường" (source nhánh `main`, không có `nvcc` thì `detectron2._C` không build,
-   vẫn chạy được). Ghi commit để Kaggle cài đúng bản: `git -C /mnt/disk1/aiotlab/haitn/d2src/detectron2 rev-parse HEAD`.
+   vẫn chạy được; server có /usr/local/cuda mà không có nvcc -> build với `CUDA_VISIBLE_DEVICES=""` để ra bản CPU,
+   và ghim `"numpy==1.26.4"` trong cùng lệnh pip). Ghi commit để Kaggle cài đúng bản: `git -C /mnt/disk1/aiotlab/haitn/d2src/detectron2 rev-parse HEAD`.
 2. **Open-GroundingDino** (BASELINE3) — clone ghim commit + phụ thuộc (bỏ bước build op: server không có
    `nvcc`, `gdino/runtime.py` tự dùng bản PyTorch thuần):
    ```bash
