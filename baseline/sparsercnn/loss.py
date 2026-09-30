@@ -105,7 +105,10 @@ class SetCriterion(nn.Module):
         loss_giou = 1 - torch.diag(box_ops.generalized_box_iou(src_boxes, target_boxes))
         losses['loss_giou'] = loss_giou.sum() / num_boxes
 
-        image_size = torch.cat([v["image_size_xyxy_tgt"] for v in targets])
+        # [baseline] bản gốc: torch.cat([v["image_size_xyxy_tgt"] for v in targets]) — một dòng mỗi GT, lệch số
+        # cặp đã ghép khi ảnh có nhiều GT hơn số proposal (Hungarian chỉ ghép min(Q, G); CE-130 train có ảnh > 300
+        # vật). Lấy theo đúng GT đã ghép như target_boxes; khi G <= Q kết quả trùng bản gốc (mọi dòng như nhau).
+        image_size = torch.cat([v["image_size_xyxy_tgt"][i] for v, (_, i) in zip(targets, indices)])
         src_boxes_ = src_boxes / image_size
         target_boxes_ = target_boxes / image_size
 

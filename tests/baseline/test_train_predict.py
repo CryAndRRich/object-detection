@@ -110,3 +110,42 @@ def _check_train_resume_predict(cfg, out, img_root, tmp_path, monkeypatch, name)
         m = json.load(open(os.path.join(pred_dir, d[:-5] + "_metrics.json")))
         r = next(iter(m["results"].values()))
         assert set(r) == {"topk_first", "nms_first"} and 0.0 <= r["nms_first"]["oracle_recall"] <= 1.0
+
+
+def test_sparsercnn_loss_when_more_gt_than_proposals():
+    """CE-130 train có ảnh > 300 vật: Hungarian chỉ ghép min(Q, G) cặp. Bản gốc của Sparse R-CNN vỡ
+    (RuntimeError ở loss_boxes, server 2026-09-30, iter ~112); bản đã sửa phải chạy và khi G <= Q phải cho
+    đúng số của bản gốc."""
+    import torch
+    from baseline.sparsercnn.loss import HungarianMatcher, SetCriterion
+    from baseline.train_net import build_cfg
+
+    cfg = build_cfg(os.path.join(CFG_DIR, "baseline1_sparsercnn.yaml"))
+    matcher = HungarianMatcher(cfg, cost_class=2.0, cost_bbox=5.0, cost_giou=2.0, use_focal=True)
+    crit = SetCriterion(cfg, num_classes=1, matcher=matcher, weight_dict={}, eos_coef=0.1,
+                        losses=["labels", "boxes"], use_focal=True)
+    g = torch.Generator().manual_seed(0)
+
+    def target(n, w=200.0, h=150.0):
+        xy = torch.rand(n, 2, generator=g) * torch.tensor([w * 0.8, h * 0.8])
+        xyxy = torch.cat([xy, xy + 5 + torch.rand(n, 2, generator=g) * 20], 1)
+        whwh = torch.tensor([w, h, w, h])
+        cxcywh = torch.cat([(xyxy[:, :2] + xyxy[:, 2:]) / 2, xyxy[:, 2:] - xyxy[:, :2]], 1) / whwh
+        return {"labels": torch.zeros(n, dtype=torch.long), "boxes": cxcywh, "boxes_xyxy": xyxy,
+                "image_size_xyxy": whwh, "image_size_xyxy_tgt": whwh.repeat(n, 1), "area": (xyxy[:, 2:] - xyxy[:, :2]).prod(1)}
+
+    Q = 5
+    xy = torch.rand(2, Q, 2, generator=g) * 150
+    out = {"pred_logits": torch.randn(2, Q, 1, generator=g), "pred_boxes": torch.cat([xy, xy + 10], -1)}
+    losses = crit(out, [target(8), target(3)])                          # ảnh 1: 8 GT > 5 proposal
+    assert all(torch.isfinite(v) for v in losses.values())
+
+    # G <= Q: trùng công thức bản gốc (image_size lấy toàn bộ dòng, không theo chỉ số)
+    tg = [target(4), target(3)]
+    idx = matcher(out, tg)
+    ours = crit.loss_boxes(out, tg, idx, num_boxes=7.0)["loss_bbox"]
+    src = out["pred_boxes"][crit._get_src_permutation_idx(idx)]
+    tgt = torch.cat([t["boxes_xyxy"][j] for t, (_, j) in zip(tg, idx)])
+    size = torch.cat([t["image_size_xyxy_tgt"] for t in tg])
+    orig = torch.nn.functional.l1_loss(src / size, tgt / size, reduction="none").sum() / 7.0
+    assert torch.allclose(ours, orig)
