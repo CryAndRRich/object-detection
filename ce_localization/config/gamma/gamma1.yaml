@@ -44,13 +44,13 @@ loss:
   l1_weight: 5.0                    # DiffusionDet, mỗi tầng như nhau
   giou_weight: 2.0
 
-training:                           # Y GAMMA0 (= bài): AdamW 5e-5, wd 0,01, batch 32, cosine, không clip
-  batch_size: 32
+training:                           # Y GAMMA0: AdamW 5e-5, wd 0,01, cosine, không clip (= bài); batch 16 (bài 32)
+  batch_size: 16
   lr: 5.0e-5
   weight_decay: 0.01
   schedule: "cosine"
   cosine_t_max: 187500
-  max_iter: 8000
+  max_iter: 8000                    # ≈ 9,5 epoch ở batch 16
   grad_clip: null
   seed: 0
   log_every: 20
