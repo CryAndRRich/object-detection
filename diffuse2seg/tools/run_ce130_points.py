@@ -17,7 +17,14 @@ phủ hết, miễn còn một vật cùng loại được chạm.
 
                                    ĐẦU RA
 
-`<out-dir>/<image_id>.png` — ảnh XÁM 8-bit, MỘT KÊNH, kích thước ảnh gốc.
+`data/ce130_segmap/<split>/<image_id>.png` — ảnh XÁM 8-bit, MỘT KÊNH, kích
+thước ảnh gốc.
+
+⚠️ ĐỂ TRONG `data/`, KHÔNG phải `output/`. CLAUDE.md xếp `output/` cho "kết quả"
+(.json, bảng số, ảnh để đọc), nhưng thứ này là ĐẦU VÀO của train: nó nằm cạnh
+`all_phase2_V2/` và `density_points.json` mà loader của ce_localization đang
+đọc, nên để cùng chỗ thì mọi config chỉ cần một gốc đường dẫn. `/data/` đã có
+trong .gitignore nên 3598 PNG không lên git.
 Mức = soft map × 255, với soft = trung bình các map đã chuẩn hoá rồi chia max.
 
 Cùng dạng ce_localization đang đọc cho density (`load_density_levels` ->
@@ -35,8 +42,8 @@ thêm `--save-labels` — nhãn cụm từng mức, RỜI RẠC nên conv không
 0 là một kênh chết ở đúng những ảnh đó. `--no-grid-fallback` để tắt.
 
 VÍ DỤ
-  python tools/run_ce130_points.py --split val --limit 20 \
-      --out-dir /mnt/disk1/aiotlab/haitn/output/d2s_ce130_points
+  python tools/run_ce130_points.py --split val                 # -> data/ce130_segmap/val/
+  python tools/run_ce130_points.py --split val --limit 20 --save-npz
 """
 
 import argparse
@@ -117,7 +124,12 @@ def main():
                     help="mặc định ../data/density_points.json")
     ap.add_argument("--data-root", default=None)
     ap.add_argument("--device", default="cuda:0")
-    ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--out-dir", default=None,
+                    help="mặc định ../data/ce130_segmap/<split>/ — ĐỂ TRONG "
+                         "data/ chứ không output/, vì đây là ĐẦU VÀO của train "
+                         "(nằm cạnh all_phase2_V2/ và density_points.json mà "
+                         "loader đang đọc), không phải kết quả để đọc. `/data/` "
+                         "đã có trong .gitignore nên PNG không lên git.")
     ap.add_argument("--save-npz", action="store_true",
                     help="ghi thêm .npz (soft float16 + points + n_iter) bên "
                          "cạnh PNG — để chẩn đoán, không cần cho train")
@@ -145,10 +157,13 @@ def main():
             fields[k] = tuple(fields[k])
     fields["canvas"] = args.canvas
     cfg = Diffu2SegConfig(**fields).validate()
+    out_dir = args.out_dir or os.path.join(here, "..", "data", "ce130_segmap",
+                                           args.split)
+    out_dir = os.path.abspath(out_dir)
     ds = CE130Points(root, args.split, pts_json, canvas=cfg.canvas)
     end = len(ds) if args.limit <= 0 else min(args.start + args.limit, len(ds))
     n = end - args.start
-    os.makedirs(args.out_dir, exist_ok=True)
+    os.makedirs(out_dir, exist_ok=True)
 
     print("=" * 74)
     print(f"CE-130 segment map, prompt = TÂM VẬT (density)")
@@ -157,6 +172,7 @@ def main():
           f"p {cfg.p}  mức {cfg.n_levels}")
     print(f"  điểm: {pts_json} (params {ds.points_params})")
     print(f"  w_up_0/w_up_1 = {cfg.w_up_0}/{cfg.w_up_1} (paper)")
+    print(f"  ghi vào: {out_dir}")
     print(f"  ⚠️ {ds.n_no_points}/{len(ds)} ảnh KHÔNG có điểm density -> "
           + ("map trống" if args.no_grid_fallback else "LÙI VỀ LƯỚI ĐỀU"))
     print(f"  ⚠️ KHÔNG connected-components / NMS: đầu ra là VÙNG NGỮ NGHĨA, "
@@ -226,7 +242,7 @@ def main():
         # một nguồn sai số (jet có 2 mức trùng màu, sai tối đa 3/255).
         lvl = np.clip(np.rint(np.asarray(soft, np.float32) * 255.0), 0, 255).astype(np.uint8)
         Image.fromarray(lvl, mode="L").save(
-            os.path.join(args.out_dir, f"{s['image_id']}.png"), optimize=True)
+            os.path.join(out_dir, f"{s['image_id']}.png"), optimize=True)
 
         if args.save_npz:
             out = {"soft": soft, "heights": heights,
@@ -238,7 +254,7 @@ def main():
             if args.save_labels:
                 out["labels"] = labels
             np.savez_compressed(
-                os.path.join(args.out_dir, f"{s['image_id']}.npz"), **out)
+                os.path.join(out_dir, f"{s['image_id']}.npz"), **out)
 
         el = time.time() - t_start
         done = k + 1
@@ -265,15 +281,15 @@ def main():
             "output": "PNG xám 8-bit một kênh, kích thước ảnh gốc, mức = soft*255",
             "config": cfg.to_dict(),
             "note": "semantic regions: KHONG connected-components, KHONG NMS"}
-    with open(os.path.join(args.out_dir, "meta.json"), "w") as fh:
+    with open(os.path.join(out_dir, "meta.json"), "w") as fh:
         json.dump(meta, fh, indent=2, ensure_ascii=False)
 
-    print(f"\n{n} ảnh -> {args.out_dir}")
+    print(f"\n{n} ảnh -> {out_dir}")
     print(f"  prompt/ảnh trung vị {np.median(n_pr):.0f} | "
           f"{n_grid} ảnh lùi về lưới đều | {n_empty} ảnh map trống | "
           f"{fmt_time(el)} ({el/max(n,1):.2f}s/ảnh)")
     print(f"  đầu ra: PNG xám 8-bit một kênh (+ .npz nếu --save-npz)")
-    print(f"  -> {args.out_dir}/meta.json")
+    print(f"  -> {out_dir}/meta.json")
     return 0
 
 
