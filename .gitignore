@@ -14,10 +14,10 @@ samples_real/
 # từ GitHub nên không cần nằm trong repo.
 notebooks/
 
-# kết quả / model (dấu / cuối: chỉ khớp THƯ MỤC, không khớp tên file)
+# kết quả / model (dấu / cuối: chỉ khớp THƯ MỤC, không khớp tên file). Mọi weight / checkpoint train ra nằm
+# trong weights/ (ở trên) — KHÔNG dùng thư mục checkpoints/ nữa (người dùng, 2026-10-01)
 output/
 outputs/
-checkpoints/
 *.pth
 *.pkl
 *.ckpt

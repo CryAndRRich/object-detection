@@ -43,10 +43,10 @@ phép làm điều đó (quét trên ảnh 0..19, xác nhận trên 100..149).
 
 CHẠY (TRÊN SERVER):
     export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache
-    LOG=/mnt/disk1/aiotlab/haitn/log/d2s_sweep_$(date +%Y%m%d_%H%M%S).log
+    LOG=/mnt/disk1/aiotlab/haitn/log/diffuse2seg/d2s_sweep_$(date +%Y%m%d_%H%M%S).log
     nohup python ../tools/run_on_free_gpu.py -- tools/sweep_t_w1.py \
         --limit 20 --timesteps 50 100 150 300 --w1 1.0 0.85 0.5 0.15 \
-        --out /mnt/disk1/aiotlab/haitn/output/d2s_sweep.json > "$LOG" 2>&1 &
+        --out /mnt/disk1/aiotlab/haitn/output/diffuse2seg/d2s_sweep.json > "$LOG" 2>&1 &
     echo "PID $! -> $LOG"
 """
 
@@ -258,7 +258,7 @@ def main():
             print("  ⚠️ Chênh dưới 1 p.p. trên 20 ảnh NẰM TRONG NHIỄU LẤY MẪU.")
             print("     Chưa đủ để kết luận cấu hình nào hơn — cần --limit lớn hơn.")
     # Lệnh sẵn sàng copy, ĐIỀN SẴN cấu hình thắng và tập ảnh rời nhau.
-    OUT = "/mnt/disk1/aiotlab/haitn/output"
+    OUT = "/mnt/disk1/aiotlab/haitn/output/diffuse2seg"
     w1_flag = f" --w1 {best['w1']}" if abs(best["w1"] - 0.85) > 1e-9 else ""
     next_start = args.start + n          # tập rời hẳn với tập vừa quét
     print("\n  BA BƯỚC TIẾP THEO (copy thẳng):\n")

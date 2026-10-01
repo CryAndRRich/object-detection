@@ -25,9 +25,9 @@ Box GT kẹp vào ảnh như eval (`scale_boxes`); box dựng không kẹp (như
 ~3.600 ảnh, chỉ đọc annotation + header ảnh + tính AP 10 ngưỡng cho 12 bộ × 3 split ⇒ ước 10–25 phút
 (đĩa dùng chung), chạy NỀN:
   cd /mnt/disk1/aiotlab/haitn/object-detection/ce_localization
-  LOG=/mnt/disk1/aiotlab/haitn/log/beta_g1_box_ceiling_$(date +%m%d_%H%M).log
+  LOG=/mnt/disk1/aiotlab/haitn/log/beta/beta_g1_box_ceiling_$(date +%m%d_%H%M).log
   nohup python tools/point_box_ceiling.py --workers 8 \\
-      --report /mnt/disk1/aiotlab/haitn/output/beta_g1_box_ceiling.json > $LOG 2>&1 &
+      --report /mnt/disk1/aiotlab/haitn/output/beta/beta_g1_box_ceiling.json > $LOG 2>&1 &
   echo "PID $! -> $LOG"
 """
 
@@ -138,7 +138,7 @@ def main():
     ap.add_argument("--splits", nargs="+", default=list(SPLITS))
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--limit", type=int, default=None, help="chỉ N ảnh đầu mỗi split (chạy thử)")
-    ap.add_argument("--report", default=None, help="JSON số đo (vào /mnt/disk1/aiotlab/haitn/output/)")
+    ap.add_argument("--report", default=None, help="JSON số đo (vào /mnt/disk1/aiotlab/haitn/output/beta/)")
     a = ap.parse_args()
 
     t0 = time.time()

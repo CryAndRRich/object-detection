@@ -31,7 +31,7 @@ OUTPUT_DIR chỉ có `last.pth` (để `--resume`), `best.pth` (chỉ model, the
 | `tools/` | `convert_ce130.py` (CE-130 -> COCO json), `visualize_ce130_coco.py`, `score_predictions.py`, `convert_crowdhuman.py`, `summarize.py` |
 | `configs/benchmarks/` | 3 benchmark DiffusionDet cũ (COCO-minitrain / VOC / CrowdHuman) — lưu trữ, không chạy lại; số liệu `docs/old/ROUND_1_ARCHIVE.md`; baseline công bố `published_baselines.yaml` |
 | `third_party/` | (gitignore) Open-GroundingDino clone ghim commit — `refs/repos/` chỉ để đọc |
-| `checkpoints/`, `notebooks/` | (gitignore) OUTPUT_DIR từng baseline; `notebooks/baseline_kaggle.ipynb` + notebook DiffusionDet cũ |
+| `notebooks/` | (gitignore) `baseline_kaggle.ipynb` + notebook DiffusionDet cũ. OUTPUT_DIR từng baseline = `../weights/detection/baselineK/` (không còn `checkpoints/`) |
 
 Test: `python -m pytest tests/baseline -q` từ `object-detection/` (phần detectron2 tự skip nếu không có
 detectron2; có thì chạy trọn luồng train -> resume -> predict -> chấm của cả 3 kiến trúc trên CE-130 giả,
@@ -66,7 +66,7 @@ export PYTHONUTF8=1                # locale server là ASCII: open() không ghi 
 3. **COCO json CE-130** (BASELINE0–2) — quét annotation + đọc header ảnh 3 split, ước 5–15 phút trên đĩa
    dùng chung ⇒ nền:
    ```bash
-   LOG=/mnt/disk1/aiotlab/haitn/log/convert_ce130_$(date +%m%d_%H%M).log
+   LOG=/mnt/disk1/aiotlab/haitn/log/baselines/convert_ce130_$(date +%m%d_%H%M).log
    nohup python tools/convert_ce130.py --ce130-root ../data/all_phase2_V2 --mode class-agnostic > $LOG 2>&1 &
    echo "PID $! -> $LOG"
    ```
@@ -81,19 +81,19 @@ Mọi lệnh ước > 5 phút ⇒ `nohup` + PID + log; ước tính phải bench
 **Train BASELINE K ∈ {0, 1, 2}** — ước 1–1,5 giờ A30 (D.1: 1h07m) + 6 lần eval val (~1–2 phút mỗi lần):
 ```bash
 K=0; CFG=configs/baseline0_diffusiondet.yaml     # K=1: baseline1_sparsercnn ; K=2: baseline2_fasterrcnn
-LOG=/mnt/disk1/aiotlab/haitn/log/baseline${K}_$(date +%m%d_%H%M).log
+LOG=/mnt/disk1/aiotlab/haitn/log/baselines/baseline${K}_$(date +%m%d_%H%M).log
 nohup python ../tools/run_on_free_gpu.py -- train_net.py --num-gpus 1 --config-file $CFG > $LOG 2>&1 &
 echo "PID $! -> $LOG"          # bị ngắt: chạy lại đúng lệnh + --resume
 ```
-`checkpoints/baseline${K}/`: `last.pth` (~1,3 GB, có optimizer, ghi đè mỗi 1000 iter), `best.pth` (chỉ model),
-`history.json`. Đường val: `python -c "import json; [print(e) for e in json.load(open('checkpoints/baseline0/history.json'))['eval']]"`.
+`../weights/detection/baseline${K}/`: `last.pth` (~1,3 GB, có optimizer, ghi đè mỗi 1000 iter), `best.pth` (chỉ model),
+`history.json`. Đường val: `python -c "import json; [print(e) for e in json.load(open('../weights/detection/baseline0/history.json'))['eval']]"`.
 
 **Dump + chấm test** — 5–15 phút mỗi lượt (quét GT 1 split vài phút + suy luận 779 ảnh):
 ```bash
 O=/mnt/disk1/aiotlab/haitn/output/baselines
-LOG=/mnt/disk1/aiotlab/haitn/log/baseline${K}_predict_$(date +%m%d_%H%M).log
+LOG=/mnt/disk1/aiotlab/haitn/log/baselines/baseline${K}_predict_$(date +%m%d_%H%M).log
 nohup python ../tools/run_on_free_gpu.py -- predict.py --config-file $CFG \
-    --weights checkpoints/baseline${K}/best.pth --split test --out-dir $O \
+    --weights ../weights/detection/baseline${K}/best.pth --split test --out-dir $O \
     --where "A30 server" --train-time <thời lượng train> > $LOG 2>&1 &     # BASELINE0: thêm --num-proposals 200 300 --steps 1 4
 echo "PID $! -> $LOG"
 ```
@@ -103,7 +103,7 @@ ngân sách (`B200` = 200 box điểm cao nhất — hàng chính; `Ball` = mọ
 
 **BASELINE3.1** (không train) — Swin-T, op PyTorch thuần trên server: ước 10–30 phút cho 779 ảnh:
 ```bash
-LOG=/mnt/disk1/aiotlab/haitn/log/baseline3_1_predict_$(date +%m%d_%H%M).log
+LOG=/mnt/disk1/aiotlab/haitn/log/baselines/baseline3_1_predict_$(date +%m%d_%H%M).log
 nohup python ../tools/run_on_free_gpu.py -- gdino/predict.py --config configs/baseline3_1_gdino_zeroshot.yaml \
     --split test --out-dir /mnt/disk1/aiotlab/haitn/output/baselines --where "zero-shot" > $LOG 2>&1 &
 echo "PID $! -> $LOG"
@@ -111,12 +111,12 @@ echo "PID $! -> $LOG"
 
 **BASELINE3.2** — chạy Kaggle là chính (build được CUDA op). Server: op PyTorch thuần, ước 4–8 giờ, bench trước:
 ```bash
-LOG=/mnt/disk1/aiotlab/haitn/log/baseline3_2_$(date +%m%d_%H%M).log
+LOG=/mnt/disk1/aiotlab/haitn/log/baselines/baseline3_2_$(date +%m%d_%H%M).log
 nohup python ../tools/run_on_free_gpu.py -- gdino/train.py --config configs/baseline3_2_gdino_finetune.yaml > $LOG 2>&1 &
 echo "PID $! -> $LOG"          # ngắt: chạy lại đúng lệnh -> main.py tự nối tiếp từ checkpoint.pth
 # chọn checkpoint trên val (oracle_recall), rồi test checkpoint đó:
 python gdino/predict.py --config configs/baseline3_2_gdino_finetune.yaml --split val \
-    --weights checkpoints/baseline3_2/checkpoint0009.pth checkpoints/baseline3_2/checkpoint.pth \
+    --weights ../weights/detection/baseline3_2/checkpoint0009.pth ../weights/detection/baseline3_2/checkpoint.pth \
     --out-dir /mnt/disk1/aiotlab/haitn/output/baselines --select-out /mnt/disk1/aiotlab/haitn/output/baselines/baseline3_2_select.json
 ```
 

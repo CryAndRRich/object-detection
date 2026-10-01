@@ -19,9 +19,23 @@ from tests.ce_localization.helpers import (CFG_B0, PSEUDO, _make_branch, _fake_c
                                            _write_points, _run_g0)
 
 
+def resize_and_pad(img, density, target):
+    """`ObjectPlacementDataset.resize_and_pad` của CE-Loc gốc, chép nguyên công thức
+    (refs/repos/Count-Editing/CE-LocModel/data/dataset.py:27-46) làm đối chứng."""
+    w, h = img.size
+    scale = min(target / w, target / h)
+    nw, nh = int(w * scale), int(h * scale)
+    img = img.resize((nw, nh), resample=Image.BILINEAR)
+    density = density.resize((nw, nh), resample=Image.NEAREST)
+    padded_img = Image.new("RGB", (target, target), (0, 0, 0))
+    padded_img.paste(img, (0, 0))
+    padded_density = Image.new("L", (target, target), 0)
+    padded_density.paste(density, (0, 0))
+    return padded_img, padded_density, scale
+
+
 def test_letterbox_matches_celoc_original():
-    """Canvas + scale y như `resize_and_pad` của CE-Loc gốc (bản viết lại có test nạp strict)."""
-    from ce_localization.celoc_paper.celoc_vision import resize_and_pad
+    """Canvas + scale y như `resize_and_pad` của CE-Loc gốc."""
     rng = np.random.default_rng(0)
     img = Image.fromarray(rng.integers(0, 255, (384, 683, 3), dtype=np.uint8))
     canvas, scale, nw, nh = letterbox(img, 512)
@@ -62,7 +76,6 @@ def test_jet_lut_matches_matplotlib_and_decode_roundtrips():
 
 def test_letterbox_density_matches_celoc_original_nearest():
     """Cùng resize NEAREST + dán góc trên-trái của `resize_and_pad` gốc, chỉ khác bước giải mã."""
-    from ce_localization.celoc_paper.celoc_vision import resize_and_pad
     rng = np.random.default_rng(0)
     lv = rng.integers(0, 256, (384, 683)).astype(np.uint8)
     img = Image.fromarray(rng.integers(0, 255, (384, 683, 3), dtype=np.uint8))
@@ -286,3 +299,80 @@ def test_g1_tool_full_run(tmp_path, monkeypatch):
         assert res["gt/gt_wh"]["AP50"] == pytest.approx(1.0) and res["gt/gt_wh"]["AP75"] == pytest.approx(1.0)
         for v in res.values():
             assert 0.0 <= v["AP75"] <= v["AP50"] <= 1.0 and set(v["by_density@0.5"]) == {"<=30 vật", "31-100 vật", ">100 vật"}
+
+
+# ----------------------------------------------------------------------------- GAMMA (bài add)
+
+def test_turn_index_matches_every_turn_one_to_one(tmp_path):
+    from tests.ce_localization.helpers import _fake_turn_index
+    root, samples, _, index, r = _fake_turn_index(str(tmp_path))
+    assert r["ok"] and r["n_matched"] == r["n_turns"] == r["n_samples"] and r["n_holes_unassigned"] == 0
+    assert r["per_split"]["train"] == len(index.keys("train")) > 0 and set(r["per_split"]) == {"train", "val", "test"}
+    for k, e in index.turns.items():                       # file samples ghép đúng = cùng pixel với ảnh lượt t
+        name, t = k.rsplit("_t", 1)
+        a = np.asarray(Image.open(os.path.join(root, e["branch"], f"inpainted_turn_{t}.png")).convert("RGB"))
+        assert np.array_equal(a, np.asarray(Image.open(os.path.join(samples, e["sample"])).convert("RGB")))
+        assert e["branch"].endswith(name) and e["t"] == int(t) and e["density"].replace("density", "images") == e["sample"]
+    b = index.branches["train/1001_b1"]
+    assert b["removed"] == [0, 0, 1, 2, 3, 4, 0] and len(b["holes"]) == 4
+
+
+def test_turn_index_reports_target_mismatch_and_missing_sample(tmp_path):
+    import json as _json
+    from ce_localization.data.turns import build_turn_index
+    from tests.ce_localization.helpers import _fake_ce130_turns
+    root, samples = _fake_ce130_turns(str(tmp_path))
+    ann = os.path.join(samples, "train", "annotation", "1000_1.json")
+    with open(ann) as f:
+        a = _json.load(f)
+    a["target_bbox"][0] += 5
+    with open(ann, "w") as f:
+        _json.dump(a, f)
+    os.remove(os.path.join(samples, "test", "images", "3000_1.png"))
+    r = build_turn_index(root, samples, workers=0, log=lambda *x: None)["report"]
+    assert not r["ok"] and len(r["target_mismatch"]) == 1 and len(r["match_issues"]) == 1
+
+
+@pytest.mark.parametrize("image", ["inpainted", "original"])
+def test_add_dataset_item(tmp_path, image):
+    from ce_localization.data.density import DensityIndex
+    from ce_localization.data.turns import CE130AddDataset, collate_add
+    from tests.ce_localization.helpers import _fake_turn_index
+    root, samples, _, index, _ = _fake_turn_index(str(tmp_path))
+    dens = "sample" if image == "inpainted" else "full"
+    dindex = DensityIndex(str(tmp_path / "density_index.json"), samples)
+    ds = CE130AddDataset(index, root, samples, "train", 128, density=dens, density_index=dindex, image=image)
+    i = ds.keys.index("1001_b1_t2")
+    s = ds[i]
+    sc = 128 / 200                                           # ảnh 200×150 -> nw 128, nh 96
+    b = index.branches["train/1001_b1"]
+    assert s["image"].shape == (4, 128, 128) and s["valid_hw"] == (96, 128) and s["t"] == 2
+    assert torch.allclose(s["holes"], torch.tensor(b["holes"][:2], dtype=torch.float32) * sc, atol=1e-4)
+    assert torch.equal(s["target"], s["holes"][-1])
+    n_obj = 7 if image == "original" else 5                  # lượt 2 đã xoá vật 2, 3
+    assert len(s["objects"]) == n_obj and s["image"][3].max() > 0
+    if image == "original":
+        canvas, _, _, _ = letterbox(Image.open(os.path.join(root, "train/1001_b1/ground_truth.jpg")).convert("RGB"), 128)
+        exp = (canvas.astype(np.float32) / 255.0 - [0.485, 0.456, 0.406]) / [0.229, 0.224, 0.225]
+        assert np.allclose(s["image"][:3].numpy(), exp.transpose(2, 0, 1), atol=1e-5)
+    bt = collate_add([s, ds[0]])
+    assert bt["images"].shape == (2, 4, 128, 128) and bt["target"].shape == (2, 4)
+    assert bt["whwh"][0].tolist() == [128, 96, 128, 96] and len(bt["holes"]) == 2
+    rgb = CE130AddDataset(index, root, samples, "test", 128)
+    assert rgb[0]["image"].shape == (3, 128, 128) and rgb.classes() == ["cup"]
+
+
+@pytest.mark.parametrize("image", ["inpainted", "original"])
+def test_visualize_gamma_draws(tmp_path, monkeypatch, image):
+    import sys
+    import ce_localization.tools.visualize_data as viz
+    from tests.ce_localization.helpers import _fake_turn_index, _gamma_cfg
+    base = str(tmp_path / "d")
+    os.makedirs(base)
+    _fake_turn_index(base)
+    cfg_path, _ = _gamma_cfg(tmp_path, base, "density")
+    out = str(tmp_path / "viz")
+    monkeypatch.setattr(sys, "argv", ["visualize_data.py", "--config", cfg_path, "--split", "train", "--n", "3",
+                                      "--image", image, "--out", out])
+    viz.main()
+    assert len([f for f in os.listdir(out) if f.endswith(f"_{image}.png")]) == 3

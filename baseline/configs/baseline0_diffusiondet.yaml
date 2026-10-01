@@ -27,4 +27,4 @@ SOLVER:
     CLIP_TYPE: "full_model"
     CLIP_VALUE: 1.0
     NORM_TYPE: 2.0
-OUTPUT_DIR: "checkpoints/baseline0"
+OUTPUT_DIR: "../weights/detection/baseline0"

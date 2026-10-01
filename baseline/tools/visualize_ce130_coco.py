@@ -16,14 +16,14 @@ Chạy (từ ``object-detection/baseline/``, CPU, < 1 phút):
     python tools/visualize_ce130_coco.py \\
         --json ../data/ce130_coco/ce130_agnostic_train.json \\
         --image-root ../data/all_phase2_V2 \\
-        --out /mnt/disk1/aiotlab/haitn/output/ce130_viz --n 12
+        --out /mnt/disk1/aiotlab/haitn/output/baselines/ce130_viz --n 12
 
 Cửa G2 của baseline (docs/BASELINES.md): ``--pred <dump.json>`` vẽ thêm box DỰ ĐOÁN (đỏ, score >=
 ``--min-score``, tối đa ``--topk``) chồng lên GT (xanh) — bắt lỗi toạ độ / quy đổi của dump:
 
     python tools/visualize_ce130_coco.py --json ../data/ce130_coco/ce130_agnostic_test.json \\
         --image-root ../data/all_phase2_V2 --pred /mnt/disk1/aiotlab/haitn/output/baselines/BASELINE2_test.json \\
-        --out /mnt/disk1/aiotlab/haitn/output/baseline_viz/BASELINE2 --n 12
+        --out /mnt/disk1/aiotlab/haitn/output/baselines/viz/BASELINE2 --n 12
 """
 
 import argparse

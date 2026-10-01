@@ -17,12 +17,19 @@ tự thêm `object-detection/` vào `sys.path`, nên vẫn chạy `python train.
 
 ```bash
 python -m pytest tests -q                      # từ object-detection/, ~15–20 phút CPU server
-cd ce_localization && python ../tools/run_on_free_gpu.py -- train.py --config config/alpha/alpha0.yaml --save-dir checkpoints/x
+cd ce_localization && python ../tools/run_on_free_gpu.py -- train.py --config config/alpha/alpha0.yaml --save-dir ../weights/detection/x
 ```
 
 ## `weights/` và `data/`
 
+**Mọi weight nằm trong `weights/`** — cả weight tải về lẫn checkpoint tự train (`--save-dir` /
+`OUTPUT_DIR` trỏ vào đây). **Không còn thư mục `checkpoints/`** ở bất cứ project nào.
+
 ```
+weights/detection/<run>/                     checkpoint tự train cho bài DETECT CE-130: alpha*, beta*, baseline*
+                                             (last.pth, best.pth, history.json; baseline thêm config.yaml, log.txt)
+weights/add/<run>/                           checkpoint tự train cho bài ADD (GAMMA); weight CE-Loc gốc của bài + TN2 đã xoá 2026-10-01
+weights/diffusion_policy/                    checkpoint Push-T công bố của Diffusion Policy (TN3)
 weights/diffusiondet/                        7 checkpoint .pth, 5,8 GB (3 benchmark DiffusionDet cũ)
 weights/gdino/groundingdino_swint_ogc.pth    Grounding DINO Swin-T chính thức (BASELINE3)
 weights/diffuse2seg/stable-diffusion-v1-5/   SD cho diffuse2seg (hoặc tải qua $HF_HOME)

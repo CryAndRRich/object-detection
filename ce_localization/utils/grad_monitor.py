@@ -15,7 +15,11 @@ _STAGE = re.compile(r"head\.stages\.(\d+)\.(\w+)")
 
 
 def group_of(name):
-    """Tên tham số của `models.detector.Detector` -> nhóm."""
+    """Tên tham số của `models.detector.Detector` / `models.box_policy.BoxPolicy` -> nhóm."""
+    if name.startswith("noise_net."):
+        return "unet1d"
+    if name.startswith(("vis_proj.", "text_proj.")):
+        return name.split(".")[0]
     if name.startswith("backbone.fpn."):
         return "fpn"
     if name.startswith("backbone."):

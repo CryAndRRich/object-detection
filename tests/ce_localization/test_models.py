@@ -179,3 +179,50 @@ def test_model_sample_one_and_multi_step():
     assert o["boxes"].shape == (1, 10, 4) and o["stage_boxes"].shape == (6, 1, 10, 4)
     o4 = m.sample(img, torch.randn(1, 512), torch.tensor([[96, 128]]), whwh, 10, steps=4)
     assert o4["boxes"].shape[1] == 40
+
+
+# ----------------------------------------------------------------------------- GAMMA (bài add)
+
+def test_forward_p5_equals_fpn_p5():
+    m = ResNet50FPN(pretrained=False).eval()
+    x = torch.randn(1, 3, 128, 96)
+    with torch.no_grad():
+        assert torch.allclose(m.forward_p5(x), m(x)["p5"], atol=1e-6)
+
+
+def test_unet1d_horizon_one_shape():
+    from ce_localization.models.unet1d import ConditionalUnet1D
+    net = ConditionalUnet1D(4, global_cond_dim=256)
+    out = net(torch.randn(5, 1, 4), torch.randint(0, 1000, (5,)), torch.randn(5, 256))
+    assert out.shape == (5, 1, 4)
+
+
+def test_box_unit_roundtrip():
+    from ce_localization.models.box_policy import boxes_to_unit, unit_to_boxes
+    whwh = torch.tensor([[128.0, 96.0, 128.0, 96.0]])
+    b = torch.tensor([[10.0, 20.0, 50.0, 60.0]])
+    u = boxes_to_unit(b, whwh)
+    assert torch.allclose(u, torch.tensor([[30 / 128 * 2 - 1, 40 / 96 * 2 - 1, 40 / 128 * 2 - 1, 40 / 96 * 2 - 1]]))
+    assert torch.allclose(unit_to_boxes(u, whwh), b, atol=1e-5)
+
+
+@pytest.mark.parametrize("in_ch", [3, 4])
+def test_box_policy_loss_trains_backbone_cond_and_unet(in_ch):
+    from ce_localization.models.box_policy import BoxPolicy
+    torch.manual_seed(0)
+    m = BoxPolicy(in_channels=in_ch, pretrained_backbone=False, num_timesteps=20)
+    if in_ch == 4:
+        assert m.backbone.stem[0].weight[:, 3].abs().max() == 0          # kênh density khởi tạo 0 (như ALPHA3)
+    x = torch.randn(2, in_ch, 128, 128)
+    loss = m(x, torch.randn(2, 512), torch.tensor([[96, 128], [128, 128]]), torch.rand(2, 4) * 2 - 1, k=3)
+    loss.backward()
+    g = {n: p.grad for n, p in m.named_parameters()}
+    for n in ("backbone.layer4.2.conv3.weight", "backbone.fpn.layer_blocks.3.0.weight", "vis_proj.weight",
+              "text_proj.0.weight", "noise_net.final_conv.1.weight", "noise_net.diffusion_step_encoder.1.weight"):
+        assert g[n] is not None and g[n].abs().sum() > 0, n
+    assert g["backbone.fpn.layer_blocks.0.0.weight"] is None             # P2..P4 không dùng
+    assert m.alphas_cumprod.shape == (20,)
+    with torch.no_grad():
+        s = m.sample(x, torch.randn(2, 512), torch.tensor([[96, 128], [128, 128]]), 4)
+    assert s.shape == (2, 4, 4) and torch.isfinite(s).all()
+

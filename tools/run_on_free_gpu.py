@@ -5,7 +5,7 @@ Dùng chung cho mọi sub-project. Chạy từ thư mục của project, script 
 mục hiện tại đó:
 
     cd object-detection/ce_localization
-    python ../tools/run_on_free_gpu.py -- train.py --save-dir checkpoints/x
+    python ../tools/run_on_free_gpu.py -- train.py --save-dir ../weights/detection/x
     python ../tools/run_on_free_gpu.py --gpu 1 -- eval.py --ckpt ...      # ép GPU
 
 Ba quy tắc, mỗi quy tắc từng gây sự cố thật:
@@ -87,7 +87,7 @@ def main():
 
     target = a.target[1:] if a.target and a.target[0] == "--" else a.target
     if not target:
-        ap.error("chưa có script — đặt sau --, vd: -- train.py --save-dir checkpoints/x")
+        ap.error("chưa có script — đặt sau --, vd: -- train.py --save-dir ../weights/detection/x")
     cmd = [sys.executable] + target
 
     for attempt in range(1, a.retries + 2):

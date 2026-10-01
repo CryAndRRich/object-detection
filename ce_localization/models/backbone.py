@@ -9,7 +9,7 @@
   cộng), không thêm P6 vì head chỉ lấy P2..P5 như DiffusionDet (`Base-DiffusionDet.yaml`).
 - `in_channels=4` (ALPHA3): conv1 thêm kênh density, weight kênh mới khởi tạo **0** (người dùng
   chốt 2026-09-29) nên ở bước 0 mô hình trùng R-50 3 kênh. CE-Loc gốc khởi tạo kênh này bằng
-  trung bình weight RGB (`celoc_paper/celoc_vision.py`). conv1 được thay SAU khi dựng FPN để thứ tự
+  trung bình weight RGB (`refs/repos/Count-Editing/CE-LocModel/models/vision_encoder.py`). conv1 được thay SAU khi dựng FPN để thứ tự
   rút RNG khởi tạo trùng bản 3 kênh (cùng seed -> cùng weight, có test).
 """
 
@@ -55,6 +55,13 @@ class ResNet50FPN(nn.Module):
         c5 = self.layer4(c4)
         out = self.fpn(OrderedDict(zip(LEVELS, (c2, c3, c4, c5))))
         return out
+
+    def forward_p5(self, x):
+        """Chỉ P5 (GAMMA0: SpatialSoftmax trên P5) — bỏ nhánh top-down xuống P2..P4. P5 của FPN chỉ phụ
+        thuộc C5: `layer_block[-1](inner_block[-1](C5))` (`FeaturePyramidNetwork.forward`), có test so với
+        `forward()["p5"]`."""
+        c5 = self.layer4(self.layer3(self.layer2(self.layer1(self.stem(x)))))
+        return self.fpn.get_result_from_layer_blocks(self.fpn.get_result_from_inner_blocks(c5, -1), -1)
 
 
 def density_weight_ratio(backbone):

@@ -19,9 +19,9 @@ và `mean_bestIoU` là đúng bộ metric cho thứ này (xem utils/metrics.py).
 
 CHẠY (TRÊN SERVER — xem README):
     export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache
-    LOG=/mnt/disk1/aiotlab/haitn/log/d2s_stage1_val_$(date +%Y%m%d_%H%M%S).log
+    LOG=/mnt/disk1/aiotlab/haitn/log/diffuse2seg/d2s_stage1_val_$(date +%Y%m%d_%H%M%S).log
     nohup python tools/run_stage1.py --split val \
-        --out /mnt/disk1/aiotlab/haitn/output/d2s_stage1_val.json > "$LOG" 2>&1 &
+        --out /mnt/disk1/aiotlab/haitn/output/diffuse2seg/d2s_stage1_val.json > "$LOG" 2>&1 &
     echo "PID $! -> $LOG"
 """
 

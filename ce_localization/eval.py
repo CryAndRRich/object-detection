@@ -9,11 +9,20 @@ Giao thức (docs/EXPERIMENT_ALPHA.md mục 6.2): test, N=200, top-k 100, NMS 0,
   --density M    : model 4 kênh (ALPHA3): density đưa vào — full (mặc định) / partial / empty (mục 5).
 Config lấy từ checkpoint (an toàn hơn), trừ khi truyền --config.
 
+GAMMA (`task: add`, docs/EXPERIMENT_GAMMA.md mục 5): mỗi mẫu (nhánh, lượt) sinh `--n-samples` box độc lập (DDPM),
+chấm IoU với lỗ + C-NLL + on_object (`engine/add_eval.py`), kèm mốc `prior` (lỗ train ngẫu nhiên, không nhìn ảnh).
+  --image inpainted original : ảnh inpaint (có lỗ) và ảnh gốc không lỗ (phép thử lối tắt; chỉ chỉ số không cần GT)
+  --add-density M            : model 4 kênh — sample (density của chính mẫu, mặc định cho ảnh inpaint) / full (bản
+                               đầy đủ nhất của ảnh gốc, mặc định cho ảnh gốc) / empty
+  LOG=/mnt/disk1/aiotlab/haitn/log/gamma/gamma0_eval_$(date +%m%d_%H%M).log
+  nohup python ../tools/run_on_free_gpu.py -- eval.py --ckpt ../weights/add/gamma0/best.pth --split test \
+      --image inpainted original --out /mnt/disk1/aiotlab/haitn/output/gamma/gamma0_test.json > $LOG 2>&1 &
+
   cd object-detection/ce_localization
-  LOG=/mnt/disk1/aiotlab/haitn/log/alpha0_eval_$(date +%m%d_%H%M).log
-  nohup python ../tools/run_on_free_gpu.py -- eval.py --ckpt checkpoints/alpha0/best.pth \\
+  LOG=/mnt/disk1/aiotlab/haitn/log/alpha/alpha0_eval_$(date +%m%d_%H%M).log
+  nohup python ../tools/run_on_free_gpu.py -- eval.py --ckpt ../weights/detection/alpha0/best.pth \\
       --split test --num-proposals 200 --top-k 100 --nms --oracle-score --steps 1 4 --attn-diag 20 \\
-      --out /mnt/disk1/aiotlab/haitn/output/alpha0_test_N200.json > $LOG 2>&1 &
+      --out /mnt/disk1/aiotlab/haitn/output/alpha/alpha0_test_N200.json > $LOG 2>&1 &
   echo "PID $! -> $LOG"
 """
 
@@ -30,7 +39,9 @@ from torch.utils.data import DataLoader
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ce_localization.data.dataset import CE130Dataset, collate  # noqa: E402
-from ce_localization.data.density import EVAL_MODES  # noqa: E402
+from ce_localization.data.density import EVAL_MODES, DensityIndex  # noqa: E402
+from ce_localization.data.turns import ADD_DENSITY, IMAGE_KINDS, CE130AddDataset, TurnIndex, collate_add  # noqa: E402
+from ce_localization.engine.add_eval import add_metrics, predict_add, prior_records, prior_unit_boxes  # noqa: E402
 from ce_localization.engine.evaluate import attention_diagnostics, predict, score  # noqa: E402
 from ce_localization.models.backbone import density_weight_ratio  # noqa: E402
 from ce_localization.models.detector import build_model  # noqa: E402
@@ -67,6 +78,73 @@ def print_results(tag, res):
             print(f"  {k:16s} thật {res[k]:.4f} | trần {o[k]:.4f} ({res[k] / max(o[k], 1e-9) * 100:.0f} % trần)")
 
 
+ADD_KEYS = ("best_iou@{K}_any", "hit50@{K}_any", "best_iou@{K}_latest", "hit50@{K}_latest", "mean_iou_any",
+            "box_hit50_any", "mean_iou_latest", "box_hit50_latest", "hole_cover", "on_object", "in_image",
+            "degenerate", "cnll_F1_n1_mean", "cnll_F1_n1_median", "cnll_F1_sel_mean", "cnll_F1_sel_median",
+            "cnll_F2_n1_mean", "cnll_F2_n1_median", "cnll_F2_sel_mean", "cnll_F2_sel_median")
+
+
+def print_add(tag, res, prior, K):
+    print(f"\n  === {tag} ({res['n']} mẫu, {K} box/mẫu; C-NLL trên {res['n_cnll']} mẫu có >= 5 vật) ===")
+    print(f"  {'':22s} {'model':>9s} {'prior':>9s}")
+    for k in ADD_KEYS:
+        k = k.format(K=K)
+        if k in res:
+            print(f"  {k:22s} {res[k]:9.4f} {prior[k]:9.4f}")
+    for t, d in res.get("by_turn", {}).items():
+        print(f"  lượt {t} ({d['n']:5d} mẫu)       best_iou_any {d['best_any']:.4f} | mean_iou_any {d['mean_any']:.4f} | "
+              f"best_iou_latest {d['best_latest']:.4f}")
+
+
+def main_add(a, cfg, ck, dev, t0):
+    """GAMMA: eval bài add trên `--split`, mỗi loại ảnh của `--image` một lượt."""
+    d = cfg["data"]
+    for k, v in (("samples_root", a.samples_root), ("turn_index", a.turn_index), ("density_index", a.density_index),
+                 ("density_root", a.density_root)):
+        if v:
+            d[k] = v
+    try:
+        index = TurnIndex(d["turn_index"])
+    except FileNotFoundError as e:
+        sys.exit(str(e))
+    four = cfg["model"].get("in_channels", 3) == 4
+    K = a.n_samples or cfg["eval"]["n_samples"]
+    model = build_model(cfg, pretrained_backbone=False).to(dev)
+    model.load_state_dict(ck["model"])
+    model.eval()
+    prior_unit = prior_unit_boxes(index, "train")
+    out = {"ckpt": a.ckpt, "iter": ck.get("iter"), "split": a.split, "n_samples": K, "density": {}, "results": {},
+           "prior": {}, "density_weight_ratio": density_weight_ratio(model.backbone)}
+    text_table = None
+    for image in a.image:
+        dens = (a.add_density or ("sample" if image == "inpainted" else "full")) if four else None
+        dindex = DensityIndex(d["density_index"], d["density_root"]) if dens == "full" else None
+        ds = CE130AddDataset(index, d["root"], d["samples_root"], a.split, d["image_size"], density=dens,
+                             density_index=dindex, image=image)
+        if a.limit:
+            ds.keys = ds.keys[: a.limit]
+        if text_table is None:
+            text_table = train_mod.build_text_table(ds.classes(), cfg, dev)
+        loader = DataLoader(ds, batch_size=a.batch_size or cfg["eval"]["batch_size"], shuffle=False,
+                            num_workers=a.num_workers, collate_fn=collate_add)
+        print(f"[eval] {a.ckpt} (iter {ck.get('iter')}) | ảnh {image} | density {dens} | split {a.split} "
+              f"({len(ds)} mẫu) | {K} mẫu/ảnh | {fmt_time(time.time() - t0)}", flush=True)
+        t = time.time()
+        rec = predict_add(model, loader, text_table, K, seed=a.seed, log_every=max(len(loader) // 10, 1))
+        holes = image == "inpainted"
+        res = add_metrics(rec, with_holes=holes)
+        res["eval_sec"] = time.time() - t
+        pri = add_metrics(prior_records(rec, prior_unit, K, seed=a.seed), with_holes=holes)
+        print_add(f"ảnh {image} ({fmt_time(res['eval_sec'])})", res, pri, K)
+        out["density"][image], out["results"][image], out["prior"][image] = dens, res, pri
+    if a.out:
+        os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
+        with open(a.out, "w") as f:
+            json.dump(out, f, indent=2, ensure_ascii=False, default=float)
+        print(f"  -> {a.out}")
+    print(f"[eval] xong {fmt_time(time.time() - t0)}", flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True)
@@ -85,13 +163,19 @@ def main():
     ap.add_argument("--steps", type=int, nargs="+", default=[1])
     ap.add_argument("--no-renewal", action="store_true", help="tắt box renewal khi nhiều bước")
     ap.add_argument("--attn-diag", type=int, default=0, help="số batch cho chẩn đoán attention; 0 = tắt")
-    ap.add_argument("--batch-size", type=int, default=2,
-                    help="chỉ cho 1 bước (nhiều bước luôn batch 1); @1024 batch 8 OOM trên GPU dùng chung")
+    ap.add_argument("--batch-size", type=int, default=None,
+                    help="detect: chỉ cho 1 bước (nhiều bước luôn batch 1), mặc định 2 (@1024 batch 8 OOM trên GPU "
+                         "dùng chung); add: mặc định eval.batch_size của config")
     ap.add_argument("--num-workers", type=int, default=4)
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default=None)
-    ap.add_argument("--out", default=None, help="file .json trong /mnt/disk1/aiotlab/haitn/output/")
+    ap.add_argument("--out", default=None, help="file .json trong /mnt/disk1/aiotlab/haitn/output/<nhóm>/")
+    ap.add_argument("--image", nargs="+", default=list(IMAGE_KINDS), choices=IMAGE_KINDS, help="GAMMA: loại ảnh vào")
+    ap.add_argument("--add-density", default=None, choices=ADD_DENSITY, help="GAMMA, model 4 kênh: density đưa vào")
+    ap.add_argument("--n-samples", type=int, default=None, help="GAMMA: số box / mẫu (mặc định eval.n_samples)")
+    ap.add_argument("--samples-root", default=None, help="GAMMA: ghi đè data.samples_root")
+    ap.add_argument("--turn-index", default=None, help="GAMMA: ghi đè data.turn_index")
     a = ap.parse_args()
 
     t0 = time.time()
@@ -104,6 +188,9 @@ def main():
         cfg = ck["config"]
     if a.data_root:
         cfg["data"]["root"] = a.data_root
+    if cfg.get("task", "detect") == "add":
+        return main_add(a, cfg, ck, dev, t0)
+    a.batch_size = a.batch_size or 2
     if a.density_root:
         cfg["data"]["density_root"] = a.density_root
     if a.density_index:

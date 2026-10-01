@@ -1,0 +1,59 @@
+# EXPERIMENT GAMMA0 — CE-Loc gốc (U-Net 1D + FiLM, ε-MSE, DDPM) cho bài ADD, ảnh qua R-50 + FPN của ALPHA.
+# Kế hoạch: docs/EXPERIMENT_GAMMA.md (gốc multi_condition/). gamma0 / gamma0_1 CHỈ khác density
+# (data.density + model.in_channels) và experiment / description.
+
+experiment: "gamma0"
+description: "bài add: (nhánh, lượt) CE-130, đích lỗ mới nhất; R-50+FPN -> SpatialSoftmax P5 -> FiLM -> U-Net 1D; RGB + density"
+task: "add"                         # detect (mặc định, ALPHA / BETA) | add
+
+data:
+  root: "../data/all_phase2_V2"     # tương đối so với ce_localization/ (annotation + ground_truth.jpg)
+  samples_root: "../data/samples"   # ảnh inpaint + density của từng (nhánh, lượt)
+  turn_index: "../data/turn_index.json"     # cửa G0: tools/build_turn_index.py
+  density_index: "../data/density_index.json"   # chỉ để eval ảnh gốc với density `full` (chỉ mục ALPHA3)
+  density_root: "../data/samples"
+  image_size: 512                   # letterbox góc trên-trái như CE-Loc gốc (người dùng chốt 2026-10-01)
+  num_workers: 4
+  density: "sample"                 # density CountGD của CHÍNH ảnh inpaint đó, giải mã jet (như ALPHA3); null = RGB
+
+model:
+  arch: "box_policy"                # detector (ALPHA / BETA) | box_policy (GAMMA0)
+  in_channels: 4                    # RGB chuẩn hoá ImageNet + density [0,1] (conv1 kênh 4 khởi tạo 0)
+  pretrained_backbone: true         # R-50 ImageNet; mọi lớp conv train, BN đóng băng (y ALPHA)
+  d_model: 256                      # kênh FPN -> SpatialSoftmax P5 = 256 điểm
+  vis_dim: 128                      # như CE-Loc gốc: Linear(2·256, 128)
+  text_dim: 512                     # CLIP ViT-B/32 pooler (frozen, tính sẵn)
+  text_proj_dim: 128                # như CE-Loc gốc: Linear(512, 128) -> Mish
+  step_embed_dim: 256               # U-Net 1D y CE-Loc gốc
+  down_dims: [64, 128, 256]
+  kernel_size: 3
+  n_groups: 8
+  clip_text: "openai/clip-vit-base-patch32"
+
+diffusion:
+  num_timesteps: 1000               # β tuyến tính 1e-4..0,02, ε-prediction (như CE-Loc gốc)
+  beta_start: 1.0e-4
+  beta_end: 0.02
+  noise_per_image: 8                # số bộ (t, ε) độc lập mỗi ảnh mỗi bước (bài: 1); backbone vẫn 1 lần / ảnh
+
+training:
+  batch_size: 16                    # TOÀN CỤC; Kaggle 2 GPU -> 8 ảnh/GPU
+  lr: 1.0e-4                        # như ALPHA (bài: 5e-5, batch 32)
+  weight_decay: 1.0e-4
+  max_iter: 12000                   # ≈ 14 epoch của 13.454 mẫu train
+  steps: [9000, 11000]
+  gamma: 0.1
+  warmup_iters: 1000
+  warmup_factor: 0.01
+  grad_clip: 1.0                    # toàn mô hình, L2
+  seed: 0
+  log_every: 20
+  ckpt_every: 1000
+  eval_every: 2000
+
+eval:
+  split: "val"                      # eval định kỳ + chọn best.pth; báo cáo trên test (eval.py)
+  limit: 500                        # mẫu val CỐ ĐỊNH cho eval định kỳ (hoán vị seed 12345)
+  n_samples: 30                     # box độc lập / mẫu (best-of-30 của bài)
+  batch_size: 16
+  select_metric: "mean_iou_any"     # IoU TB của MỘT box bất kỳ với lỗ gần nhất (không oracle)

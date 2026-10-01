@@ -61,9 +61,9 @@ có bảng phân rã thời gian và ngoại suy cả tập.
 
 **A. Reproduce** (việc đáng làm tiếp: chạy đủ 2410 ảnh với `t=150, w1=0,85` của paper):
 ```bash
-LOG=/mnt/disk1/aiotlab/haitn/log/d2s_paper_$(date +%m%d_%H%M).log
+LOG=/mnt/disk1/aiotlab/haitn/log/diffuse2seg/d2s_paper_$(date +%m%d_%H%M).log
 nohup python ../tools/run_on_free_gpu.py -- tools/run_paper.py --dataset paco \
-    --out /mnt/disk1/aiotlab/haitn/output/d2s_paper_paco.json > $LOG 2>&1 &
+    --out /mnt/disk1/aiotlab/haitn/output/diffuse2seg/d2s_paper_paco.json > $LOG 2>&1 &
 echo "PID $! -> $LOG"
 ```
 Mặc định `--limit 50`; cả tập: `--limit 2410 --checkpoint-every 50` (ngắt thì thêm
@@ -72,18 +72,18 @@ UnSAM 9,3.
 
 **Quét `t × w1`** (20 ảnh để CHỌN, không để báo số — xác nhận bằng `--start` khác):
 ```bash
-LOG=/mnt/disk1/aiotlab/haitn/log/d2s_sweep_$(date +%m%d_%H%M).log
+LOG=/mnt/disk1/aiotlab/haitn/log/diffuse2seg/d2s_sweep_$(date +%m%d_%H%M).log
 nohup python ../tools/run_on_free_gpu.py -- tools/sweep_t_w1.py --limit 20 \
     --timesteps 50 100 150 300 --w1 1.0 0.85 0.5 0.15 \
-    --out /mnt/disk1/aiotlab/haitn/output/d2s_sweep.json > $LOG 2>&1 &
+    --out /mnt/disk1/aiotlab/haitn/output/diffuse2seg/d2s_sweep.json > $LOG 2>&1 &
 echo "PID $! -> $LOG"
 ```
 
 **Nhìn ảnh trước khi tin số** (`--pick spread` mặc định; `best` là mẫu thiên vị):
 ```bash
 python ../tools/run_on_free_gpu.py -- tools/visualize_best.py \
-    --from-json /mnt/disk1/aiotlab/haitn/output/d2s_paper_paco.json \
-    --limit 30 --pick spread --out-dir /mnt/disk1/aiotlab/haitn/output/d2s_viz
+    --from-json /mnt/disk1/aiotlab/haitn/output/diffuse2seg/d2s_paper_paco.json \
+    --limit 30 --pick spread --out-dir /mnt/disk1/aiotlab/haitn/output/diffuse2seg/d2s_viz
 ```
 Mỗi mức granularity là một phân hoạch riêng — vẽ **từng mức một**, không chồng lên nhau.
 

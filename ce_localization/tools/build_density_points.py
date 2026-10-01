@@ -21,9 +21,9 @@ của ALPHA3, `tools/build_density_index.py`). Đỉnh: `data/points.find_peaks(
 
 ~3.600 PNG + quét annotation 3 split (4–6 phút trên đĩa dùng chung) ⇒ ước 5–15 phút, chạy NỀN:
   cd /mnt/disk1/aiotlab/haitn/object-detection/ce_localization
-  LOG=/mnt/disk1/aiotlab/haitn/log/beta_g0_points_$(date +%m%d_%H%M).log
+  LOG=/mnt/disk1/aiotlab/haitn/log/beta/beta_g0_points_$(date +%m%d_%H%M).log
   nohup python tools/build_density_points.py --out ../data/density_points.json \\
-      --report /mnt/disk1/aiotlab/haitn/output/beta_g0_points.json --workers 8 > $LOG 2>&1 &
+      --report /mnt/disk1/aiotlab/haitn/output/beta/beta_g0_points.json --workers 8 > $LOG 2>&1 &
   echo "PID $! -> $LOG"
 """
 
@@ -108,7 +108,7 @@ def main():
     ap.add_argument("--samples", default="../data/samples")
     ap.add_argument("--density-index", default="../data/density_index.json")
     ap.add_argument("--out", default="../data/density_points.json")
-    ap.add_argument("--report", default=None, help="JSON số đo (vào /mnt/disk1/aiotlab/haitn/output/)")
+    ap.add_argument("--report", default=None, help="JSON số đo (vào /mnt/disk1/aiotlab/haitn/output/beta/)")
     ap.add_argument("--taus", type=int, nargs="+", default=[8, 32, 64, 96, 128, 160])
     ap.add_argument("--radii", type=int, nargs="+", default=[1, 2, 3, 4, 6])
     ap.add_argument("--tau", type=int, default=None, help="ép tau (cùng --radius), bỏ qua chọn theo F1")

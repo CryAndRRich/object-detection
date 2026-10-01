@@ -5,7 +5,7 @@
 Chỉ đọc annotation + JSON, CPU. Quét annotation 1 split trên đĩa dùng chung mất vài phút ⇒ chạy nền:
 
   cd /mnt/disk1/aiotlab/haitn/object-detection/baseline
-  LOG=/mnt/disk1/aiotlab/haitn/log/score_<tên>_$(date +%m%d_%H%M).log
+  LOG=/mnt/disk1/aiotlab/haitn/log/baselines/score_<tên>_$(date +%m%d_%H%M).log
   nohup python tools/score_predictions.py --pred /mnt/disk1/aiotlab/haitn/output/baselines/<dump>.json \\
       --budgets 200 all > $LOG 2>&1 &
   echo "PID $! -> $LOG"

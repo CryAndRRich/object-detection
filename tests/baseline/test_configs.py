@@ -39,13 +39,13 @@ def test_three_baselines():
         assert c["MODEL"][node]["NUM_CLASSES"] == 1 and c["MODEL"][node]["NUM_PROPOSALS"] == 300
         assert c["SOLVER"]["OPTIMIZER"] == "ADAMW" and abs(c["SOLVER"]["BASE_LR"] - lr_adamw) < 1e-9
         assert c["SOLVER"]["CLIP_GRADIENTS"]["CLIP_TYPE"] == "full_model"
-        assert c["BASELINE"]["NAME"] == f"BASELINE{k}" and c["OUTPUT_DIR"] == f"checkpoints/baseline{k}"
+        assert c["BASELINE"]["NAME"] == f"BASELINE{k}" and c["OUTPUT_DIR"] == f"../weights/detection/baseline{k}"
     assert c2["_BASE_"] == "Base-CE130.yaml" and c2["MODEL"]["META_ARCHITECTURE"] == "GeneralizedRCNN"
     assert c2["MODEL"]["ROI_HEADS"]["NUM_CLASSES"] == 1 and c2["MODEL"]["MASK_ON"] is False
     assert abs(c2["SOLVER"]["BASE_LR"] - 0.02 * 2 / 16) < 1e-12 and c2["SOLVER"]["MOMENTUM"] == 0.9
     assert c2["TEST"]["DETECTIONS_PER_IMAGE"] == 300 and c2["MODEL"]["ROI_HEADS"]["SCORE_THRESH_TEST"] == 0.0
     assert c2["MODEL"]["ROI_HEADS"]["NMS_THRESH_TEST"] == 0.5
-    assert c2["BASELINE"]["NAME"] == "BASELINE2" and c2["OUTPUT_DIR"] == "checkpoints/baseline2"
+    assert c2["BASELINE"]["NAME"] == "BASELINE2" and c2["OUTPUT_DIR"] == "../weights/detection/baseline2"
 
 
 def test_no_stray_configs():
@@ -61,7 +61,7 @@ def test_text_open_has_utf8_encoding():
     server là ASCII -> json.dump(..., ensure_ascii=False) vỡ ở ký tự '—' (UnicodeEncodeError, BASELINE3.1
     2026-09-30); đọc YAML / nguồn có chữ Việt cũng vỡ."""
     project = os.path.join(os.path.dirname(__file__), "..", "..")
-    skip = {"third_party", "checkpoints", "notebooks", "__pycache__"}
+    skip = {"third_party", "notebooks", "__pycache__"}
     bad = []
     for dirpath, dirs, files in (w for sub in ("baseline", "tests/baseline") for w in os.walk(os.path.join(project, sub))):
         dirs[:] = [d for d in dirs if d not in skip]

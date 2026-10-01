@@ -20,24 +20,30 @@ box nhiễu [B,N,4] (N = 200) --6 stage, mỗi stage:
 Loss DiffusionDet (SimOTA, focal + L1 + GIoU) ở cả 6 stage; suy luận DDIM 1 hoặc nhiều bước.
 ```
 
+Bài **ADD** (`task: add`, GAMMA — `model.arch: box_policy`): CE-Loc gốc với ảnh qua cùng R-50 + FPN.
+```
+ảnh inpaint lượt t [B,3|4,512,512] -> R-50 + FPN -> P5 -> SpatialSoftmax có mask (256 điểm) -> Linear -> 128 ┐
+tên lớp -> CLIP text frozen -> Linear -> Mish -> 128 ──────────────────────────────────────────────────────┤ cond
+box nhiễu [B,1,4] + t -> U-Net 1D (FiLM theo cond) -> ε̂ ; ε-MSE, β tuyến tính ; suy luận DDPM, K mẫu độc lập
+```
+
 ## Cấu trúc
 
 | | |
 |---|---|
 | `train.py` / `eval.py` | điểm vào duy nhất (1 GPU hoặc `torchrun`; `--resume`, `--max-hours`, `--bench`, `--nan-debug`) |
-| `config/alpha/`, `config/beta/` | config từng thí nghiệm (bảng dưới) |
-| `data/` | `dataset` (quét CE-130, letterbox, đích box / điểm), `density` (giải mã jet, chỉ mục, chọn bản), `points` (đỉnh density, cỡ giả kNN) |
-| `models/` | `backbone`, `roi`, `memory`, `head`, `detector`, `text` (CLIP ViT-B/32 frozen) |
-| `engine/` | `diffusion`, `criterion` (SimOTA + loss, chế độ box / điểm), `evaluate` (suy luận + chỉ số), `train_utils`, `nan_debug` |
+| `config/alpha/`, `config/beta/`, `config/gamma/` | config từng thí nghiệm (bảng dưới) |
+| `data/` | `dataset` (quét CE-130, letterbox, đích box / điểm), `density` (giải mã jet, chỉ mục, chọn bản), `points` (đỉnh density, cỡ giả kNN), `turns` (bài add: chỉ mục (nhánh, lượt) ↔ `samples/`, dataset) |
+| `models/` | `backbone`, `roi`, `memory`, `head`, `detector`, `text` (CLIP ViT-B/32 frozen); bài add: `box_policy` + `unet1d` |
+| `engine/` | `diffusion`, `criterion` (SimOTA + loss, chế độ box / điểm), `evaluate` (suy luận + chỉ số), `add_eval` (bài add: K mẫu, IoU với lỗ, C-NLL, on_object), `train_utils`, `nan_debug` |
 | `utils/` | hình học box (torch / numpy), toán khuếch tán, chấm điểm numpy, checkpoint ghi nguyên tử, grad theo nhóm, log |
-| `tools/` | `build_density_index`, `build_density_points`, `visualize_data` (xem đầu vào bằng mắt), `check_data_facts`, `inspect_spatial_softmax`, `inspect_dp_spatial_softmax` |
-| `celoc_paper/` | CE-Loc GỐC của bài viết lại đúng công thức (nạp strict `weights/celoc/best_paper.pth`) + encoder Diffusion Policy — để so sánh / soi mô hình gốc |
-| `notebooks/` | `train_kaggle.ipynb` (một config trên T4×2), `celoc_paper_kaggle.ipynb` — gitignore, chỉ ở local |
-| `checkpoints/` | không vào git |
+| `tools/` | `build_density_index`, `build_density_points`, `build_turn_index` (bài add, cửa G0), `visualize_data` (xem đầu vào bằng mắt), `check_data_facts` |
+| `notebooks/` | `train_kaggle.ipynb` (một config trên T4×2) — gitignore, chỉ ở local |
 
 Test ở `object-detection/tests/ce_localization/` theo module: `test_data`, `test_models`,
-`test_engine`, `test_train_eval` (trọn luồng mọi loại config), `test_celoc_paper`, `test_dp_vision`;
-dữ liệu giả dùng chung ở `helpers.py`.
+`test_engine`, `test_train_eval` (trọn luồng mọi loại config); dữ liệu giả dùng chung ở `helpers.py`.
+Code soi SpatialSoftmax (`celoc_paper/`, `tools/inspect_*spatial_softmax.py`, TN1–TN3 của
+`docs/SPATIAL_SOFTMAX.md`) đã xoá 2026-10-01 — còn trong lịch sử git.
 
 ## Thí nghiệm (config)
 
@@ -50,6 +56,8 @@ dữ liệu giả dùng chung ở `helpers.py`.
 | `alpha/alpha3_2.yaml` | như trên, `data.density: mix` (1/3 đầy đủ · 1/3 thiếu vật · 1/3 trống) | 〃 mục 5 |
 | `alpha/alpha3_2_36k.yaml` | như `alpha3_2`, train 36k iter (steps 27k / 33k) | 〃 mục 12.5 |
 | `beta/beta0.yaml` | `data.targets: point` (đích = box giả từ điểm density, box GT chỉ để chấm) | `docs/EXPERIMENT_BETA.md` |
+| `gamma/gamma0.yaml` | **bài add**: `task: add`, `model.arch: box_policy`, canvas 512, batch 16, density của chính mẫu (kênh 4) | `docs/EXPERIMENT_GAMMA.md` |
+| `gamma/gamma0_1.yaml` | như `gamma0`, CHỈ RGB | 〃 |
 
 ## Chạy
 
@@ -65,9 +73,9 @@ Mọi lệnh chạy trong `object-detection/ce_localization/` trên server, sau
 
 **Train** (`--save-dir` bắt buộc; `last.pth` mỗi 1000 iter, ghi nguyên tử):
 ```bash
-LOG=/mnt/disk1/aiotlab/haitn/log/<tên>_$(date +%m%d_%H%M).log
+LOG=/mnt/disk1/aiotlab/haitn/log/<nhóm>/<tên>_$(date +%m%d_%H%M).log
 nohup python ../tools/run_on_free_gpu.py -- train.py --config config/alpha/alpha0.yaml \
-    --save-dir checkpoints/<tên> > $LOG 2>&1 &
+    --save-dir ../weights/detection/<tên> > $LOG 2>&1 &
 echo "PID $! -> $LOG"
 ```
 Bị ngắt thì chạy lại **đúng lệnh đó + `--resume`**. Không có `--resume` mà `last.pth` đã có thì
@@ -75,10 +83,10 @@ train DỪNG ngay, không ghi đè. Kaggle: `torchrun --standalone --nproc_per_n
 
 **Eval** (config lấy từ checkpoint; model 4 kênh thêm `--density full|partial|empty`):
 ```bash
-LOG=/mnt/disk1/aiotlab/haitn/log/<tên>_eval_$(date +%m%d_%H%M).log
-nohup python ../tools/run_on_free_gpu.py -- eval.py --ckpt checkpoints/<tên>/best.pth \
+LOG=/mnt/disk1/aiotlab/haitn/log/<nhóm>/<tên>_eval_$(date +%m%d_%H%M).log
+nohup python ../tools/run_on_free_gpu.py -- eval.py --ckpt ../weights/detection/<tên>/best.pth \
     --split test --num-proposals 200 --top-k 100 --nms --oracle-score --steps 1 4 --attn-diag 20 \
-    --out /mnt/disk1/aiotlab/haitn/output/<tên>_test_N200.json > $LOG 2>&1 &
+    --out /mnt/disk1/aiotlab/haitn/output/<nhóm>/<tên>_test_N200.json > $LOG 2>&1 &
 echo "PID $! -> $LOG"
 ```
 Có NMS thì JSON báo cả hai thứ tự hậu xử lý: `steps{k}` (top-k trước) và `steps{k}_nmsfirst`.
@@ -89,37 +97,12 @@ python tools/build_density_index.py --samples ../data/samples --ce130 ../data/al
     --out ../data/density_index.json --workers 8
 ```
 
-## CE-Loc gốc (`celoc_paper/`)
+## Bài add (GAMMA)
 
-**Soi SpatialSoftmax của CE-Loc gốc** (chỉ cần torch/torchvision/matplotlib, CPU được; 100 ảnh
-có hình ~4–7 phút mỗi chế độ):
-```bash
-for m in original inpainted_1 inpainted_2; do
-  python tools/inspect_spatial_softmax.py --image $m --n 100 --out ../../output/spatial_softmax/density_paper/$m
-  # weight nodensity: thêm --ckpt ../weights/celoc/best_nodensity.pth, --out .../nodensity/$m
-done
-```
-
-**Soi SpatialSoftmax của Diffusion Policy** (Push-T; checkpoint `../weights/diffusion_policy/epoch=1850-test_mean_score=0.898.ckpt`,
-data `../data/pusht/pusht_cchi_v7_replay.zarr`; cần thêm `zarr<3`, `dill`, `omegaconf`; CPU ~35 giây):
-```bash
-python tools/inspect_dp_spatial_softmax.py --episode 116 --out ../../output/spatial_softmax/diffusion_policy
-```
-
-**Train lại CE-Loc gốc, có / không density.** Công thức suy từ checkpoint gốc: AdamW lr 5e-5
-wd 0,01, cosine `T_max` 300 theo epoch, batch toàn cục 32, best = loss train nhỏ nhất;
-`--stop-epoch 120` dừng sớm mà giữ lịch. Eval báo cả sampler `mock` của bài lẫn `ddpm` đúng, IoU
-đúng (`best_iou`) lẫn công thức sai của bài (`best_iou_orig`), mốc `prior`; `--viz N` vẽ box.
-```bash
-LOG=/mnt/disk1/aiotlab/haitn/log/celoc_nodensity_$(date +%m%d_%H%M).log
-nohup python ../tools/run_on_free_gpu.py -- celoc_paper/train.py --save-dir checkpoints/celoc_nodensity \
-    --no-density --stop-epoch 120 > $LOG 2>&1 &
-echo "PID $! -> $LOG"
-# nhiều GPU (Kaggle): cache rồi DDP
-python celoc_paper/build_cache.py --data <samples>/train --out <cache> [--no-density]
-torchrun --standalone --nproc_per_node=2 celoc_paper/train.py --save-dir <out> --cache-dir <cache> --stop-epoch 120 ...
-```
-Ngữ cảnh + kết quả: `docs/SPATIAL_SOFTMAX.md`.
+Chỉ mục (nhánh, lượt) ↔ `samples/` dựng một lần: `tools/build_turn_index.py` (lệnh trong docstring). Train /
+eval như mọi config (`--save-dir ../weights/add/<tên>`, log `log/gamma/`, kết quả `output/gamma/`); `eval.py`
+tự nhận `task: add`: `--image inpainted original`, `--n-samples`, `--add-density`. Lệnh đầy đủ:
+`docs/EXPERIMENT_GAMMA.md`.
 
 ## Đọc số
 
@@ -131,6 +114,7 @@ Ngữ cảnh + kết quả: `docs/SPATIAL_SOFTMAX.md`.
 | `oracle_recall_per_stage` | recall theo stage; phẳng = các stage sau không tinh chỉnh thêm |
 | `density_recall`, `size_recall` | recall tách theo số vật / ảnh và theo cỡ vật (quy về canvas 512) |
 | `iou_matched` (log train) | chỉ để đọc — **không** chọn checkpoint (mù với GT không box nào chạm tới) |
+| bài add: `mean_iou_any` | IoU TB của MỘT box bất kỳ với lỗ gần nhất (không oracle) — chọn checkpoint; `best_iou@K` / `hit50@K` = oracle best-of-K (giao thức của bài) |
 
 ⚠️ Chỉ số trong log train là **khử nhiễu 1 bước từ GT đã thêm nhiễu**, cao hơn suy luận thật. Số
 báo cáo chỉ lấy từ `eval.py` (DDIM từ nhiễu thuần).

@@ -53,10 +53,10 @@ thật — ở 20 mask thì không có gì bất thường.
 
 CHẠY (TRÊN SERVER):
     export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache
-    LOG=/mnt/disk1/aiotlab/haitn/log/d2s_paper_$(date +%Y%m%d_%H%M%S).log
+    LOG=/mnt/disk1/aiotlab/haitn/log/diffuse2seg/d2s_paper_$(date +%Y%m%d_%H%M%S).log
     nohup python ../tools/run_on_free_gpu.py -- tools/run_paper.py \
         --dataset paco --limit 50 \
-        --out /mnt/disk1/aiotlab/haitn/output/d2s_paper_paco.json > "$LOG" 2>&1 &
+        --out /mnt/disk1/aiotlab/haitn/output/diffuse2seg/d2s_paper_paco.json > "$LOG" 2>&1 &
     echo "PID $! -> $LOG"
 """
 

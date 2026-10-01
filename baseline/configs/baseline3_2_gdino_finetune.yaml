@@ -19,7 +19,7 @@ weights_url: "https://github.com/IDEA-Research/GroundingDINO/releases/download/v
 predict:
   prompt: "{name} ."
 finetune:
-  output_dir: "checkpoints/baseline3_2"
+  output_dir: "../weights/detection/baseline3_2"
   batch_total: 2
   epochs: 13
   lr_drop: 10

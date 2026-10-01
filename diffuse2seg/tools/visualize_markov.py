@@ -13,7 +13,7 @@ Vẽ một hàng ảnh:
 VÍ DỤ
   python tools/visualize_markov.py --dataset paco --image-id 5142 \
       --point 0.42 0.45 --canvas 512 \
-      --out /mnt/disk1/aiotlab/haitn/output/markov_5142.png
+      --out /mnt/disk1/aiotlab/haitn/output/diffuse2seg/markov_5142.png
 
 --point là toạ độ TƯƠNG ĐỐI (x, y) trong [0,1] trên ẢNH GỐC, để không phải
 tra pixel. Mặc định (0.5, 0.5).

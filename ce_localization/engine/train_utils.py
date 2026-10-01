@@ -15,7 +15,7 @@ __all__ = ["setup_dist", "PthCheckpoints", "warmup_multistep", "epoch_batches",
 
 def setup_dist(device=None):
     """-> (rank, world, dev). torchrun đặt WORLD_SIZE/RANK/LOCAL_RANK; không có thì 1 tiến trình.
-    (cùng khuôn `ce_localization/celoc_paper/train.py:66-78`)
+    (khuôn DDP của Diffusion Policy / CE-Loc gốc)
 
     `device="cpu"`: ép CPU kể cả khi có CUDA (nhiều tiến trình thì dùng gloo) — test chạy trên
     server có GPU dùng chung phải tất định và không phụ thuộc bộ nhớ GPU còn trống."""

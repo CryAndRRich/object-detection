@@ -153,3 +153,86 @@ def _run_g0(monkeypatch, base, out, report, extra=()):
                                       "--density-index", os.path.join(base, "density_index.json"),
                                       "--out", out, "--report", report, "--workers", "0", *extra])
     g0.main()
+
+
+# ----------------------------------------------------------------------------- GAMMA (bài add)
+
+CFG_G = {"density": os.path.join(CFG_DIR, "gamma", "gamma0.yaml"), "rgb": os.path.join(CFG_DIR, "gamma", "gamma0_1.yaml")}
+
+
+def _fake_ce130_turns(base, seed=0):
+    """CE-130 giả theo (nhánh, lượt) + `samples/` của bài: mỗi ảnh gốc 1–2 nhánh, nhánh xoá cộng dồn T <= 4 vật
+    (lỗ tô xám, `inpainted_bboxes` lệch vật `all_bboxes` 1 px như dữ liệu thật); file samples đặt tên
+    `{iid}_{j}` với j XÁO TRỘN (không theo nhánh / lượt), train + val -> `samples/train`, test -> `samples/test`
+    như bài. -> (ce130_root, samples_root). Vật thứ 0..1 KHÔNG bao giờ bị xoá."""
+    rng = np.random.default_rng(seed)
+    root, samples = os.path.join(base, "all_phase2_V2"), os.path.join(base, "samples")
+    plan = (("train", ["1000", "1001", "1002"], "apple"), ("val", ["2000", "2001"], "bird"), ("test", ["3000", "3001"], "cup"))
+    for split, iids, cat in plan:
+        sdir = os.path.join(samples, "test" if split == "test" else "train")
+        for d in ("images", "density", "annotation"):
+            os.makedirs(os.path.join(sdir, d), exist_ok=True)
+        for iid in iids:
+            W, H = 200, 150
+            gt = rng.integers(0, 255, (H, W, 3), dtype=np.uint8)
+            objs = []
+            for k in range(7):
+                x1, y1 = 10 + 26 * k, rng.uniform(10, 100)
+                objs.append([float(x1), float(y1), float(x1 + 20), float(y1 + rng.uniform(15, 35))])
+            outs = []
+            for b, order in ((1, [2, 3, 4, 5]), (2, [6, 5]))[: 1 + int(iid[-1]) % 2]:
+                br = os.path.join(root, split, f"{iid}_b{b}")
+                os.makedirs(br, exist_ok=True)
+                Image.fromarray(gt).save(os.path.join(br, "ground_truth.jpg"))
+                holes = [[o + 1.0 for o in objs[i]] for i in order]          # lệch 1 px như all_bboxes ↔ inpainted
+                img = np.asarray(Image.open(os.path.join(br, "ground_truth.jpg")).convert("RGB")).copy()
+                for t, (x1, y1, x2, y2) in enumerate(holes, 1):
+                    img[int(y1):int(y2), int(x1):int(x2)] = 128
+                    Image.fromarray(img).save(os.path.join(br, f"inpainted_turn_{t}.png"))
+                    cx, cy, w, h = (x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1
+                    lv = np.zeros((H, W), dtype=np.uint8)
+                    for i in range(len(objs)):
+                        if i not in order[:t]:
+                            ox, oy = int((objs[i][0] + objs[i][2]) / 2), int((objs[i][1] + objs[i][3]) / 2)
+                            lv[oy - 2:oy + 3, ox - 2:ox + 3] = 255
+                    outs.append((img.copy(), JET[lv], {"class": cat, "target_bbox": [cx, cy, w, h]}))
+                with open(os.path.join(br, "annotation.json"), "w") as f:
+                    json.dump({"all_bboxes": objs, "inpainted_bboxes": holes, "class_based_caption": cat}, f)
+            for j, o in enumerate(rng.permutation(len(outs))):
+                im, den, ann = outs[o]
+                Image.fromarray(im).save(os.path.join(sdir, "images", f"{iid}_{j + 1}.png"))
+                Image.fromarray(den).save(os.path.join(sdir, "density", f"{iid}_{j + 1}.png"))
+                with open(os.path.join(sdir, "annotation", f"{iid}_{j + 1}.json"), "w") as f:
+                    json.dump(ann, f)
+    return root, samples
+
+
+def _fake_turn_index(base):
+    """CE-130 + samples giả, chỉ mục (nhánh, lượt) và chỉ mục density ALPHA3 (cho ảnh gốc, density `full`)."""
+    from ce_localization.data.turns import TurnIndex, build_turn_index
+    root, samples = _fake_ce130_turns(base)
+    idx = build_turn_index(root, samples, workers=0, log=lambda *a: None)
+    p = os.path.join(base, "turn_index.json")
+    with open(p, "w") as f:
+        json.dump(idx, f)
+    with open(os.path.join(base, "density_index.json"), "w") as f:
+        json.dump(build_index(samples, workers=0, log=lambda *a: None), f)
+    return root, samples, p, TurnIndex(p), idx["report"]
+
+
+def _gamma_cfg(tmp_path, base, kind="density"):
+    with open(CFG_G[kind]) as f:
+        cfg = yaml.safe_load(f)
+    cfg["data"].update(root=os.path.join(base, "all_phase2_V2"), samples_root=os.path.join(base, "samples"),
+                       turn_index=os.path.join(base, "turn_index.json"),
+                       density_index=os.path.join(base, "density_index.json"),
+                       density_root=os.path.join(base, "samples"), image_size=128, num_workers=0)
+    cfg["model"]["pretrained_backbone"] = False
+    cfg["diffusion"].update(num_timesteps=20, noise_per_image=2)
+    cfg["training"].update(batch_size=2, max_iter=4, steps=[3], warmup_iters=2, log_every=1, ckpt_every=2,
+                           eval_every=2)
+    cfg["eval"].update(n_samples=3, batch_size=2)
+    p = str(tmp_path / f"cfg_gamma_{kind}.yaml")
+    with open(p, "w") as f:
+        yaml.safe_dump(cfg, f)
+    return p, cfg

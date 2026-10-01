@@ -296,3 +296,66 @@ def test_full_flow_beta0_train_resume_eval_and_gt_never_in_loss(tmp_path, monkey
         p = res["results"][key]["point"]
         assert 0 <= p["oracle_recall_pt"] <= 1 and 0 <= p["AP_pt"] <= 1
         assert set(p["by_density"]) == {"<=30 vật", "31-100 vật", ">100 vật"}
+
+
+# ----------------------------------------------------------------------------- GAMMA (bài add)
+
+@pytest.mark.parametrize("kind", ["density", "rgb"])
+def test_full_flow_gamma_train_resume_eval(tmp_path, monkeypatch, kind):
+    """GAMMA0 / 0.1: chỉ mục (nhánh, lượt) -> train 2 iter -> --resume tới 4 == train liền 4 -> eval.py trên ảnh
+    inpaint + ảnh gốc, kèm mốc prior."""
+    from tests.ce_localization.helpers import _fake_turn_index, _gamma_cfg
+    base = str(tmp_path / "d")
+    os.makedirs(base)
+    _fake_turn_index(base)
+    cfg_path, cfg = _gamma_cfg(tmp_path, base, kind)
+    a, b = str(tmp_path / "a"), str(tmp_path / "b")
+    _run_train(monkeypatch, ["--config", cfg_path, "--save-dir", a, "--max-iter", "2"])
+    _run_train(monkeypatch, ["--config", cfg_path, "--save-dir", a, "--resume"])
+    _run_train(monkeypatch, ["--config", cfg_path, "--save-dir", b])
+    ka = torch.load(os.path.join(a, "last.pth"), weights_only=False)
+    kb = torch.load(os.path.join(b, "last.pth"), weights_only=False)
+    assert ka["iter"] == kb["iter"] == 4 and sorted(os.listdir(a)) == ["best.pth", "history.json", "last.pth"]
+    for k in kb["model"]:
+        assert torch.allclose(ka["model"][k].float(), kb["model"][k].float(), atol=1e-5), k
+    assert "mean_iou_any" in kb["best"] and kb["best"]["iter"] in (2, 4)
+    ev = [h["eval"] for h in kb["history"] if "eval" in h]
+    assert len(ev) == 2 and ev[0]["n"] == 10 and 0 <= ev[0]["mean_iou_any"] <= 1    # val giả: 4 + 4 + 2 lượt
+
+    import ce_localization.eval as ea
+    import ce_localization.train as ta
+    from tests.ce_localization.helpers import _fake_text_table
+    monkeypatch.setattr(ta, "build_text_table", _fake_text_table)
+    out = str(tmp_path / "res.json")
+    monkeypatch.setattr(sys, "argv", ["eval.py", "--ckpt", os.path.join(a, "best.pth"), "--split", "test",
+                                      "--n-samples", "5", "--num-workers", "0", "--out", out, "--device", "cpu"])
+    ea.main()
+    with open(out) as f:
+        res = json.load(f)
+    assert set(res["results"]) == set(res["prior"]) == {"inpainted", "original"}
+    ri, ro = res["results"]["inpainted"], res["results"]["original"]
+    assert ri["n"] == ro["n"] > 0 and 0 <= ri["best_iou@5_any"] <= 1 and "best_iou@5_any" not in ro
+    assert res["density"] == ({"inpainted": "sample", "original": "full"} if kind == "density" else
+                              {"inpainted": None, "original": None})
+    assert ri["best_iou@5_any"] >= ri["best_iou@5_latest"] and res["prior"]["inpainted"]["n_cnll"] == ri["n_cnll"]
+
+
+def test_gamma_configs_only_differ_by_density():
+    from tests.ce_localization.helpers import CFG_G
+    with open(CFG_G["density"]) as f:
+        c0 = yaml.safe_load(f)
+    with open(CFG_G["rgb"]) as f:
+        c1 = yaml.safe_load(f)
+    assert c0["task"] == "add" and c0["model"]["arch"] == "box_policy"
+    assert (c0["data"].pop("density"), c1["data"].pop("density")) == ("sample", None)
+    assert (c0["model"].pop("in_channels"), c1["model"].pop("in_channels")) == (4, 3)
+    for k in ("experiment", "description"):
+        c0.pop(k), c1.pop(k)
+    assert c0 == c1
+
+
+def test_gamma_resume_refuses_changed_task(tmp_path, monkeypatch):
+    import ce_localization.train as ta
+    saved = {"task": "add", "model": {}, "diffusion": {}, "matcher": {}, "data": {}, "loss": {}}
+    assert "task" in ta.config_diff(saved, {**saved, "task": "detect"})[0]
+    assert ta.config_diff(saved, dict(saved))[0] == []

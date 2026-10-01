@@ -5,7 +5,7 @@ Dự án đã có tiền lệ số liệu sai được trích lại nhiều lư�
 là 1,96 ô @512px). Cần số chính xác thì chạy tool này, đừng trích lại từ docs.
 Không train, không GPU, không CLIP — chỉ đọc annotation.
 
-  python tools/check_data_facts.py --out /mnt/disk1/aiotlab/haitn/output/data_facts.json
+  python tools/check_data_facts.py --out /mnt/disk1/aiotlab/haitn/output/data/data_facts.json
 
 Hình học theo letterbox của `data/dataset.py` (scale = min(T/W, T/H), box kẹp vào vùng ảnh thật).
 Mặc định `--image-size 512 --cell 16` = lưới 32×32 ô 16 px, đơn vị của con số "1,96 ô" trong

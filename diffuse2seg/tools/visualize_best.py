@@ -23,9 +23,9 @@ MÀU: xanh lá = GT | cam = pred khớp GT ở IoU>=0.5 | đỏ = pred không kh
 CHẠY (TRÊN SERVER):
     export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache
     python ../tools/run_on_free_gpu.py -- tools/visualize_best.py \
-        --from-json /mnt/disk1/aiotlab/haitn/output/d2s_paper_paco.json \
+        --from-json /mnt/disk1/aiotlab/haitn/output/diffuse2seg/d2s_paper_paco.json \
         --limit 30 --pick spread \
-        --out-dir /mnt/disk1/aiotlab/haitn/output/d2s_viz
+        --out-dir /mnt/disk1/aiotlab/haitn/output/diffuse2seg/d2s_viz
 """
 
 import argparse

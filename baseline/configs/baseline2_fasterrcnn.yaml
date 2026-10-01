@@ -36,4 +36,4 @@ SOLVER:
     ENABLED: False
 TEST:
   DETECTIONS_PER_IMAGE: 300
-OUTPUT_DIR: "checkpoints/baseline2"
+OUTPUT_DIR: "../weights/detection/baseline2"

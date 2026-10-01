@@ -261,3 +261,77 @@ def test_epoch_batches_disjoint_across_ranks_and_reproducible():
     assert len(a) == len(b) == 5
     assert not set(sum(a, [])) & set(sum(b, []))
     assert a == epoch_batches(11, 1, 0, 2, 0, 3) and a != epoch_batches(11, 1, 0, 2, 0, 4)
+
+
+# ----------------------------------------------------------------------------- GAMMA (bài add)
+
+def test_linear_schedule_matches_celoc_original():
+    from ce_localization.utils.diffusion_math import linear_alphas_cumprod
+    ref = torch.cumprod(1.0 - torch.linspace(0.0001, 0.02, 1000), dim=0)      # diffusion_module.py của bài
+    assert torch.equal(linear_alphas_cumprod(1000), ref)
+
+
+def test_ddpm_sample_recovers_x0_with_oracle_eps():
+    from ce_localization.models.box_policy import ddpm_sample
+    from ce_localization.utils.diffusion_math import linear_alphas_cumprod
+    ac = linear_alphas_cumprod(50, 1e-3, 0.2)
+    x0 = torch.tensor([[0.3, -0.2, 0.5, -0.7]]).repeat(3, 1)
+    eps_fn = lambda x, t: (x - ac[t][:, None].sqrt() * x0) / (1 - ac[t][:, None]).sqrt()  # noqa: E731
+    out = ddpm_sample(eps_fn, 3, ac, generator=torch.Generator().manual_seed(0))
+    assert torch.allclose(out, x0, atol=1e-4)
+
+
+def _rec(boxes, holes, objects, t=None, wh=(100.0, 100.0)):
+    return {"image_id": "x", "t": t or len(holes), "wh": np.asarray(wh), "boxes": np.asarray(boxes, float),
+            "holes": np.asarray(holes, float).reshape(-1, 4), "objects": np.asarray(objects, float).reshape(-1, 4)}
+
+
+def test_add_metrics_hand_computed():
+    from ce_localization.engine.add_eval import add_metrics
+    holes = [[0, 0, 10, 10], [50, 50, 60, 60]]                       # lỗ cũ, lỗ MỚI NHẤT
+    boxes = [[0, 0, 10, 10],                                          # trùng lỗ cũ: IoU any 1, latest 0
+             [50, 50, 60, 65],                                        # IoU latest 100/150
+             [80, 80, 70, 90],                                        # suy biến (w < 0) -> IoU 0
+             [95, 95, 105, 105]]                                      # tràn ra ngoài ảnh
+    objects = [[20, 20, 40, 40], [94, 94, 104, 104]]
+    r = add_metrics([_rec(boxes, holes, objects)])
+    assert r["best_iou@4_any"] == 1.0 and np.isclose(r["best_iou@4_latest"], 100 / 150)
+    assert r["hit50@4_any"] == r["hit50@4_latest"] == 1.0
+    assert np.isclose(r["mean_iou_any"], (1 + 100 / 150) / 4) and np.isclose(r["mean_iou_latest"], (100 / 150) / 4)
+    assert r["box_hit50_any"] == 0.5 and r["box_hit50_latest"] == 0.25
+    assert r["hole_cover"] == 1.0 and r["n_multi_hole"] == 1 and r["degenerate"] == 0.25
+    assert r["in_image"] == 0.5                                       # box 0, 1 nằm trọn; 2 suy biến; 3 tràn
+    assert r["on_object"] == 0.25                                     # box 3: giao 9×9 / 100 >= 0,5
+    assert r["n_cnll"] == 0 and np.isnan(r["cnll_F1_n1_mean"])        # < 5 vật -> bỏ C-NLL
+    assert r["by_turn"][2]["n"] == 1 and r["by_turn"][2]["best_any"] == 1.0
+    r2 = add_metrics([_rec(boxes, holes, objects)], with_holes=False)
+    assert "mean_iou_any" not in r2 and r2["on_object"] == 0.25
+
+
+def test_cnll_matches_gaussian_definition():
+    """C-NLL F2 = −log N(x | μ, Σ + ridge) − min_i(−log N(z_i)) với z = [cx, cy, w, h] / (nw, nh) của vật có sẵn;
+    F1 tính tay cho một box."""
+    from scipy.stats import multivariate_normal
+    from ce_localization.engine.add_eval import CNLL_RIDGE, cnll
+    rng = np.random.default_rng(0)
+    xy = rng.uniform(0, 80, (8, 2))
+    wh = rng.uniform(5, 15, (8, 2))
+    objs = np.concatenate([xy, xy + wh], 1)
+    box = np.array([[30.0, 40.0, 42.0, 50.0]])
+    W, H = 100.0, 80.0
+    z = np.stack([(objs[:, 0] + objs[:, 2]) / 2 / W, (objs[:, 1] + objs[:, 3]) / 2 / H,
+                  (objs[:, 2] - objs[:, 0]) / W, (objs[:, 3] - objs[:, 1]) / H], 1)
+    mvn = multivariate_normal(z.mean(0), np.cov(z.T, bias=True) + CNLL_RIDGE * np.eye(4))
+    x = np.array([[36 / W, 45 / H, 12 / W, 10 / H]])
+    exp = -mvn.logpdf(x) - (-mvn.logpdf(z)).min()
+    assert np.allclose(cnll(box, objs, (W, H), "F2"), exp)
+    c1 = cnll(np.concatenate([box, objs[:1]]), objs, (W, H), "F1")
+    assert c1.shape == (2,) and np.isfinite(c1).all() and c1[1] >= 0     # vật có sẵn: >= vật "điển hình nhất"
+    assert cnll(box, objs[:4], (W, H)) is None
+
+
+def test_prior_records_map_unit_boxes_to_valid_region():
+    from ce_localization.engine.add_eval import prior_records
+    rec = _rec([[0, 0, 1, 1]] * 2, [[0, 0, 1, 1]], [], wh=(200.0, 100.0))
+    pri = prior_records([rec], np.array([[0.5, 0.5, 0.1, 0.2]]), n_samples=3)
+    assert pri[0]["boxes"].shape == (3, 4) and np.allclose(pri[0]["boxes"], [[90, 40, 110, 60]] * 3)
