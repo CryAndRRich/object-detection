@@ -1,7 +1,7 @@
 # EXPERIMENT GAMMA0.1 — GAMMA0 bỏ density (CHỈ RGB). GAMMA0: CE-Loc gốc cho bài ADD, CHỈ đổi ResNet18 -> R-50 (+ Linear(4096, 128) vì C5 2048 kênh) và dữ liệu
 # CE-130 (nhánh, lượt). Mọi thứ khác như bài: BN train, to_tensor, SpatialSoftmax không mask, box chia canvas, density
 # .convert("L") + kênh conv1 = TB RGB, U-Net 1D + FiLM, ε-MSE, β tuyến tính, AdamW 5e-5 / wd 0,01 / cosine / không
-# clip / 1 nhiễu mỗi ảnh; batch 16 (bài 32). Eval DDPM đúng công thức.
+# clip / 1 nhiễu mỗi ảnh; batch 8 (bài 32). Eval DDPM đúng công thức.
 # Kế hoạch: docs/EXPERIMENT_GAMMA.md (gốc multi_condition/). gamma0 / gamma0_1 CHỈ khác density
 # (data.density + model.in_channels) và experiment / description.
 
@@ -46,18 +46,18 @@ diffusion:
   beta_end: 0.02
   noise_per_image: 1                # 1 bộ (t, ε) mỗi ảnh mỗi bước như bài
 
-training:                           # optimizer / lịch NHƯ BÀI (AdamW 5e-5, wd 0,01, cosine, không clip); batch 16 (bài 32)
-  batch_size: 16                    # TOÀN CỤC (người dùng chốt 2026-10-01; bài: 32 — vừa bộ nhớ GPU dùng chung); Kaggle 2 GPU -> 8 / GPU + SyncBN
+training:                           # optimizer / lịch NHƯ BÀI (AdamW 5e-5, wd 0,01, cosine, không clip); batch 8 (bài 32)
+  batch_size: 8                     # TOÀN CỤC (người dùng chốt 2026-10-01: GAMMA1 batch 16 OOM trên GPU dùng chung; bài 32); Kaggle 2 GPU -> 4 / GPU + SyncBN
   lr: 5.0e-5
   weight_decay: 0.01
   schedule: "cosine"                # CosineAnnealingLR của bài, theo iter
-  cosine_t_max: 187500              # = 300 epoch × 625 bước của bài => lr gần như giữ 5e-5 trong 16k iter (như đoạn đầu lịch bài)
-  max_iter: 16000                   # ≈ 19 epoch của 13.454 mẫu ở batch 16 (bài: 75k bước × 32; bản train lại ở epoch 10 đã best-of-30 0,335)
+  cosine_t_max: 187500              # = 300 epoch × 625 bước của bài => lr gần như giữ 5e-5 trong 32k iter (như đoạn đầu lịch bài)
+  max_iter: 32000                   # ≈ 19 epoch của 13.454 mẫu ở batch 8 (bài: 75k bước × 32; bản train lại ở epoch 10 đã best-of-30 0,335)
   grad_clip: null                   # bài không clip
   seed: 0
   log_every: 20
   ckpt_every: 1000
-  eval_every: 2000
+  eval_every: 4000                  # 8 lần eval val như trước
 
 eval:
   split: "val"                      # eval định kỳ + chọn best.pth; báo cáo trên test (eval.py)
