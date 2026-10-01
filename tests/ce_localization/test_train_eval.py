@@ -5,6 +5,7 @@ không tất định (resume lệch ~1e-5) và GPU server dùng chung có thể 
 """
 
 import json
+import numpy as np
 import os
 import sys
 
@@ -359,3 +360,58 @@ def test_gamma_resume_refuses_changed_task(tmp_path, monkeypatch):
     saved = {"task": "add", "model": {}, "diffusion": {}, "matcher": {}, "data": {}, "loss": {}}
     assert "task" in ta.config_diff(saved, {**saved, "task": "detect"})[0]
     assert ta.config_diff(saved, dict(saved))[0] == []
+
+
+def test_plot_denoise_trajectory_full_flow(tmp_path, monkeypatch):
+    """Tool vẽ quỹ đạo: checkpoint giả khuôn của bài trên samples/ giả -> PNG + JSON; ca chọn tay và chọn tự động."""
+    import ce_localization.tools.plot_denoise_trajectory as tool
+    from tests.ce_localization.helpers import _fake_ce130_turns, _fake_paper_ckpt
+    _, samples = _fake_ce130_turns(str(tmp_path / "d"))
+    ck = str(tmp_path / "best_model.pth")
+    _fake_paper_ckpt(ck, T=100)                                           # vòng mock của bài: 100 bước
+    monkeypatch.setattr(tool, "encode_class_names",
+                        lambda names, *a, **k: {n: torch.randn(512, generator=torch.Generator().manual_seed(len(n)))
+                                                for n in names})
+    out = str(tmp_path / "out")
+    monkeypatch.setattr(sys, "argv", ["plot_denoise_trajectory.py", "--ckpt", ck, "--samples", samples,
+                                      "--files", "train/images/1000_1.png", "test/images/3000_1.png:apple",
+                                      "--snapshots-ddpm", "99", "50", "0", "--snapshots-mock", "99", "0",
+                                      "--out", out, "--device", "cpu"])
+    tool.main()
+    files = set(os.listdir(out))
+    assert files == {"ddpm_case0_apple.png", "ddpm_case1_apple.png", "mock_case0_apple.png", "mock_case1_apple.png",
+                     "trajectories.json"}
+    with open(os.path.join(out, "trajectories.json")) as f:
+        res = json.load(f)
+    assert len(res["cases"]) == 4 and res["style"] == "paper" and res["track"] == "xt"
+    r = res["cases"][2]                                                   # ddpm, case1: ảnh lớp cup, text apple
+    assert r["text"] == "apple" and r["gt_class"] == "cup" and r["steps"] == [99, 50, 0]
+    assert len(r["boxes_canvas"]) == 3 and all(0 <= v <= 1 for v in r["iou"]) and len(r["center_dist_px"]) == 3
+    out2 = str(tmp_path / "out2")                                         # text rỗng / bỏ hẳn text
+    monkeypatch.setattr(sys, "argv", ["plot_denoise_trajectory.py", "--ckpt", ck, "--samples", samples, "--samplers", "mock",
+                                      "--files", "test/images/3000_1.png:<empty>", "test/images/3000_1.png:<zero>:empty",
+                                      "test/images/3000_1.png:<zero>:blank",
+                                      "--snapshots-mock", "99", "0", "--out", out2, "--device", "cpu"])
+    tool.main()
+    assert set(os.listdir(out2)) == {"mock_case0_empty.png", "mock_case1_zero_dempty.png", "mock_case2_zero_dblank.png",
+                                     "trajectories.json"}
+    with open(os.path.join(out2, "trajectories.json")) as f:
+        assert [r["density"] for r in json.load(f)["cases"]] == ["sample", "empty", "blank"]
+    from ce_localization.data.density import build_index                 # ảnh gốc chưa xoá + density đầy đủ nhất
+    didx = str(tmp_path / "density_index.json")
+    with open(didx, "w") as f:
+        json.dump(build_index(samples, workers=0, log=lambda *x: None), f)
+    out3 = str(tmp_path / "out3")
+    monkeypatch.setattr(sys, "argv", ["plot_denoise_trajectory.py", "--ckpt", ck, "--samples", samples, "--samplers", "mock",
+                                      "--image", "original", "--ce130", os.path.join(str(tmp_path / "d"), "all_phase2_V2"),
+                                      "--density-index", didx, "--files", "test/images/3000_1.png:cup",
+                                      "test/images/3000_1.png:<empty>:blank", "--snapshots-mock", "99", "0",
+                                      "--out", out3, "--device", "cpu"])
+    tool.main()
+    with open(os.path.join(out3, "trajectories.json")) as f:
+        assert [r["density"] for r in json.load(f)["cases"]] == ["full", "blank"]
+    ann = {"train": {"train/images/a_1.png": "egg", "train/images/b_1.png": "cup"},
+           "test": {"test/images/c_1.png": "egg", "test/images/d_1.png": "egg", "test/images/e_1.png": "kiwi"}}
+    cases = tool.pick_cases(ann, None, np.random.default_rng(0))
+    assert [c["name"] for c in cases] == ["train", "test_same", "test_unseen", "train_text"]
+    assert cases[0]["text"] == "egg" and cases[2]["text"] == "kiwi" and cases[3]["file"] == cases[0]["file"]

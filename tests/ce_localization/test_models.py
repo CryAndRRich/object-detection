@@ -206,23 +206,79 @@ def test_box_unit_roundtrip():
     assert torch.allclose(unit_to_boxes(u, whwh), b, atol=1e-5)
 
 
-@pytest.mark.parametrize("in_ch", [3, 4])
-def test_box_policy_loss_trains_backbone_cond_and_unet(in_ch):
+@pytest.mark.parametrize("in_ch,src", [(3, "c5"), (4, "c5"), (4, "p5")])
+def test_box_policy_loss_trains_backbone_cond_and_unet(in_ch, src):
     from ce_localization.models.box_policy import BoxPolicy
     torch.manual_seed(0)
-    m = BoxPolicy(in_channels=in_ch, pretrained_backbone=False, num_timesteps=20)
+    m = BoxPolicy(in_channels=in_ch, pretrained_backbone=False, num_timesteps=20, ss_source=src)
+    assert m.vis_proj.in_features == (4096 if src == "c5" else 512)
     if in_ch == 4:
         assert m.backbone.stem[0].weight[:, 3].abs().max() == 0          # kênh density khởi tạo 0 (như ALPHA3)
     x = torch.randn(2, in_ch, 128, 128)
     loss = m(x, torch.randn(2, 512), torch.tensor([[96, 128], [128, 128]]), torch.rand(2, 4) * 2 - 1, k=3)
     loss.backward()
     g = {n: p.grad for n, p in m.named_parameters()}
-    for n in ("backbone.layer4.2.conv3.weight", "backbone.fpn.layer_blocks.3.0.weight", "vis_proj.weight",
+    for n in ("backbone.layer4.2.conv3.weight", "backbone.stem.0.weight", "vis_proj.weight",
               "text_proj.0.weight", "noise_net.final_conv.1.weight", "noise_net.diffusion_step_encoder.1.weight"):
         assert g[n] is not None and g[n].abs().sum() > 0, n
     assert g["backbone.fpn.layer_blocks.0.0.weight"] is None             # P2..P4 không dùng
+    fpn_used = g["backbone.fpn.layer_blocks.3.0.weight"] is not None
+    assert fpn_used == (src == "p5")                                     # C5: không qua FPN
     assert m.alphas_cumprod.shape == (20,)
     with torch.no_grad():
         s = m.sample(x, torch.randn(2, 512), torch.tensor([[96, 128], [128, 128]]), 4)
     assert s.shape == (2, 4, 4) and torch.isfinite(s).all()
 
+
+
+def test_paper_spatial_softmax_matches_original_code():
+    """`SpatialSoftmax` của refs/repos/Count-Editing/CE-LocModel/models/spatial_softmax.py chép nguyên (meshgrid mặc
+    định = 'ij')."""
+    import torch.nn.functional as F
+    from ce_localization.models.box_policy import _paper_spatial_softmax
+    fm = torch.randn(2, 5, 4, 6)
+    N, C, H, W = fm.shape
+    pos_x, pos_y = torch.meshgrid(torch.linspace(-1, 1, H), torch.linspace(-1, 1, W), indexing="ij")
+    att = F.softmax(fm.reshape(N, C, -1), dim=-1)
+    ex = torch.sum(pos_x.reshape(H * W) * att, dim=-1, keepdim=True)
+    ey = torch.sum(pos_y.reshape(H * W) * att, dim=-1, keepdim=True)
+    assert torch.equal(_paper_spatial_softmax(fm), torch.cat([ex, ey], dim=-1).reshape(N, -1))
+
+
+def test_load_celoc_paper_renames_and_checks(tmp_path):
+    from ce_localization.models.box_policy import BoxPolicy
+    from tests.ce_localization.helpers import _fake_paper_ckpt
+    p = str(tmp_path / "best_model.pth")
+    ref = _fake_paper_ckpt(p)
+    m, clip, info = BoxPolicy.load_celoc_paper(p)
+    assert info["in_channels"] == 4 and info["num_timesteps"] == 20 and info["epoch"] == 113
+    assert list(clip) == ["text_model.final_layer_norm.weight"] and info["schedule_max_err"] == 0
+    for k, v in ref.state_dict().items():
+        assert torch.equal(m.state_dict()[k], v), k
+    assert m.vision.backbone[0].weight.shape == (64, 4, 7, 7) and m.vision.projection.weight.shape == (128, 1024)
+    ck = torch.load(p, weights_only=False)
+    ck["model_state_dict"]["vision_encoder.extra"] = torch.zeros(1)
+    with pytest.raises(RuntimeError):
+        BoxPolicy.load_celoc_paper(ck)
+    ck["model_state_dict"].pop("vision_encoder.extra")
+    ck["model_state_dict"]["alphas_cumprod"] = ck["model_state_dict"]["alphas_cumprod"] * 0.9
+    with pytest.raises(RuntimeError):
+        BoxPolicy.load_celoc_paper(ck)
+
+
+def test_null_text_zeroes_text_part_of_condition():
+    from ce_localization.models.box_policy import BoxPolicy
+    m = BoxPolicy(pretrained_backbone=False, num_timesteps=20, vision="r18_paper", in_channels=4).eval()
+    x, t = torch.randn(1, 4, 128, 128), torch.randn(1, 512)
+    with torch.no_grad():
+        c, c0 = m.condition(x, t, None), m.condition(x, t, None, null_text=True)
+    assert torch.equal(c[:, :128], c0[:, :128]) and c0[:, 128:].abs().max() == 0 and c[:, 128:].abs().max() > 0
+
+
+def test_forward_c5_is_layer4_output():
+    m = ResNet50FPN(pretrained=False).eval()
+    x = torch.randn(1, 3, 128, 96)
+    with torch.no_grad():
+        c5 = m.forward_c5(x)
+        ref = m.layer4(m.layer3(m.layer2(m.layer1(m.stem(x)))))
+    assert c5.shape == (1, 2048, 4, 3) and torch.equal(c5, ref)

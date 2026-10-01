@@ -20,8 +20,9 @@ model:
   arch: "box_policy"                # detector (ALPHA / BETA) | box_policy (GAMMA0)
   in_channels: 4                    # RGB chuẩn hoá ImageNet + density [0,1] (conv1 kênh 4 khởi tạo 0)
   pretrained_backbone: true         # R-50 ImageNet; mọi lớp conv train, BN đóng băng (y ALPHA)
-  d_model: 256                      # kênh FPN -> SpatialSoftmax P5 = 256 điểm
-  vis_dim: 128                      # như CE-Loc gốc: Linear(2·256, 128)
+  ss_source: "c5"                   # SpatialSoftmax trên C5 (layer4 R-50 pretrain, 2048 kênh) như bài; p5 = bản đầu, G3 hỏng
+  d_model: 256                      # kênh FPN (chỉ dùng khi ss_source: p5)
+  vis_dim: 128                      # như CE-Loc gốc: Linear(2·2048, 128)
   text_dim: 512                     # CLIP ViT-B/32 pooler (frozen, tính sẵn)
   text_proj_dim: 128                # như CE-Loc gốc: Linear(512, 128) -> Mish
   step_embed_dim: 256               # U-Net 1D y CE-Loc gốc

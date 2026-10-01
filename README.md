@@ -28,7 +28,8 @@ cd ce_localization && python ../tools/run_on_free_gpu.py -- train.py --config co
 ```
 weights/detection/<run>/                     checkpoint tự train cho bài DETECT CE-130: alpha*, beta*, baseline*
                                              (last.pth, best.pth, history.json; baseline thêm config.yaml, log.txt)
-weights/add/<run>/                           checkpoint tự train cho bài ADD (GAMMA); weight CE-Loc gốc của bài + TN2 đã xoá 2026-10-01
+weights/add/<run>/                           checkpoint tự train cho bài ADD (GAMMA)
+weights/add/paper/best_model.pth             checkpoint CE-Loc gốc của bài (ResNet18; nạp bằng `BoxPolicy.load_celoc_paper`)
 weights/diffusion_policy/                    checkpoint Push-T công bố của Diffusion Policy (TN3)
 weights/diffusiondet/                        7 checkpoint .pth, 5,8 GB (3 benchmark DiffusionDet cũ)
 weights/gdino/groundingdino_swint_ogc.pth    Grounding DINO Swin-T chính thức (BASELINE3)

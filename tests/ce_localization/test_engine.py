@@ -335,3 +335,19 @@ def test_prior_records_map_unit_boxes_to_valid_region():
     rec = _rec([[0, 0, 1, 1]] * 2, [[0, 0, 1, 1]], [], wh=(200.0, 100.0))
     pri = prior_records([rec], np.array([[0.5, 0.5, 0.1, 0.2]]), n_samples=3)
     assert pri[0]["boxes"].shape == (3, 4) and np.allclose(pri[0]["boxes"], [[90, 40, 110, 60]] * 3)
+
+
+def test_mock_sampler_is_original_loop_and_records_trajectory():
+    from ce_localization.models.box_policy import ddpm_sample, mock_sample
+    from ce_localization.utils.diffusion_math import linear_alphas_cumprod
+    ac = linear_alphas_cumprod(1000)
+    fn = lambda x, t: 0.1 * x + 0.01 * t[:, None].float() / 100  # noqa: E731
+    g = torch.Generator().manual_seed(3)
+    x = torch.randn((4, 4), generator=g)
+    for t in reversed(range(100)):                                       # vòng của inference.py gốc
+        x = x - fn(x, torch.full((4,), t)) / 100
+    out, traj = mock_sample(fn, 4, ac, steps=100, generator=torch.Generator().manual_seed(3), record={99, 0})
+    assert torch.allclose(out, x) and [s["t"] for s in traj] == [99, 0]
+    out2, traj2 = ddpm_sample(fn, 4, linear_alphas_cumprod(10), generator=torch.Generator().manual_seed(1), record="all")
+    assert [s["t"] for s in traj2] == list(range(9, -1, -1)) and traj2[0]["x_t"].shape == (4, 4)
+    assert torch.allclose(out2, ddpm_sample(fn, 4, linear_alphas_cumprod(10), generator=torch.Generator().manual_seed(1)))

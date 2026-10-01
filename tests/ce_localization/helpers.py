@@ -236,3 +236,23 @@ def _gamma_cfg(tmp_path, base, kind="density"):
     with open(p, "w") as f:
         yaml.safe_dump(cfg, f)
     return p, cfg
+
+
+def _fake_paper_ckpt(path, in_channels=4, T=20, seed=0):
+    """Checkpoint giả ĐÚNG khuôn của bài (`model_state_dict` với tên module của `ObjectPlacementPolicy`):
+    `vision_encoder.*`, `text_encoder.projection`, `text_encoder.backbone.*` (CLIP), `noise_net.*`, `alphas_cumprod`."""
+    from ce_localization.models.box_policy import BoxPolicy
+    torch.manual_seed(seed)
+    m = BoxPolicy(in_channels=in_channels, pretrained_backbone=False, num_timesteps=T, vision="r18_paper")
+    sd = {}
+    for k, v in m.state_dict().items():
+        if k.startswith("vision."):
+            sd["vision_encoder." + k[len("vision."):]] = v
+        elif k.startswith("text_proj.0."):
+            sd["text_encoder.projection." + k[len("text_proj.0."):]] = v
+        else:
+            sd[k] = v
+    sd["text_encoder.backbone.text_model.final_layer_norm.weight"] = torch.ones(512)
+    sd["alphas_cumprod"] = m.alphas_cumprod.clone()
+    torch.save({"epoch": 113, "loss": 0.03, "model_state_dict": sd}, path)
+    return m

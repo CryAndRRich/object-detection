@@ -376,3 +376,31 @@ def test_visualize_gamma_draws(tmp_path, monkeypatch, image):
                                       "--image", image, "--out", out])
     viz.main()
     assert len([f for f in os.listdir(out) if f.endswith(f"_{image}.png")]) == 3
+
+
+def test_image_inputs_paper_style_matches_original_preprocessing(tmp_path):
+    """style 'paper' = `resize_and_pad` + `to_tensor` của CE-Loc gốc, density `.convert("L")`."""
+    from ce_localization.data.turns import image_inputs
+    rng = np.random.default_rng(0)
+    img = Image.fromarray(rng.integers(0, 255, (150, 200, 3), dtype=np.uint8))
+    den = Image.fromarray(JET[rng.integers(0, 256, (150, 200)).astype(np.uint8)])
+    dp = str(tmp_path / "d.png")
+    den.save(dp)
+    x, scale, nw, nh = image_inputs(img, dp, 128, "paper")
+    ri, rd, rs = resize_and_pad(img, Image.open(dp).convert("L"), 128)
+    assert x.shape == (4, 128, 128) and scale == rs and (nw, nh) == (128, 96)
+    assert np.allclose(x[:3].numpy(), np.asarray(ri, dtype=np.float32).transpose(2, 0, 1) / 255.0)
+    assert np.array_equal(x[3].numpy(), np.asarray(rd, dtype=np.float32) / 255.0)
+    xo, _, _, _ = image_inputs(img, None, 128, "ours")
+    assert xo.shape == (3, 128, 128) and xo.min() < 0                    # chuẩn hoá ImageNet
+
+
+def test_image_inputs_blank_density_is_jet_background():
+    """Density trống đúng kiểu dữ liệu (PNG toàn nền jet (0,0,127)): đầu vào của bài -> 14/255 trong vùng ảnh, 0 ở đệm;
+    đầu vào 'ours' (giải mã jet) -> 0."""
+    from ce_localization.data.turns import image_inputs
+    img = Image.new("RGB", (200, 150), (90, 90, 90))
+    x, _, nw, nh = image_inputs(img, Image.new("RGB", (200, 150), (0, 0, 127)), 128, "paper")
+    assert np.allclose(x[3, :nh, :nw].numpy(), 14 / 255.0) and x[3, nh:].abs().max() == 0
+    xo, _, _, _ = image_inputs(img, Image.new("RGB", (200, 150), (0, 0, 127)), 128, "ours")
+    assert xo[3].abs().max() == 0

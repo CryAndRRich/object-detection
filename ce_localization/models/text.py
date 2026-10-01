@@ -14,11 +14,18 @@ __all__ = ["encode_class_names", "TextTable"]
 
 
 @torch.no_grad()
-def encode_class_names(names, model_name="openai/clip-vit-base-patch32", device="cpu", batch=64):
-    """list[str] -> {tên: tensor [512] float32 trên CPU}."""
+def encode_class_names(names, model_name="openai/clip-vit-base-patch32", device="cpu", batch=64, state_dict=None):
+    """list[str] -> {tên: tensor [512] float32 trên CPU}. `state_dict`: weight CLIP text thay cho bản tải về (vd. CLIP
+    lưu trong checkpoint CE-Loc gốc); chỉ tha `position_ids` (buffer, có / không tuỳ phiên bản transformers)."""
     from transformers import CLIPTextModel, CLIPTokenizer
     tok = CLIPTokenizer.from_pretrained(model_name)
-    model = CLIPTextModel.from_pretrained(model_name).to(device).eval()
+    model = CLIPTextModel.from_pretrained(model_name)
+    if state_dict is not None:
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        bad = [k for k in list(missing) + list(unexpected) if not k.endswith("position_ids")]
+        if bad:
+            raise RuntimeError(f"state_dict CLIP text lệch {model_name}: {bad[:10]}")
+    model = model.to(device).eval()
     out = {}
     names = sorted(set(names))
     for i in range(0, len(names), batch):

@@ -65,7 +65,7 @@ def build_model(cfg, pretrained_backbone=None):
             vis_dim=m["vis_dim"], text_in=m.get("text_dim", 512), text_dim=m["text_proj_dim"],
             step_embed_dim=m["step_embed_dim"], down_dims=m["down_dims"], kernel_size=m["kernel_size"],
             n_groups=m["n_groups"], num_timesteps=d["num_timesteps"], beta_start=d["beta_start"],
-            beta_end=d["beta_end"])
+            beta_end=d["beta_end"], ss_source=m.get("ss_source", "c5"))
     return Detector(
         memory=m["memory"], d_model=m["d_model"], n_stage=m["n_stage"], n_head=m["n_head"],
         dim_feedforward=m["dim_feedforward"], dropout=m["dropout"], text_dim=m.get("text_dim", 512),

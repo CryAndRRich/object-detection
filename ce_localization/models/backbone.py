@@ -56,6 +56,10 @@ class ResNet50FPN(nn.Module):
         out = self.fpn(OrderedDict(zip(LEVELS, (c2, c3, c4, c5))))
         return out
 
+    def forward_c5(self, x):
+        """C5 = đầu ra layer4 (2048 kênh, stride 32) — weight ImageNet, không qua FPN (GAMMA0: SpatialSoftmax như bài)."""
+        return self.layer4(self.layer3(self.layer2(self.layer1(self.stem(x)))))
+
     def forward_p5(self, x):
         """Chỉ P5 (GAMMA0: SpatialSoftmax trên P5) — bỏ nhánh top-down xuống P2..P4. P5 của FPN chỉ phụ
         thuộc C5: `layer_block[-1](inner_block[-1](C5))` (`FeaturePyramidNetwork.forward`), có test so với

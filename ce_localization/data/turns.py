@@ -28,16 +28,34 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from ce_localization.data.dataset import _read_annotation, letterbox, normalize, scale_boxes
-from ce_localization.data.density import letterbox_density, load_density_levels
+from ce_localization.data.density import decode_jet, letterbox_density, load_density_levels
 from ce_localization.utils.box_ops_np import box_iou, filter_degenerate
 
-__all__ = ["SPLITS", "IMAGE_KINDS", "ADD_DENSITY", "pixel_hash", "assign_removed", "build_turn_index",
-           "TurnIndex", "CE130AddDataset", "collate_add", "to_device_add"]
+__all__ = ["SPLITS", "IMAGE_KINDS", "ADD_DENSITY", "INPUT_STYLES", "pixel_hash", "assign_removed", "build_turn_index",
+           "TurnIndex", "CE130AddDataset", "collate_add", "to_device_add", "image_inputs"]
 
 SPLITS = ("train", "val", "test")
 IMAGE_KINDS = ("inpainted", "original")
 ADD_DENSITY = ("sample", "full", "empty")       # density của chính mẫu | bản `full` của ảnh gốc (ALPHA3) | trống
 TARGET_TOL_PX = 1.0                             # target_bbox (cxcywh, làm tròn) vs inpainted_bboxes (xyxy)
+INPUT_STYLES = ("ours", "paper")
+
+
+def image_inputs(img_rgb, density_path=None, target=512, style="ours"):
+    """Một ảnh PIL RGB (+ PNG density: đường dẫn hoặc ảnh PIL) -> (tensor [3|4,T,T], scale, nw, nh), letterbox góc trên-trái.
+      ours : chuẩn hoá ImageNet + density giải mã jet (như `CE130AddDataset`, ALPHA3)
+      paper: CE-Loc gốc — chỉ `to_tensor` (/255) + density `.convert("L")` (độ sáng của PNG jet, nền 14/255), resize
+             NEAREST + độn 0: đúng `ObjectPlacementDataset.resize_and_pad` (có test so với công thức gốc)."""
+    if style not in INPUT_STYLES:
+        raise ValueError(f"style {style!r} không thuộc {INPUT_STYLES}")
+    canvas, scale, nw, nh = letterbox(img_rgb, target)
+    x = normalize(canvas) if style == "ours" else canvas.astype(np.float32).transpose(2, 0, 1) / 255.0
+    if density_path is not None:
+        den = Image.open(density_path) if isinstance(density_path, str) else density_path
+        lv = (decode_jet(np.asarray(den.convert("RGB")))[0] if style == "ours" else
+              np.asarray(den.convert("L"), dtype=np.uint8))
+        x = np.concatenate([x, letterbox_density(lv, nw, nh, target)[None]], axis=0)
+    return torch.from_numpy(np.ascontiguousarray(x)), scale, nw, nh
 
 
 def pixel_hash(path):
