@@ -122,7 +122,7 @@ def main_add(a, cfg, ck, dev, t0):
         dens = (a.add_density or ("sample" if image == "inpainted" else "full")) if four else None
         dindex = DensityIndex(d["density_index"], d["density_root"]) if dens == "full" else None
         ds = CE130AddDataset(index, d["root"], d["samples_root"], a.split, d["image_size"], density=dens,
-                             density_index=dindex, image=image)
+                             density_index=dindex, image=image, style=d.get("input_style", "ours"))
         if a.limit:
             ds.keys = ds.keys[: a.limit]
         if text_table is None:

@@ -13,8 +13,13 @@ chuẩn hoá theo vùng thật, density kênh 4 khởi tạo 0). Text, U-Net 1D,
 `ss_source: p5` (P5 của FPN, 256 kênh) là bản đầu — G3 2026-10-01 HỎNG: FPN khởi tạo ngẫu nhiên ⇒ softmax phẳng, nhánh ảnh
 gần như không có gradient; giữ khoá chỉ để tái lập.
 
-Box trong không gian khuếch tán: cxcywh chia (nw, nh) của VÙNG ẢNH THẬT (cùng quy ước `whwh` của ALPHA) rồi
-`·2 − 1` -> [−1, 1], cả w, h (CE-Loc gốc chia canvas 512 — khác chỗ phần đệm, không đổi bản chất).
+Box trong không gian khuếch tán: cxcywh chia (nw, nh) của VÙNG ẢNH THẬT (`box_norm: valid`, quy ước `whwh` của ALPHA) hoặc
+chia CANVAS như bài (`box_norm: canvas`) rồi `·2 − 1` -> [−1, 1] (`norm_whwh`).
+
+"CE-Loc gốc + R-50" (người dùng chốt 2026-10-01, sau khi GAMMA0 bản ALPHA hỏng — EXPERIMENT_GAMMA mục 12.2): config đặt
+`backbone_norm: bn` (BN train như bài), `density_init: rgb_mean`, `ss_kind: paper` (SpatialSoftmax KHÔNG mask trên cả
+canvas, meshgrid 'ij', toạ độ [−1, 1] — đúng `_paper_spatial_softmax`), `box_norm: canvas`, cùng `data.input_style: paper`
+(`to_tensor`, density `.convert("L")`). Mặc định của constructor giữ bản cũ (FrozenBN / mask / vùng thật) để tái lập.
 Train: mỗi ảnh rút `noise_per_image` bộ (t, ε) độc lập — backbone chỉ tính MỘT lần mỗi ảnh, U-Net rất rẻ.
 
 `vision="r18_paper"` (chỉ để NẠP checkpoint của bài, `BoxPolicy.load_celoc_paper`): phần ảnh đúng CE-Loc gốc
@@ -33,14 +38,21 @@ from ce_localization.models.memory import masked_spatial_softmax, valid_cells_ma
 from ce_localization.models.unet1d import ConditionalUnet1D
 from ce_localization.utils.diffusion_math import linear_alphas_cumprod
 
-__all__ = ["BoxPolicy", "PaperVisionEncoder", "boxes_to_unit", "unit_to_boxes", "ddpm_sample", "mock_sample",
-           "VISIONS"]
+__all__ = ["BoxPolicy", "PaperVisionEncoder", "boxes_to_unit", "unit_to_boxes", "norm_whwh", "ddpm_sample", "mock_sample",
+           "VISIONS", "SS_KINDS", "BOX_NORMS"]
 
 VISIONS = ("r50_fpn", "r18_paper")
 
 P5_STRIDE = 32
 C5_CHANNELS = 2048
 SS_SOURCES = ("c5", "p5")
+SS_KINDS = ("masked", "paper")
+BOX_NORMS = ("valid", "canvas")
+
+
+def norm_whwh(model, whwh, canvas):
+    """whwh vùng thật [B,4] -> whwh dùng để chuẩn hoá box của `model` (`box_norm`): giữ nguyên, hoặc canvas T."""
+    return torch.full_like(whwh, float(canvas)) if getattr(model, "box_norm", "valid") == "canvas" else whwh
 
 
 def boxes_to_unit(boxes_xyxy, whwh):
@@ -119,6 +131,15 @@ def _paper_spatial_softmax(feat):
     return torch.cat([ex, ey], dim=-1).reshape(N, -1)
 
 
+def spatial_keypoints(feat, valid_hw, kind):
+    """feat [B,C,H,W] (stride 32) -> [B, 2C] toạ độ SpatialSoftmax. `paper`: y bài (không mask, cả canvas, (dọc, ngang)
+    trong [−1, 1]); `masked`: che ô đệm, (x, y) chia vùng thật (`models/memory.masked_spatial_softmax`)."""
+    if kind == "paper":
+        return _paper_spatial_softmax(feat)
+    valid = valid_cells_mask(valid_hw, feat.shape[2], feat.shape[3], P5_STRIDE)
+    return masked_spatial_softmax(feat, valid, valid_hw, P5_STRIDE).flatten(1)
+
+
 class PaperVisionEncoder(nn.Module):
     """`SpatialVisualEncoder` của CE-Loc gốc: ResNet18 (BatchNorm) bỏ avgpool + fc -> SpatialSoftmax -> Linear(1024, D).
     Tên module (`backbone`, `projection`) trùng bản gốc để nạp checkpoint. in_channels 4: kênh density khởi tạo bằng
@@ -153,17 +174,21 @@ class PaperVisionEncoder(nn.Module):
 class BoxPolicy(nn.Module):
     def __init__(self, in_channels=3, pretrained_backbone=True, fpn_dim=256, vis_dim=128, text_in=512,
                  text_dim=128, step_embed_dim=256, down_dims=(64, 128, 256), kernel_size=3, n_groups=8,
-                 num_timesteps=1000, beta_start=1e-4, beta_end=0.02, vision="r50_fpn", ss_source="c5"):
+                 num_timesteps=1000, beta_start=1e-4, beta_end=0.02, vision="r50_fpn", ss_source="c5",
+                 backbone_norm="frozen", density_init="zero", ss_kind="masked", box_norm="valid"):
         super().__init__()
         if vision not in VISIONS:
             raise ValueError(f"vision {vision!r} không thuộc {VISIONS}")
-        if ss_source not in SS_SOURCES:
-            raise ValueError(f"ss_source {ss_source!r} không thuộc {SS_SOURCES}")
-        self.vision_kind, self.ss_source = vision, ss_source
+        if ss_source not in SS_SOURCES or ss_kind not in SS_KINDS or box_norm not in BOX_NORMS:
+            raise ValueError(f"ss_source {ss_source!r} / ss_kind {ss_kind!r} / box_norm {box_norm!r} không thuộc "
+                             f"{SS_SOURCES} / {SS_KINDS} / {BOX_NORMS}")
+        self.vision_kind, self.ss_source, self.ss_kind = vision, ss_source, ss_kind
+        self.box_norm = "canvas" if vision == "r18_paper" else box_norm
         if vision == "r18_paper":
             self.vision = PaperVisionEncoder(vis_dim, in_channels, pretrained_backbone)
         else:
-            self.backbone = ResNet50FPN(fpn_dim, pretrained=pretrained_backbone, in_channels=in_channels)
+            self.backbone = ResNet50FPN(fpn_dim, pretrained=pretrained_backbone, in_channels=in_channels,
+                                        norm=backbone_norm, density_init=density_init)
             self.vis_proj = nn.Linear(2 * (C5_CHANNELS if ss_source == "c5" else fpn_dim), vis_dim)
         self.text_proj = nn.Sequential(nn.Linear(text_in, text_dim), nn.Mish())
         self.noise_net = ConditionalUnet1D(4, vis_dim + text_dim, step_embed_dim, tuple(down_dims),
@@ -182,9 +207,8 @@ class BoxPolicy(nn.Module):
         if self.vision_kind == "r18_paper":                                        # bài: không mask vùng thật
             return torch.cat([self.vision(images), self.text_emb(text_raw, null_text)], dim=-1)
         f = self.backbone.forward_c5(images) if self.ss_source == "c5" else self.backbone.forward_p5(images)
-        valid = valid_cells_mask(valid_hw, f.shape[2], f.shape[3], P5_STRIDE)       # C5 / P5 cùng stride 32
-        xy = masked_spatial_softmax(f, valid, valid_hw, P5_STRIDE)                 # [B,C,2] (x, y)
-        return torch.cat([self.vis_proj(xy.flatten(1)), self.text_emb(text_raw, null_text)], dim=-1)
+        return torch.cat([self.vis_proj(spatial_keypoints(f, valid_hw, self.ss_kind)), self.text_emb(text_raw, null_text)],
+                         dim=-1)
 
     def forward(self, images, text_raw, valid_hw, x0, k=1, generator=None):
         """ε-MSE như `ObjectPlacementPolicy.compute_loss` của bài, k bộ (t, ε) mỗi ảnh.

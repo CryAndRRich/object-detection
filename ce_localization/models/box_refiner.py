@@ -11,8 +11,10 @@ kiểu ALPHA; mỗi tầng ra một box, loss ở MỌI tầng (deep supervision
         b_{k+1} = apply_deltas(reg(q_k), b_k), detach trước tầng sau (như DiffusionDet)
     Các mẫu (cùng ảnh hay khác ảnh) không thấy nhau: K mẫu / ảnh = K hàng độc lập.
 
-Khuếch tán như GAMMA0: lịch β tuyến tính 1e-4..0,02, T = 1000; box cxcywh / (nw, nh) · 2 − 1 (= hàm của DiffusionDet
-với snr = 1). Khác GAMMA0: dự đoán x0 (box), không ε. Loss = Σ_k [5·L1(b / whwh) + 2·(1 − GIoU)] với lỗ mới nhất
+Ảnh / `vis` / chuẩn hoá box DÙNG CHUNG khoá với GAMMA0 (`backbone_norm`, `density_init`, `ss_kind`, `box_norm` — xem
+`models/box_policy.py`): config GAMMA1 đặt y GAMMA0 ("CE-Loc gốc + R-50": BN train, SpatialSoftmax không mask cả canvas, box
+chia canvas). Khuếch tán như GAMMA0: lịch β tuyến tính 1e-4..0,02, T = 1000; box cxcywh / whwh chuẩn hoá · 2 − 1 (= hàm
+của DiffusionDet với snr = 1). Khác GAMMA0: dự đoán x0 (box), không ε. Loss = Σ_k [5·L1(b / whwh) + 2·(1 − GIoU)] với lỗ mới nhất
 (trọng số loss box của DiffusionDet, mỗi tầng như nhau).
 Box nhiễu vào tầng 1: kẹp [−1, 1] rồi w, h >= MIN_WH (tỉ lệ vùng thật). Lý do: snr 1 ⇒ ~16 % box nhiễu ở t lớn có
 w hoặc h <= 0 sau kẹp; apply_deltas nhân delta với w = 0 nên box kẹt suy biến qua cả 6 tầng.
@@ -25,7 +27,7 @@ import torch.nn as nn
 
 from ce_localization.engine.diffusion import diffusion_from_boxes
 from ce_localization.models.backbone import ResNet50FPN
-from ce_localization.models.box_policy import boxes_to_unit
+from ce_localization.models.box_policy import BOX_NORMS, SS_KINDS, boxes_to_unit, norm_whwh, spatial_keypoints
 from ce_localization.models.head import _tower, apply_deltas
 from ce_localization.models.memory import MemoryEncoder
 from ce_localization.models.roi import MultiLevelRoIAlign
@@ -132,9 +134,13 @@ class RefineHead(nn.Module):
 class BoxRefiner(nn.Module):
     def __init__(self, in_channels=3, pretrained_backbone=True, d_model=256, n_stage=6, n_head=4, dim_feedforward=1024,
                  dropout=0.3, text_dim=512, num_timesteps=1000, beta_start=1e-4, beta_end=0.02, l1_weight=5.0,
-                 giou_weight=2.0):
+                 giou_weight=2.0, backbone_norm="frozen", density_init="zero", ss_kind="masked", box_norm="valid"):
         super().__init__()
-        self.backbone = ResNet50FPN(d_model, pretrained=pretrained_backbone, in_channels=in_channels)
+        if ss_kind not in SS_KINDS or box_norm not in BOX_NORMS:
+            raise ValueError(f"ss_kind {ss_kind!r} / box_norm {box_norm!r} không thuộc {SS_KINDS} / {BOX_NORMS}")
+        self.ss_kind, self.box_norm = ss_kind, box_norm
+        self.backbone = ResNet50FPN(d_model, pretrained=pretrained_backbone, in_channels=in_channels, norm=backbone_norm,
+                                    density_init=density_init)
         self.memory = MemoryEncoder("spatial_softmax", d_model, text_dim, feat_channels=C5_CHANNELS,
                                     feat_stride=C5_STRIDE)
         self.head = RefineHead(n_stage, d_model, n_head, dim_feedforward, dropout)
@@ -148,7 +154,7 @@ class BoxRefiner(nn.Module):
     def encode_image(self, images, valid_hw):
         """-> (P2..P5, token vis [B,1,d]). Không phụ thuộc t: MỘT lần mỗi ảnh."""
         f, c5 = self.backbone.forward_with_c5(images)
-        vis, _ = self.memory.image_tokens(c5, valid_hw)
+        vis = self.memory.ss_proj(spatial_keypoints(c5, valid_hw, self.ss_kind))[:, None] + self.memory.cond_pos_emb[:, 2:3]
         return [f["p2"], f["p3"], f["p4"], f["p5"]], vis
 
     def refine(self, feats, vis, text_raw, t, boxes, need_weights=False):
@@ -159,11 +165,11 @@ class BoxRefiner(nn.Module):
         return out.flatten(1, 2), attn
 
     def forward(self, images, text_raw, valid_hw, target, whwh, k=1, generator=None):
-        """target [B,4] xyxy pixel (lỗ mới nhất), whwh [B,4]; k bộ (t, ε) độc lập mỗi ảnh.
+        """target [B,4] xyxy pixel (lỗ mới nhất), whwh [B,4] vùng thật; k bộ (t, ε) độc lập mỗi ảnh.
         -> (loss vô hướng, {"loss", "loss_per_stage" [S]})."""
         feats, vis = self.encode_image(images, valid_hw)
         B, dev = images.shape[0], images.device
-        wk = whwh.repeat_interleave(k, 0)
+        wk = norm_whwh(self, whwh, images.shape[-1]).repeat_interleave(k, 0)
         gt = target.repeat_interleave(k, 0)
         x0 = diffusion_from_boxes(gt, wk, 1.0)
         t = torch.randint(0, self.num_timesteps, (B * k,), device=dev, generator=generator)
@@ -179,11 +185,11 @@ class BoxRefiner(nn.Module):
     @torch.no_grad()
     def sample(self, images, text_raw, valid_hw, n_samples, generator=None, steps=1, eta=1.0, return_stages=False):
         """n_samples mẫu ĐỘC LẬP mỗi ảnh, DDIM `steps` bước. -> [B, n_samples, 4] trong [−1, 1] (cùng quy ước
-        `box_policy.unit_to_boxes`); `return_stages` -> (box, box mọi tầng ở MỖI bước: list [S,B,K,4] xyxy pixel)."""
+        `box_policy.unit_to_boxes` với `norm_whwh`); `return_stages` -> (box, box mọi tầng ở MỖI bước: list [S,B,K,4] xyxy pixel)."""
         feats, vis = self.encode_image(images, valid_hw)
         B, K, dev = images.shape[0], n_samples, images.device
         whwh = torch.stack([valid_hw[:, 1], valid_hw[:, 0], valid_hw[:, 1], valid_hw[:, 0]], 1).float()
-        wk = whwh.repeat_interleave(K, 0)
+        wk = norm_whwh(self, whwh, images.shape[-1]).repeat_interleave(K, 0)
         ac = self.alphas_cumprod
         x = torch.randn((B * K, 4), device=dev, generator=generator)
         stages = []

@@ -1,10 +1,12 @@
-# EXPERIMENT GAMMA0.1 — GAMMA0 bỏ density (CHỈ RGB).
-# Gốc: CE-Loc gốc (U-Net 1D + FiLM, ε-MSE, DDPM) cho bài ADD, ảnh qua R-50 + FPN của ALPHA.
+# EXPERIMENT GAMMA0.1 — GAMMA0 bỏ density (CHỈ RGB). GAMMA0: CE-Loc gốc cho bài ADD, CHỈ đổi ResNet18 -> R-50 (+ Linear(4096, 128) vì C5 2048 kênh) và dữ liệu
+# CE-130 (nhánh, lượt). Mọi thứ khác như bài: BN train, to_tensor, SpatialSoftmax không mask, box chia canvas, density
+# .convert("L") + kênh conv1 = TB RGB, U-Net 1D + FiLM, ε-MSE, β tuyến tính, AdamW 5e-5 / wd 0,01 / batch 32 / cosine / không
+# clip / 1 nhiễu mỗi ảnh. Eval DDPM đúng công thức.
 # Kế hoạch: docs/EXPERIMENT_GAMMA.md (gốc multi_condition/). gamma0 / gamma0_1 CHỈ khác density
 # (data.density + model.in_channels) và experiment / description.
 
 experiment: "gamma0_1"
-description: "bài add: (nhánh, lượt) CE-130, đích lỗ mới nhất; R-50+FPN -> SpatialSoftmax P5 -> FiLM -> U-Net 1D; CHỈ RGB"
+description: "bài add: (nhánh, lượt) CE-130, đích lỗ mới nhất; CE-Loc gốc với R-50 (BN train) -> SpatialSoftmax C5 -> FiLM -> U-Net 1D; CHỈ RGB"
 task: "add"                         # detect (mặc định, ALPHA / BETA) | add
 
 data:
@@ -15,13 +17,19 @@ data:
   density_root: "../data/samples"
   image_size: 512                   # letterbox góc trên-trái như CE-Loc gốc (người dùng chốt 2026-10-01)
   num_workers: 4
+  input_style: "paper"              # như bài: to_tensor (/255), density .convert("L"); ours = chuẩn hoá ImageNet + giải mã jet
   density: null                     # CHỈ RGB (GAMMA0.1)
 
 model:
   arch: "box_policy"                # detector (ALPHA / BETA) | box_policy (GAMMA0)
-  in_channels: 3                    # RGB chuẩn hoá ImageNet (GAMMA0.1)
-  pretrained_backbone: true         # R-50 ImageNet; mọi lớp conv train, BN đóng băng (y ALPHA)
+  in_channels: 3                    # CHỈ RGB (GAMMA0.1)
+  pretrained_backbone: true         # R-50 ImageNet (bài: ResNet18 ImageNet); mọi lớp train
   ss_source: "c5"                   # SpatialSoftmax trên C5 (layer4 R-50 pretrain, 2048 kênh) như bài; p5 = bản đầu, G3 hỏng
+  # "CE-Loc gốc + R-50" (2026-10-01; bản ALPHA — FrozenBN / chuẩn hoá ImageNet / mask / box chia vùng thật — hỏng, mục 12.2):
+  backbone_norm: "bn"               # BatchNorm TRAIN (thống kê theo batch) như ResNet18 của bài; frozen = bản ALPHA
+  density_init: "rgb_mean"          # kênh density conv1 = TB weight RGB như bài (bỏ qua khi in_channels 3)
+  ss_kind: "paper"                  # SpatialSoftmax KHÔNG mask, cả canvas, toạ độ [−1,1] như bài; masked = bản ALPHA
+  box_norm: "canvas"                # box chia canvas 512 như bài; valid = chia vùng ảnh thật
   d_model: 256                      # kênh FPN (chỉ dùng khi ss_source: p5)
   vis_dim: 128                      # như CE-Loc gốc: Linear(2·2048, 128)
   text_dim: 512                     # CLIP ViT-B/32 pooler (frozen, tính sẵn)
@@ -36,18 +44,16 @@ diffusion:
   num_timesteps: 1000               # β tuyến tính 1e-4..0,02, ε-prediction (như CE-Loc gốc)
   beta_start: 1.0e-4
   beta_end: 0.02
-  noise_per_image: 8                # số bộ (t, ε) độc lập mỗi ảnh mỗi bước (bài: 1); backbone vẫn 1 lần / ảnh
+  noise_per_image: 1                # 1 bộ (t, ε) mỗi ảnh mỗi bước như bài
 
-training:
-  batch_size: 16                    # TOÀN CỤC; Kaggle 2 GPU -> 8 ảnh/GPU
-  lr: 1.0e-4                        # như ALPHA (bài: 5e-5, batch 32)
-  weight_decay: 1.0e-4
-  max_iter: 12000                   # ≈ 14 epoch của 13.454 mẫu train
-  steps: [9000, 11000]
-  gamma: 0.1
-  warmup_iters: 1000
-  warmup_factor: 0.01
-  grad_clip: 1.0                    # toàn mô hình, L2
+training:                           # optimizer / lịch / batch NHƯ BÀI (AdamW 5e-5, wd 0,01, batch 32, cosine, không clip)
+  batch_size: 32                    # TOÀN CỤC (BN train: thống kê trên cả 32); Kaggle 2 GPU -> 16 / GPU + SyncBN
+  lr: 5.0e-5
+  weight_decay: 0.01
+  schedule: "cosine"                # CosineAnnealingLR của bài, theo iter
+  cosine_t_max: 187500              # = 300 epoch × 625 bước của bài => lr gần như giữ 5e-5 trong 8k iter (như đoạn đầu lịch bài)
+  max_iter: 8000                    # ≈ 19 epoch của 13.454 mẫu (bài: 75k bước; bản train lại ở epoch 10 ≈ 6k bước đã best-of-30 0,335)
+  grad_clip: null                   # bài không clip
   seed: 0
   log_every: 20
   ckpt_every: 1000

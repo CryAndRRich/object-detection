@@ -72,7 +72,10 @@ def load_model(path, device, clip_name="openai/clip-vit-base-patch32"):
     model = build_model(cfg, pretrained_backbone=False)
     model.load_state_dict(ck["model"])
     text = lambda names: TextTable(encode_class_names(names, cfg["model"]["clip_text"], device=str(device)))  # noqa: E731
-    return (model.to(device).eval(), "ours", cfg["model"].get("in_channels", 3) == 4, text,
+    style = cfg["data"].get("input_style", "ours")          # GAMMA "CE-Loc gốc + R-50": paper (box chia canvas)
+    if (style == "paper") != (model.box_norm == "canvas"):
+        sys.exit(f"{path}: data.input_style {style} lệch model.box_norm {model.box_norm} — tool chưa hỗ trợ tổ hợp này")
+    return (model.to(device).eval(), style, cfg["model"].get("in_channels", 3) == 4, text,
             f"{cfg['experiment']} iter {ck.get('iter')}")
 
 

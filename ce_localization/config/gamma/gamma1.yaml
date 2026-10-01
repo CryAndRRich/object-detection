@@ -1,6 +1,7 @@
 # EXPERIMENT GAMMA1 — bài ADD: điều kiện CE-Loc (SpatialSoftmax C5 + text + t) nhưng phần sinh box = 6 tầng RoI +
 # cross-attn kiểu ALPHA (thay U-Net 1D + FiLM của GAMMA0), mỗi tầng ra một box, loss ở mọi tầng.
-# Kế hoạch: docs/EXPERIMENT_GAMMA.md mục 11 (gốc multi_condition/). Dữ liệu / density / train / eval y GAMMA0.
+# Kế hoạch: docs/EXPERIMENT_GAMMA.md mục 11 (gốc multi_condition/). Dữ liệu / ảnh vào / `vis` / chuẩn hoá box / optimizer /
+# lịch / eval Y GAMMA0 ("CE-Loc gốc + R-50") — chỉ khác phần sinh box (và dự đoán x0 thay ε).
 
 experiment: "gamma1"
 description: "bài add: (nhánh, lượt) CE-130, đích lỗ mới nhất; R-50+FPN 4 kênh; memory [t ; text ; SpatialSoftmax C5]; 1 box nhiễu -> 6 tầng RoI + cross-attn (không self-attn), dự đoán x0, L1 + GIoU mọi tầng; RGB + density"
@@ -14,12 +15,17 @@ data:
   density_root: "../data/samples"
   image_size: 512
   num_workers: 4
+  input_style: "paper"              # như GAMMA0: to_tensor, density .convert("L")
   density: "sample"                 # như GAMMA0 (người dùng chốt: backbone nhận density cho thống nhất)
 
 model:
   arch: "box_refiner"               # models/box_refiner.py
-  in_channels: 4                    # RGB + density (conv1 kênh 4 khởi tạo 0)
+  in_channels: 4                    # RGB + density
   pretrained_backbone: true
+  backbone_norm: "bn"               # như GAMMA0: BN train
+  density_init: "rgb_mean"          # như GAMMA0
+  ss_kind: "paper"                  # token vis = SpatialSoftmax C5 kiểu bài (không mask, cả canvas) -> Linear(4096, 256)
+  box_norm: "canvas"                # như GAMMA0: box chia canvas
   d_model: 256                      # kênh FPN = chiều token / memory
   n_stage: 6
   n_head: 4                         # tầng của ALPHA (DP) bỏ self-attn: cross-attn + FFN
@@ -29,25 +35,23 @@ model:
   clip_text: "openai/clip-vit-base-patch32"
 
 diffusion:
-  num_timesteps: 1000               # β tuyến tính 1e-4..0,02 như GAMMA0 / CE-Loc gốc; box chuẩn hoá snr 1
+  num_timesteps: 1000               # β tuyến tính 1e-4..0,02 như GAMMA0 / CE-Loc gốc; box chuẩn hoá snr 1 (theo canvas)
   beta_start: 1.0e-4
   beta_end: 0.02
-  noise_per_image: 8                # 8 mẫu độc lập (t, ε riêng) mỗi ảnh — không thấy nhau
+  noise_per_image: 1                # như GAMMA0 (bài: 1 bộ (t, ε) mỗi ảnh)
 
 loss:
   l1_weight: 5.0                    # DiffusionDet, mỗi tầng như nhau
   giou_weight: 2.0
 
-training:
-  batch_size: 16
-  lr: 1.0e-4
-  weight_decay: 1.0e-4
-  max_iter: 12000
-  steps: [9000, 11000]
-  gamma: 0.1
-  warmup_iters: 1000
-  warmup_factor: 0.01
-  grad_clip: 1.0
+training:                           # Y GAMMA0 (= bài): AdamW 5e-5, wd 0,01, batch 32, cosine, không clip
+  batch_size: 32
+  lr: 5.0e-5
+  weight_decay: 0.01
+  schedule: "cosine"
+  cosine_t_max: 187500
+  max_iter: 8000
+  grad_clip: null
   seed: 0
   log_every: 20
   ckpt_every: 1000

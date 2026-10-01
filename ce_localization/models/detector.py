@@ -54,6 +54,12 @@ class Detector(nn.Module):
                            self.snr_scale, steps, eta=1.0, renewal=renewal, generator=generator)
 
 
+def _paper_keys(m):
+    """Khoá bài add chọn giữa bản ALPHA (mặc định) và "CE-Loc gốc + R-50" (GAMMA, `models/box_policy.py`)."""
+    return {"backbone_norm": m.get("backbone_norm", "frozen"), "density_init": m.get("density_init", "zero"),
+            "ss_kind": m.get("ss_kind", "masked"), "box_norm": m.get("box_norm", "valid")}
+
+
 def build_model(cfg, pretrained_backbone=None):
     """`model.arch`: `detector` (mặc định — ALPHA / BETA, bài detect) | `box_policy` (GAMMA0, bài add) |
     `box_refiner` (GAMMA1, bài add)."""
@@ -65,7 +71,8 @@ def build_model(cfg, pretrained_backbone=None):
             in_channels=m.get("in_channels", 3), pretrained_backbone=pre, d_model=m["d_model"], n_stage=m["n_stage"],
             n_head=m["n_head"], dim_feedforward=m["dim_feedforward"], dropout=m["dropout"],
             text_dim=m.get("text_dim", 512), num_timesteps=d["num_timesteps"], beta_start=d["beta_start"],
-            beta_end=d["beta_end"], l1_weight=cfg["loss"]["l1_weight"], giou_weight=cfg["loss"]["giou_weight"])
+            beta_end=d["beta_end"], l1_weight=cfg["loss"]["l1_weight"], giou_weight=cfg["loss"]["giou_weight"],
+            **_paper_keys(m))
     if m.get("arch", "detector") == "box_policy":
         from ce_localization.models.box_policy import BoxPolicy
         return BoxPolicy(
@@ -73,7 +80,7 @@ def build_model(cfg, pretrained_backbone=None):
             vis_dim=m["vis_dim"], text_in=m.get("text_dim", 512), text_dim=m["text_proj_dim"],
             step_embed_dim=m["step_embed_dim"], down_dims=m["down_dims"], kernel_size=m["kernel_size"],
             n_groups=m["n_groups"], num_timesteps=d["num_timesteps"], beta_start=d["beta_start"],
-            beta_end=d["beta_end"], ss_source=m.get("ss_source", "c5"))
+            beta_end=d["beta_end"], ss_source=m.get("ss_source", "c5"), **_paper_keys(m))
     return Detector(
         memory=m["memory"], d_model=m["d_model"], n_stage=m["n_stage"], n_head=m["n_head"],
         dim_feedforward=m["dim_feedforward"], dropout=m["dropout"], text_dim=m.get("text_dim", 512),

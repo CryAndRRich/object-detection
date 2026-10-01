@@ -198,12 +198,16 @@ class TurnIndex:
 
 
 class CE130AddDataset(Dataset):
-    """Một phần tử = một (nhánh, lượt). Box ra là xyxy PIXEL CANVAS như ALPHA."""
+    """Một phần tử = một (nhánh, lượt). Box ra là xyxy PIXEL CANVAS như ALPHA.
+    `style`: `ours` = chuẩn hoá ImageNet + density giải mã jet (ALPHA3); `paper` = CE-Loc gốc: `to_tensor` (/255) + density
+    `.convert("L")` (density `empty` = PNG jet trống (0, 0, 127) -> độ sáng 14/255 trên vùng thật), như `image_inputs`."""
 
     def __init__(self, index, ce130_root, samples_root, split, image_size=512, density=None, density_index=None,
-                 image="inpainted"):
+                 image="inpainted", style="ours"):
         if image not in IMAGE_KINDS:
             raise ValueError(f"image {image!r} không thuộc {IMAGE_KINDS}")
+        if style not in INPUT_STYLES:
+            raise ValueError(f"style {style!r} không thuộc {INPUT_STYLES}")
         if density is not None and density not in ADD_DENSITY:
             raise ValueError(f"density {density!r} không thuộc {ADD_DENSITY}")
         if density == "full" and density_index is None:
@@ -211,6 +215,7 @@ class CE130AddDataset(Dataset):
         self.index, self.ce130_root, self.samples_root = index, ce130_root, samples_root
         self.keys = index.keys(split)
         self.image_size, self.density, self.density_index, self.image = image_size, density, density_index, image
+        self.style = style
 
     def __len__(self):
         return len(self.keys)
@@ -230,15 +235,20 @@ class CE130AddDataset(Dataset):
                 os.path.join(self.ce130_root, e["branch"], "ground_truth.jpg"))
         img = Image.open(path).convert("RGB")
         canvas, scale, nw, nh = letterbox(img, self.image_size)
-        x = normalize(canvas)
+        paper = self.style == "paper"
+        x = canvas.astype(np.float32).transpose(2, 0, 1) / 255.0 if paper else normalize(canvas)
         if self.density is not None:
-            if self.density == "empty":
+            if self.density == "empty" and paper:
+                den = letterbox_density(np.asarray(Image.new("RGB", img.size, (0, 0, 127)).convert("L")), nw, nh,
+                                        self.image_size)
+            elif self.density == "empty":
                 den = np.zeros((self.image_size, self.image_size), dtype=np.float32)
             else:
                 iid = e["branch"].split("/")[1].split("_b")[0]
                 path_d = (os.path.join(self.samples_root, e["density"]) if self.density == "sample" else
                           self.density_index.path(self.density_index.pick(iid, "full")[0]))
-                den = letterbox_density(load_density_levels(path_d), nw, nh, self.image_size)
+                lv = np.asarray(Image.open(path_d).convert("L"), dtype=np.uint8) if paper else load_density_levels(path_d)
+                den = letterbox_density(lv, nw, nh, self.image_size)
             x = np.concatenate([x, den[None]], axis=0)
         holes = scale_boxes(b["holes"][:t], scale, nw, nh)
         if len(holes) != t:
@@ -248,7 +258,7 @@ class CE130AddDataset(Dataset):
         if self.image == "inpainted":                    # vật còn trong ảnh lượt t: chưa bị xoá tới lượt t
             objs = objs[(removed == 0) | (removed > t)]
         return {
-            "image": torch.from_numpy(x),
+            "image": torch.from_numpy(np.ascontiguousarray(x, dtype=np.float32)),
             "target": torch.from_numpy(holes[-1]).float(),               # lỗ MỚI NHẤT = đích train
             "holes": torch.from_numpy(holes).float(),                    # mọi lỗ tới lượt t (chấm)
             "objects": torch.from_numpy(scale_boxes(objs, scale, nw, nh)).float(),   # vật đang có (chấm)

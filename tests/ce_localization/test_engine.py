@@ -2,6 +2,7 @@
 và chỉ số (top-k / NMS trước, trần oracle, recall theo độ dày, chỉ số điểm), lịch lr, chia batch.
 """
 
+import math
 import numpy as np
 import pytest
 import torch
@@ -351,3 +352,12 @@ def test_mock_sampler_is_original_loop_and_records_trajectory():
     out2, traj2 = ddpm_sample(fn, 4, linear_alphas_cumprod(10), generator=torch.Generator().manual_seed(1), record="all")
     assert [s["t"] for s in traj2] == list(range(9, -1, -1)) and traj2[0]["x_t"].shape == (4, 4)
     assert torch.allclose(out2, ddpm_sample(fn, 4, linear_alphas_cumprod(10), generator=torch.Generator().manual_seed(1)))
+
+
+def test_lr_factor_cosine_like_paper_and_multistep_default():
+    from ce_localization.engine.train_utils import lr_factor
+    tr = {"schedule": "cosine", "cosine_t_max": 187500}
+    assert lr_factor(0, tr) == 1.0 and lr_factor(187500, tr) == pytest.approx(0.0, abs=1e-12)
+    assert lr_factor(8000, tr) == pytest.approx(0.5 * (1 + math.cos(math.pi * 8000 / 187500)))
+    ms = {"steps": [9000, 11000], "gamma": 0.1, "warmup_iters": 1000, "warmup_factor": 0.01}
+    assert lr_factor(500, ms) == warmup_multistep(500, [9000, 11000])

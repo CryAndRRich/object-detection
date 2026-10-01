@@ -11,6 +11,8 @@
   chốt 2026-09-29) nên ở bước 0 mô hình trùng R-50 3 kênh. CE-Loc gốc khởi tạo kênh này bằng
   trung bình weight RGB (`refs/repos/Count-Editing/CE-LocModel/models/vision_encoder.py`). conv1 được thay SAU khi dựng FPN để thứ tự
   rút RNG khởi tạo trùng bản 3 kênh (cùng seed -> cùng weight, có test).
+- GAMMA (bài add, "CE-Loc gốc + R-50", người dùng chốt 2026-10-01): `norm="bn"` = `nn.BatchNorm2d` TRAIN được (thống
+  kê theo batch, khởi tạo từ ImageNet) như ResNet18 của bài; `density_init="rgb_mean"` như bài. Mặc định giữ ALPHA.
 """
 
 from collections import OrderedDict
@@ -21,19 +23,23 @@ import torchvision
 from torchvision.ops import FeaturePyramidNetwork
 from torchvision.ops.misc import FrozenBatchNorm2d
 
-__all__ = ["ResNet50FPN", "STRIDES", "LEVELS", "density_weight_ratio"]
+__all__ = ["ResNet50FPN", "STRIDES", "LEVELS", "NORMS", "DENSITY_INITS", "density_weight_ratio"]
 
 LEVELS = ("p2", "p3", "p4", "p5")
+NORMS = ("frozen", "bn")
+DENSITY_INITS = ("zero", "rgb_mean")
 STRIDES = (4, 8, 16, 32)
 
 
 class ResNet50FPN(nn.Module):
-    def __init__(self, out_channels=256, pretrained=True, in_channels=3):
+    def __init__(self, out_channels=256, pretrained=True, in_channels=3, norm="frozen", density_init="zero"):
         super().__init__()
         if in_channels not in (3, 4):
             raise ValueError(f"in_channels phải là 3 hoặc 4, nhận {in_channels}")
+        if norm not in NORMS or density_init not in DENSITY_INITS:
+            raise ValueError(f"norm {norm!r} / density_init {density_init!r} không thuộc {NORMS} / {DENSITY_INITS}")
         weights = torchvision.models.ResNet50_Weights.IMAGENET1K_V1 if pretrained else None
-        r = torchvision.models.resnet50(weights=weights, norm_layer=FrozenBatchNorm2d)
+        r = torchvision.models.resnet50(weights=weights, norm_layer=FrozenBatchNorm2d if norm == "frozen" else nn.BatchNorm2d)
         fpn = FeaturePyramidNetwork([256, 512, 1024, 2048], out_channels)   # rút RNG như bản 3 kênh
         conv1 = r.conv1
         if in_channels == 4:
@@ -41,6 +47,8 @@ class ResNet50FPN(nn.Module):
             with torch.no_grad():
                 conv1.weight.zero_()
                 conv1.weight[:, :3] = r.conv1.weight
+                if density_init == "rgb_mean":
+                    conv1.weight[:, 3:] = r.conv1.weight.mean(dim=1, keepdim=True)
         self.stem = nn.Sequential(conv1, r.bn1, r.relu, r.maxpool)
         self.layer1, self.layer2, self.layer3, self.layer4 = r.layer1, r.layer2, r.layer3, r.layer4
         self.fpn = fpn                          # đăng ký SAU layer4 như cũ: thứ tự tham số không đổi

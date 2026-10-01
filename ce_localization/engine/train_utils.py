@@ -1,6 +1,7 @@
 """Tiện ích train ALPHA: DDP, lịch lr kiểu detectron2, chia batch tái lập được, checkpoint .pth."""
 
 import bisect
+import math
 import datetime
 import os
 
@@ -9,7 +10,7 @@ import torch.distributed as dist
 
 from ce_localization.utils.checkpoint import CheckpointManager
 
-__all__ = ["setup_dist", "PthCheckpoints", "warmup_multistep", "epoch_batches",
+__all__ = ["setup_dist", "PthCheckpoints", "warmup_multistep", "lr_factor", "epoch_batches",
            "noise_seed"]
 
 
@@ -60,6 +61,15 @@ def warmup_multistep(it, steps, gamma=0.1, warmup_iters=1000, warmup_factor=0.01
         a = it / warmup_iters
         f *= warmup_factor * (1 - a) + a
     return f
+
+
+def lr_factor(it, tr):
+    """Hệ số lr theo `training.schedule`: `multistep` (mặc định, ALPHA: warmup + giảm bậc) | `cosine` (CE-Loc gốc:
+    `CosineAnnealingLR(T_max)` không warmup, ở đây theo ITERATION — `cosine_t_max` = 300 epoch × 625 bước = 187.500 như bài,
+    nên trong vài nghìn iter lr gần như giữ nguyên như đoạn đầu lịch của bài)."""
+    if tr.get("schedule", "multistep") == "cosine":
+        return 0.5 * (1 + math.cos(math.pi * min(it, tr["cosine_t_max"]) / tr["cosine_t_max"]))
+    return warmup_multistep(it, tr["steps"], tr["gamma"], tr["warmup_iters"], tr["warmup_factor"])
 
 
 def epoch_batches(n, batch_per_rank, rank, world, seed, epoch):

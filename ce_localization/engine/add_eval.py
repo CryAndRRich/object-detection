@@ -29,7 +29,7 @@ import numpy as np
 import torch
 
 from ce_localization.data.turns import to_device_add
-from ce_localization.models.box_policy import unit_to_boxes
+from ce_localization.models.box_policy import norm_whwh, unit_to_boxes
 from ce_localization.utils.box_ops_np import box_iou
 from ce_localization.utils.log import fmt_time
 
@@ -57,7 +57,8 @@ def predict_add(model, loader, text_table, n_samples=30, seed=0, log_every=0, lo
         batch = to_device_add(batch, dev)
         u = model.sample(batch["images"], text_table(batch["text"], dev), batch["valid_hw"], n_samples, generator=gen,
                          **kw)
-        boxes = unit_to_boxes(u.float(), batch["whwh"][:, None, :]).cpu().numpy().astype(np.float64)
+        nwhwh = norm_whwh(model, batch["whwh"], batch["images"].shape[-1])
+        boxes = unit_to_boxes(u.float(), nwhwh[:, None, :]).cpu().numpy().astype(np.float64)
         wh = batch["whwh"][:, :2].cpu().numpy()
         for i in range(len(batch["image_id"])):
             records.append({"image_id": batch["image_id"][i], "t": batch["t"][i], "wh": wh[i].astype(np.float64),

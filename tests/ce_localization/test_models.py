@@ -371,3 +371,57 @@ def test_box_refiner_sample_steps_and_attention():
     att = m.pop_attn()
     assert len(att) == 6 and all(abs(sum(a.values()) - 1) < 1e-4 for a in att) and set(att[0]) == {"t", "text", "vis"}
     assert m.pop_attn() is None
+
+
+# ----------------------------------------------------------------------------- "CE-Loc gốc + R-50" (GAMMA)
+
+def test_backbone_bn_train_and_rgb_mean_density_init():
+    torch.manual_seed(0)
+    m = ResNet50FPN(pretrained=False, in_channels=4, norm="bn", density_init="rgb_mean")
+    assert not any(isinstance(x, FrozenBatchNorm2d) for x in m.modules())
+    assert sum(isinstance(x, nn.BatchNorm2d) for x in m.modules()) == 53
+    w = m.stem[0].weight
+    assert torch.allclose(w[:, 3:], w[:, :3].mean(dim=1, keepdim=True))
+    with pytest.raises(ValueError):
+        ResNet50FPN(pretrained=False, norm="gn")
+
+
+def test_paper_keypoints_and_canvas_norm():
+    from ce_localization.models.box_policy import _paper_spatial_softmax, norm_whwh, spatial_keypoints
+    f = torch.randn(2, 6, 4, 4)
+    vhw = torch.tensor([[96, 128], [128, 128]])
+    assert torch.equal(spatial_keypoints(f, vhw, "paper"), _paper_spatial_softmax(f))      # không mask: bỏ qua valid_hw
+    assert spatial_keypoints(f, vhw, "masked").shape == (2, 12)
+    whwh = torch.tensor([[128.0, 96.0, 128.0, 96.0]])
+    assert torch.equal(norm_whwh(nn.Module(), whwh, 128), whwh)
+    m = nn.Module()
+    m.box_norm = "canvas"
+    assert torch.equal(norm_whwh(m, whwh, 128), torch.full((1, 4), 128.0))
+
+
+@pytest.mark.parametrize("arch", ["box_policy", "box_refiner"])
+def test_gamma_paper_keys_build_train_sample(arch):
+    """Config GAMMA0 / GAMMA1 thật (khoá "CE-Loc gốc + R-50") dựng được, BN train, loss lùi được, sample hữu hạn."""
+    import yaml
+    from ce_localization.models.detector import build_model
+    from tests.ce_localization.helpers import CFG_G
+    with open(CFG_G["density" if arch == "box_policy" else "refiner"]) as f:
+        cfg = yaml.safe_load(f)
+    cfg["diffusion"]["num_timesteps"] = 20
+    torch.manual_seed(0)
+    m = build_model(cfg, pretrained_backbone=False)
+    assert m.box_norm == "canvas" and any(isinstance(x, nn.BatchNorm2d) for x in m.modules())
+    x, vhw = torch.rand(2, 4, 128, 128), torch.tensor([[96, 128], [128, 128]])
+    whwh = torch.tensor([[128.0, 96.0, 128.0, 96.0], [128.0, 128.0, 128.0, 128.0]])
+    tgt = torch.tensor([[10.0, 20.0, 50.0, 60.0], [60.0, 70.0, 100.0, 120.0]])
+    if arch == "box_policy":
+        from ce_localization.models.box_policy import boxes_to_unit, norm_whwh
+        loss = m(x, torch.randn(2, 512), vhw, boxes_to_unit(tgt, norm_whwh(m, whwh, 128)), k=1)
+    else:
+        loss, _ = m(x, torch.randn(2, 512), vhw, tgt, whwh, k=1)
+    loss.backward()
+    assert m.backbone.layer4[2].conv3.weight.grad.abs().sum() > 0
+    m.eval()
+    with torch.no_grad():
+        s = m.sample(x, torch.randn(2, 512), vhw, 3) if arch == "box_policy" else m.sample(x, torch.randn(2, 512), vhw, 3, steps=2)
+    assert s.shape == (2, 3, 4) and torch.isfinite(s).all()

@@ -55,9 +55,9 @@ from ce_localization.engine.criterion import Criterion, build_targets  # noqa: E
 from ce_localization.engine.diffusion import prepare_train_boxes  # noqa: E402
 from ce_localization.engine.evaluate import predict, score  # noqa: E402
 from ce_localization.engine.train_utils import (PthCheckpoints, epoch_batches,  # noqa: E402
-                                               noise_seed, setup_dist, warmup_multistep)
+                                               lr_factor, noise_seed, setup_dist)
 from ce_localization.models.backbone import density_weight_ratio  # noqa: E402
-from ce_localization.models.box_policy import boxes_to_unit  # noqa: E402
+from ce_localization.models.box_policy import boxes_to_unit, norm_whwh  # noqa: E402
 from ce_localization.models.detector import build_model  # noqa: E402
 from ce_localization.models.text import TextTable, encode_class_names  # noqa: E402
 from ce_localization.utils.grad_monitor import GradMonitor  # noqa: E402
@@ -121,7 +121,7 @@ def add_datasets(cfg, eval_split, limit=None, eval_limit=None):
         sys.exit(str(e))
     dens = add_density_setup(cfg)
     mk = lambda split: CE130AddDataset(index, d["root"], d["samples_root"], split, d["image_size"],  # noqa: E731
-                                       density=dens)
+                                       density=dens, style=d.get("input_style", "ours"))
     ds_tr = mk("train")
     if limit:
         ds_tr.keys = ds_tr.keys[:limit]
@@ -221,7 +221,7 @@ def _step_loss(net, crit, batch, text_table, cfg, model, gen, dev):
         text = text_table(batch["text"], dev)
         if cfg["model"].get("arch") == "box_refiner":   # GAMMA1: L1 + GIoU ở mọi tầng, đích = lỗ mới nhất
             return net(batch["images"], text, batch["valid_hw"], batch["target"], batch["whwh"], k=k, generator=gen)
-        x0 = boxes_to_unit(batch["target"], batch["whwh"])       # GAMMA0: ε-MSE của BoxPolicy
+        x0 = boxes_to_unit(batch["target"], norm_whwh(model, batch["whwh"], batch["images"].shape[-1]))  # GAMMA0: ε-MSE
         loss = net(batch["images"], text, batch["valid_hw"], x0, k=k, generator=gen)
         return loss, {"loss": loss.detach()}
     boxes, t = prepare_train_boxes(batch["boxes"], batch["whwh"], cfg["diffusion"]["num_proposals"],
@@ -372,6 +372,8 @@ def main():
     # ------------------------------------------------------------------ model
     t = time.time()
     model = build_model(cfg).to(dev)
+    if world > 1 and any(isinstance(m, torch.nn.BatchNorm2d) for m in model.modules()):
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)   # GAMMA (BN train như bài): thống kê trên cả batch
     # find_unused_parameters=True BẮT BUỘC: conv 3x3 đầu ra của một tầng FPN chỉ có gradient khi có
     # RoI rơi vào tầng đó. Ở canvas 512, P5 cần sqrt(diện tích) >= 448 px nên ở ALPHA0 (P5 chỉ đi
     # qua RoI) gần như không bao giờ được dùng; tầng khác cũng có thể trống ở một iteration.
@@ -383,8 +385,7 @@ def main():
         f"in_channels {model.backbone.in_channels} | {n_learn / 1e6:.2f}M tham số train | "
         f"N={cfg['diffusion'].get('num_proposals')} | {fmt_time(time.time() - t)}")
     opt = torch.optim.AdamW(model.parameters(), lr=float(tr["lr"]), weight_decay=float(tr["weight_decay"]))
-    sched = torch.optim.lr_scheduler.LambdaLR(
-        opt, lambda it: warmup_multistep(it, tr["steps"], tr["gamma"], tr["warmup_iters"], tr["warmup_factor"]))
+    sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda it: lr_factor(it, tr))
     crit = None if task == "add" else Criterion(cfg["loss"], cfg["matcher"], mode=targets)
 
     if a.bench:
@@ -443,7 +444,8 @@ def main():
             opt.zero_grad(set_to_none=True)
             loss.backward()
             gmon.maybe_record(it)
-            gn = torch.nn.utils.clip_grad_norm_(model.parameters(), tr["grad_clip"])
+            # grad_clip null = KHÔNG clip (CE-Loc gốc), vẫn đo norm để log
+            gn = torch.nn.utils.clip_grad_norm_(model.parameters(), tr["grad_clip"] or float("inf"))
             finite = bool(torch.isfinite(gn)) and bool(torch.isfinite(loss))
             if a.nan_debug:
                 log(f"  [nan-debug] it {it} | loss {float(loss):.4f} | grad trước clip {float(gn):.4g} | "
