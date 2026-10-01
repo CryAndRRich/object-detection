@@ -15,19 +15,24 @@ chặn); ở đây nó là thứ ta cần — một prompt lan sang mọi vật 
 density thiếu vật (blob ≈ 0,9 × số vật, 1,4 % ảnh trống) vẫn không chặn việc
 phủ hết, miễn còn một vật cùng loại được chạm.
 
-                          ĐẦU RA (mỗi ảnh một .npz)
+                                   ĐẦU RA
 
-  soft    (H, W) float16  trung bình các soft map đã chuẩn hoá, chia cho max
-                          -> [0,1]. ĐÂY LÀ KÊNH DÙNG ĐƯỢC NGAY cho detector
-                          (liên tục, giống cách ALPHA3 đưa density làm kênh 4).
-  labels  (L, H, W) uint8 nhãn cụm ở từng mức granularity (0 = không cụm nào).
-                          Rời rạc, conv KHÔNG đọc trực tiếp được — để dành cho
-                          ai muốn tự nhị phân hoá / one-hot.
-  heights (L,) float32    độ cao cắt dendrogram tương ứng
-  points  (M, 2) int16    ô lưới thực sự dùng làm prompt (sau khi loại/gộp)
+`<out-dir>/<image_id>.png` — ảnh XÁM 8-bit, MỘT KÊNH, kích thước ảnh gốc.
+Mức = soft map × 255, với soft = trung bình các map đã chuẩn hoá rồi chia max.
 
-Ảnh không có điểm nào (14/908 ở val) vẫn ghi file, `soft` toàn 0 và
-`n_prompts = 0`, để phía đọc không phải xử lý file thiếu.
+Cùng dạng ce_localization đang đọc cho density (`load_density_levels` ->
+uint8 [H,W] -> `letterbox_density` -> /255 -> [0,1]), nên nối vào đúng đường
+kênh-4 của ALPHA3 mà không phải sửa gì bên đó.
+⚠️ KHÔNG tô jet. Density gốc là PNG jet vì nó được vẽ cho NGƯỜI xem; ở đây ghi
+thẳng mức, nên jet chỉ thêm một vòng mã hoá/giải mã và một nguồn sai số (bảng
+jet có hai mức trùng màu, sai tối đa 3/255).
+
+`--save-npz` ghi thêm `<image_id>.npz` để chẩn đoán: `soft` float16, `points`
+(ô lưới thực dùng), `n_iter`, `grid_fallback`, và `labels` (L,H,W) uint8 nếu
+thêm `--save-labels` — nhãn cụm từng mức, RỜI RẠC nên conv không đọc thẳng được.
+
+Ảnh không có điểm density (14/908 ở val) mặc định LÙI VỀ LƯỚI ĐỀU, vì map toàn
+0 là một kênh chết ở đúng những ảnh đó. `--no-grid-fallback` để tắt.
 
 VÍ DỤ
   python tools/run_ce130_points.py --split val --limit 20 \
@@ -42,6 +47,7 @@ import time
 
 import numpy as np
 import torch
+from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
@@ -52,7 +58,8 @@ from diffuse2seg.d2s.merging import (_upsample_nearest, cluster_at_heights,  # n
                                      normalise_maps, symmetric_kl_matrix)
 from diffuse2seg.d2s.pipeline import build_affinity          # noqa: E402
 from diffuse2seg.d2s.plaplacian import plaplacian_propagate  # noqa: E402
-from diffuse2seg.d2s.prompts import f0_onehot, points_to_cells  # noqa: E402
+from diffuse2seg.d2s.prompts import (build_prompt_grid, f0_onehot,  # noqa: E402
+                                     points_to_cells)
 from diffuse2seg.utils.metrics import fmt_time               # noqa: E402
 
 
@@ -111,15 +118,33 @@ def main():
     ap.add_argument("--data-root", default=None)
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--save-npz", action="store_true",
+                    help="ghi thêm .npz (soft float16 + points + n_iter) bên "
+                         "cạnh PNG — để chẩn đoán, không cần cho train")
     ap.add_argument("--save-labels", action="store_true",
-                    help="ghi thêm mảng nhãn 6 mức (nặng hơn ~6x)")
+                    help="ghi thêm nhãn cụm 6 mức vào .npz (cần --save-npz)")
+    ap.add_argument("--no-grid-fallback", action="store_true",
+                    help="ảnh không có điểm density thì để map TRỐNG thay vì "
+                         "lùi về lưới đều")
     args = ap.parse_args()
 
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     root = args.data_root or os.path.join(here, "..", "data", "all_phase2_V2")
     pts_json = args.points or os.path.join(here, "..", "data", "density_points.json")
 
-    cfg = Diffu2SegConfig(canvas=args.canvas).validate()
+    # Lấy cấu hình PAPER rồi chỉ ghi đè canvas: mặc định của Diffu2SegConfig là
+    # w_up_0/1 = 0,5/0,5 (giá trị của M2N2), còn paper dùng 0,85/0,15. Lần chạy
+    # thử 2026-10-01 đã lỡ dùng 0,5/0,5 — không sai nhưng lệch với kết quả PACO
+    # đã báo cáo.
+    from diffuse2seg.config.paper import cfg as _paper
+    fields = _paper.to_dict()
+    fields = {k: v for k, v in fields.items()
+              if k in Diffu2SegConfig.__dataclass_fields__}
+    for k in ("timesteps", "timestep_weights", "kl_thresholds"):
+        if k in fields and isinstance(fields[k], list):
+            fields[k] = tuple(fields[k])
+    fields["canvas"] = args.canvas
+    cfg = Diffu2SegConfig(**fields).validate()
     ds = CE130Points(root, args.split, pts_json, canvas=cfg.canvas)
     end = len(ds) if args.limit <= 0 else min(args.start + args.limit, len(ds))
     n = end - args.start
@@ -131,7 +156,9 @@ def main():
     print(f"  canvas {cfg.canvas}  r {cfg.grid_r}  t {cfg.timesteps[0]}  "
           f"p {cfg.p}  mức {cfg.n_levels}")
     print(f"  điểm: {pts_json} (params {ds.points_params})")
-    print(f"  ⚠️ {ds.n_no_points}/{len(ds)} ảnh KHÔNG có điểm density -> soft toàn 0")
+    print(f"  w_up_0/w_up_1 = {cfg.w_up_0}/{cfg.w_up_1} (paper)")
+    print(f"  ⚠️ {ds.n_no_points}/{len(ds)} ảnh KHÔNG có điểm density -> "
+          + ("map trống" if args.no_grid_fallback else "LÙI VỀ LƯỚI ĐỀU"))
     print(f"  ⚠️ KHÔNG connected-components / NMS: đầu ra là VÙNG NGỮ NGHĨA, "
           f"mỗi vùng gộp mọi vật giống nhau")
     print("=" * 74 + "\n", flush=True)
@@ -147,11 +174,24 @@ def main():
     print(f"model nạp xong trong {time.time() - t0:.1f}s\n", flush=True)
 
     t_start = time.time()
-    n_pr, n_empty = [], 0
+    n_pr, n_empty, n_grid, grid_ids = [], 0, 0, []
     for k, i in enumerate(range(args.start, end)):
         s = ds[i]
         cells = points_to_cells(s["points_xy"], s["W"], s["H"], cfg.grid_r,
                                 cfg.canvas, s["valid_w"], s["valid_h"])
+        used_grid = False
+        if len(cells) == 0 and not args.no_grid_fallback:
+            # 14/908 ảnh val có density TRỐNG (1,5 %). Không có prompt thì
+            # không có gì để lan -> map toàn 0, tức detector nhận một kênh chết
+            # ở đúng những ảnh đó. Lùi về lưới đều để vẫn có tín hiệu; cờ
+            # `grid_fallback` trong meta cho biết ảnh nào.
+            cells = build_prompt_grid(cfg.grid_r, cfg.prompt_stride_cells,
+                                      valid_h=s["valid_h"],
+                                      min_valid_frac=cfg.min_valid_frac,
+                                      valid_w=s["valid_w"])
+            used_grid = len(cells) > 0
+            if used_grid:
+                n_grid += 1
         if len(cells) == 0:
             n_empty += 1
             soft = np.zeros((s["H"], s["W"]), np.float16)
@@ -174,13 +214,31 @@ def main():
                 torch.cuda.empty_cache()
 
         n_pr.append(len(cells))
-        out = {"soft": soft, "heights": heights,
-               "points": cells.astype(np.int16),
-               "image_id": np.array(s["image_id"]),
-               "n_prompts": np.array(len(cells)), "n_iter": np.array(n_iter)}
-        if args.save_labels:
-            out["labels"] = labels
-        np.savez_compressed(os.path.join(args.out_dir, f"{s['image_id']}.npz"), **out)
+        if used_grid:
+            grid_ids.append(s["image_id"])
+
+        # ĐẦU RA CHÍNH: PNG XÁM 8-bit, MỘT KÊNH, kích thước ẢNH GỐC.
+        # Cùng dạng mà ce_localization đang đọc cho density (`load_density_levels`
+        # -> uint8 [H,W] -> `letterbox_density` -> /255 -> [0,1]), nên dùng lại
+        # được đúng đường kênh-4 của ALPHA3 mà không cần sửa gì bên đó.
+        # ⚠️ KHÔNG tô jet: density gốc là PNG jet vì nó được vẽ để NGƯỜI xem;
+        # ở đây ta ghi thẳng mức nên jet chỉ thêm một vòng mã hoá/giải mã và
+        # một nguồn sai số (jet có 2 mức trùng màu, sai tối đa 3/255).
+        lvl = np.clip(np.rint(np.asarray(soft, np.float32) * 255.0), 0, 255).astype(np.uint8)
+        Image.fromarray(lvl, mode="L").save(
+            os.path.join(args.out_dir, f"{s['image_id']}.png"), optimize=True)
+
+        if args.save_npz:
+            out = {"soft": soft, "heights": heights,
+                   "points": cells.astype(np.int16),
+                   "image_id": np.array(s["image_id"]),
+                   "n_prompts": np.array(len(cells)),
+                   "n_iter": np.array(n_iter),
+                   "grid_fallback": np.array(used_grid)}
+            if args.save_labels:
+                out["labels"] = labels
+            np.savez_compressed(
+                os.path.join(args.out_dir, f"{s['image_id']}.npz"), **out)
 
         el = time.time() - t_start
         done = k + 1
@@ -202,6 +260,9 @@ def main():
             "points_params": ds.points_params,
             "prompts_per_image_median": float(np.median(n_pr)) if n_pr else 0.0,
             "n_images_without_points": n_empty,
+            "n_images_grid_fallback": n_grid,
+            "grid_fallback_ids": grid_ids,
+            "output": "PNG xám 8-bit một kênh, kích thước ảnh gốc, mức = soft*255",
             "config": cfg.to_dict(),
             "note": "semantic regions: KHONG connected-components, KHONG NMS"}
     with open(os.path.join(args.out_dir, "meta.json"), "w") as fh:
@@ -209,7 +270,9 @@ def main():
 
     print(f"\n{n} ảnh -> {args.out_dir}")
     print(f"  prompt/ảnh trung vị {np.median(n_pr):.0f} | "
-          f"{n_empty} ảnh không có điểm | {fmt_time(el)} ({el/max(n,1):.2f}s/ảnh)")
+          f"{n_grid} ảnh lùi về lưới đều | {n_empty} ảnh map trống | "
+          f"{fmt_time(el)} ({el/max(n,1):.2f}s/ảnh)")
+    print(f"  đầu ra: PNG xám 8-bit một kênh (+ .npz nếu --save-npz)")
     print(f"  -> {args.out_dir}/meta.json")
     return 0
 
