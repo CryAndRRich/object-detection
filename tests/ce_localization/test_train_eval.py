@@ -415,3 +415,27 @@ def test_plot_denoise_trajectory_full_flow(tmp_path, monkeypatch):
     cases = tool.pick_cases(ann, None, np.random.default_rng(0))
     assert [c["name"] for c in cases] == ["train", "test_same", "test_unseen", "train_text"]
     assert cases[0]["text"] == "egg" and cases[2]["text"] == "kiwi" and cases[3]["file"] == cases[0]["file"]
+
+
+def test_plot_spatial_softmax_full_flow(tmp_path, monkeypatch):
+    """Tool SpatialSoftmax: toạ độ đổi đúng trục (toạ độ đầu của bài là DỌC, ±1 = tâm ô đầu / cuối), chạy trọn trên
+    checkpoint giả khuôn của bài + ảnh gốc giả -> PNG + JSON (hàng density full / blank)."""
+    import ce_localization.tools.plot_spatial_softmax as tool
+    from ce_localization.data.density import build_index
+    from tests.ce_localization.helpers import _fake_ce130_turns, _fake_paper_ckpt
+    px, py = tool.keypoint_pixels(np.array([[-1.0, 1.0], [1.0, -1.0]]), 16)        # (dọc, ngang)
+    assert np.allclose(px, [496, 16]) and np.allclose(py, [16, 496])
+    root, samples = _fake_ce130_turns(str(tmp_path / "d"))
+    ck = str(tmp_path / "best_model.pth")
+    _fake_paper_ckpt(ck)
+    didx = str(tmp_path / "density_index.json")
+    with open(didx, "w") as f:
+        json.dump(build_index(samples, workers=0, log=lambda *x: None), f)
+    out = str(tmp_path / "out")
+    monkeypatch.setattr(sys, "argv", ["plot_spatial_softmax.py", "--ckpt", ck, "--samples", samples, "--ce130", root,
+                                      "--density-index", didx, "--files", "test/images/3000_1.png", "--out", out])
+    tool.main()
+    assert set(os.listdir(out)) == {"original_3000_1.png", "spatial_softmax.json"}
+    with open(os.path.join(out, "spatial_softmax.json")) as f:
+        rows = json.load(f)
+    assert [r["density"] for r in rows] == ["full", "blank"] and all(0 <= r["sharp_frac"] <= 1 for r in rows)

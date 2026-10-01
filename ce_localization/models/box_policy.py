@@ -140,6 +140,15 @@ class PaperVisionEncoder(nn.Module):
     def forward(self, x):
         return self.projection(_paper_spatial_softmax(self.backbone(x)))
 
+    @torch.no_grad()
+    def keypoints(self, x):
+        """Soi SpatialSoftmax: -> (toạ độ [B,C,2] theo thứ tự (DỌC, NGANG) trong [−1, 1] — meshgrid 'ij' của bài —,
+        attention softmax [B,C,H,W]). Toạ độ −1 / +1 = TÂM ô đầu / ô cuối của lưới H×W."""
+        feat = self.backbone(x)
+        N, C, H, W = feat.shape
+        att = F.softmax(feat.reshape(N, C, -1), dim=-1)
+        return _paper_spatial_softmax(feat).reshape(N, C, 2), att.reshape(N, C, H, W)
+
 
 class BoxPolicy(nn.Module):
     def __init__(self, in_channels=3, pretrained_backbone=True, fpn_dim=256, vis_dim=128, text_in=512,
