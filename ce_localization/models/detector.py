@@ -55,9 +55,17 @@ class Detector(nn.Module):
 
 
 def build_model(cfg, pretrained_backbone=None):
-    """`model.arch`: `detector` (mặc định — ALPHA / BETA, bài detect) | `box_policy` (GAMMA0, bài add)."""
+    """`model.arch`: `detector` (mặc định — ALPHA / BETA, bài detect) | `box_policy` (GAMMA0, bài add) |
+    `box_refiner` (GAMMA1, bài add)."""
     m, d = cfg["model"], cfg["diffusion"]
     pre = m.get("pretrained_backbone", True) if pretrained_backbone is None else pretrained_backbone
+    if m.get("arch", "detector") == "box_refiner":
+        from ce_localization.models.box_refiner import BoxRefiner
+        return BoxRefiner(
+            in_channels=m.get("in_channels", 3), pretrained_backbone=pre, d_model=m["d_model"], n_stage=m["n_stage"],
+            n_head=m["n_head"], dim_feedforward=m["dim_feedforward"], dropout=m["dropout"],
+            text_dim=m.get("text_dim", 512), num_timesteps=d["num_timesteps"], beta_start=d["beta_start"],
+            beta_end=d["beta_end"], l1_weight=cfg["loss"]["l1_weight"], giou_weight=cfg["loss"]["giou_weight"])
     if m.get("arch", "detector") == "box_policy":
         from ce_localization.models.box_policy import BoxPolicy
         return BoxPolicy(

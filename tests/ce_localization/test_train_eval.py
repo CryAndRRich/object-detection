@@ -301,10 +301,10 @@ def test_full_flow_beta0_train_resume_eval_and_gt_never_in_loss(tmp_path, monkey
 
 # ----------------------------------------------------------------------------- GAMMA (bài add)
 
-@pytest.mark.parametrize("kind", ["density", "rgb"])
+@pytest.mark.parametrize("kind", ["density", "rgb", "refiner"])
 def test_full_flow_gamma_train_resume_eval(tmp_path, monkeypatch, kind):
-    """GAMMA0 / 0.1: chỉ mục (nhánh, lượt) -> train 2 iter -> --resume tới 4 == train liền 4 -> eval.py trên ảnh
-    inpaint + ảnh gốc, kèm mốc prior."""
+    """GAMMA0 / 0.1 / 1: chỉ mục (nhánh, lượt) -> train 2 iter -> --resume tới 4 == train liền 4 -> eval.py trên ảnh
+    inpaint + ảnh gốc, kèm mốc prior (GAMMA1: DDIM 1 và 2 bước, kèm attention lên [t ; text ; vis])."""
     from tests.ce_localization.helpers import _fake_turn_index, _gamma_cfg
     base = str(tmp_path / "d")
     os.makedirs(base)
@@ -328,17 +328,24 @@ def test_full_flow_gamma_train_resume_eval(tmp_path, monkeypatch, kind):
     from tests.ce_localization.helpers import _fake_text_table
     monkeypatch.setattr(ta, "build_text_table", _fake_text_table)
     out = str(tmp_path / "res.json")
+    refiner = kind == "refiner"
+    if refiner:
+        assert all(len(h["loss_per_stage"]) == 6 for h in kb["history"] if "loss" in h)
+        assert all(len(e["attn"]) == 6 for e in ev)
     monkeypatch.setattr(sys, "argv", ["eval.py", "--ckpt", os.path.join(a, "best.pth"), "--split", "test",
-                                      "--n-samples", "5", "--num-workers", "0", "--out", out, "--device", "cpu"])
+                                      "--n-samples", "5", "--num-workers", "0", "--out", out, "--device", "cpu",
+                                      "--steps", "1", "2"])
     ea.main()
     with open(out) as f:
         res = json.load(f)
-    assert set(res["results"]) == set(res["prior"]) == {"inpainted", "original"}
-    ri, ro = res["results"]["inpainted"], res["results"]["original"]
+    keys = [f"{i}_steps{s}" for i in ("inpainted", "original") for s in (1, 2)] if refiner else ["inpainted", "original"]
+    assert set(res["results"]) == set(res["prior"]) == set(keys)
+    ri, ro = res["results"][keys[0]], res["results"][keys[-1]]
     assert ri["n"] == ro["n"] > 0 and 0 <= ri["best_iou@5_any"] <= 1 and "best_iou@5_any" not in ro
-    assert res["density"] == ({"inpainted": "sample", "original": "full"} if kind == "density" else
-                              {"inpainted": None, "original": None})
-    assert ri["best_iou@5_any"] >= ri["best_iou@5_latest"] and res["prior"]["inpainted"]["n_cnll"] == ri["n_cnll"]
+    assert res["density"] == ({"inpainted": None, "original": None} if kind == "rgb" else
+                              {"inpainted": "sample", "original": "full"})
+    assert ri["best_iou@5_any"] >= ri["best_iou@5_latest"] and res["prior"][keys[0]]["n_cnll"] == ri["n_cnll"]
+    assert ("attn" in ri) == refiner
 
 
 def test_gamma_configs_only_differ_by_density():

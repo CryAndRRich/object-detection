@@ -22,10 +22,13 @@ Loss DiffusionDet (SimOTA, focal + L1 + GIoU) ở cả 6 stage; suy luận DDIM 
 
 Bài **ADD** (`task: add`, GAMMA — `model.arch: box_policy`): CE-Loc gốc với ảnh qua cùng R-50 + FPN.
 ```
-ảnh inpaint lượt t [B,3|4,512,512] -> R-50 + FPN -> P5 -> SpatialSoftmax có mask (256 điểm) -> Linear -> 128 ┐
+ảnh inpaint lượt t [B,3|4,512,512] -> R-50 -> C5 -> SpatialSoftmax có mask (2048 điểm) -> Linear -> 128 ──┐
 tên lớp -> CLIP text frozen -> Linear -> Mish -> 128 ──────────────────────────────────────────────────────┤ cond
 box nhiễu [B,1,4] + t -> U-Net 1D (FiLM theo cond) -> ε̂ ; ε-MSE, β tuyến tính ; suy luận DDPM, K mẫu độc lập
 ```
+GAMMA1 (`model.arch: box_refiner`, `models/box_refiner.py`): cùng điều kiện nhưng là memory `[t ; text ; SpatialSoftmax C5]`;
+1 box nhiễu -> 6 tầng (RoIAlign P2..P5 -> token -> cross-attn memory -> FFN -> delta box, KHÔNG self-attn), dự đoán x0,
+L1 + GIoU ở mọi tầng; suy luận DDIM `--steps`.
 
 ## Cấu trúc
 
@@ -34,7 +37,7 @@ box nhiễu [B,1,4] + t -> U-Net 1D (FiLM theo cond) -> ε̂ ; ε-MSE, β tuyế
 | `train.py` / `eval.py` | điểm vào duy nhất (1 GPU hoặc `torchrun`; `--resume`, `--max-hours`, `--bench`, `--nan-debug`) |
 | `config/alpha/`, `config/beta/`, `config/gamma/` | config từng thí nghiệm (bảng dưới) |
 | `data/` | `dataset` (quét CE-130, letterbox, đích box / điểm), `density` (giải mã jet, chỉ mục, chọn bản), `points` (đỉnh density, cỡ giả kNN), `turns` (bài add: chỉ mục (nhánh, lượt) ↔ `samples/`, dataset) |
-| `models/` | `backbone`, `roi`, `memory`, `head`, `detector`, `text` (CLIP ViT-B/32 frozen); bài add: `box_policy` + `unet1d` |
+| `models/` | `backbone`, `roi`, `memory`, `head`, `detector`, `text` (CLIP ViT-B/32 frozen); bài add: `box_policy` + `unet1d` (GAMMA0), `box_refiner` (GAMMA1) |
 | `engine/` | `diffusion`, `criterion` (SimOTA + loss, chế độ box / điểm), `evaluate` (suy luận + chỉ số), `add_eval` (bài add: K mẫu, IoU với lỗ, C-NLL, on_object), `train_utils`, `nan_debug` |
 | `utils/` | hình học box (torch / numpy), toán khuếch tán, chấm điểm numpy, checkpoint ghi nguyên tử, grad theo nhóm, log |
 | `tools/` | `build_density_index`, `build_density_points`, `build_turn_index` (bài add, cửa G0), `visualize_data` (xem đầu vào bằng mắt), `check_data_facts`, `plot_denoise_trajectory` (bài add: box qua từng bước khử nhiễu, checkpoint của bài hoặc GAMMA) |
@@ -58,6 +61,7 @@ Code soi SpatialSoftmax (`celoc_paper/`, `tools/inspect_*spatial_softmax.py`, TN
 | `beta/beta0.yaml` | `data.targets: point` (đích = box giả từ điểm density, box GT chỉ để chấm) | `docs/EXPERIMENT_BETA.md` |
 | `gamma/gamma0.yaml` | **bài add**: `task: add`, `model.arch: box_policy`, canvas 512, batch 16, density của chính mẫu (kênh 4) | `docs/EXPERIMENT_GAMMA.md` |
 | `gamma/gamma0_1.yaml` | như `gamma0`, CHỈ RGB | 〃 |
+| `gamma/gamma1.yaml` | bài add, `model.arch: box_refiner` (6 tầng RoI + cross-attn, loss mọi tầng), RGB + density | 〃 mục 11 |
 
 ## Chạy
 
@@ -101,7 +105,7 @@ python tools/build_density_index.py --samples ../data/samples --ce130 ../data/al
 
 Chỉ mục (nhánh, lượt) ↔ `samples/` dựng một lần: `tools/build_turn_index.py` (lệnh trong docstring). Train /
 eval như mọi config (`--save-dir ../weights/add/<tên>`, log `log/gamma/`, kết quả `output/gamma/`); `eval.py`
-tự nhận `task: add`: `--image inpainted original`, `--n-samples`, `--add-density`. Lệnh đầy đủ:
+tự nhận `task: add`: `--image inpainted original`, `--n-samples`, `--add-density`, `--steps` (GAMMA1). Lệnh đầy đủ:
 `docs/EXPERIMENT_GAMMA.md`.
 
 ## Đọc số

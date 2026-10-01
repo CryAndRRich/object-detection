@@ -49,12 +49,15 @@ class ResNet50FPN(nn.Module):
 
     def forward(self, x):
         """[B,C,H,W] (C = in_channels) -> OrderedDict p2..p5, stride 4/8/16/32."""
+        return self.forward_with_c5(x)[0]
+
+    def forward_with_c5(self, x):
+        """-> (OrderedDict p2..p5, C5) trong MỘT lượt (GAMMA1: RoIAlign trên P2..P5 + SpatialSoftmax trên C5)."""
         c2 = self.layer1(self.stem(x))
         c3 = self.layer2(c2)
         c4 = self.layer3(c3)
         c5 = self.layer4(c4)
-        out = self.fpn(OrderedDict(zip(LEVELS, (c2, c3, c4, c5))))
-        return out
+        return self.fpn(OrderedDict(zip(LEVELS, (c2, c3, c4, c5)))), c5
 
     def forward_c5(self, x):
         """C5 = đầu ra layer4 (2048 kênh, stride 32) — weight ImageNet, không qua FPN (GAMMA0: SpatialSoftmax như bài)."""

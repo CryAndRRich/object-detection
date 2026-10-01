@@ -1,7 +1,7 @@
 """Đánh giá bài ADD — docs/EXPERIMENT_GAMMA.md mục 5.
 
-Mỗi mẫu: model sinh K box ĐỘC LẬP (ảnh mã hoá một lần, K nhiễu khử song song, DDPM từ nhiễu thuần — không
-dùng số trong log train, cạm bẫy 9). Mọi thứ sau model là numpy, box xyxy PIXEL CANVAS; IoU không đổi qua phép
+Mỗi mẫu: model sinh K box ĐỘC LẬP (ảnh mã hoá một lần, K nhiễu khử song song từ nhiễu thuần: DDPM ở GAMMA0, DDIM ở
+GAMMA1 — không dùng số trong log train, cạm bẫy 9). Mọi thứ sau model là numpy, box xyxy PIXEL CANVAS; IoU không đổi qua phép
 co giãn đẳng hướng của letterbox nên chấm trên canvas = chấm trên ảnh gốc. Box suy biến (w hoặc h <= 0) kẹp về
 w / h = 0 trước khi chấm (IoU 0), tỉ lệ của chúng báo riêng (`degenerate`).
 
@@ -42,15 +42,21 @@ KNN = 3
 
 
 @torch.no_grad()
-def predict_add(model, loader, text_table, n_samples=30, seed=0, log_every=0, log=print):
-    """-> list record numpy: image_id, t, wh (nw, nh), boxes [K,4] (thô), holes [t,4], objects [M,4]."""
+def predict_add(model, loader, text_table, n_samples=30, seed=0, log_every=0, log=print, steps=None):
+    """-> list record numpy: image_id, t, wh (nw, nh), boxes [K,4] (thô), holes [t,4], objects [M,4].
+    `steps`: số bước DDIM của `BoxRefiner` (GAMMA1; None = mặc định của model). BoxRefiner còn cộng dồn attention lên
+    [t ; text ; vis] — lấy bằng `model.pop_attn()` sau khi gọi."""
     model.eval()
+    kw = {"steps": steps} if steps else {}
+    if hasattr(model, "track_attn"):
+        model.track_attn = True
     dev = next(model.parameters()).device
     gen = torch.Generator(device=dev.type).manual_seed(seed)
     records, t0, n = [], time.time(), len(loader.dataset)
     for bi, batch in enumerate(loader):
         batch = to_device_add(batch, dev)
-        u = model.sample(batch["images"], text_table(batch["text"], dev), batch["valid_hw"], n_samples, generator=gen)
+        u = model.sample(batch["images"], text_table(batch["text"], dev), batch["valid_hw"], n_samples, generator=gen,
+                         **kw)
         boxes = unit_to_boxes(u.float(), batch["whwh"][:, None, :]).cpu().numpy().astype(np.float64)
         wh = batch["whwh"][:, :2].cpu().numpy()
         for i in range(len(batch["image_id"])):
@@ -61,6 +67,8 @@ def predict_add(model, loader, text_table, n_samples=30, seed=0, log_every=0, lo
             el = time.time() - t0
             log(f"    [eval {len(records):5d}/{n}] {el / len(records) * 1000:.0f} ms/mẫu | {fmt_time(el)} | "
                 f"còn ~{fmt_time(el / len(records) * (n - len(records)))}")
+    if hasattr(model, "track_attn"):
+        model.track_attn = False
     return records
 
 

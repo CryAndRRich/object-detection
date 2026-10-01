@@ -15,7 +15,8 @@ _STAGE = re.compile(r"head\.stages\.(\d+)\.(\w+)")
 
 
 def group_of(name):
-    """Tên tham số của `models.detector.Detector` / `models.box_policy.BoxPolicy` -> nhóm."""
+    """Tên tham số của `models.detector.Detector` / `models.box_policy.BoxPolicy` / `models.box_refiner.BoxRefiner`
+    -> nhóm."""
     if name.startswith("noise_net."):
         return "unet1d"
     if name.startswith(("vis_proj.", "text_proj.")):
@@ -29,7 +30,7 @@ def group_of(name):
     m = _STAGE.match(name)
     if m:
         i, sub = int(m.group(1)), m.group(2)
-        if sub in ("roi_proj", "decoder"):
+        if sub in ("roi_proj", "decoder", "cross_attn"):
             return f"{sub}[{i}]"
         return f"heads[{i}]"
     return "khác"

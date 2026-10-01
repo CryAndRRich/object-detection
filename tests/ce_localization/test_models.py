@@ -282,3 +282,92 @@ def test_forward_c5_is_layer4_output():
         c5 = m.forward_c5(x)
         ref = m.layer4(m.layer3(m.layer2(m.layer1(m.stem(x)))))
     assert c5.shape == (1, 2048, 4, 3) and torch.equal(c5, ref)
+
+
+# ----------------------------------------------------------------------------- BoxRefiner (GAMMA1)
+
+def test_backbone_forward_with_c5_matches_forward_and_c5():
+    torch.manual_seed(0)
+    m = ResNet50FPN(pretrained=False, in_channels=4).eval()
+    x = torch.randn(1, 4, 128, 128)
+    f, c5 = m.forward_with_c5(x)
+    assert torch.equal(c5, m.forward_c5(x)) and c5.shape == (1, 2048, 4, 4)
+    for k, v in m(x).items():
+        assert torch.equal(f[k], v), k
+
+
+def test_noisy_to_boxes_clamps_and_keeps_min_size():
+    from ce_localization.models.box_refiner import MIN_WH, noisy_to_boxes
+    whwh = torch.tensor([[200.0, 100.0, 200.0, 100.0]])
+    b = noisy_to_boxes(torch.tensor([[0.0, 0.0, -3.0, 5.0]]), whwh)       # w <= 0 sau kẹp -> MIN_WH; h kẹp 1
+    w, h = b[0, 2] - b[0, 0], b[0, 3] - b[0, 1]
+    assert torch.isclose(w, torch.tensor(MIN_WH * 200)) and torch.isclose(h, torch.tensor(100.0))
+    assert torch.allclose((b[0, 0] + b[0, 2]) / 2, torch.tensor(100.0))
+
+
+def test_paired_giou_matches_matrix_diagonal():
+    from ce_localization.models.box_refiner import paired_giou
+    from ce_localization.utils.box_ops import generalized_box_iou
+    torch.manual_seed(0)
+    a = torch.rand(6, 2) * 50
+    a = torch.cat([a, a + torch.rand(6, 2) * 40 + 1], 1)
+    b = torch.rand(6, 2) * 50
+    b = torch.cat([b, b + torch.rand(6, 2) * 40 + 1], 1)
+    assert torch.allclose(paired_giou(a, b), torch.diagonal(generalized_box_iou(a, b)), atol=1e-6)
+
+
+@pytest.mark.parametrize("in_ch", [3, 4])
+def test_box_refiner_loss_every_stage_trains_all_parts(in_ch):
+    from ce_localization.models.box_refiner import BoxRefiner
+    torch.manual_seed(0)
+    m = BoxRefiner(in_channels=in_ch, pretrained_backbone=False, num_timesteps=20)
+    assert not any("self_attn" in n for n, _ in m.named_parameters())      # không self-attention
+    x = torch.randn(2, in_ch, 128, 128)
+    whwh = torch.tensor([[128.0, 96.0, 128.0, 96.0], [128.0, 128.0, 128.0, 128.0]])
+    tgt = torch.tensor([[10.0, 20.0, 50.0, 60.0], [60.0, 70.0, 100.0, 120.0]])
+    loss, st = m(x, torch.randn(2, 512), torch.tensor([[96, 128], [128, 128]]), tgt, whwh, k=3)
+    assert st["loss_per_stage"].shape == (6,) and torch.isclose(loss, st["loss_per_stage"].sum())
+    loss.backward()
+    g = {n: p.grad for n, p in m.named_parameters()}
+    names = ["backbone.stem.0.weight", "backbone.layer4.2.conv3.weight", "backbone.fpn.layer_blocks.0.0.weight",
+             "memory.ss_proj.weight", "memory.text_proj.weight", "memory.encoder.0.weight"]
+    names += [f"head.stages.{i}.{p}" for i in range(6) for p in ("roi_proj.weight", "cross_attn.in_proj_weight",
+                                                                 "ffn.0.weight", "bboxes_delta.weight")]
+    for n in names:
+        assert g[n] is not None and g[n].abs().sum() > 0, n
+
+
+def test_box_refiner_samples_are_independent():
+    """Không self-attn: box của một mẫu không đổi khi có / không có mẫu khác cùng ảnh."""
+    from ce_localization.models.box_refiner import BoxRefiner
+    torch.manual_seed(0)
+    m = BoxRefiner(pretrained_backbone=False, num_timesteps=20).eval()
+    x, vhw = torch.randn(1, 3, 128, 128), torch.tensor([[128, 128]])
+    with torch.no_grad():
+        feats, vis = m.encode_image(x, vhw)
+        boxes = torch.tensor([[[10.0, 10.0, 40.0, 50.0], [60.0, 30.0, 120.0, 90.0], [5.0, 70.0, 30.0, 100.0]]])
+        t = torch.tensor([3, 11, 19])
+        text = torch.randn(1, 512)
+        all_, _ = m.refine(feats, vis, text, t, boxes)
+        for j in range(3):
+            one, _ = m.refine(feats, vis, text, t[j:j + 1], boxes[:, j:j + 1])
+            assert torch.allclose(one[:, 0], all_[:, j], rtol=1e-4, atol=1e-3), j
+
+
+def test_box_refiner_sample_steps_and_attention():
+    from ce_localization.models.box_refiner import BoxRefiner
+    from ce_localization.models.box_policy import unit_to_boxes
+    torch.manual_seed(0)
+    m = BoxRefiner(in_channels=4, pretrained_backbone=False, num_timesteps=20).eval()
+    x, vhw = torch.randn(2, 4, 128, 128), torch.tensor([[96, 128], [128, 128]])
+    m.track_attn = True
+    for steps in (1, 3):
+        g = torch.Generator().manual_seed(1)
+        u, stages = m.sample(x, torch.randn(2, 512), vhw, 5, generator=g, steps=steps, return_stages=True)
+        assert u.shape == (2, 5, 4) and torch.isfinite(u).all()
+        assert len(stages) == steps and stages[0].shape == (6, 2, 5, 4)
+        b = unit_to_boxes(u, torch.tensor([[128.0, 96.0, 128.0, 96.0], [128.0, 128.0, 128.0, 128.0]])[:, None])
+        assert torch.allclose(b, stages[-1][-1], rtol=1e-4, atol=1e-2)     # bước cuối: box tầng cuối, KHÔNG kẹp
+    att = m.pop_attn()
+    assert len(att) == 6 and all(abs(sum(a.values()) - 1) < 1e-4 for a in att) and set(att[0]) == {"t", "text", "vis"}
+    assert m.pop_attn() is None

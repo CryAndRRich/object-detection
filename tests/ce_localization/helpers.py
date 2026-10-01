@@ -157,7 +157,8 @@ def _run_g0(monkeypatch, base, out, report, extra=()):
 
 # ----------------------------------------------------------------------------- GAMMA (bài add)
 
-CFG_G = {"density": os.path.join(CFG_DIR, "gamma", "gamma0.yaml"), "rgb": os.path.join(CFG_DIR, "gamma", "gamma0_1.yaml")}
+CFG_G = {"density": os.path.join(CFG_DIR, "gamma", "gamma0.yaml"), "rgb": os.path.join(CFG_DIR, "gamma", "gamma0_1.yaml"),
+         "refiner": os.path.join(CFG_DIR, "gamma", "gamma1.yaml")}
 
 
 def _fake_ce130_turns(base, seed=0):

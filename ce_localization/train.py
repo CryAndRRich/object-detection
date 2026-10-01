@@ -24,9 +24,10 @@ BETA (`data.targets: point`, docs/EXPERIMENT_BETA.md): đích train = box giả 
 `best.pth` theo `eval.select_metric` (BETA: `oracle_recall_pt`).
 
 GAMMA (`task: add`, docs/EXPERIMENT_GAMMA.md): bài ADD — mẫu = (nhánh, lượt) qua `data.turn_index`, đích = lỗ
-mới nhất, model `model.arch: box_policy` (R-50 + SpatialSoftmax P5 -> FiLM -> U-Net 1D, ε-MSE, `noise_per_image`
-bộ (t, ε) mỗi ảnh); eval định kỳ = DDPM `eval.n_samples` mẫu / ảnh trên `eval.limit` mẫu val cố định, chọn
-`best.pth` theo `eval.select_metric` (`mean_iou_any`).
+mới nhất, `noise_per_image` bộ (t, ε) mỗi ảnh. `model.arch: box_policy` (GAMMA0: R-50 -> SpatialSoftmax C5 -> FiLM ->
+U-Net 1D, ε-MSE, eval DDPM) | `box_refiner` (GAMMA1: 6 tầng RoI + cross-attn [t ; text ; vis], L1 + GIoU ở mọi tầng,
+eval DDIM `eval.sampling_steps` bước). Eval định kỳ = `eval.n_samples` mẫu / ảnh trên `eval.limit` mẫu val cố định,
+chọn `best.pth` theo `eval.select_metric` (`mean_iou_any`).
 """
 
 import argparse
@@ -160,9 +161,11 @@ def run_val(model, loader, text_table, cfg, log):
     ev = cfg["eval"]
     if cfg.get("task", "detect") == "add":
         rec = predict_add(model, loader, text_table, ev["n_samples"], seed=0,
-                          log_every=max(len(loader) // 4, 1), log=log)
+                          log_every=max(len(loader) // 4, 1), log=log, steps=ev.get("sampling_steps"))
         res = add_metrics(rec)
         res["eval_sec"] = time.time() - t0
+        if hasattr(model, "pop_attn"):                  # GAMMA1: attention của query lên [t ; text ; vis]
+            res["attn"] = model.pop_attn()
         return res
     rec, stage = predict(model, loader, text_table, cfg["diffusion"]["num_proposals"],
                          steps=ev["sampling_steps"], top_k=ev["top_k"], nms_thr=ev["nms_thr"],
@@ -213,10 +216,13 @@ def bench(model, net, crit, loader_fn, text_table, cfg, opt, dev, n, log, todev=
 
 
 def _step_loss(net, crit, batch, text_table, cfg, model, gen, dev):
-    if crit is None:                                    # GAMMA (bài add): ε-MSE của BoxPolicy
-        x0 = boxes_to_unit(batch["target"], batch["whwh"])
-        loss = net(batch["images"], text_table(batch["text"], dev), batch["valid_hw"], x0,
-                   k=cfg["diffusion"]["noise_per_image"], generator=gen)
+    if crit is None:                                    # GAMMA (bài add)
+        k = cfg["diffusion"]["noise_per_image"]
+        text = text_table(batch["text"], dev)
+        if cfg["model"].get("arch") == "box_refiner":   # GAMMA1: L1 + GIoU ở mọi tầng, đích = lỗ mới nhất
+            return net(batch["images"], text, batch["valid_hw"], batch["target"], batch["whwh"], k=k, generator=gen)
+        x0 = boxes_to_unit(batch["target"], batch["whwh"])       # GAMMA0: ε-MSE của BoxPolicy
+        loss = net(batch["images"], text, batch["valid_hw"], x0, k=k, generator=gen)
         return loss, {"loss": loss.detach()}
     boxes, t = prepare_train_boxes(batch["boxes"], batch["whwh"], cfg["diffusion"]["num_proposals"],
                                    model.alphas_cumprod, model.snr_scale, gen)
@@ -346,8 +352,11 @@ def main():
     def loader_fn(epoch, start_batch):
         ds_tr.epoch = epoch                            # density `mix`: RNG theo (seed, epoch, ảnh)
         bl = epoch_batches(len(ds_tr), bpr, rank, world, tr["seed"], epoch)[start_batch:]
+        # generator riêng: tạo iterator DataLoader rút base_seed của worker từ đây, KHÔNG từ RNG toàn cục — nếu không,
+        # --resume giữa epoch (tạo iterator mới) làm lệch RNG toàn cục => mặt nạ dropout khác bản train liền (GAMMA1)
+        g = torch.Generator().manual_seed(tr["seed"] * 100003 + epoch * 101 + rank)
         return DataLoader(ds_tr, batch_sampler=bl, num_workers=nw, collate_fn=collate_fn,
-                          pin_memory=dev.type == "cuda")
+                          pin_memory=dev.type == "cuda", generator=g)
 
     # ------------------------------------------------------------------ text
     t = time.time()
@@ -473,7 +482,8 @@ def main():
                 spi = (time.time() - t_last) / max(win["n"], 1)
                 eta = spi * (tr["max_iter"] - it)
                 if crit is None:
-                    detail = ""
+                    lps = st.get("loss_per_stage")
+                    detail = "" if lps is None else " (tầng " + " ".join(f"{float(x):.3f}" for x in lps) + ")"
                 else:
                     lps = " ".join(f"{float(x):.2f}" for x in st["loss_per_stage"])
                     terms = " ".join(f"{LOG_LABEL.get(k, k)} {float(st[k + '_final']):.3f}" for k in crit.log_keys)
@@ -515,6 +525,9 @@ def main():
                             + " | ".join(f"{k} {res[k]:.4f}" for k in keys) + f" | {fmt_time(res['eval_sec'])}"
                             + ("" if dw is None else f" | ‖W density‖/‖W RGB‖ conv1 {dw:.4f}")
                             + (" | *best" if is_best else ""))
+                        if res.get("attn"):
+                            log("          attention query -> [t ; text ; vis] theo tầng: " + " | ".join(
+                                "/".join(f"{a[k]:.2f}" for k in ("t", "text", "vis")) for a in res["attn"]))
                         history.append({"iter": it, "eval": res, "density_weight_ratio": dw})
                     else:
                         if is_best:

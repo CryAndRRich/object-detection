@@ -1,0 +1,62 @@
+# EXPERIMENT GAMMA1 — bài ADD: điều kiện CE-Loc (SpatialSoftmax C5 + text + t) nhưng phần sinh box = 6 tầng RoI +
+# cross-attn kiểu ALPHA (thay U-Net 1D + FiLM của GAMMA0), mỗi tầng ra một box, loss ở mọi tầng.
+# Kế hoạch: docs/EXPERIMENT_GAMMA.md mục 11 (gốc multi_condition/). Dữ liệu / density / train / eval y GAMMA0.
+
+experiment: "gamma1"
+description: "bài add: (nhánh, lượt) CE-130, đích lỗ mới nhất; R-50+FPN 4 kênh; memory [t ; text ; SpatialSoftmax C5]; 1 box nhiễu -> 6 tầng RoI + cross-attn (không self-attn), dự đoán x0, L1 + GIoU mọi tầng; RGB + density"
+task: "add"
+
+data:
+  root: "../data/all_phase2_V2"
+  samples_root: "../data/samples"
+  turn_index: "../data/turn_index.json"
+  density_index: "../data/density_index.json"
+  density_root: "../data/samples"
+  image_size: 512
+  num_workers: 4
+  density: "sample"                 # như GAMMA0 (người dùng chốt: backbone nhận density cho thống nhất)
+
+model:
+  arch: "box_refiner"               # models/box_refiner.py
+  in_channels: 4                    # RGB + density (conv1 kênh 4 khởi tạo 0)
+  pretrained_backbone: true
+  d_model: 256                      # kênh FPN = chiều token / memory
+  n_stage: 6
+  n_head: 4                         # tầng của ALPHA (DP) bỏ self-attn: cross-attn + FFN
+  dim_feedforward: 1024
+  dropout: 0.3
+  text_dim: 512                     # CLIP ViT-B/32 pooler (frozen, tính sẵn)
+  clip_text: "openai/clip-vit-base-patch32"
+
+diffusion:
+  num_timesteps: 1000               # β tuyến tính 1e-4..0,02 như GAMMA0 / CE-Loc gốc; box chuẩn hoá snr 1
+  beta_start: 1.0e-4
+  beta_end: 0.02
+  noise_per_image: 8                # 8 mẫu độc lập (t, ε riêng) mỗi ảnh — không thấy nhau
+
+loss:
+  l1_weight: 5.0                    # DiffusionDet, mỗi tầng như nhau
+  giou_weight: 2.0
+
+training:
+  batch_size: 16
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  max_iter: 12000
+  steps: [9000, 11000]
+  gamma: 0.1
+  warmup_iters: 1000
+  warmup_factor: 0.01
+  grad_clip: 1.0
+  seed: 0
+  log_every: 20
+  ckpt_every: 1000
+  eval_every: 2000
+
+eval:
+  split: "val"
+  limit: 500
+  n_samples: 30
+  sampling_steps: 1                 # DDIM 1 bước cho eval định kỳ; báo cáo test 1 và 4 bước (eval.py --steps 1 4)
+  batch_size: 16
+  select_metric: "mean_iou_any"

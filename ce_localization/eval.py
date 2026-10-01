@@ -9,8 +9,9 @@ Giao thức (docs/EXPERIMENT_ALPHA.md mục 6.2): test, N=200, top-k 100, NMS 0,
   --density M    : model 4 kênh (ALPHA3): density đưa vào — full (mặc định) / partial / empty (mục 5).
 Config lấy từ checkpoint (an toàn hơn), trừ khi truyền --config.
 
-GAMMA (`task: add`, docs/EXPERIMENT_GAMMA.md mục 5): mỗi mẫu (nhánh, lượt) sinh `--n-samples` box độc lập (DDPM),
-chấm IoU với lỗ + C-NLL + on_object (`engine/add_eval.py`), kèm mốc `prior` (lỗ train ngẫu nhiên, không nhìn ảnh).
+GAMMA (`task: add`, docs/EXPERIMENT_GAMMA.md mục 5): mỗi mẫu (nhánh, lượt) sinh `--n-samples` box độc lập (DDPM ở
+GAMMA0; DDIM `--steps` bước ở GAMMA1, mỗi số bước một lượt), chấm IoU với lỗ + C-NLL + on_object (`engine/add_eval.py`),
+kèm mốc `prior` (lỗ train ngẫu nhiên, không nhìn ảnh). GAMMA1 in thêm attention của query lên [t ; text ; vis].
   --image inpainted original : ảnh inpaint (có lỗ) và ảnh gốc không lỗ (phép thử lối tắt; chỉ chỉ số không cần GT)
   --add-density M            : model 4 kênh — sample (density của chính mẫu, mặc định cho ảnh inpaint) / full (bản
                                đầy đủ nhất của ảnh gốc, mặc định cho ảnh gốc) / empty
@@ -113,6 +114,7 @@ def main_add(a, cfg, ck, dev, t0):
     model.load_state_dict(ck["model"])
     model.eval()
     prior_unit = prior_unit_boxes(index, "train")
+    step_list = a.steps if cfg["model"].get("arch") == "box_refiner" else [None]
     out = {"ckpt": a.ckpt, "iter": ck.get("iter"), "split": a.split, "n_samples": K, "density": {}, "results": {},
            "prior": {}, "density_weight_ratio": density_weight_ratio(model.backbone)}
     text_table = None
@@ -127,16 +129,27 @@ def main_add(a, cfg, ck, dev, t0):
             text_table = train_mod.build_text_table(ds.classes(), cfg, dev)
         loader = DataLoader(ds, batch_size=a.batch_size or cfg["eval"]["batch_size"], shuffle=False,
                             num_workers=a.num_workers, collate_fn=collate_add)
-        print(f"[eval] {a.ckpt} (iter {ck.get('iter')}) | ảnh {image} | density {dens} | split {a.split} "
-              f"({len(ds)} mẫu) | {K} mẫu/ảnh | {fmt_time(time.time() - t0)}", flush=True)
-        t = time.time()
-        rec = predict_add(model, loader, text_table, K, seed=a.seed, log_every=max(len(loader) // 10, 1))
-        holes = image == "inpainted"
-        res = add_metrics(rec, with_holes=holes)
-        res["eval_sec"] = time.time() - t
-        pri = add_metrics(prior_records(rec, prior_unit, K, seed=a.seed), with_holes=holes)
-        print_add(f"ảnh {image} ({fmt_time(res['eval_sec'])})", res, pri, K)
-        out["density"][image], out["results"][image], out["prior"][image] = dens, res, pri
+        out["density"][image] = dens
+        for steps in step_list:                       # GAMMA1: mỗi số bước DDIM một lượt; GAMMA0: một lượt DDPM
+            key = image if steps is None else f"{image}_steps{steps}"
+            print(f"[eval] {a.ckpt} (iter {ck.get('iter')}) | ảnh {image} | density {dens} | split {a.split} "
+                  f"({len(ds)} mẫu) | {K} mẫu/ảnh" + ("" if steps is None else f" | DDIM {steps} bước")
+                  + f" | {fmt_time(time.time() - t0)}", flush=True)
+            t = time.time()
+            rec = predict_add(model, loader, text_table, K, seed=a.seed, log_every=max(len(loader) // 10, 1),
+                              steps=steps)
+            holes = image == "inpainted"
+            res = add_metrics(rec, with_holes=holes)
+            res["eval_sec"] = time.time() - t
+            if hasattr(model, "pop_attn"):
+                res["attn"] = model.pop_attn()
+            pri = add_metrics(prior_records(rec, prior_unit, K, seed=a.seed), with_holes=holes)
+            print_add(f"ảnh {image}" + ("" if steps is None else f", {steps} bước") + f" ({fmt_time(res['eval_sec'])})",
+                      res, pri, K)
+            if res.get("attn"):
+                print("  attention query -> [t ; text ; vis] theo tầng: " + " | ".join(
+                    "/".join(f"{x[k]:.2f}" for k in ("t", "text", "vis")) for x in res["attn"]))
+            out["results"][key], out["prior"][key] = res, pri
     if a.out:
         os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
         with open(a.out, "w") as f:
@@ -160,7 +173,7 @@ def main():
     ap.add_argument("--nms", action="store_true")
     ap.add_argument("--nms-thr", type=float, default=0.5)
     ap.add_argument("--oracle-score", action="store_true")
-    ap.add_argument("--steps", type=int, nargs="+", default=[1])
+    ap.add_argument("--steps", type=int, nargs="+", default=[1], help="số bước DDIM (detect; add: chỉ GAMMA1 box_refiner)")
     ap.add_argument("--no-renewal", action="store_true", help="tắt box renewal khi nhiều bước")
     ap.add_argument("--attn-diag", type=int, default=0, help="số batch cho chẩn đoán attention; 0 = tắt")
     ap.add_argument("--batch-size", type=int, default=None,
