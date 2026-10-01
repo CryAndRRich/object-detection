@@ -51,8 +51,8 @@ training:                           # optimizer / lịch NHƯ BÀI (AdamW 5e-5, 
   lr: 5.0e-5
   weight_decay: 0.01
   schedule: "cosine"                # CosineAnnealingLR của bài, theo iter
-  cosine_t_max: 187500              # = 300 epoch × 625 bước của bài => lr gần như giữ 5e-5 trong 8k iter (như đoạn đầu lịch bài)
-  max_iter: 8000                    # ≈ 9,5 epoch của 13.454 mẫu ở batch 16 (bài: 75k bước × 32; bản train lại ở epoch 10 đã best-of-30 0,335)
+  cosine_t_max: 187500              # = 300 epoch × 625 bước của bài => lr gần như giữ 5e-5 trong 16k iter (như đoạn đầu lịch bài)
+  max_iter: 16000                   # ≈ 19 epoch của 13.454 mẫu ở batch 16 (bài: 75k bước × 32; bản train lại ở epoch 10 đã best-of-30 0,335)
   grad_clip: null                   # bài không clip
   seed: 0
   log_every: 20

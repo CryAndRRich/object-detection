@@ -50,7 +50,7 @@ training:                           # Y GAMMA0: AdamW 5e-5, wd 0,01, cosine, kh�
   weight_decay: 0.01
   schedule: "cosine"
   cosine_t_max: 187500
-  max_iter: 8000                    # ≈ 9,5 epoch ở batch 16
+  max_iter: 16000                   # ≈ 19 epoch ở batch 16
   grad_clip: null
   seed: 0
   log_every: 20
