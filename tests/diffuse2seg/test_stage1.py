@@ -13,7 +13,8 @@ from diffuse2seg.config.base import Diffu2SegConfig
 from diffuse2seg.d2s.affinity import blend_timesteps, change_temperature, to_affinity
 from diffuse2seg.d2s.markov import matrix_ipf, markov_map_from_prompt
 from diffuse2seg.d2s.plaplacian import compute_g, plaplacian_propagate
-from diffuse2seg.d2s.prompts import build_prompt_grid, cells_to_canvas_xy, f0_onehot
+from diffuse2seg.d2s.prompts import (build_prompt_grid, cells_to_canvas_xy, f0_onehot,
+                                     points_to_cells)
 
 try:                                    # cần diffusers — máy local có thể chưa cài
     from diffuse2seg.d2s.attention import AttnProcessor2_0Wrapper
@@ -865,3 +866,75 @@ def test_per_head_division_would_be_8x_wrong():
     ratio = wrong.abs().max() / right.abs().max()
     assert abs(float(ratio) - H) < 0.01, f"kỳ vọng gấp {H}, đo {ratio}"
 
+
+
+# ---------------------------------------------------------------------------
+# points_to_cells: prompt từ nguồn ngoài (tâm vật density) -> ô lưới
+# ---------------------------------------------------------------------------
+
+def _letterbox_valid(W, H, canvas):
+    s = min(canvas / W, canvas / H)
+    return int(W * s) / canvas, int(H * s) / canvas
+
+
+def test_points_to_cells_keeps_corners_of_the_real_region():
+    """[NEGATIVE CONTROL] điểm sát ĐÁY ảnh không được biến mất.
+
+    Vùng thật hiếm khi kết thúc đúng mép ô: 640x384 @canvas 512 cho
+    valid_h·r = 38,375, nên hàng ô 38 chứa 37,5 % ảnh thật. Dùng FLOOR làm
+    ngưỡng thì cả hàng đó bị loại và mọi vật sát đáy mất prompt — âm thầm, vì
+    hàm vẫn trả về một mảng hợp lệ. CE-130 có vật sát đáy nên mất thật.
+    """
+    W, H, canvas, r = 640, 384, 512, 64
+    vw, vh = _letterbox_valid(W, H, canvas)
+    pts = np.array([[0.0, 0.0], [W / 2, H / 2], [W - 1.0, H - 1.0]])
+    cells = points_to_cells(pts, W, H, r, canvas, vw, vh, dedup=False)
+    assert len(cells) == 3, f"mất điểm: {len(cells)}/3"
+    assert cells[:, 0].max() < r and cells[:, 1].max() < r
+
+
+def test_points_to_cells_drops_points_outside_the_image():
+    """Điểm ngoài ảnh (hoặc rơi vào pad) phải bị loại, không bị kẹp vào mép."""
+    W, H, canvas, r = 640, 384, 512, 64
+    vw, vh = _letterbox_valid(W, H, canvas)
+    pts = np.array([[-5.0, 10.0], [W + 60.0, 10.0], [10.0, H + 120.0], [10.0, 10.0]])
+    cells = points_to_cells(pts, W, H, r, canvas, vw, vh, dedup=False)
+    assert len(cells) == 1, f"kỳ vọng giữ 1, được {len(cells)}"
+
+
+def test_points_to_cells_dedups_same_cell():
+    """Hai vật trong cùng một ô 8 px -> MỘT prompt.
+
+    Không gộp thì f0_onehot tạo hai hàng giống hệt nhau, hai soft map trùng,
+    KL = 0, và clustering sinh cụm thừa.
+    """
+    W, H, canvas, r = 640, 384, 512, 64
+    vw, vh = _letterbox_valid(W, H, canvas)
+    # ⚠️ Một ô phủ ~10 px ảnh gốc ở cấu hình này (canvas/r = 8 px canvas, chia
+    # cho scale 0,8). Chọn ba điểm nằm GIỮA ô, không sát mốc: 100,0 rơi đúng
+    # biên nên (100, 100) và (101, 100) thuộc HAI ô khác nhau — bản test đầu
+    # của tôi dùng đúng cặp đó và đỏ, dù hàm chạy đúng.
+    same = np.array([[102.0, 102.0], [104.0, 104.0], [106.0, 106.0]])
+    assert len(points_to_cells(same, W, H, r, canvas, vw, vh, dedup=True)) == 1
+    assert len(points_to_cells(same, W, H, r, canvas, vw, vh, dedup=False)) == 3
+
+
+def test_points_to_cells_handles_portrait_padding():
+    """Ảnh DỌC pad bên phải (valid_w < 1): toạ độ không được bị nén.
+
+    CE-130 luôn W >= H nên valid_w = 1 và lỗi này KHÔNG lộ ở đó; chỉ lộ trên
+    PACO/COCO. Điểm ở mép phải phải rơi vào ô trong vùng thật, không vào pad.
+    """
+    W, H, canvas, r = 478, 640, 512, 64
+    vw, vh = _letterbox_valid(W, H, canvas)
+    assert vw < 0.8
+    cells = points_to_cells(np.array([[W - 1.0, H / 2]]), W, H, r, canvas, vw, vh)
+    assert len(cells) == 1
+    nx = int(np.ceil(vw * r))
+    assert cells[0, 1] < nx, f"cột {cells[0, 1]} rơi ngoài vùng thật (<{nx})"
+    assert cells[0, 1] >= nx - 2, "điểm mép phải phải nằm sát mép vùng thật"
+
+
+def test_points_to_cells_empty_input():
+    cells = points_to_cells(np.zeros((0, 2)), 640, 384, 64, 512)
+    assert cells.shape == (0, 2) and cells.dtype == np.int64

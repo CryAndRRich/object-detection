@@ -59,7 +59,7 @@ def build_affinity(image, cfg, aggregator):
 
 
 def segment_image(image, valid_h, cfg, aggregator=None, A=None, valid_w=1.0,
-                  orig_hw=None):
+                  orig_hw=None, cells=None):
     """Segment one padded canvas image.
 
     Args:
@@ -92,8 +92,20 @@ def segment_image(image, valid_h, cfg, aggregator=None, A=None, valid_w=1.0,
     assert A.shape == (r * r, r * r), \
         f"affinity is {tuple(A.shape)}, expected {(r * r, r * r)} for grid_r={r}"
 
-    cells = build_prompt_grid(r, cfg.prompt_stride_cells, valid_h=valid_h,
-                             min_valid_frac=cfg.min_valid_frac, valid_w=valid_w)
+    if cells is None:
+        cells = build_prompt_grid(r, cfg.prompt_stride_cells, valid_h=valid_h,
+                                  min_valid_frac=cfg.min_valid_frac,
+                                  valid_w=valid_w)
+    else:
+        # Prompt do NGƯỜI GỌI cung cấp (vd tâm vật từ density CountGD) thay cho
+        # lưới đều. Mọi thứ sau đó không đổi một dòng: propagation và Alg.2 chỉ
+        # nhìn thấy một danh sách ô.
+        cells = np.asarray(cells, dtype=np.int64).reshape(-1, 2)
+        if len(cells):
+            assert cells[:, 0].min() >= 0 and cells[:, 0].max() < r, \
+                f"hàng ô ngoài [0,{r}): {cells[:, 0].min()}..{cells[:, 0].max()}"
+            assert cells[:, 1].min() >= 0 and cells[:, 1].max() < r, \
+                f"cột ô ngoài [0,{r}): {cells[:, 1].min()}..{cells[:, 1].max()}"
     if len(cells) == 0:
         return _empty(r, "no prompt survived the padding filter", orig_hw)
 

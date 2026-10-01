@@ -34,7 +34,8 @@ thing standing between the pipeline and a pile of garbage boxes.
 import numpy as np
 import torch
 
-__all__ = ["build_prompt_grid", "f0_onehot", "cells_to_canvas_xy"]
+__all__ = ["build_prompt_grid", "f0_onehot", "cells_to_canvas_xy",
+           "points_to_cells"]
 
 
 def build_prompt_grid(grid_r, stride_cells, valid_h=1.0, min_valid_frac=1.0,
@@ -107,3 +108,56 @@ def cells_to_canvas_xy(cells, grid_r, canvas):
     cells = np.asarray(cells, dtype=np.float64).reshape(-1, 2)
     return np.stack([(cells[:, 1] + 0.5) * cell_px,
                      (cells[:, 0] + 0.5) * cell_px], axis=1)
+
+
+def points_to_cells(points_xy, W, H, grid_r, canvas, valid_w=1.0, valid_h=1.0,
+                    dedup=True):
+    """Điểm pixel trên ẢNH GỐC -> ô lưới (row, col). Nghịch đảo của letterbox.
+
+    Dùng khi prompt đến từ nguồn ngoài thay cho lưới đều — ví dụ tâm vật do
+    CountGD sinh ra (`data/density_points.json` của ce_localization).
+
+    `points_xy`: (K, 2) toạ độ (x, y) pixel liên tục trên ảnh gốc W×H.
+    Trả (M, 2) int64, M <= K: điểm ngoài ảnh bị loại, và nếu `dedup` thì nhiều
+    điểm rơi cùng một ô gộp làm một.
+
+    ⚠️ HAI CHỖ DỄ SAI, cả hai đều âm thầm:
+
+    1. Ảnh được resize GIỮ TỈ LỆ rồi dán góc trên-trái, nên vùng thật chỉ chiếm
+       `valid_w × valid_h` của canvas. Chia cho `canvas` thay vì cho phần hợp lệ
+       sẽ nén toạ độ: trên ảnh dọc 478×640 (valid_w = 0,746) điểm ở mép phải
+       lệch 26 %. Ảnh CE-130 luôn W >= H nên `valid_w = 1` và lỗi KHÔNG lộ —
+       chỉ lộ trên PACO/COCO.
+    2. Trùng ô là chuyện thường: density cho ~20 điểm trên lưới 64×64, nhưng hai
+       vật sát nhau có thể rơi cùng một ô 8 px. Không gộp thì `f0_onehot` tạo
+       hai prompt giống hệt nhau -> hai soft map trùng -> KL = 0 -> cụm thừa.
+    """
+    pts = np.asarray(points_xy, dtype=np.float64).reshape(-1, 2)
+    if len(pts) == 0:
+        return np.zeros((0, 2), dtype=np.int64)
+
+    # pixel ảnh gốc -> pixel canvas -> ô lưới
+    sx = valid_w * canvas / float(W)
+    sy = valid_h * canvas / float(H)
+    cell_px = canvas / float(grid_r)
+    col = np.floor(pts[:, 0] * sx / cell_px).astype(np.int64)
+    row = np.floor(pts[:, 1] * sy / cell_px).astype(np.int64)
+
+    # Loại điểm ngoài VÙNG THẬT (không chỉ ngoài lưới): điểm rơi vào pad sẽ lan
+    # tự do trên nền xám phẳng và sinh một mask khổng lồ.
+    #
+    # ⚠️ CEIL chứ không FLOOR. Vùng thật hiếm khi kết thúc đúng mép ô: ảnh
+    # 640×384 cho valid_h·r = 38,375, nên ô hàng 38 chứa 37,5 % ảnh thật và
+    # 62,5 % pad. FLOOR vứt cả hàng đó -> mọi điểm ở DẢI ĐÁY ảnh bị loại âm
+    # thầm (đo: điểm (639, 383) biến mất). CE-130 có vật sát đáy nên mất thật.
+    # Điểm đã nằm trong ảnh gốc thì ô chứa nó hợp lệ theo định nghĩa — khác
+    # `build_prompt_grid`, nơi `min_valid_frac` đòi ô NẰM TRỌN trong ảnh vì ở
+    # đó ô được sinh ra mù, không có điểm nào bảo chứng.
+    nx = min(int(np.ceil(valid_w * grid_r)), grid_r)
+    ny = min(int(np.ceil(valid_h * grid_r)), grid_r)
+    keep = (col >= 0) & (col < nx) & (row >= 0) & (row < ny)
+    cells = np.stack([row[keep], col[keep]], axis=1)
+
+    if dedup and len(cells):
+        cells = np.unique(cells, axis=0)
+    return cells
