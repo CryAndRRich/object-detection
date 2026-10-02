@@ -140,6 +140,7 @@ def main_add(a, cfg, ck, dev, t0):
         model.load_state_dict(ck["model"])
         it, dwr = ck.get("iter"), density_ratio_of(model)
     model = model.to(dev).eval()
+    amp = bool(cfg.get("training", {}).get("amp")) and dev.type == "cuda"     # model train AMP -> eval cùng autocast fp16
     src = d.get("split_source", "ce130")
     prior_unit = prior_unit_boxes(index, "train", src)
     if cfg["model"].get("arch") == "box_refiner" and not paper:
@@ -158,7 +159,8 @@ def main_add(a, cfg, ck, dev, t0):
                     else f"CE-Loc -> refine t*={rt}, {a.refine_steps} bước")
             refine_vars.append((suffix, desc, {"refine_t": rt, "refine_steps": a.refine_steps}))
     out = {"ckpt": a.ckpt, "iter": it, "split": a.split, "n_samples": K, "density": {}, "results": {},
-           "prior": {}, "density_weight_ratio": dwr, "add_samplers": a.add_samplers, "proposer_sampler": a.proposer_sampler}
+           "prior": {}, "density_weight_ratio": dwr, "add_samplers": a.add_samplers, "proposer_sampler": a.proposer_sampler,
+           "amp": amp}
     text_table = None
     for image in a.image:
         dens = (a.add_density or ("sample" if image == "inpainted" else "full")) if four else None
@@ -205,7 +207,8 @@ def main_add(a, cfg, ck, dev, t0):
                   flush=True)
             t = time.time()
             recs = predict_add(model, loader, text_table, K, seed=a.seed, log_every=max(len(loader) // 10, 1),
-                               sample_kw={"proposer_sampler": a.proposer_sampler}, variants=[v for _, _, v in refine_vars])
+                               sample_kw={"proposer_sampler": a.proposer_sampler}, variants=[v for _, _, v in refine_vars],
+                               amp=amp)
             for vi, ((suffix, desc, _), rec) in enumerate(zip(refine_vars, recs)):
                 report(image + suffix, desc, rec, time.time() - t, attn_key=vi)
             continue
@@ -213,7 +216,7 @@ def main_add(a, cfg, ck, dev, t0):
             print(f"[eval] {a.ckpt} ({it}) | ảnh {image} | density {dens} | split {a.split} ({len(ds)} mẫu) | {K} mẫu/ảnh"
                   f" | {desc} | {fmt_time(time.time() - t0)}", flush=True)
             t = time.time()
-            rec = predict_add(model, loader, text_table, K, seed=a.seed, log_every=max(len(loader) // 10, 1), **kw)
+            rec = predict_add(model, loader, text_table, K, seed=a.seed, log_every=max(len(loader) // 10, 1), amp=amp, **kw)
             report(image + suffix, desc, rec, time.time() - t)
     if a.out:
         os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)

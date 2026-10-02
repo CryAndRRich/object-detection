@@ -43,11 +43,12 @@ KNN = 3
 
 @torch.no_grad()
 def predict_add(model, loader, text_table, n_samples=30, seed=0, log_every=0, log=print, steps=None, sampler=None,
-                sample_kw=None, variants=None):
+                sample_kw=None, variants=None, amp=False):
     """-> list record numpy: image_id, t, wh (nw, nh), boxes [K,4] (thô), holes [t,4], objects [M,4].
     `steps`: số bước DDIM của `BoxRefiner` (GAMMA1; None = mặc định của model); `sampler`: ddpm | mock của `BoxPolicy`. BoxRefiner còn cộng dồn attention lên
     [t ; text ; vis] — lấy bằng `model.pop_attn()` sau khi gọi. `sample_kw`: tham số thêm cho `model.sample`; `variants`
-    (ProposeRefine): list biến thể refine -> list record của TỪNG biến thể, cùng box CE-Loc."""
+    (ProposeRefine): list biến thể refine -> list record của TỪNG biến thể, cùng box CE-Loc. `amp`: autocast fp16 (chỉ CUDA)
+    như lúc train model `training.amp` (head refine tự giữ fp32)."""
     model.eval()
     kw = {"steps": steps} if steps else {}
     if sampler:                                       # BoxPolicy (GAMMA0 / checkpoint của bài): ddpm | mock
@@ -62,11 +63,12 @@ def predict_add(model, loader, text_table, n_samples=30, seed=0, log_every=0, lo
     for bi, batch in enumerate(loader):
         batch = to_device_add(batch, dev)
         text = text_table(batch["text"], dev)
-        if multi:
-            us = model.sample_variants(batch["images"], text, batch["valid_hw"], n_samples, generator=gen,
-                                       variants=variants, **kw)
-        else:
-            us = [model.sample(batch["images"], text, batch["valid_hw"], n_samples, generator=gen, **kw)]
+        with torch.autocast(device_type=dev.type, dtype=torch.float16, enabled=amp and dev.type == "cuda"):
+            if multi:
+                us = model.sample_variants(batch["images"], text, batch["valid_hw"], n_samples, generator=gen,
+                                           variants=variants, **kw)
+            else:
+                us = [model.sample(batch["images"], text, batch["valid_hw"], n_samples, generator=gen, **kw)]
         nwhwh = norm_whwh(model, batch["whwh"], batch["images"].shape[-1])
         wh = batch["whwh"][:, :2].cpu().numpy()
         for vi, u in enumerate(us):

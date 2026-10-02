@@ -408,8 +408,9 @@ def test_image_inputs_blank_density_is_jet_background():
 
 def test_add_dataset_paper_style_matches_image_inputs(tmp_path):
     """`style="paper"` (GAMMA "CE-Loc gốc + R-50") == `image_inputs(..., "paper")` (đã kiểm với `resize_and_pad` của bài):
-    ảnh `to_tensor`, density `.convert("L")`; box / lỗ không đổi theo style; density `empty` = PNG jet trống -> 14/255."""
-    from ce_localization.data.turns import CE130AddDataset, image_inputs
+    ảnh `to_tensor`, density `.convert("L")`; box / lỗ không đổi theo style; density `empty` = PNG jet trống -> 14/255.
+    Dataset trả uint8, `/255` làm sau `to_device_add` (`paper_to_float`) — TRÙNG TỪNG BIT với bản float."""
+    from ce_localization.data.turns import CE130AddDataset, collate_add, image_inputs, paper_to_float, to_device_add
     from tests.ce_localization.helpers import _fake_turn_index
     root, samples, _, index, _ = _fake_turn_index(str(tmp_path))
     ours = CE130AddDataset(index, root, samples, "train", 128, density="sample")
@@ -418,13 +419,17 @@ def test_add_dataset_paper_style_matches_image_inputs(tmp_path):
     e, _ = pap.entry(0)
     ref = image_inputs(Image.open(os.path.join(samples, e["sample"])).convert("RGB"),
                        os.path.join(samples, e["density"]), 128, "paper")[0]
-    assert b["image"].dtype == torch.float32 and torch.allclose(b["image"], ref)
-    assert 0 <= float(b["image"][:3].min()) and float(b["image"][:3].max()) <= 1
+    assert b["image"].dtype == torch.uint8 and torch.equal(paper_to_float(b["image"]), ref)
+    bt = to_device_add(collate_add([b, pap[1]]), torch.device("cpu"))
+    assert bt["images"].dtype == torch.float32 and torch.equal(bt["images"][0], ref)
+    assert torch.equal(paper_to_float(torch.arange(256, dtype=torch.uint8)),
+                       torch.from_numpy(np.arange(256, dtype=np.uint8).astype(np.float32) / 255.0))
+    assert a["image"].dtype == torch.float32                                      # style ours giữ float
     for k in ("target", "holes", "objects"):
         assert torch.equal(a[k], b[k]), k
     emp = CE130AddDataset(index, root, samples, "train", 128, density="empty", style="paper")[0]["image"][3]
     nh, nw = b["valid_hw"]
-    assert torch.allclose(emp[:nh, :nw], torch.tensor(14 / 255)) and float(emp[nh:].abs().sum()) == 0
+    assert bool((emp[:nh, :nw] == 14).all()) and int(emp[nh:].sum()) == 0
     with pytest.raises(ValueError):
         CE130AddDataset(index, root, samples, "train", 128, style="x")
 

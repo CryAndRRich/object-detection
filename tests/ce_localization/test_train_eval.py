@@ -123,6 +123,42 @@ def test_ddp_two_processes(tmp_path):
     assert sorted(os.listdir(save)) == ["best.pth", "history.json", "last.pth"]
 
 
+def _ddp_worker_strict(rank, world, port, argv, unused):
+    """`_ddp_worker` + cảnh báo lệch stride grad của DDP thành LỖI; `unused` ép find_unused_parameters (đường cũ)."""
+    import warnings
+    import ce_localization.train as ta
+    warnings.filterwarnings("error", message="Grad strides do not match bucket view strides")
+    if unused is not None:
+        ta.ddp_find_unused = lambda cfg: unused
+    _ddp_worker(rank, world, port, argv)
+
+
+def test_ddp_gamma2_celoc_bucket_view_no_stride_warning(tmp_path):
+    """Pha 1 GAMMA2 (config thật, BN thường) trên 2 tiến trình gloo: grad = view bucket DDP => không cảnh báo lệch stride
+    (weight Conv1d kernel 1 của U-Net trả grad stride khác ở chiều kích thước 1); đường cũ (find_unused, grad mới mỗi iter)
+    thì có — để chắc phép thử bắt được cảnh báo."""
+    import socket
+    import torch.multiprocessing as tmp
+    from tests.ce_localization.helpers import _fake_turn_index, _gamma2_cfg
+    base = str(tmp_path / "d")
+    os.makedirs(base)
+    _fake_turn_index(base)
+    cfg_path, cfg = _gamma2_cfg(tmp_path, base, "celoc2")
+    assert cfg["training"]["sync_bn"] is False
+
+    def run(save, unused):
+        with socket.socket() as so:
+            so.bind(("127.0.0.1", 0))
+            port = so.getsockname()[1]
+        tmp.spawn(_ddp_worker_strict, args=(2, port, ["--config", cfg_path, "--save-dir", save, "--max-iter", "3",
+                                                      "--eval-every", "3"], unused), nprocs=2, join=True)
+    run(str(tmp_path / "new"), None)
+    ck = torch.load(os.path.join(str(tmp_path / "new"), "last.pth"), weights_only=False)
+    assert ck["iter"] == 3 and all(np.isfinite(h["loss"]) and h["skipped"] == 0 for h in ck["history"] if "loss" in h)
+    with pytest.raises(Exception, match="Grad strides"):
+        run(str(tmp_path / "old"), True)
+
+
 def test_config_diff_ignores_data_root_and_workers():
     """Kaggle gắn dataset ở đường dẫn khác nhau giữa các phiên: resume vẫn phải chạy."""
     from ce_localization.train import config_diff
@@ -580,6 +616,7 @@ def test_full_flow_gamma2_celoc_then_refine(tmp_path, monkeypatch):
     _run_train(monkeypatch, ["--config", c1_path, "--save-dir", p1])
     ck1 = torch.load(os.path.join(p1, "best.pth"), weights_only=False)
     assert ck1["config"]["model"]["ss_mask"] and ck1["iter"] in (2, 4)
+    assert ck1["config"]["training"]["amp"] and "scaler" in ck1          # amp: true trên CPU -> tự tắt, vẫn lưu GradScaler
     ev = [h["eval"] for h in ck1["history"] if "eval" in h]
     assert ev and ev[0]["n"] == len(ta.TurnIndex(os.path.join(base, "turn_index.json")).keys("val", "samples"))
 

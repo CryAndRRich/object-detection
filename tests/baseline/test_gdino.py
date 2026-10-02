@@ -63,7 +63,8 @@ def fake_og(tmp_path, monkeypatch):
 def test_shim_routes_to_pytorch_when_op_missing(fake_og, monkeypatch):
     # chặn import op THẬT (Kaggle build được op -> máy có sẵn): sys.modules[...] = None -> ImportError
     monkeypatch.setitem(sys.modules, "MultiScaleDeformableAttention", None)
-    assert install_msda_fallback() is True
+    with pytest.warns(UserWarning, match="dùng bản PyTorch thuần"):            # cảnh báo có chủ đích: chậm hơn op CUDA
+        assert install_msda_fallback() is True
     import models.GroundingDINO.ms_deform_attn as m
     assert m.forward("v") == ("pytorch", "v")
 

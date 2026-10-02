@@ -471,6 +471,8 @@ def test_box_policy_r18_trainable_with_mask():
     loss = m(x, torch.randn(2, 512), vhw, torch.rand(2, 4) * 2 - 1, k=1)
     loss.backward()
     assert m.vision.backbone[0].weight.grad.abs().sum() > 0 and m.vision.projection.weight.grad.abs().sum() > 0
+    # MỌI tham số có grad => train.py tắt DDP find_unused_parameters, dùng gradient_as_bucket_view (`ddp_find_unused`)
+    assert [n for n, p in m.named_parameters() if p.grad is None] == []
     with torch.no_grad():
         s = m.sample(x, torch.randn(2, 512), vhw, 3)
         kp = m.vision.keypoints_flat(m.vision.backbone(x), vhw)
@@ -479,6 +481,16 @@ def test_box_policy_r18_trainable_with_mask():
         b = m.sample_from_cond(m.cond_from_keypoints(kp, torch.randn(2, 512, generator=torch.Generator().manual_seed(1))),
                                3, g2)
     assert s.shape == (2, 3, 4) and torch.allclose(a, b, atol=1e-5)
+
+
+def test_ddp_find_unused_only_off_for_paper_r18():
+    """Chỉ CE-Loc gốc ResNet18 (box_policy + r18_paper) tắt find_unused_parameters; R-50 (FPN không dùng) và mọi
+    model RoI (tầng FPN có thể trống) giữ bật."""
+    import yaml
+    from ce_localization.train import ddp_find_unused
+    from tests.ce_localization.helpers import CFG_G
+    on = {k: ddp_find_unused(yaml.safe_load(open(p))) for k, p in CFG_G.items()}
+    assert on == {k: k != "celoc2" for k in CFG_G}, on
 
 
 def test_dynamic_conv_matches_diffusiondet_formula():
@@ -528,6 +540,25 @@ def test_propose_refine_freeze_and_joint_loss(freeze):
     opt.step()
     same = all(torch.equal(before[k], v) for k, v in m.proposer.state_dict().items())
     assert same is freeze                                                 # đóng băng: kể cả thống kê BN không đổi
+
+
+def test_propose_refine_head_stays_fp32_under_autocast():
+    """`training.amp`: autocast hạ backbone + FPN xuống nửa chính xác, nhưng memory + head refine (kiểu DiffusionDet) chạy
+    fp32 — box mọi stage và loss là fp32, backward qua được. CPU dùng bf16 thay cho fp16 CUDA (cùng cơ chế autocast)."""
+    m = _propose_refine(False).train()
+    x, vhw = torch.rand(2, 4, 128, 128), torch.tensor([[96, 128], [128, 128]])
+    whwh = torch.tensor([[128.0, 96.0, 128.0, 96.0], [128.0, 128.0, 128.0, 128.0]])
+    tgt = torch.tensor([[10.0, 20.0, 50.0, 60.0], [60.0, 70.0, 100.0, 120.0]])
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        feats, kp = m.encode(x, vhw)
+        assert feats[0].dtype == torch.bfloat16                           # autocast có tới backbone + FPN
+        boxes = tgt[:, None].repeat(1, 3, 1)
+        preds, att = m.refine(feats, m.vis_token(kp), torch.randn(2, 512), torch.randint(0, 1000, (6,)), boxes, True)
+        assert preds.dtype == torch.float32 and att.dtype == torch.float32
+        loss, st = m(x, torch.randn(2, 512), vhw, tgt, whwh, k=3)
+    assert loss.dtype == torch.float32 and torch.isfinite(loss) and st["loss_per_stage"].dtype == torch.float32
+    loss.backward()
+    assert m.head.stages[0].bboxes_delta.weight.grad.dtype == torch.float32
 
 
 def test_propose_refine_sample_variants():

@@ -43,7 +43,9 @@ diffusion:
   noise_per_image: 1
 
 training:                           # như bài trừ batch (gấp đôi) / số iter (nửa)
-  batch_size: 64                    # TOÀN CỤC: Kaggle 2 GPU -> 32 / GPU + SyncBN (BN thống kê trên cả 64)
+  batch_size: 64                    # TOÀN CỤC: Kaggle 2 GPU -> 32 / GPU
+  sync_bn: false                    # BN thường: thống kê trên 32 ảnh / GPU = đúng batch BN của bài (SyncBN sẽ thành 64, chậm hơn)
+  amp: true                         # Kaggle T4: autocast fp16 + GradScaler + channels_last (tensor core) — người dùng chốt 2026-10-02
   lr: 5.0e-5
   weight_decay: 0.01
   schedule: "cosine"

@@ -18,7 +18,8 @@ Dataset đọc ảnh + density từ `samples/` (Kaggle chỉ cần zip samples +
 train = mọi mẫu `samples/train` (gồm cả ảnh gốc val / test CE-130 bài đã dùng), val / test = mẫu `samples/test` có ảnh gốc
 thuộc val / test CE-130 (`samples/` train và test không chung ảnh gốc ⇒ chưa model nào train trên val / test này).
 `AddCache` (GAMMA2, Kaggle): ảnh inpaint + density của mẫu đã letterbox, uint8 [T,T,4] trong MỘT file (zlib hoặc memmap thô) —
-`/255` ra đúng từng bit đầu vào kiểu bài (có test); bỏ nghẽn giải mã PNG.
+`/255` ra đúng từng bit đầu vào kiểu bài (có test); bỏ nghẽn giải mã PNG. Style `paper` trả ảnh uint8 (cả khi không cache):
+`to_device_add` mới `/255` trên thiết bị (`paper_to_float`) — worker nhẹ hơn, PCIe chở 1/4 số byte.
 """
 
 import glob
@@ -40,7 +41,7 @@ from ce_localization.utils.box_ops_np import box_iou, filter_degenerate
 
 __all__ = ["SPLITS", "IMAGE_KINDS", "ADD_DENSITY", "INPUT_STYLES", "SPLIT_SOURCES", "pixel_hash", "assign_removed",
            "build_turn_index", "TurnIndex", "AddCache", "build_add_cache", "CE130AddDataset", "collate_add", "to_device_add",
-           "image_inputs"]
+           "paper_to_float", "image_inputs"]
 
 SPLITS = ("train", "val", "test")
 IMAGE_KINDS = ("inpainted", "original")
@@ -247,13 +248,20 @@ class AddCache:
         return np.asarray(self._fh[self.rows[key]]), scale, nw, nh
 
 
+def _letterbox_l_u8(gray_u8, nw, nh, target):
+    """Density kiểu bài (`.convert("L")`, uint8 [H,W]) -> uint8 [T,T]: resize NEAREST, dán góc trên-trái lên nền 0.
+    `/255` ra đúng `letterbox_density` (float)."""
+    den = np.zeros((target, target), dtype=np.uint8)
+    small = Image.fromarray(np.asarray(gray_u8, dtype=np.uint8)).resize((nw, nh), resample=Image.NEAREST)
+    den[:nh, :nw] = np.asarray(small, dtype=np.uint8)
+    return den
+
+
 def _cache_one(job):
     key, img_path, den_path, size, fmt = job
     img = Image.open(img_path).convert("RGB")
     canvas, scale, nw, nh = letterbox(img, size)
-    den = np.zeros((size, size), dtype=np.uint8)
-    small = Image.open(den_path).convert("L").resize((nw, nh), resample=Image.NEAREST)
-    den[:nh, :nw] = np.asarray(small, dtype=np.uint8)
+    den = _letterbox_l_u8(np.asarray(Image.open(den_path).convert("L"), dtype=np.uint8), nw, nh, size)
     arr = np.ascontiguousarray(np.concatenate([canvas, den[..., None]], axis=-1))
     return key, (zlib.compress(arr.tobytes(), 1) if fmt == "zlib" else arr), (float(scale), int(nw), int(nh))
 
@@ -341,7 +349,7 @@ class CE130AddDataset(Dataset):
         paper = self.style == "paper"
         if self.cache is not None and key in self.cache:
             arr, scale, nw, nh = self.cache.get(key)
-            x = arr.transpose(2, 0, 1).astype(np.float32) / 255.0
+            x = arr.transpose(2, 0, 1)
             if self.density is None:
                 x = x[:3]
         else:
@@ -349,19 +357,22 @@ class CE130AddDataset(Dataset):
                     os.path.join(self.ce130_root, e["branch"], "ground_truth.jpg"))
             img = Image.open(path).convert("RGB")
             canvas, scale, nw, nh = letterbox(img, self.image_size)
-            x = canvas.astype(np.float32).transpose(2, 0, 1) / 255.0 if paper else normalize(canvas)
+            x = canvas.transpose(2, 0, 1) if paper else normalize(canvas)
         if self.density is not None and x.shape[0] == 3:
             if self.density == "empty" and paper:
-                den = letterbox_density(np.asarray(Image.new("RGB", img.size, (0, 0, 127)).convert("L")), nw, nh,
-                                        self.image_size)
+                den = _letterbox_l_u8(np.asarray(Image.new("RGB", img.size, (0, 0, 127)).convert("L")), nw, nh,
+                                      self.image_size)
             elif self.density == "empty":
                 den = np.zeros((self.image_size, self.image_size), dtype=np.float32)
             else:
                 iid = e["branch"].split("/")[1].split("_b")[0]
                 path_d = (os.path.join(self.samples_root, e["density"]) if self.density == "sample" else
                           self.density_index.path(self.density_index.pick(iid, "full")[0]))
-                lv = np.asarray(Image.open(path_d).convert("L"), dtype=np.uint8) if paper else load_density_levels(path_d)
-                den = letterbox_density(lv, nw, nh, self.image_size)
+                if paper:
+                    den = _letterbox_l_u8(np.asarray(Image.open(path_d).convert("L"), dtype=np.uint8), nw, nh,
+                                          self.image_size)
+                else:
+                    den = letterbox_density(load_density_levels(path_d), nw, nh, self.image_size)
             x = np.concatenate([x, den[None]], axis=0)
         holes = scale_boxes(b["holes"][:t], scale, nw, nh)
         if len(holes) != t:
@@ -371,7 +382,7 @@ class CE130AddDataset(Dataset):
         if self.image == "inpainted":                    # vật còn trong ảnh lượt t: chưa bị xoá tới lượt t
             objs = objs[(removed == 0) | (removed > t)]
         return {
-            "image": torch.from_numpy(np.ascontiguousarray(x, dtype=np.float32)),
+            "image": torch.from_numpy(np.ascontiguousarray(x, dtype=np.uint8 if paper else np.float32)),
             "target": torch.from_numpy(holes[-1]).float(),               # lỗ MỚI NHẤT = đích train
             "holes": torch.from_numpy(holes).float(),                    # mọi lỗ tới lượt t (chấm)
             "objects": torch.from_numpy(scale_boxes(objs, scale, nw, nh)).float(),   # vật đang có (chấm)
@@ -398,9 +409,19 @@ def collate_add(batch):
     }
 
 
+def paper_to_float(images_u8):
+    """Ảnh kiểu bài uint8 -> float32 `/255` qua bảng tra 256 giá trị tính bằng numpy float32: trùng TỪNG BIT với
+    `to_tensor` / đọc PNG (phép chia `/` của PyTorch CUDA theo vô hướng là nhân nghịch đảo, có thể lệch 1 ulp)."""
+    lut = torch.from_numpy(np.arange(256, dtype=np.float32) / np.float32(255.0)).to(images_u8.device)
+    return lut[images_u8.long()]
+
+
 def to_device_add(batch, dev):
+    """Đưa batch lên `dev`. Ảnh kiểu bài đi qua PCIe dạng uint8 (nhẹ 4×) rồi mới `/255` trên thiết bị."""
     nb = dev.type == "cuda"
     out = dict(batch)
     for k in ("images", "target", "whwh", "valid_hw"):
         out[k] = batch[k].to(dev, non_blocking=nb)
+    if out["images"].dtype == torch.uint8:
+        out["images"] = paper_to_float(out["images"])
     return out

@@ -87,10 +87,14 @@ class ProposeRefine(nn.Module):
         return self.memory.ss_proj(kp)[:, None] + self.memory.cond_pos_emb[:, 2:3]
 
     def refine(self, feats, vis, text_raw, t, boxes, need_weights=False):
-        """boxes [B,K,4] xyxy pixel, t [B·K] -> (box mọi stage [S, B·K, 4], attention [S, B·K, 3] | None)."""
+        """boxes [B,K,4] xyxy pixel, t [B·K] -> (box mọi stage [S, B·K, 4], attention [S, B·K, 3] | None).
+        Memory + head LUÔN fp32 kể cả khi train AMP (`training.amp`): head kiểu DiffusionDet vỡ với fp16 (CLAUDE.md);
+        AMP chỉ áp cho backbone + FPN + U-Net 1D."""
         K = boxes.shape[1]
-        mem, _ = self.memory(t, text_raw.repeat_interleave(K, 0), vis.repeat_interleave(K, 0))
-        return self.head(feats, boxes, t, mem, need_weights)
+        with torch.autocast(device_type=boxes.device.type, enabled=False):
+            feats = [f.float() for f in feats]
+            mem, _ = self.memory(t, text_raw.float().repeat_interleave(K, 0), vis.float().repeat_interleave(K, 0))
+            return self.head(feats, boxes.float(), t, mem, need_weights)
 
     @staticmethod
     def _whwh(valid_hw):

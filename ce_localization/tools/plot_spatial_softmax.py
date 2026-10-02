@@ -80,6 +80,7 @@ def main():
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.colors import LogNorm
+    from matplotlib.ticker import FuncFormatter, NullFormatter
 
     model, _, info = BoxPolicy.load_celoc_paper(a.ckpt)
     if info["in_channels"] != 4:
@@ -122,7 +123,11 @@ def main():
             sc = axes[r, 2].scatter(px[order], py[order], c=eff[order], s=size[order], cmap="plasma_r",
                                     norm=LogNorm(vmin=1, vmax=att.shape[1] * att.shape[2]), edgecolors="black",
                                     linewidths=0.3, alpha=0.9)
-            fig.colorbar(sc, ax=axes[r, 2], fraction=0.046, pad=0.02, label="effective cells (1 = sharp, 256 = uniform)")
+            cb = fig.colorbar(sc, ax=axes[r, 2], fraction=0.046, pad=0.02, label="effective cells (1 = sharp, 256 = uniform)")
+            # nhãn trục log dạng số thường ("1", "10", "100"), KHÔNG mathtext "$10^{k}$": matplotlib cũ + pyparsing ≥ 3.3
+            # (Kaggle) cảnh báo PyparsingDeprecationWarning mỗi lần dựng / parse mathtext
+            cb.ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
+            cb.ax.yaxis.set_minor_formatter(NullFormatter())
             sharp = float((eff < SHARP).mean())
             axes[r, 2].set_title(f"SpatialSoftmax Output (512 channels)\nsharp (<{SHARP} cells): {sharp * 100:.1f}% | "
                                  f"median cells {np.median(eff):.0f}", fontsize=9)

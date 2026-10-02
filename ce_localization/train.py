@@ -171,7 +171,7 @@ def run_val(model, loader, text_table, cfg, log):
     if cfg.get("task", "detect") == "add":
         rec = predict_add(model, loader, text_table, ev["n_samples"], seed=0,
                           log_every=max(len(loader) // 4, 1), log=log, steps=ev.get("sampling_steps"),
-                          sample_kw=ev.get("sample_kw"))
+                          sample_kw=ev.get("sample_kw"), amp=bool(cfg["training"].get("amp")))
         res = add_metrics(rec)
         res["eval_sec"] = time.time() - t0
         if hasattr(model, "pop_attn"):                  # GAMMA1: attention của query lên [t ; text ; vis]
@@ -185,8 +185,8 @@ def run_val(model, loader, text_table, cfg, log):
     return res
 
 
-def bench(model, net, crit, loader_fn, text_table, cfg, opt, dev, n, log, todev=to_device):
-    """G4: đo riêng đọc dữ liệu và tính toán (forward + backward + step) trên n iter."""
+def bench(model, net, crit, loader_fn, text_table, cfg, opt, dev, n, log, todev=to_device, amp=False):
+    """G4: đo riêng đọc dữ liệu và tính toán (forward + backward + step) trên n iter (`amp`: autocast fp16 như train)."""
     model.train()
     batches = loader_fn(0, 0)
     it = iter(batches)
@@ -202,12 +202,15 @@ def bench(model, net, crit, loader_fn, text_table, cfg, opt, dev, n, log, todev=
             it = iter(loader_fn(1, 0))
             batch = next(it)
         batch = todev(batch, dev)
+        if amp:
+            batch["images"] = batch["images"].contiguous(memory_format=torch.channels_last)
         if dev.type == "cuda":
             torch.cuda.synchronize()
         td = time.time() - t
         t = time.time()
         gen.manual_seed(k)
-        loss = _step_loss(net, crit, batch, text_table, cfg, model, gen, dev)[0]
+        with torch.autocast(device_type=dev.type, dtype=torch.float16, enabled=amp):
+            loss = _step_loss(net, crit, batch, text_table, cfg, model, gen, dev)[0]
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
@@ -223,6 +226,15 @@ def bench(model, net, crit, loader_fn, text_table, cfg, opt, dev, n, log, todev=
     log(f"[bench] ETA thô cho {cfg['training']['max_iter']} iter (chưa tính eval): "
         f"{fmt_time(per * cfg['training']['max_iter'])} (đọc dữ liệu chạy song song với worker nên "
         f"thời gian thật gần max(đọc, tính) hơn là tổng)")
+
+
+def ddp_find_unused(cfg):
+    """DDP `find_unused_parameters`: True khi có tham số train có thể KHÔNG nhận grad ở một iteration — conv 3x3 đầu ra
+    của một tầng FPN chỉ có gradient khi có RoI rơi vào tầng đó (ở canvas 512, P5 cần sqrt(diện tích) >= 448 px nên ở
+    ALPHA0 gần như không bao giờ được dùng); `box_policy` R-50 chỉ đọc C5 nên FPN không dùng. Chỉ CE-Loc gốc ResNet18
+    (`box_policy` + `r18_paper`) dùng MỌI tham số mỗi iteration (có test) — tắt thì DDP khỏi duyệt đồ thị mỗi iter."""
+    m = cfg["model"]
+    return not (m.get("arch") == "box_policy" and m.get("vision") == "r18_paper")
 
 
 def _step_loss(net, crit, batch, text_table, cfg, model, gen, dev):
@@ -326,6 +338,8 @@ def main():
 
     torch.manual_seed(tr["seed"] + rank)
     np.random.seed(tr["seed"] + rank)
+    # mọi ảnh vào cùng cỡ (letterbox T×T) => cudnn đo thử thuật toán conv MỘT lần rồi dùng bản nhanh nhất
+    torch.backends.cudnn.benchmark = dev.type == "cuda"
     env = run_env(cfg, dev)
     env["world_size"] = world
     if main_proc:
@@ -388,24 +402,47 @@ def main():
     # ------------------------------------------------------------------ model
     t = time.time()
     model = build_model(cfg).to(dev)
-    if world > 1 and any(isinstance(m, torch.nn.BatchNorm2d) for m in model.modules()):
-        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)   # GAMMA (BN train như bài): thống kê trên cả batch
-    # find_unused_parameters=True BẮT BUỘC: conv 3x3 đầu ra của một tầng FPN chỉ có gradient khi có
-    # RoI rơi vào tầng đó. Ở canvas 512, P5 cần sqrt(diện tích) >= 448 px nên ở ALPHA0 (P5 chỉ đi
-    # qua RoI) gần như không bao giờ được dùng; tầng khác cũng có thể trống ở một iteration.
+    # `training.amp` (GAMMA2, Kaggle T4): autocast fp16 + GradScaler, conv channels_last — tensor core của T4 chỉ chạy fp16.
+    # Chỉ trên CUDA (CPU / test: tắt, chạy fp32 như cũ). Head refine kiểu DiffusionDet tự tắt autocast (models/propose_refine.py)
+    amp = bool(tr.get("amp")) and dev.type == "cuda"
+    if amp:
+        model = model.to(memory_format=torch.channels_last)
+    # GAMMA (BN train như bài): SyncBN = thống kê trên cả batch toàn cục. `training.sync_bn: false` khi batch / GPU đã
+    # bằng batch BN muốn có (gamma2_celoc: 32 / GPU = batch 32 của bài) — BN thường của cudnn nhanh hơn, không all-gather
+    if world > 1 and tr.get("sync_bn", True) and any(isinstance(m, torch.nn.BatchNorm2d) for m in model.modules()):
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+    unused = ddp_find_unused(cfg)
+    if world > 1 and not unused:
+        # mọi tham số luôn có grad => grad là view của bucket DDP (gradient_as_bucket_view): backward cộng THẲNG vào
+        # bucket, không chép, và không bao giờ lệch stride (cảnh báo "Grad strides do not match bucket view strides":
+        # weight Conv1d / conv kernel 1 — cudnn trả grad khác stride ở chiều kích thước 1). Grad tạo sẵn để cả iter 0
+        # cũng cộng vào bucket; zero_grad giữ tensor (set_to_none=False) — cùng toán vì không tham số nào thiếu grad
+        for p in model.parameters():
+            if p.requires_grad:
+                p.grad = torch.zeros_like(p)
     net = torch.nn.parallel.DistributedDataParallel(
         model, device_ids=[dev.index] if dev.type == "cuda" else None,
-        find_unused_parameters=True) if world > 1 else model
+        find_unused_parameters=unused, gradient_as_bucket_view=not unused) if world > 1 else model
+    keep_grad = world > 1 and not unused                # zero_grad(set_to_none=not keep_grad)
     n_learn = sum(p.numel() for p in model.parameters() if p.requires_grad)
     log(f"[model] arch={cfg['model'].get('arch', 'detector')} | memory={cfg['model'].get('memory')} | "
         f"in_channels {conv1_of(model).in_channels} | {n_learn / 1e6:.2f}M tham số train | "
-        f"N={cfg['diffusion'].get('num_proposals')} | {fmt_time(time.time() - t)}")
-    opt = torch.optim.AdamW(model.parameters(), lr=float(tr["lr"]), weight_decay=float(tr["weight_decay"]))
+        f"N={cfg['diffusion'].get('num_proposals')} | "
+        f"AMP {'fp16 + channels_last' if amp else ('tắt (không CUDA)' if tr.get('amp') else 'tắt')} | "
+        f"DDP find_unused {unused if world > 1 else '-'} | SyncBN {world > 1 and tr.get('sync_bn', True)} | "
+        f"{fmt_time(time.time() - t)}")
+    # fused (CUDA): một kernel cho cả bước AdamW thay vì vài kernel / tham số — cùng công thức
+    opt = torch.optim.AdamW(model.parameters(), lr=float(tr["lr"]), weight_decay=float(tr["weight_decay"]),
+                            fused=dev.type == "cuda")
+    # tắt: scale / unscale_ / update là no-op, step = opt.step(). torch.amp.GradScaler có từ torch 2.3 (Kaggle); bản cũ
+    # (venv test local 2.2) chỉ có torch.cuda.amp.GradScaler — bản này trên torch mới thì báo FutureWarning
+    scaler = (torch.amp.GradScaler("cuda", enabled=amp) if hasattr(torch.amp, "GradScaler")
+              else torch.cuda.amp.GradScaler(enabled=amp))
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda it: lr_factor(it, tr))
     crit = None if task == "add" else Criterion(cfg["loss"], cfg["matcher"], mode=targets)
 
     if a.bench:
-        return bench(model, net, crit, loader_fn, text_table, cfg, opt, dev, a.bench, log, todev)
+        return bench(model, net, crit, loader_fn, text_table, cfg, opt, dev, a.bench, log, todev, amp)
 
     start, best, history = 0, None, []
     if a.resume:
@@ -418,6 +455,8 @@ def main():
         model.load_state_dict(st["model"])
         opt.load_state_dict(st["optimizer"])
         sched.load_state_dict(st["scheduler"])
+        if "scaler" in st:
+            scaler.load_state_dict(st["scaler"])
         start, best, history = st["iter"], st["best"], st["history"]
         if main_proc:                                   # RNG toàn cục (dropout) của rank 0
             torch.set_rng_state(st["rng"]["torch"])
@@ -435,7 +474,7 @@ def main():
             return
         rng = torch.get_rng_state()
         ckm.save({"model": model.state_dict(), "optimizer": opt.state_dict(),
-                  "scheduler": sched.state_dict(), "iter": it_next, "best": best,
+                  "scheduler": sched.state_dict(), "scaler": scaler.state_dict(), "iter": it_next, "best": best,
                   "history": history, "config": cfg, "env": env, "rng": {"torch": rng}}, is_best)
         with open(os.path.join(a.save_dir, "history.json"), "w") as f:
             json.dump({"config": cfg, "environment": env, "best": best, "history": history}, f,
@@ -455,10 +494,14 @@ def main():
         for batch in loader_fn(epoch, offset):
             win["data"] += time.time() - t_data
             batch = todev(batch, dev)
+            if amp:
+                batch["images"] = batch["images"].contiguous(memory_format=torch.channels_last)
             gen.manual_seed(noise_seed(tr["seed"], it, rank))
-            loss, st = _step_loss(net, crit, batch, text_table, cfg, model, gen, dev)
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
+            with torch.autocast(device_type=dev.type, dtype=torch.float16, enabled=amp):
+                loss, st = _step_loss(net, crit, batch, text_table, cfg, model, gen, dev)
+            opt.zero_grad(set_to_none=not keep_grad)
+            scaler.scale(loss).backward()
+            scaler.unscale_(opt)                        # grad về thang thật trước khi đo / clip
             gmon.maybe_record(it)
             # grad_clip null = KHÔNG clip (CE-Loc gốc), vẫn đo norm để log
             gn = torch.nn.utils.clip_grad_norm_(model.parameters(), tr["grad_clip"] or float("inf"))
@@ -476,10 +519,12 @@ def main():
                     nan_debug.report(model, batch, boxes, t, text_table(batch["text"], dev), log)
                     sys.exit(f"[nan-debug] dừng ở NaN đầu tiên, it {it}")
             if not finite:
-                win["skip"] += 1                        # bước NaN sẽ ghi NaN vào mọi weight
-                opt.zero_grad(set_to_none=True)
+                # bước NaN sẽ ghi NaN vào mọi weight. AMP: grad inf ở vài bước đầu là BÌNH THƯỜNG (GradScaler dò thang:
+                # bỏ bước rồi giảm scale ở update) — vẫn đếm vào "bỏ N bước NaN"
+                win["skip"] += 1
+                opt.zero_grad(set_to_none=not keep_grad)
             else:
-                opt.step()
+                scaler.step(opt)
                 if a.nan_debug:
                     bp = nan_debug.bad_params(model)
                     if bp:
@@ -489,6 +534,7 @@ def main():
                                     f"{nan_debug.tensor_stats(p.grad) if p.grad is not None else None}")
                         sys.exit(f"[nan-debug] opt.step() với grad hữu hạn làm {len(bp)} tham số thành "
                                  f"không hữu hạn ở it {it}: {bp[:10]}")
+            scaler.update()
             sched.step()
             win["loss"] += float(st["loss"])
             win["n"] += 1
@@ -512,6 +558,7 @@ def main():
                     f"lr {sched.get_last_lr()[0]:.3e} | "
                     f"grad {np.median(win['gn']):.1f} | {spi:.3f} s/iter (đọc {win['data'] / win['n']:.3f}) | "
                     f"đã chạy {fmt_time(el)} | ETA {fmt_time(eta)}"
+                    + (f" | AMP scale {scaler.get_scale():.0f}" if amp else "")
                     + (f" | ⚠️ bỏ {win['skip']} bước NaN" if win["skip"] else ""))
                 gsum = gmon.summary()
                 if gsum:

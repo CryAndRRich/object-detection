@@ -64,6 +64,7 @@ init:
 
 training:                           # DiffusionDet (AdamW 2,5e-5 @ batch 16, clip toàn mô hình 1,0, warmup) — lr ×2 theo batch 32
   batch_size: 32                    # TOÀN CỤC: 16 / GPU
+  amp: true                         # fp16 cho backbone + FPN + U-Net; memory + head refine (kiểu DiffusionDet) luôn fp32
   lr: 5.0e-5
   weight_decay: 1.0e-4
   max_iter: 20000                   # ≈ 32 epoch của 19.998 mẫu
