@@ -62,6 +62,10 @@ Code soi SpatialSoftmax (`celoc_paper/`, `tools/inspect_*spatial_softmax.py`, TN
 | `gamma/gamma0.yaml` | **bài add**: `task: add`, `model.arch: box_policy`, canvas 512, batch 16, density của chính mẫu (kênh 4) | `docs/EXPERIMENT_GAMMA.md` |
 | `gamma/gamma0_1.yaml` | như `gamma0`, CHỈ RGB | 〃 |
 | `gamma/gamma1.yaml` | bài add, `model.arch: box_refiner` (6 tầng RoI + cross-attn, loss mọi tầng), RGB + density | 〃 mục 11 |
+| `gamma/gamma1_1.yaml` | như `gamma1`, `model.box_token: coords` (bỏ RoI: token = Linear(4 toạ độ box)) | 〃 mục 11.1 |
+| `gamma/gamma2_celoc.yaml` | GAMMA2 pha 1: CE-Loc gốc (ResNet18) + SpatialSoftmax mask phần đệm, `data.split_source: samples` | 〃 mục 13 |
+| `gamma/gamma2.yaml` | GAMMA2: `model.arch: propose_refine` — CE-Loc pha 1 đóng băng -> refine 6 stage kiểu DiffusionDet | 〃 mục 13 |
+| `gamma/gamma2_1.yaml` | như `gamma2`, `freeze_proposer: false` (train chung 2 loss) | 〃 mục 13 |
 
 ## Chạy
 

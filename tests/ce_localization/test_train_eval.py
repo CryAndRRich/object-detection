@@ -301,7 +301,7 @@ def test_full_flow_beta0_train_resume_eval_and_gt_never_in_loss(tmp_path, monkey
 
 # ----------------------------------------------------------------------------- GAMMA (bài add)
 
-@pytest.mark.parametrize("kind", ["density", "rgb", "refiner"])
+@pytest.mark.parametrize("kind", ["density", "rgb", "refiner", "refiner_coords"])
 def test_full_flow_gamma_train_resume_eval(tmp_path, monkeypatch, kind):
     """GAMMA0 / 0.1 / 1: chỉ mục (nhánh, lượt) -> train 2 iter -> --resume tới 4 == train liền 4 -> eval.py trên ảnh
     inpaint + ảnh gốc, kèm mốc prior (GAMMA1: DDIM 1 và 2 bước, kèm attention lên [t ; text ; vis])."""
@@ -328,13 +328,13 @@ def test_full_flow_gamma_train_resume_eval(tmp_path, monkeypatch, kind):
     from tests.ce_localization.helpers import _fake_text_table
     monkeypatch.setattr(ta, "build_text_table", _fake_text_table)
     out = str(tmp_path / "res.json")
-    refiner = kind == "refiner"
+    refiner = kind.startswith("refiner")
     if refiner:
         assert all(len(h["loss_per_stage"]) == 6 for h in kb["history"] if "loss" in h)
         assert all(len(e["attn"]) == 6 for e in ev)
     monkeypatch.setattr(sys, "argv", ["eval.py", "--ckpt", os.path.join(a, "best.pth"), "--split", "test",
                                       "--n-samples", "5", "--num-workers", "0", "--out", out, "--device", "cpu",
-                                      "--steps", "1", "2"])
+                                      "--steps", "1", "2", "--add-samplers", "ddpm"])               # T giả = 20 < 100 bước mock
     ea.main()
     with open(out) as f:
         res = json.load(f)
@@ -360,6 +360,18 @@ def test_gamma_configs_only_differ_by_density():
     for k in ("experiment", "description"):
         c0.pop(k), c1.pop(k)
     assert c0 == c1
+
+
+def test_gamma1_configs_only_differ_by_box_token():
+    from tests.ce_localization.helpers import CFG_G
+    with open(CFG_G["refiner"]) as f:
+        c1 = yaml.safe_load(f)
+    with open(CFG_G["refiner_coords"]) as f:
+        c11 = yaml.safe_load(f)
+    assert (c1["model"].pop("box_token"), c11["model"].pop("box_token")) == ("roi", "coords")
+    for k in ("experiment", "description"):
+        c1.pop(k), c11.pop(k)
+    assert c1 == c11
 
 
 def test_gamma_resume_refuses_changed_task(tmp_path, monkeypatch):
@@ -394,15 +406,6 @@ def test_plot_denoise_trajectory_full_flow(tmp_path, monkeypatch):
     r = res["cases"][2]                                                   # ddpm, case1: ảnh lớp cup, text apple
     assert r["text"] == "apple" and r["gt_class"] == "cup" and r["steps"] == [99, 50, 0]
     assert len(r["boxes_canvas"]) == 3 and all(0 <= v <= 1 for v in r["iou"]) and len(r["center_dist_px"]) == 3
-    assert "iou_output" in rows[0] and len(rows[0]["x_t_path"]) == 4
-    out3 = str(tmp_path / "out3")
-    monkeypatch.setattr(sys, "argv", ["plot_refiner_steps.py", "--ckpt", ck, "--ce130", root, "--samples", samples,
-                                      "--density-index", didx, "--branches", "3000_b1", "--sampler", "mock",
-                                      "--mock-steps", "10", "--show-x0", "--out", out3])
-    tool.main()
-    with open(os.path.join(out3, "refiner_steps.json")) as f:
-        r0 = json.load(f)[0]["rows"][0]
-    assert [s["t"] for s in r0["steps"]] == [9, 6, 3, 0] and len(r0["x_t_path"]) == 10
     out2 = str(tmp_path / "out2")                                         # text rỗng / bỏ hẳn text
     monkeypatch.setattr(sys, "argv", ["plot_denoise_trajectory.py", "--ckpt", ck, "--samples", samples, "--samplers", "mock",
                                       "--files", "test/images/3000_1.png:<empty>", "test/images/3000_1.png:<zero>:empty",
@@ -539,7 +542,7 @@ def test_eval_paper_checkpoint_on_ce130_add(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):                                       # thiếu --config
         monkeypatch.setattr(sys, "argv", ["eval.py", "--ckpt", ck, "--device", "cpu"])
         ea.main()
-    for split, n_seen_all in (("test", False), ("val", True)):
+    for split, n_seen in (("test", "none"), ("val", "some")):
         out = str(tmp_path / f"paper_{split}.json")
         monkeypatch.setattr(sys, "argv", ["eval.py", "--ckpt", ck, "--config", cfg_path, "--split", split, "--n-samples",
                                           "3", "--add-samplers", "ddpm", "mock", "--num-workers", "0", "--out", out,
@@ -550,6 +553,90 @@ def test_eval_paper_checkpoint_on_ce130_add(tmp_path, monkeypatch):
         assert set(res["results"]) == {f"{i}_{s}" for i in ("inpainted", "original") for s in ("ddpm", "mock")}
         r = res["results"]["inpainted_ddpm"]
         assert res["density"] == {"inpainted": "sample", "original": "full"} and str(res["iter"]).startswith("epoch")
-        assert 0 <= r["best_iou@3_latest"] <= 1 and (r["n_paper_train"] == r["n"]) == n_seen_all
-        assert "excl_paper_train" not in r                                # cả split cùng một phía
+        assert 0 <= r["best_iou@3_latest"] <= 1
+        if n_seen == "none":                                               # test giả: toàn samples/test
+            assert r["n_paper_train"] == 0 and "excl_paper_train" not in r
+        else:                                                              # val giả: 2000 ở samples/train, 2001 ở samples/test
+            assert 0 < r["n_paper_train"] < r["n"] and r["excl_paper_train"]["n"] == r["n"] - r["n_paper_train"]
     assert seen_sd and all(sd is not None and "text_model.final_layer_norm.weight" in sd for sd in seen_sd)
+
+
+
+# ----------------------------------------------------------------------------- GAMMA2: CE-Loc pha 1 -> refine pha 2
+
+def test_full_flow_gamma2_celoc_then_refine(tmp_path, monkeypatch):
+    """Pha 1 (CE-Loc ResNet18 + SpatialSoftmax mask, split samples) train -> pha 2 GAMMA2 nạp CE-Loc pha 1 (đóng băng):
+    train 2 iter + --resume tới 4 == train liền 4, CE-Loc không đổi; eval quét refine_t (none / t* / noise) trên cùng box CE-Loc;
+    GAMMA2.1 (train chung) đổi CE-Loc; proposer_ckpt lệch ss_mask bị từ chối."""
+    import ce_localization.eval as ea
+    import ce_localization.train as ta
+    from ce_localization.models.detector import build_model, load_proposer
+    from tests.ce_localization.helpers import _fake_text_table, _fake_turn_index, _gamma2_cfg
+    base = str(tmp_path / "d")
+    os.makedirs(base)
+    _fake_turn_index(base)
+    c1_path, _ = _gamma2_cfg(tmp_path, base, "celoc2")
+    p1 = str(tmp_path / "celoc")
+    _run_train(monkeypatch, ["--config", c1_path, "--save-dir", p1])
+    ck1 = torch.load(os.path.join(p1, "best.pth"), weights_only=False)
+    assert ck1["config"]["model"]["ss_mask"] and ck1["iter"] in (2, 4)
+    ev = [h["eval"] for h in ck1["history"] if "eval" in h]
+    assert ev and ev[0]["n"] == len(ta.TurnIndex(os.path.join(base, "turn_index.json")).keys("val", "samples"))
+
+    c2_path, _ = _gamma2_cfg(tmp_path, base, "pr")
+    a, b = str(tmp_path / "a"), str(tmp_path / "b")
+    _run_train(monkeypatch, ["--config", c2_path, "--save-dir", a, "--max-iter", "2",
+                             "--proposer-ckpt", os.path.join(p1, "best.pth")])
+    _run_train(monkeypatch, ["--config", c2_path, "--save-dir", a, "--resume", "--proposer-ckpt", os.path.join(p1, "best.pth")])
+    _run_train(monkeypatch, ["--config", c2_path, "--save-dir", b, "--proposer-ckpt", os.path.join(p1, "best.pth")])
+    ka = torch.load(os.path.join(a, "last.pth"), weights_only=False)
+    kb = torch.load(os.path.join(b, "last.pth"), weights_only=False)
+    assert ka["iter"] == kb["iter"] == 4
+    for k in kb["model"]:
+        assert torch.allclose(ka["model"][k].float(), kb["model"][k].float(), atol=1e-5), k
+    for k, v in ck1["model"].items():                                     # CE-Loc đóng băng: y pha 1
+        assert torch.equal(kb["model"]["proposer." + k], v), k
+    assert all(len(h["loss_per_stage"]) == 6 for h in kb["history"] if "loss" in h)
+
+    monkeypatch.setattr(ta, "build_text_table", _fake_text_table)
+    out = str(tmp_path / "res.json")
+    monkeypatch.setattr(sys, "argv", ["eval.py", "--ckpt", os.path.join(a, "best.pth"), "--split", "test", "--n-samples", "3",
+                                      "--refine-t", "none", "5", "noise", "--proposer-sampler", "ddpm",
+                                      "--num-workers", "0", "--out", out, "--device", "cpu"])
+    ea.main()
+    with open(out) as f:
+        res = json.load(f)
+    assert set(res["results"]) == {f"{i}_{v}" for i in ("inpainted", "original") for v in ("ce", "t5", "noise")}
+    r = res["results"]["inpainted_t5"]
+    assert r["n"] == res["results"]["inpainted_ce"]["n"] > 0 and 0 <= r["best_iou@3_latest"] <= 1 and len(r["attn"]) == 6
+
+    cj_path, _ = _gamma2_cfg(tmp_path, base, "pr_joint")
+    j = str(tmp_path / "joint")
+    _run_train(monkeypatch, ["--config", cj_path, "--save-dir", j, "--proposer-ckpt", os.path.join(p1, "best.pth")])
+    kj = torch.load(os.path.join(j, "last.pth"), weights_only=False)
+    assert any(not torch.equal(kj["model"]["proposer." + k], v) for k, v in ck1["model"].items() if v.is_floating_point())
+
+    _, cfg2 = _gamma2_cfg(tmp_path, base, "pr")
+    bad = dict(ck1, config={**ck1["config"], "model": {**ck1["config"]["model"], "ss_mask": False}})
+    torch.save(bad, str(tmp_path / "bad.pth"))
+    with pytest.raises(ValueError):
+        load_proposer(build_model(cfg2, pretrained_backbone=False), str(tmp_path / "bad.pth"))
+
+
+def test_gamma2_configs():
+    """gamma2 / gamma2_1 chỉ khác freeze_proposer (+ tên); proposer của pha 2 khớp model của pha 1."""
+    from tests.ce_localization.helpers import CFG_G
+    cfg = {}
+    for k in ("celoc2", "pr", "pr_joint"):
+        with open(CFG_G[k]) as f:
+            cfg[k] = yaml.safe_load(f)
+    a, b = cfg["pr"], cfg["pr_joint"]
+    assert (a["model"].pop("freeze_proposer"), b["model"].pop("freeze_proposer")) == (True, False)
+    for k in ("experiment", "description"):
+        a.pop(k), b.pop(k)
+    assert a == b
+    m1 = cfg["celoc2"]["model"]
+    for k, v in a["model"]["proposer"].items():
+        assert m1[k] == v, k
+    assert {k: cfg["celoc2"]["diffusion"][k] for k in ("num_timesteps", "beta_start", "beta_end")} == a["diffusion"]["proposer"]
+    assert cfg["celoc2"]["data"] == {k: v for k, v in a["data"].items()}

@@ -9,11 +9,15 @@ Giao thức (docs/EXPERIMENT_ALPHA.md mục 6.2): test, N=200, top-k 100, NMS 0,
   --density M    : model 4 kênh (ALPHA3): density đưa vào — full (mặc định) / partial / empty (mục 5).
 Config lấy từ checkpoint (an toàn hơn), trừ khi truyền --config.
 
+GAMMA2 (`model.arch: propose_refine`): CE-Loc sinh `--n-samples` box MỘT lần (`--proposer-sampler`), mỗi `--refine-t`
+(none / t* / noise) chấm riêng trên cùng box đó (khoá `<ảnh>_ce`, `<ảnh>_t<t*>`, `<ảnh>_noise`).
+
 Checkpoint CE-Loc gốc của bài (`model_state_dict`, vd weights/add/paper/best_model.pth) + `--config config/gamma/gamma0.yaml`
 (đường dẫn dữ liệu): eval bài add như GAMMA, kèm `excl_paper_train` (bỏ mẫu samples/train mà bài đã train).
 
-GAMMA (`task: add`, docs/EXPERIMENT_GAMMA.md mục 5): mỗi mẫu (nhánh, lượt) sinh `--n-samples` box độc lập (DDPM ở
-GAMMA0; DDIM `--steps` bước ở GAMMA1, mỗi số bước một lượt), chấm IoU với lỗ + C-NLL + on_object (`engine/add_eval.py`),
+GAMMA (`task: add`, docs/EXPERIMENT_GAMMA.md mục 5): mỗi mẫu (nhánh, lượt) sinh `--n-samples` box độc lập (U-Net 1D — GAMMA0,
+GAMMA2 pha 1, checkpoint của bài: `--add-samplers`, mặc định mock 100 bước như bài, `ddpm` = 1000 bước đúng công thức; GAMMA1:
+DDIM `--steps` bước, mỗi số bước một lượt), chấm IoU với lỗ + C-NLL + on_object (`engine/add_eval.py`),
 kèm mốc `prior` (lỗ train ngẫu nhiên, không nhìn ảnh). GAMMA1 in thêm attention của query lên [t ; text ; vis].
   --image inpainted original : ảnh inpaint (có lỗ) và ảnh gốc không lỗ (phép thử lối tắt; chỉ chỉ số không cần GT)
   --add-density M            : model 4 kênh — sample (density của chính mẫu, mặc định cho ảnh inpaint) / full (bản
@@ -47,7 +51,7 @@ from ce_localization.data.density import EVAL_MODES, DensityIndex  # noqa: E402
 from ce_localization.data.turns import ADD_DENSITY, IMAGE_KINDS, CE130AddDataset, TurnIndex, collate_add  # noqa: E402
 from ce_localization.engine.add_eval import add_metrics, predict_add, prior_records, prior_unit_boxes  # noqa: E402
 from ce_localization.engine.evaluate import attention_diagnostics, predict, score  # noqa: E402
-from ce_localization.models.backbone import density_weight_ratio  # noqa: E402
+from ce_localization.models.backbone import density_ratio_of  # noqa: E402
 from ce_localization.models.box_policy import BoxPolicy  # noqa: E402
 from ce_localization.models.detector import build_model  # noqa: E402
 from ce_localization.utils.log import fmt_time  # noqa: E402
@@ -131,26 +135,36 @@ def main_add(a, cfg, ck, dev, t0):
         it, dwr = f"epoch {info['epoch']}", None
         print(f"[eval] checkpoint CE-Loc gốc của bài: {info}", flush=True)
     else:
-        four = cfg["model"].get("in_channels", 3) == 4
+        four = train_mod.image_in_channels(cfg) == 4
         model = build_model(cfg, pretrained_backbone=False)
         model.load_state_dict(ck["model"])
-        it, dwr = ck.get("iter"), density_weight_ratio(model.backbone)
+        it, dwr = ck.get("iter"), density_ratio_of(model)
     model = model.to(dev).eval()
-    prior_unit = prior_unit_boxes(index, "train")
+    src = d.get("split_source", "ce130")
+    prior_unit = prior_unit_boxes(index, "train", src)
     if cfg["model"].get("arch") == "box_refiner" and not paper:
         variants = [(f"_steps{s}", f"DDIM {s} bước", {"steps": s}) for s in a.steps]
-    elif a.add_samplers == ["ddpm"]:                  # GAMMA0 / bài: một lượt DDPM, khoá cũ (không hậu tố)
-        variants = [("", "DDPM", {})]
+    elif len(a.add_samplers) == 1:                    # GAMMA0 / bài: một sampler -> khoá không hậu tố (sampler ghi ở out)
+        sm = a.add_samplers[0]
+        variants = [("", "mock 100 bước (vòng của bài)" if sm == "mock" else "DDPM 1000 bước", {"sampler": sm})]
     else:
         variants = [(f"_{sm}", sm, {"sampler": sm}) for sm in a.add_samplers]
+    refine_vars = []
+    if cfg["model"].get("arch") == "propose_refine" and not paper:
+        for v in a.refine_t:
+            rt = None if v == "none" else ("noise" if v == "noise" else int(v))
+            suffix = "_ce" if rt is None else ("_noise" if rt == "noise" else f"_t{rt}")
+            desc = ("CE-Loc một mình" if rt is None else f"refine từ nhiễu thuần, {a.refine_steps} bước" if rt == "noise"
+                    else f"CE-Loc -> refine t*={rt}, {a.refine_steps} bước")
+            refine_vars.append((suffix, desc, {"refine_t": rt, "refine_steps": a.refine_steps}))
     out = {"ckpt": a.ckpt, "iter": it, "split": a.split, "n_samples": K, "density": {}, "results": {},
-           "prior": {}, "density_weight_ratio": dwr}
+           "prior": {}, "density_weight_ratio": dwr, "add_samplers": a.add_samplers, "proposer_sampler": a.proposer_sampler}
     text_table = None
     for image in a.image:
         dens = (a.add_density or ("sample" if image == "inpainted" else "full")) if four else None
         dindex = DensityIndex(d["density_index"], d["density_root"]) if dens == "full" else None
         ds = CE130AddDataset(index, d["root"], d["samples_root"], a.split, d["image_size"], density=dens,
-                             density_index=dindex, image=image, style=d.get("input_style", "ours"))
+                             density_index=dindex, image=image, style=d.get("input_style", "ours"), split_source=src)
         if a.limit:
             ds.keys = ds.keys[: a.limit]
         if text_table is None:
@@ -158,17 +172,13 @@ def main_add(a, cfg, ck, dev, t0):
         loader = DataLoader(ds, batch_size=a.batch_size or cfg["eval"]["batch_size"], shuffle=False,
                             num_workers=a.num_workers, collate_fn=collate_add)
         out["density"][image] = dens
-        for suffix, desc, kw in variants:             # GAMMA1: mỗi số bước DDIM; GAMMA0 / bài: DDPM (+ mock nếu xin)
-            key = image + suffix
-            print(f"[eval] {a.ckpt} ({it}) | ảnh {image} | density {dens} | split {a.split} ({len(ds)} mẫu) | {K} mẫu/ảnh"
-                  f" | {desc} | {fmt_time(time.time() - t0)}", flush=True)
-            t = time.time()
-            rec = predict_add(model, loader, text_table, K, seed=a.seed, log_every=max(len(loader) // 10, 1), **kw)
-            holes = image == "inpainted"
+        holes = image == "inpainted"
+
+        def report(key, desc, rec, sec, attn_key=None):
             res = add_metrics(rec, with_holes=holes)
-            res["eval_sec"] = time.time() - t
+            res["eval_sec"] = sec
             if hasattr(model, "pop_attn"):
-                res["attn"] = model.pop_attn()
+                res["attn"] = model.pop_attn() if attn_key is None else model.pop_attn(attn_key)
             pri_rec = prior_records(rec, prior_unit, K, seed=a.seed)
             pri = add_metrics(pri_rec, with_holes=holes)
             seen = paper_train_mask(index, rec)
@@ -177,7 +187,7 @@ def main_add(a, cfg, ck, dev, t0):
                 res["excl_paper_train"] = add_metrics([rec[i] for i in keep], with_holes=holes)
                 pri["excl_paper_train"] = add_metrics([pri_rec[i] for i in keep], with_holes=holes)
             res["n_paper_train"] = int(sum(seen))
-            print_add(f"ảnh {image}, {desc} ({fmt_time(res['eval_sec'])})", res, pri, K)
+            print_add(f"ảnh {image}, {desc} ({fmt_time(sec)})", res, pri, K)
             if "excl_paper_train" in res:
                 ex = res["excl_paper_train"]
                 print(f"  -- bỏ {res['n_paper_train']} mẫu thuộc samples/train (bài đã train), còn {ex['n']}: " + " | ".join(
@@ -188,6 +198,23 @@ def main_add(a, cfg, ck, dev, t0):
                 print("  attention query -> [t ; text ; vis] theo tầng: " + " | ".join(
                     "/".join(f"{x[k]:.2f}" for k in ("t", "text", "vis")) for x in res["attn"]))
             out["results"][key], out["prior"][key] = res, pri
+
+        if refine_vars:                               # GAMMA2: CE-Loc chạy MỘT lần / batch, mọi biến thể refine dùng lại
+            print(f"[eval] {a.ckpt} ({it}) | ảnh {image} | density {dens} | split {a.split} ({len(ds)} mẫu) | {K} mẫu/ảnh"
+                  f" | CE-Loc {a.proposer_sampler} -> {[d_ for _, d_, _ in refine_vars]} | {fmt_time(time.time() - t0)}",
+                  flush=True)
+            t = time.time()
+            recs = predict_add(model, loader, text_table, K, seed=a.seed, log_every=max(len(loader) // 10, 1),
+                               sample_kw={"proposer_sampler": a.proposer_sampler}, variants=[v for _, _, v in refine_vars])
+            for vi, ((suffix, desc, _), rec) in enumerate(zip(refine_vars, recs)):
+                report(image + suffix, desc, rec, time.time() - t, attn_key=vi)
+            continue
+        for suffix, desc, kw in variants:             # GAMMA1: mỗi số bước DDIM; GAMMA0 / bài: DDPM (+ mock nếu xin)
+            print(f"[eval] {a.ckpt} ({it}) | ảnh {image} | density {dens} | split {a.split} ({len(ds)} mẫu) | {K} mẫu/ảnh"
+                  f" | {desc} | {fmt_time(time.time() - t0)}", flush=True)
+            t = time.time()
+            rec = predict_add(model, loader, text_table, K, seed=a.seed, log_every=max(len(loader) // 10, 1), **kw)
+            report(image + suffix, desc, rec, time.time() - t)
     if a.out:
         os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
         with open(a.out, "w") as f:
@@ -225,8 +252,14 @@ def main():
     ap.add_argument("--image", nargs="+", default=list(IMAGE_KINDS), choices=IMAGE_KINDS, help="GAMMA: loại ảnh vào")
     ap.add_argument("--add-density", default=None, choices=ADD_DENSITY, help="GAMMA, model 4 kênh: density đưa vào")
     ap.add_argument("--n-samples", type=int, default=None, help="GAMMA: số box / mẫu (mặc định eval.n_samples)")
-    ap.add_argument("--add-samplers", nargs="+", default=["ddpm"], choices=["ddpm", "mock"],
-                    help="GAMMA0 / checkpoint của bài (U-Net 1D): ddpm (đúng công thức) và / hoặc mock (vòng của bài)")
+    ap.add_argument("--refine-t", nargs="+", default=["none", "0", "100", "200", "400", "700", "noise"],
+                    help="GAMMA2: biến thể refine — none (CE-Loc một mình) | t* (cộng nhiễu box CE-Loc tới t* rồi DDIM) | noise")
+    ap.add_argument("--refine-steps", type=int, default=1, help="GAMMA2: số bước DDIM của refine")
+    ap.add_argument("--proposer-sampler", default="mock", choices=["ddpm", "mock"],
+                    help="GAMMA2: sampler của CE-Loc — mặc định mock 100 bước như bài")
+    ap.add_argument("--add-samplers", nargs="+", default=["mock"], choices=["ddpm", "mock"],
+                    help="GAMMA0 / GAMMA2 pha 1 / checkpoint của bài (U-Net 1D): mock (mặc định — vòng 100 bước của bài) và / hoặc "
+                         "ddpm (1000 bước đúng công thức)")
     ap.add_argument("--samples-root", default=None, help="GAMMA: ghi đè data.samples_root")
     ap.add_argument("--turn-index", default=None, help="GAMMA: ghi đè data.turn_index")
     a = ap.parse_args()
@@ -277,7 +310,7 @@ def main():
         for it in ds.items:
             k = dindex.pick(it["image_id"], density)[1]
             kinds[k] = kinds.get(k, 0) + 1
-    dw = density_weight_ratio(model.backbone)
+    dw = density_ratio_of(model)
     print(f"[eval] {a.ckpt} (iter {ck.get('iter')}) | memory={cfg['model']['memory']} | "
           f"density={density} {kinds or ''}"
           + ("" if dw is None else f" (‖W density‖/‖W RGB‖ conv1 {dw:.4f})") + f" | split={a.split} "

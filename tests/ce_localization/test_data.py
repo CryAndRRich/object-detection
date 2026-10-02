@@ -427,3 +427,38 @@ def test_add_dataset_paper_style_matches_image_inputs(tmp_path):
     assert torch.allclose(emp[:nh, :nw], torch.tensor(14 / 255)) and float(emp[nh:].abs().sum()) == 0
     with pytest.raises(ValueError):
         CE130AddDataset(index, root, samples, "train", 128, style="x")
+
+
+def test_samples_split_source_and_uint8_cache(tmp_path):
+    """GAMMA2: split `samples` = train mọi mẫu samples/train, val / test = samples/test theo split CE-130 của ảnh gốc;
+    cache uint8 (`build_add_cache`) cho đúng từng bit đầu vào kiểu bài như đọc PNG."""
+    from ce_localization.data.turns import AddCache, CE130AddDataset, build_add_cache
+    from tests.ce_localization.helpers import _fake_turn_index
+    root, samples, _, index, _ = _fake_turn_index(str(tmp_path))
+    tr, va, te = (index.keys(s, "samples") for s in ("train", "val", "test"))
+    assert tr and va and te and not (set(tr) & set(va)) and not (set(va) & set(te))
+    assert all(index.turns[k]["sample"].startswith("train/") for k in tr)
+    assert all(index.turns[k]["sample"].startswith("test/") and k.startswith("2001") for k in va)
+    assert set(te) == set(index.keys("test", "ce130"))                    # test giả: toàn bộ ở samples/test
+    assert set(tr) == {k for k in index.turns if index.turns[k]["sample"].startswith("train/")}
+    with pytest.raises(ValueError):
+        index.keys("train", "x")
+    plain = CE130AddDataset(index, root, samples, "train", 128, density="sample", style="paper", split_source="samples")
+    for fmt in ("zlib", "raw"):
+        cdir = str(tmp_path / f"cache_{fmt}")
+        assert build_add_cache(index, samples, tr, cdir, 128, workers=0, log=lambda *a: None, fmt=fmt) == len(tr)
+        cache = AddCache(cdir)
+        assert cache.format == fmt
+        cached = CE130AddDataset(index, root, samples, "train", 128, density="sample", style="paper",
+                                 split_source="samples", cache=cache)
+        assert cached.cache is not None and len(plain) == len(cached) == len(tr)
+        for i in range(len(plain)):
+            a, b = plain[i], cached[i]
+            assert torch.equal(a["image"], b["image"]), (fmt, i)
+            for k in ("target", "holes", "objects", "valid_hw", "text"):
+                assert (torch.equal(a[k], b[k]) if torch.is_tensor(a[k]) else a[k] == b[k]), k
+    rgb = CE130AddDataset(index, root, samples, "train", 128, style="paper", split_source="samples", cache=cache)
+    assert rgb[0]["image"].shape[0] == 3 and torch.equal(rgb[0]["image"], plain[0]["image"][:3])
+    orig = CE130AddDataset(index, root, samples, "train", 128, style="paper", split_source="samples", cache=cache,
+                           image="original")
+    assert orig.cache is None                                             # ảnh gốc không có trong cache

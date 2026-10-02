@@ -1,10 +1,9 @@
-# EXPERIMENT GAMMA1 — bài ADD: điều kiện CE-Loc (SpatialSoftmax C5 + text + t) nhưng phần sinh box = 6 tầng RoI +
-# cross-attn kiểu ALPHA (thay U-Net 1D + FiLM của GAMMA0), mỗi tầng ra một box, loss ở mọi tầng.
-# Kế hoạch: docs/EXPERIMENT_GAMMA.md mục 11 (gốc multi_condition/). Dữ liệu / ảnh vào / `vis` / chuẩn hoá box / optimizer /
-# lịch / eval Y GAMMA0 ("CE-Loc gốc + R-50") — chỉ khác phần sinh box (và dự đoán x0 thay ε).
+# EXPERIMENT GAMMA1.1 — GAMMA1 bỏ RoI: token mỗi tầng = Linear(4 toạ độ box) như GAMMA0 đưa 4 toạ độ vào U-Net; ảnh chỉ vào
+# qua token vis (SpatialSoftmax C5) của memory [t ; text ; vis]. Mọi thứ khác Y GAMMA1 (gamma1 / gamma1_1 CHỈ khác
+# model.box_token + experiment / description) => tách đóng góp của RoI. Kế hoạch: docs/EXPERIMENT_GAMMA.md mục 11.1.
 
-experiment: "gamma1"
-description: "bài add: (nhánh, lượt) CE-130, đích lỗ mới nhất; R-50+FPN 4 kênh; memory [t ; text ; SpatialSoftmax C5]; 1 box nhiễu -> 6 tầng RoI + cross-attn (không self-attn), dự đoán x0, L1 + GIoU mọi tầng; RGB + density"
+experiment: "gamma1_1"
+description: "bài add: như gamma1 nhưng KHÔNG RoI — token mỗi tầng = Linear(4 toạ độ box) như GAMMA0; ảnh chỉ vào qua token vis (SpatialSoftmax C5); RGB + density"
 task: "add"
 
 data:
@@ -20,7 +19,7 @@ data:
 
 model:
   arch: "box_refiner"               # models/box_refiner.py
-  box_token: "roi"                  # token mỗi tầng = Linear(RoIAlign(P2..P5, box)); gamma1_1: coords (bỏ RoI)
+  box_token: "coords"               # GAMMA1.1: token mỗi tầng = Linear(4 toạ độ box chuẩn hoá [−1,1]) như GAMMA0, KHÔNG RoI / FPN
   in_channels: 4                    # RGB + density
   pretrained_backbone: true
   backbone_norm: "bn"               # như GAMMA0: BN train

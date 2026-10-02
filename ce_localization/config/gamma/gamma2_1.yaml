@@ -1,0 +1,87 @@
+# EXPERIMENT GAMMA2.1 — như GAMMA2 nhưng KHÔNG đóng băng: CE-Loc pha 1 + refine train CHUNG (loss refine + ε-MSE CE-Loc)
+# trên backbone ResNet18 chung. Gốc GAMMA2: CE-Loc pha 1 đề xuất box
+# -> model refine 6 stage kiểu DiffusionDet (FPN mới trên ResNet18 chung, RoIAlignV2, cross-attn [t ; text ; vis] thay
+# self-attn, DynamicConv, FFN, FiLM thời gian). Refine train trên box nhiễu từ đích (cosine, snr 2); suy luận: box CE-Loc ->
+# cộng nhiễu tới t* -> DDIM. gamma2 / gamma2_1 CHỈ khác model.freeze_proposer. Kế hoạch: docs/EXPERIMENT_GAMMA.md mục 13.
+
+experiment: "gamma2_1"
+description: "bài add: CE-Loc pha 1 + refine TRAIN CHUNG (ε-MSE + loss refine, backbone chung train được) -> 6 stage kiểu DiffusionDet (RoI + DynamicConv + cross-attn [t ; text ; vis]), backbone ResNet18 chung"
+task: "add"
+
+data:
+  root: "../data/all_phase2_V2"
+  samples_root: "../data/samples"
+  turn_index: "../data/turn_index.json"
+  density_index: "../data/density_index.json"
+  density_root: "../data/samples"
+  split_source: "samples"
+  cache_dir: null
+  image_size: 512
+  num_workers: 4
+  input_style: "paper"
+  density: "sample"
+
+model:
+  arch: "propose_refine"
+  pretrained_backbone: true         # train: nạp CE-Loc pha 1 từ init.proposer_ckpt
+  freeze_proposer: false            # GAMMA2.1: train chung từ pha 1, loss = refine + ε-MSE CE-Loc
+  proposer:                         # PHẢI khớp gamma2_celoc.yaml (load_proposer kiểm strict)
+    vision: "r18_paper"
+    ss_mask: true
+    in_channels: 4
+    vis_dim: 128
+    text_dim: 512
+    text_proj_dim: 128
+    step_embed_dim: 256
+    down_dims: [64, 128, 256]
+    kernel_size: 3
+    n_groups: 8
+  d_model: 256                      # cấu hình mặc định DiffusionDet
+  n_stage: 6
+  n_head: 8
+  dim_feedforward: 2048
+  dropout: 0.0
+  dim_dynamic: 64
+  num_dynamic: 2
+  text_dim: 512
+  clip_text: "openai/clip-vit-base-patch32"
+
+diffusion:                          # khuếch tán của REFINE như DiffusionDet
+  num_timesteps: 1000               # cosine
+  snr_scale: 2.0
+  noise_per_image: 8                # 8 box nhiễu độc lập / ảnh (1 đích)
+  proposer:                         # khuếch tán của CE-Loc (như bài)
+    num_timesteps: 1000
+    beta_start: 1.0e-4
+    beta_end: 0.02
+
+loss:
+  l1_weight: 5.0                    # DiffusionDet, mỗi stage như nhau
+  giou_weight: 2.0
+  proposer_weight: 1.0              # chỉ dùng khi freeze_proposer: false — ε-MSE của CE-Loc
+
+init:
+  proposer_ckpt: "../weights/add/gamma2_celoc/best.pth"   # Kaggle: --proposer-ckpt
+
+training:                           # DiffusionDet (AdamW 2,5e-5 @ batch 16, clip toàn mô hình 1,0, warmup) — lr ×2 theo batch 32
+  batch_size: 32                    # TOÀN CỤC: 16 / GPU
+  lr: 5.0e-5
+  weight_decay: 1.0e-4
+  max_iter: 20000                   # ≈ 32 epoch của 19.998 mẫu
+  steps: [15000, 18500]
+  gamma: 0.1
+  warmup_iters: 1000
+  warmup_factor: 0.01
+  grad_clip: 1.0
+  seed: 0
+  log_every: 50
+  ckpt_every: 1000
+  eval_every: 2500
+
+eval:
+  split: "val"
+  limit: 500
+  n_samples: 30
+  batch_size: 16
+  sample_kw: {refine_t: 200, refine_steps: 1, proposer_sampler: "mock"}   # eval định kỳ; test quét t* (eval.py --refine-t)
+  select_metric: "mean_iou_any"

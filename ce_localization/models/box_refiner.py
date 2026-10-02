@@ -13,7 +13,9 @@ kiểu ALPHA; mỗi tầng ra một box, loss ở MỌI tầng (deep supervision
 
 Ảnh / `vis` / chuẩn hoá box DÙNG CHUNG khoá với GAMMA0 (`backbone_norm`, `density_init`, `ss_kind`, `box_norm` — xem
 `models/box_policy.py`): config GAMMA1 đặt y GAMMA0 ("CE-Loc gốc + R-50": BN train, SpatialSoftmax không mask cả canvas, box
-chia canvas). Khuếch tán như GAMMA0: lịch β tuyến tính 1e-4..0,02, T = 1000; box cxcywh / whwh chuẩn hoá · 2 − 1 (= hàm
+chia canvas). `box_token: coords` (GAMMA1.1): bỏ RoI — token mỗi tầng = Linear(4 toạ độ box chuẩn hoá) thay Linear(RoIAlign), không tính FPN;
+ảnh chỉ vào qua `vis`; mọi thứ khác y GAMMA1 (tách đóng góp của RoI).
+Khuếch tán như GAMMA0: lịch β tuyến tính 1e-4..0,02, T = 1000; box cxcywh / whwh chuẩn hoá · 2 − 1 (= hàm
 của DiffusionDet với snr = 1). Khác GAMMA0: dự đoán x0 (box), không ε. Loss = Σ_k [5·L1(b / whwh) + 2·(1 − GIoU)] với lỗ mới nhất
 (trọng số loss box của DiffusionDet, mỗi tầng như nhau).
 Box nhiễu vào tầng 1: kẹp [−1, 1] rồi w, h >= MIN_WH (tỉ lệ vùng thật). Lý do: snr 1 ⇒ ~16 % box nhiễu ở t lớn có
@@ -35,12 +37,13 @@ from ce_localization.models.roi import MultiLevelRoIAlign
 from ce_localization.utils.box_ops import cxcywh_to_xyxy
 from ce_localization.utils.diffusion_math import ddim_time_pairs, linear_alphas_cumprod, predict_noise_from_start
 
-__all__ = ["BoxRefiner", "RefineStage", "RefineHead", "noisy_to_boxes", "paired_giou", "MIN_WH", "MEM_TOKENS"]
+__all__ = ["BoxRefiner", "RefineStage", "RefineHead", "noisy_to_boxes", "paired_giou", "MIN_WH", "MEM_TOKENS", "BOX_TOKENS"]
 
 C5_CHANNELS = 2048
 C5_STRIDE = 32
 MIN_WH = 0.02                    # w, h tối thiểu của box nhiễu, tỉ lệ (nw, nh) — ~10 px trên canvas 512
 MEM_TOKENS = ("t", "text", "vis")
+BOX_TOKENS = ("roi", "coords")
 
 
 def noisy_to_boxes(x, whwh):
@@ -61,13 +64,18 @@ def paired_giou(a, b):
 
 
 class RefineStage(nn.Module):
-    """Một tầng: RoI -> token -> cross-attn tới memory -> FFN -> delta box. Phép toán của `nn.TransformerDecoderLayer`
-    (norm_first, gelu) BỎ khối self-attention."""
+    """Một tầng: box -> token -> cross-attn tới memory -> FFN -> delta box. Phép toán của `nn.TransformerDecoderLayer`
+    (norm_first, gelu) BỎ khối self-attention. Token của box (`box_token`): `roi` = Linear(RoIAlign(P2..P5, box)) (GAMMA1);
+    `coords` = Linear(4 toạ độ box chuẩn hoá về [−1, 1]) — không nhìn ảnh tại box, ảnh chỉ vào qua `vis` (GAMMA1.1)."""
 
     def __init__(self, d_model=256, n_head=4, dim_feedforward=1024, dropout=0.3, roi_channels=256, roi_size=7,
-                 num_reg=3, first=False):
+                 num_reg=3, first=False, box_token="roi"):
         super().__init__()
-        self.roi_proj = nn.Linear(roi_channels * roi_size * roi_size, d_model)
+        self.box_token = box_token
+        if box_token == "roi":
+            self.roi_proj = nn.Linear(roi_channels * roi_size * roi_size, d_model)
+        else:
+            self.box_proj = nn.Linear(4, d_model)
         self.norm_in = None if first else nn.LayerNorm(d_model)
         self.norm_ca = nn.LayerNorm(d_model)
         self.cross_attn = nn.MultiheadAttention(d_model, n_head, dropout=dropout, batch_first=True)
@@ -79,11 +87,14 @@ class RefineStage(nn.Module):
         self.reg_tower = _tower(d_model, num_reg)
         self.bboxes_delta = nn.Linear(d_model, 4)
 
-    def forward(self, feats, boxes, q_prev, memory, pooler, need_weights=False):
-        """boxes [B,K,4] xyxy (đã detach), memory [B·K, M, d], q_prev [B·K, d] | None.
-        -> (box [B,K,4], q [B·K, d], attention [B·K, M] (TB các head) | None)."""
+    def forward(self, feats, boxes, q_prev, memory, pooler, need_weights=False, norm=None):
+        """boxes [B,K,4] xyxy (đã detach), memory [B·K, M, d], q_prev [B·K, d] | None, norm [B·K, 4] whwh chuẩn hoá box
+        (chỉ `coords`). -> (box [B,K,4], q [B·K, d], attention [B·K, M] (TB các head) | None)."""
         B, K = boxes.shape[:2]
-        r = self.roi_proj(pooler(feats, boxes).flatten(1))
+        if self.box_token == "roi":
+            r = self.roi_proj(pooler(feats, boxes).flatten(1))
+        else:
+            r = self.box_proj(boxes_to_unit(boxes.reshape(-1, 4), norm))
         q = r if self.norm_in is None else self.norm_in(q_prev + r)
         h = self.norm_ca(q)[:, None]
         a, w = self.cross_attn(h, memory, memory, need_weights=need_weights)
@@ -95,16 +106,18 @@ class RefineStage(nn.Module):
 
 
 class RefineHead(nn.Module):
-    def __init__(self, n_stage=6, d_model=256, n_head=4, dim_feedforward=1024, dropout=0.3):
+    def __init__(self, n_stage=6, d_model=256, n_head=4, dim_feedforward=1024, dropout=0.3, box_token="roi"):
         super().__init__()
+        if box_token not in BOX_TOKENS:
+            raise ValueError(f"box_token {box_token!r} không thuộc {BOX_TOKENS}")
         self.pooler = MultiLevelRoIAlign(output_size=7, sampling_ratio=2)
-        self.stages = nn.ModuleList([RefineStage(d_model, n_head, dim_feedforward, dropout, first=(i == 0))
-                                     for i in range(n_stage)])
+        self.stages = nn.ModuleList([RefineStage(d_model, n_head, dim_feedforward, dropout, first=(i == 0),
+                                                 box_token=box_token) for i in range(n_stage)])
         self._init()
 
     def _init(self):
         """Như `DecoderHead._init` của ALPHA: khối attention / FFN theo DP (normal 0,02, bias 0, LN 1/0);
-        roi_proj, tower, delta xavier như DiffusionDet. Không có nhánh score."""
+        roi_proj / box_proj, tower, delta xavier như DiffusionDet. Không có nhánh score."""
         for st in self.stages:
             for m in [st.cross_attn, st.ffn, st.norm_ca, st.norm_ff, *([st.norm_in] if st.norm_in else [])]:
                 for mm in m.modules():
@@ -117,15 +130,15 @@ class RefineHead(nn.Module):
                     elif isinstance(mm, nn.LayerNorm):
                         nn.init.ones_(mm.weight)
                         nn.init.zeros_(mm.bias)
-            for m in [st.roi_proj, st.bboxes_delta, *st.reg_tower]:
+            for m in [getattr(st, "roi_proj", None) or st.box_proj, st.bboxes_delta, *st.reg_tower]:
                 if isinstance(m, nn.Linear):
                     nn.init.xavier_uniform_(m.weight)
 
-    def forward(self, feats, init_boxes, memory, need_weights=False):
+    def forward(self, feats, init_boxes, memory, need_weights=False, norm=None):
         """-> (box mọi tầng [S,B,K,4], attention [S, B·K, M] | None)."""
         boxes, q, outs, attn = init_boxes, None, [], []
         for st in self.stages:
-            pred, q, w = st(feats, boxes, q, memory, self.pooler, need_weights)
+            pred, q, w = st(feats, boxes, q, memory, self.pooler, need_weights, norm)
             outs.append(pred)
             attn.append(w)
             boxes = pred.detach()
@@ -135,7 +148,8 @@ class RefineHead(nn.Module):
 class BoxRefiner(nn.Module):
     def __init__(self, in_channels=3, pretrained_backbone=True, d_model=256, n_stage=6, n_head=4, dim_feedforward=1024,
                  dropout=0.3, text_dim=512, num_timesteps=1000, beta_start=1e-4, beta_end=0.02, l1_weight=5.0,
-                 giou_weight=2.0, backbone_norm="frozen", density_init="zero", ss_kind="masked", box_norm="valid"):
+                 giou_weight=2.0, backbone_norm="frozen", density_init="zero", ss_kind="masked", box_norm="valid",
+                 box_token="roi"):
         super().__init__()
         if ss_kind not in SS_KINDS or box_norm not in BOX_NORMS:
             raise ValueError(f"ss_kind {ss_kind!r} / box_norm {box_norm!r} không thuộc {SS_KINDS} / {BOX_NORMS}")
@@ -144,7 +158,8 @@ class BoxRefiner(nn.Module):
                                     density_init=density_init)
         self.memory = MemoryEncoder("spatial_softmax", d_model, text_dim, feat_channels=C5_CHANNELS,
                                     feat_stride=C5_STRIDE)
-        self.head = RefineHead(n_stage, d_model, n_head, dim_feedforward, dropout)
+        self.box_token = box_token
+        self.head = RefineHead(n_stage, d_model, n_head, dim_feedforward, dropout, box_token)
         self.num_timesteps = num_timesteps
         self.l1_weight, self.giou_weight = l1_weight, giou_weight
         self.register_buffer("alphas_cumprod", linear_alphas_cumprod(num_timesteps, beta_start, beta_end),
@@ -153,16 +168,23 @@ class BoxRefiner(nn.Module):
         self._attn_sum, self._attn_n = None, 0
 
     def encode_image(self, images, valid_hw):
-        """-> (P2..P5, token vis [B,1,d]). Không phụ thuộc t: MỘT lần mỗi ảnh."""
-        f, c5 = self.backbone.forward_with_c5(images)
+        """-> (P2..P5 | None khi `box_token: coords` (không dùng FPN), token vis [B,1,d]). MỘT lần mỗi ảnh."""
+        if self.box_token == "coords":
+            feats, c5 = None, self.backbone.forward_c5(images)
+        else:
+            f, c5 = self.backbone.forward_with_c5(images)
+            feats = [f["p2"], f["p3"], f["p4"], f["p5"]]
         vis = self.memory.ss_proj(spatial_keypoints(c5, valid_hw, self.ss_kind))[:, None] + self.memory.cond_pos_emb[:, 2:3]
-        return [f["p2"], f["p3"], f["p4"], f["p5"]], vis
+        return feats, vis
 
-    def refine(self, feats, vis, text_raw, t, boxes, need_weights=False):
-        """boxes [B,K,4] xyxy, t [B·K] -> (box mọi tầng [S, B·K, 4], attention [S, B·K, 3] | None)."""
+    def refine(self, feats, vis, text_raw, t, boxes, need_weights=False, norm=None):
+        """boxes [B,K,4] xyxy, t [B·K], norm [B·K,4] whwh chuẩn hoá (cần khi `box_token: coords`)
+        -> (box mọi tầng [S, B·K, 4], attention [S, B·K, 3] | None)."""
         K = boxes.shape[1]
+        if self.box_token == "coords" and norm is None:
+            raise ValueError("box_token coords cần norm (whwh chuẩn hoá box)")
         mem, _ = self.memory(t, text_raw.repeat_interleave(K, 0), vis.repeat_interleave(K, 0))
-        out, attn = self.head(feats, boxes, mem, need_weights)
+        out, attn = self.head(feats, boxes, mem, need_weights, norm)
         return out.flatten(1, 2), attn
 
     def forward(self, images, text_raw, valid_hw, target, whwh, k=1, generator=None):
@@ -177,7 +199,7 @@ class BoxRefiner(nn.Module):
         noise = torch.randn(x0.shape, device=dev, generator=generator)
         ab = self.alphas_cumprod[t].unsqueeze(-1)
         xt = ab.sqrt() * x0 + (1 - ab).sqrt() * noise
-        preds, _ = self.refine(feats, vis, text_raw, t, noisy_to_boxes(xt, wk).view(B, k, 4))
+        preds, _ = self.refine(feats, vis, text_raw, t, noisy_to_boxes(xt, wk).view(B, k, 4), norm=wk)
         per = torch.stack([self.l1_weight * ((p - gt) / wk).abs().sum(-1).mean()
                            + self.giou_weight * (1 - paired_giou(p, gt)).mean() for p in preds])
         loss = per.sum()
@@ -210,7 +232,7 @@ class BoxRefiner(nn.Module):
         for t, t_next in pairs:
             tb = torch.full((B * K,), t, device=dev, dtype=torch.long)
             noisy = noisy_to_boxes(x, wk).view(B, K, 4)
-            preds, attn = self.refine(feats, vis, text_raw, tb, noisy, self.track_attn)
+            preds, attn = self.refine(feats, vis, text_raw, tb, noisy, self.track_attn, norm=wk)
             if attn is not None:
                 s = attn.float().sum(1)                                          # [S, 3]
                 self._attn_sum = s if self._attn_sum is None else self._attn_sum + s

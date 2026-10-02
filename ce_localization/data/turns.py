@@ -13,12 +13,19 @@ còn split lấy theo thư mục `all_phase2_V2` (lớp 3 split rời nhau).
 Dataset đọc ảnh + density từ `samples/` (Kaggle chỉ cần zip samples + annotation CE-130), letterbox góc trên-trái
 + chuẩn hoá ImageNet như ALPHA (`data/dataset.py`), density giải mã jet như ALPHA3 (`data/density.py`).
 `image="original"` thay ảnh vào bằng `ground_truth.jpg` của nhánh (không lỗ) — phép thử lối tắt "tìm vết inpaint".
+
+`split_source` (GAMMA2): `ce130` = split theo thư mục `all_phase2_V2` (mặc định); `samples` = split NHƯ CE-Loc GỐC TRAIN:
+train = mọi mẫu `samples/train` (gồm cả ảnh gốc val / test CE-130 bài đã dùng), val / test = mẫu `samples/test` có ảnh gốc
+thuộc val / test CE-130 (`samples/` train và test không chung ảnh gốc ⇒ chưa model nào train trên val / test này).
+`AddCache` (GAMMA2, Kaggle): ảnh inpaint + density của mẫu đã letterbox, uint8 [T,T,4] trong MỘT file (zlib hoặc memmap thô) —
+`/255` ra đúng từng bit đầu vào kiểu bài (có test); bỏ nghẽn giải mã PNG.
 """
 
 import glob
 import hashlib
 import json
 import os
+import zlib
 from collections import defaultdict
 from multiprocessing import Pool
 
@@ -31,14 +38,16 @@ from ce_localization.data.dataset import _read_annotation, letterbox, normalize,
 from ce_localization.data.density import decode_jet, letterbox_density, load_density_levels
 from ce_localization.utils.box_ops_np import box_iou, filter_degenerate
 
-__all__ = ["SPLITS", "IMAGE_KINDS", "ADD_DENSITY", "INPUT_STYLES", "pixel_hash", "assign_removed", "build_turn_index",
-           "TurnIndex", "CE130AddDataset", "collate_add", "to_device_add", "image_inputs"]
+__all__ = ["SPLITS", "IMAGE_KINDS", "ADD_DENSITY", "INPUT_STYLES", "SPLIT_SOURCES", "pixel_hash", "assign_removed",
+           "build_turn_index", "TurnIndex", "AddCache", "build_add_cache", "CE130AddDataset", "collate_add", "to_device_add",
+           "image_inputs"]
 
 SPLITS = ("train", "val", "test")
 IMAGE_KINDS = ("inpainted", "original")
 ADD_DENSITY = ("sample", "full", "empty")       # density của chính mẫu | bản `full` của ảnh gốc (ALPHA3) | trống
 TARGET_TOL_PX = 1.0                             # target_bbox (cxcywh, làm tròn) vs inpainted_bboxes (xyxy)
 INPUT_STYLES = ("ours", "paper")
+SPLIT_SOURCES = ("ce130", "samples")
 
 
 def image_inputs(img_rgb, density_path=None, target=512, style="ours"):
@@ -193,8 +202,101 @@ class TurnIndex:
             d = json.load(f)
         self.branches, self.turns = d["branches"], d["turns"]
 
-    def keys(self, split):
-        return sorted(k for k, v in self.turns.items() if self.branches[v["branch"]]["split"] == split)
+    def keys(self, split, source="ce130"):
+        """Khoá (nhánh, lượt) của `split`. `source` (mục docstring module): ce130 | samples."""
+        if source not in SPLIT_SOURCES:
+            raise ValueError(f"split_source {source!r} không thuộc {SPLIT_SOURCES}")
+        if source == "ce130":
+            return sorted(k for k, v in self.turns.items() if self.branches[v["branch"]]["split"] == split)
+        sdir = "train" if split == "train" else "test"
+        return sorted(k for k, v in self.turns.items() if v["sample"].split("/")[0] == sdir
+                      and (split == "train" or self.branches[v["branch"]]["split"] == split))
+
+
+class AddCache:
+    """Đọc cache của `build_add_cache` (`meta.json`: image_size, format, khoá -> hàng / (offset, độ dài), (scale, nw, nh)).
+    Mỗi mẫu = uint8 [T,T,4] (RGB letterbox + density `.convert("L")` letterbox):
+      raw   `data.u8` memmap [N,T,T,4] (~1 MiB / mẫu ở canvas 512)
+      zlib  `data.zlib` các khối zlib nối liền (~0,41 MiB / mẫu đo trên samples/train — vừa giới hạn output ~20 GB của Kaggle
+            nên LƯU LẠI được giữa các phiên); giải nén vài ms / mẫu, vẫn nhanh hơn giải mã PNG nhiều.
+    File mở lười (mỗi worker DataLoader mở riêng)."""
+
+    def __init__(self, cache_dir):
+        with open(os.path.join(cache_dir, "meta.json")) as f:
+            m = json.load(f)
+        self.dir, self.size, self.rows, self.geom = cache_dir, m["image_size"], m["rows"], m["geom"]
+        self.format = m.get("format", "raw")
+        self._fh = None
+
+    def __contains__(self, key):
+        return key in self.rows
+
+    def get(self, key):
+        """-> (uint8 [T,T,4], scale, nw, nh)."""
+        scale, nw, nh = self.geom[key]
+        if self.format == "zlib":
+            if self._fh is None:
+                self._fh = open(os.path.join(self.dir, "data.zlib"), "rb")
+            off, n = self.rows[key]
+            self._fh.seek(off)
+            arr = np.frombuffer(zlib.decompress(self._fh.read(n)), dtype=np.uint8)
+            return arr.reshape(self.size, self.size, 4), scale, nw, nh
+        if self._fh is None:
+            self._fh = np.memmap(os.path.join(self.dir, "data.u8"), dtype=np.uint8, mode="r",
+                                 shape=(len(self.rows), self.size, self.size, 4))
+        return np.asarray(self._fh[self.rows[key]]), scale, nw, nh
+
+
+def _cache_one(job):
+    key, img_path, den_path, size, fmt = job
+    img = Image.open(img_path).convert("RGB")
+    canvas, scale, nw, nh = letterbox(img, size)
+    den = np.zeros((size, size), dtype=np.uint8)
+    small = Image.open(den_path).convert("L").resize((nw, nh), resample=Image.NEAREST)
+    den[:nh, :nw] = np.asarray(small, dtype=np.uint8)
+    arr = np.ascontiguousarray(np.concatenate([canvas, den[..., None]], axis=-1))
+    return key, (zlib.compress(arr.tobytes(), 1) if fmt == "zlib" else arr), (float(scale), int(nw), int(nh))
+
+
+def build_add_cache(index, samples_root, keys, out_dir, image_size=512, workers=4, log=print, fmt="zlib"):
+    """Ghi cache uint8 của `keys` (ảnh inpaint + density của mẫu, letterbox kiểu bài) vào `out_dir`, định dạng `fmt`."""
+    if fmt not in ("zlib", "raw"):
+        raise ValueError(f"format {fmt!r} không thuộc ('zlib', 'raw')")
+    os.makedirs(out_dir, exist_ok=True)
+    jobs = [(k, os.path.join(samples_root, index.turns[k]["sample"]), os.path.join(samples_root, index.turns[k]["density"]),
+             image_size, fmt) for k in keys]
+    if fmt == "raw":
+        sink = np.memmap(os.path.join(out_dir, "data.u8"), dtype=np.uint8, mode="w+",
+                         shape=(len(jobs), image_size, image_size, 4))
+    else:
+        sink = open(os.path.join(out_dir, "data.zlib"), "wb")
+    rows, geom, off = {}, {}, 0
+    pool = Pool(workers) if workers > 0 else None
+    it = pool.imap(_cache_one, jobs, chunksize=16) if pool else map(_cache_one, jobs)
+    t0 = __import__("time").time()
+    for i, (k, data, g) in enumerate(it):
+        if fmt == "raw":
+            sink[i] = data
+            rows[k] = i
+        else:
+            sink.write(data)
+            rows[k] = [off, len(data)]
+            off += len(data)
+        geom[k] = g
+        if (i + 1) % 2000 == 0 or i + 1 == len(jobs):
+            el = __import__("time").time() - t0
+            log(f"  [cache] {i + 1}/{len(jobs)} | {el:.0f}s | còn ~{el / (i + 1) * (len(jobs) - i - 1):.0f}s"
+                + ("" if fmt == "raw" else f" | {off / 2 ** 30:.2f} GB"))
+    if pool:
+        pool.close()
+        pool.join()
+    if fmt == "raw":
+        sink.flush()
+    else:
+        sink.close()
+    with open(os.path.join(out_dir, "meta.json"), "w") as f:      # ghi CUỐI: có meta.json = cache đầy đủ
+        json.dump({"image_size": image_size, "format": fmt, "rows": rows, "geom": geom}, f)
+    return len(jobs)
 
 
 class CE130AddDataset(Dataset):
@@ -203,7 +305,7 @@ class CE130AddDataset(Dataset):
     `.convert("L")` (density `empty` = PNG jet trống (0, 0, 127) -> độ sáng 14/255 trên vùng thật), như `image_inputs`."""
 
     def __init__(self, index, ce130_root, samples_root, split, image_size=512, density=None, density_index=None,
-                 image="inpainted", style="ours"):
+                 image="inpainted", style="ours", split_source="ce130", cache=None):
         if image not in IMAGE_KINDS:
             raise ValueError(f"image {image!r} không thuộc {IMAGE_KINDS}")
         if style not in INPUT_STYLES:
@@ -213,9 +315,14 @@ class CE130AddDataset(Dataset):
         if density == "full" and density_index is None:
             raise ValueError("density 'full' cần density_index (data/density_index.json của ALPHA3)")
         self.index, self.ce130_root, self.samples_root = index, ce130_root, samples_root
-        self.keys = index.keys(split)
+        self.keys = index.keys(split, split_source)
         self.image_size, self.density, self.density_index, self.image = image_size, density, density_index, image
         self.style = style
+        # cache chỉ dùng được khi đầu vào đúng thứ đã cache: ảnh inpaint kiểu bài + density của mẫu (hoặc không density)
+        usable = cache is not None and image == "inpainted" and style == "paper" and density in (None, "sample")
+        if cache is not None and cache.size != image_size:
+            raise ValueError(f"cache image_size {cache.size} != {image_size}")
+        self.cache = cache if usable else None
 
     def __len__(self):
         return len(self.keys)
@@ -231,13 +338,19 @@ class CE130AddDataset(Dataset):
         key = self.keys[i]
         e, b = self.entry(i)
         t = e["t"]
-        path = (os.path.join(self.samples_root, e["sample"]) if self.image == "inpainted" else
-                os.path.join(self.ce130_root, e["branch"], "ground_truth.jpg"))
-        img = Image.open(path).convert("RGB")
-        canvas, scale, nw, nh = letterbox(img, self.image_size)
         paper = self.style == "paper"
-        x = canvas.astype(np.float32).transpose(2, 0, 1) / 255.0 if paper else normalize(canvas)
-        if self.density is not None:
+        if self.cache is not None and key in self.cache:
+            arr, scale, nw, nh = self.cache.get(key)
+            x = arr.transpose(2, 0, 1).astype(np.float32) / 255.0
+            if self.density is None:
+                x = x[:3]
+        else:
+            path = (os.path.join(self.samples_root, e["sample"]) if self.image == "inpainted" else
+                    os.path.join(self.ce130_root, e["branch"], "ground_truth.jpg"))
+            img = Image.open(path).convert("RGB")
+            canvas, scale, nw, nh = letterbox(img, self.image_size)
+            x = canvas.astype(np.float32).transpose(2, 0, 1) / 255.0 if paper else normalize(canvas)
+        if self.density is not None and x.shape[0] == 3:
             if self.density == "empty" and paper:
                 den = letterbox_density(np.asarray(Image.new("RGB", img.size, (0, 0, 127)).convert("L")), nw, nh,
                                         self.image_size)

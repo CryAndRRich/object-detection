@@ -22,7 +22,8 @@ canvas, meshgrid 'ij', toạ độ [−1, 1] — đúng `_paper_spatial_softmax`
 (`to_tensor`, density `.convert("L")`). Mặc định của constructor giữ bản cũ (FrozenBN / mask / vùng thật) để tái lập.
 Train: mỗi ảnh rút `noise_per_image` bộ (t, ε) độc lập — backbone chỉ tính MỘT lần mỗi ảnh, U-Net rất rẻ.
 
-`vision="r18_paper"` (chỉ để NẠP checkpoint của bài, `BoxPolicy.load_celoc_paper`): phần ảnh đúng CE-Loc gốc
+`vision="r18_paper"` (NẠP checkpoint của bài qua `BoxPolicy.load_celoc_paper`, hoặc TRAIN lại CE-Loc gốc — GAMMA2 pha 1,
+`ss_mask: true` = SpatialSoftmax mask phần đệm: ô đệm −inf trước softmax, lưới toạ độ giữ hệ canvas của bài): phần ảnh đúng CE-Loc gốc
 (`refs/repos/Count-Editing/CE-LocModel/models/{vision_encoder,spatial_softmax}.py`) — ResNet18 4 kênh, SpatialSoftmax
 KHÔNG mask trên cả canvas (meshgrid 'ij': toạ độ đầu là DỌC), Linear(1024, 128); đầu vào `data.turns.paper_inputs`
 (`to_tensor`, density `.convert("L")`), box chuẩn hoá theo CANVAS (whwh = T).
@@ -120,12 +121,16 @@ def mock_sample(eps_fn, n_rows, alphas_cumprod, steps=100, generator=None, devic
     return x if traj is None else (x, traj)
 
 
-def _paper_spatial_softmax(feat):
-    """`SpatialSoftmax` của CE-Loc gốc, y từng phép tính: meshgrid 'ij' -> toạ độ đầu là DỌC; xen kẽ (x_c, y_c)."""
+def _paper_spatial_softmax(feat, valid=None):
+    """`SpatialSoftmax` của CE-Loc gốc, y từng phép tính: meshgrid 'ij' -> toạ độ đầu là DỌC; xen kẽ (x_c, y_c).
+    `valid` [N,H,W] bool (GAMMA2): ô False (phần đệm) nhận −inf trước softmax — cùng lưới toạ độ canvas của bài."""
     N, C, H, W = feat.shape
     pos_x, pos_y = torch.meshgrid(torch.linspace(-1, 1, H, device=feat.device),
                                   torch.linspace(-1, 1, W, device=feat.device), indexing="ij")
-    att = F.softmax(feat.reshape(N, C, -1), dim=-1)
+    logits = feat.reshape(N, C, -1)
+    if valid is not None:
+        logits = logits.masked_fill(~valid.reshape(N, 1, -1), float("-inf"))
+    att = F.softmax(logits, dim=-1)
     ex = torch.sum(pos_x.reshape(H * W) * att, dim=-1, keepdim=True)
     ey = torch.sum(pos_y.reshape(H * W) * att, dim=-1, keepdim=True)
     return torch.cat([ex, ey], dim=-1).reshape(N, -1)
@@ -145,8 +150,9 @@ class PaperVisionEncoder(nn.Module):
     Tên module (`backbone`, `projection`) trùng bản gốc để nạp checkpoint. in_channels 4: kênh density khởi tạo bằng
     TB weight RGB như bài (chỉ có ý nghĩa khi train từ đầu)."""
 
-    def __init__(self, output_dim=128, in_channels=4, pretrained=False):
+    def __init__(self, output_dim=128, in_channels=4, pretrained=False, ss_mask=False):
         super().__init__()
+        self.ss_mask = ss_mask
         r = torchvision.models.resnet18(weights=torchvision.models.ResNet18_Weights.IMAGENET1K_V1 if pretrained else None)
         if in_channels == 4:
             conv1 = nn.Conv2d(4, 64, kernel_size=7, stride=2, padding=3, bias=False)
@@ -158,24 +164,45 @@ class PaperVisionEncoder(nn.Module):
         self.backbone = nn.Sequential(*list(r.children())[:-2])
         self.projection = nn.Linear(512 * 2, output_dim)
 
-    def forward(self, x):
-        return self.projection(_paper_spatial_softmax(self.backbone(x)))
+    def features(self, x):
+        """-> (C2, C3, C4, C5) của ResNet18 (64 / 128 / 256 / 512 kênh, stride 4 / 8 / 16 / 32) — GAMMA2 dựng FPN trên đây."""
+        feats = []
+        for i, m in enumerate(self.backbone):
+            x = m(x)
+            if i >= 4:                                       # 0..3 = conv1, bn1, relu, maxpool ; 4..7 = layer1..4
+                feats.append(x)
+        return tuple(feats)
+
+    def valid(self, c5, valid_hw):
+        """Ô C5 thuộc vùng ảnh thật [N,H,W] nếu `ss_mask`, không thì None (bài: cả canvas)."""
+        return valid_cells_mask(valid_hw, c5.shape[2], c5.shape[3], P5_STRIDE) if self.ss_mask else None
+
+    def keypoints_flat(self, c5, valid_hw=None):
+        """C5 -> [N, 2C] toạ độ SpatialSoftmax (có mask nếu `ss_mask`)."""
+        return _paper_spatial_softmax(c5, self.valid(c5, valid_hw))
+
+    def forward(self, x, valid_hw=None):
+        return self.projection(self.keypoints_flat(self.backbone(x), valid_hw))
 
     @torch.no_grad()
-    def keypoints(self, x):
+    def keypoints(self, x, valid_hw=None):
         """Soi SpatialSoftmax: -> (toạ độ [B,C,2] theo thứ tự (DỌC, NGANG) trong [−1, 1] — meshgrid 'ij' của bài —,
         attention softmax [B,C,H,W]). Toạ độ −1 / +1 = TÂM ô đầu / ô cuối của lưới H×W."""
         feat = self.backbone(x)
         N, C, H, W = feat.shape
-        att = F.softmax(feat.reshape(N, C, -1), dim=-1)
-        return _paper_spatial_softmax(feat).reshape(N, C, 2), att.reshape(N, C, H, W)
+        logits = feat.reshape(N, C, -1)
+        valid = self.valid(feat, valid_hw)
+        if valid is not None:
+            logits = logits.masked_fill(~valid.reshape(N, 1, -1), float("-inf"))
+        att = F.softmax(logits, dim=-1)
+        return _paper_spatial_softmax(feat, valid).reshape(N, C, 2), att.reshape(N, C, H, W)
 
 
 class BoxPolicy(nn.Module):
     def __init__(self, in_channels=3, pretrained_backbone=True, fpn_dim=256, vis_dim=128, text_in=512,
                  text_dim=128, step_embed_dim=256, down_dims=(64, 128, 256), kernel_size=3, n_groups=8,
                  num_timesteps=1000, beta_start=1e-4, beta_end=0.02, vision="r50_fpn", ss_source="c5",
-                 backbone_norm="frozen", density_init="zero", ss_kind="masked", box_norm="valid"):
+                 backbone_norm="frozen", density_init="zero", ss_kind="masked", box_norm="valid", ss_mask=False):
         super().__init__()
         if vision not in VISIONS:
             raise ValueError(f"vision {vision!r} không thuộc {VISIONS}")
@@ -185,7 +212,7 @@ class BoxPolicy(nn.Module):
         self.vision_kind, self.ss_source, self.ss_kind = vision, ss_source, ss_kind
         self.box_norm = "canvas" if vision == "r18_paper" else box_norm
         if vision == "r18_paper":
-            self.vision = PaperVisionEncoder(vis_dim, in_channels, pretrained_backbone)
+            self.vision = PaperVisionEncoder(vis_dim, in_channels, pretrained_backbone, ss_mask)
         else:
             self.backbone = ResNet50FPN(fpn_dim, pretrained=pretrained_backbone, in_channels=in_channels,
                                         norm=backbone_norm, density_init=density_init)
@@ -204,16 +231,24 @@ class BoxPolicy(nn.Module):
 
     def condition(self, images, text_raw, valid_hw, null_text=False):
         """-> cond [B, vis_dim + text_dim]. Phần ảnh không phụ thuộc t: tính MỘT lần mỗi ảnh."""
-        if self.vision_kind == "r18_paper":                                        # bài: không mask vùng thật
-            return torch.cat([self.vision(images), self.text_emb(text_raw, null_text)], dim=-1)
+        if self.vision_kind == "r18_paper":                       # bài: không mask vùng thật; GAMMA2: ss_mask
+            return torch.cat([self.vision(images, valid_hw), self.text_emb(text_raw, null_text)], dim=-1)
         f = self.backbone.forward_c5(images) if self.ss_source == "c5" else self.backbone.forward_p5(images)
         return torch.cat([self.vis_proj(spatial_keypoints(f, valid_hw, self.ss_kind)), self.text_emb(text_raw, null_text)],
                          dim=-1)
 
+    def cond_from_keypoints(self, kp, text_raw, null_text=False):
+        """ResNet18 của bài: toạ độ SpatialSoftmax [B, 2C] -> cond — để GAMMA2 dùng chung backbone với model refine."""
+        return torch.cat([self.vision.projection(kp), self.text_emb(text_raw, null_text)], dim=-1)
+
     def forward(self, images, text_raw, valid_hw, x0, k=1, generator=None):
         """ε-MSE như `ObjectPlacementPolicy.compute_loss` của bài, k bộ (t, ε) mỗi ảnh.
         x0 [B,4] trong [−1,1]. -> loss vô hướng (trung bình trên B·k·4)."""
-        cond = self.condition(images, text_raw, valid_hw).repeat_interleave(k, dim=0)
+        return self.eps_loss(self.condition(images, text_raw, valid_hw), x0, k, generator)
+
+    def eps_loss(self, cond, x0, k=1, generator=None):
+        """ε-MSE từ cond [B, D] đã tính sẵn."""
+        cond = cond.repeat_interleave(k, dim=0)
         x0 = x0.repeat_interleave(k, dim=0)
         dev = x0.device
         t = torch.randint(0, self.num_timesteps, (x0.shape[0],), device=dev, generator=generator)
@@ -228,8 +263,14 @@ class BoxPolicy(nn.Module):
                null_text=False):
         """n_samples mẫu ĐỘC LẬP mỗi ảnh (ảnh mã hoá một lần, các mẫu khử nhiễu song song).
         -> [B, n_samples, 4] trong [−1,1]; `record` (tập t / "all") -> (box, quỹ đạo: list {t, x_t, x0_hat} [B,n,4])."""
-        B = images.shape[0]
-        cond = self.condition(images, text_raw, valid_hw, null_text).repeat_interleave(n_samples, dim=0)
+        return self.sample_from_cond(self.condition(images, text_raw, valid_hw, null_text), n_samples, generator, sampler,
+                                     record)
+
+    @torch.no_grad()
+    def sample_from_cond(self, cond, n_samples, generator=None, sampler="ddpm", record=None):
+        """Như `sample` nhưng từ cond [B, D] đã tính sẵn."""
+        B = cond.shape[0]
+        cond = cond.repeat_interleave(n_samples, dim=0)
         fn = lambda x, t: self.noise_net(x.unsqueeze(1), t, cond).squeeze(1)  # noqa: E731
         run = ddpm_sample if sampler == "ddpm" else mock_sample
         out = run(fn, cond.shape[0], self.alphas_cumprod, generator=generator, device=cond.device, record=record)

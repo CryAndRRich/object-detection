@@ -48,7 +48,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ce_localization.data.dataset import CE130Dataset, collate, to_device  # noqa: E402
 from ce_localization.data.density import DensityIndex  # noqa: E402
 from ce_localization.data.points import PointTable  # noqa: E402
-from ce_localization.data.turns import CE130AddDataset, TurnIndex, collate_add, to_device_add  # noqa: E402
+from ce_localization.data.turns import AddCache, CE130AddDataset, TurnIndex, collate_add, to_device_add  # noqa: E402
 from ce_localization.engine.add_eval import add_metrics, predict_add  # noqa: E402
 from ce_localization.engine import nan_debug  # noqa: E402
 from ce_localization.engine.criterion import Criterion, build_targets  # noqa: E402
@@ -56,7 +56,7 @@ from ce_localization.engine.diffusion import prepare_train_boxes  # noqa: E402
 from ce_localization.engine.evaluate import predict, score  # noqa: E402
 from ce_localization.engine.train_utils import (PthCheckpoints, epoch_batches,  # noqa: E402
                                                lr_factor, noise_seed, setup_dist)
-from ce_localization.models.backbone import density_weight_ratio  # noqa: E402
+from ce_localization.models.backbone import conv1_of, density_ratio_of  # noqa: E402
 from ce_localization.models.box_policy import boxes_to_unit, norm_whwh  # noqa: E402
 from ce_localization.models.detector import build_model  # noqa: E402
 from ce_localization.models.text import TextTable, encode_class_names  # noqa: E402
@@ -67,7 +67,7 @@ from ce_localization.utils.log import fmt_time, print_banner, run_env  # noqa: E
 # `eval` được phép khác (chỉ cảnh báo); `data.num_workers` / đường dẫn dữ liệu không ảnh hưởng phép
 # toán (Kaggle gắn dataset ở đường dẫn khác nhau giữa các phiên).
 MUST_MATCH = ("model", "diffusion", "matcher", "data", "loss")
-DATA_FREE = ("num_workers", "root", "density_root", "density_index", "points", "samples_root", "turn_index")
+DATA_FREE = ("num_workers", "root", "density_root", "density_index", "points", "samples_root", "turn_index", "cache_dir")
 TASKS = ("detect", "add")
 # nhãn số hạng loss trên dòng log (giữ đúng nhãn cũ của ALPHA: ce / l1 / giou / iou)
 LOG_LABEL = {"loss_ce": "ce", "loss_bbox": "l1", "loss_giou": "giou", "iou_matched": "iou",
@@ -104,9 +104,15 @@ def density_setup(cfg):
         sys.exit(str(e))
 
 
+def image_in_channels(cfg):
+    """Số kênh ảnh vào: `model.in_channels`, hoặc của CE-Loc (`model.proposer`) với `propose_refine`."""
+    m = cfg["model"]
+    return m.get("proposer", m).get("in_channels", 3)
+
+
 def add_density_setup(cfg):
-    """GAMMA: `data.density` (None | sample) phải khớp `model.in_channels` (4 <=> có density)."""
-    mode, ch = cfg["data"].get("density"), cfg["model"].get("in_channels", 3)
+    """GAMMA: `data.density` (None | sample) phải khớp `model.in_channels` (4 <=> có density); GAMMA2: của proposer."""
+    mode, ch = cfg["data"].get("density"), image_in_channels(cfg)
     if (mode is not None) != (ch == 4):
         sys.exit(f"config mâu thuẫn: data.density={mode} nhưng model.in_channels={ch} (density <=> 4 kênh)")
     return mode
@@ -121,8 +127,10 @@ def add_datasets(cfg, eval_split, limit=None, eval_limit=None):
     except FileNotFoundError as e:
         sys.exit(str(e))
     dens = add_density_setup(cfg)
+    cache = AddCache(d["cache_dir"]) if d.get("cache_dir") else None          # GAMMA2 / Kaggle: ảnh train đã letterbox
     mk = lambda split: CE130AddDataset(index, d["root"], d["samples_root"], split, d["image_size"],  # noqa: E731
-                                       density=dens, style=d.get("input_style", "ours"))
+                                       density=dens, style=d.get("input_style", "ours"),
+                                       split_source=d.get("split_source", "ce130"), cache=cache)
     ds_tr = mk("train")
     if limit:
         ds_tr.keys = ds_tr.keys[:limit]
@@ -162,7 +170,8 @@ def run_val(model, loader, text_table, cfg, log):
     ev = cfg["eval"]
     if cfg.get("task", "detect") == "add":
         rec = predict_add(model, loader, text_table, ev["n_samples"], seed=0,
-                          log_every=max(len(loader) // 4, 1), log=log, steps=ev.get("sampling_steps"))
+                          log_every=max(len(loader) // 4, 1), log=log, steps=ev.get("sampling_steps"),
+                          sample_kw=ev.get("sample_kw"))
         res = add_metrics(rec)
         res["eval_sec"] = time.time() - t0
         if hasattr(model, "pop_attn"):                  # GAMMA1: attention của query lên [t ; text ; vis]
@@ -220,7 +229,7 @@ def _step_loss(net, crit, batch, text_table, cfg, model, gen, dev):
     if crit is None:                                    # GAMMA (bài add)
         k = cfg["diffusion"]["noise_per_image"]
         text = text_table(batch["text"], dev)
-        if cfg["model"].get("arch") == "box_refiner":   # GAMMA1: L1 + GIoU ở mọi tầng, đích = lỗ mới nhất
+        if cfg["model"].get("arch") in ("box_refiner", "propose_refine"):   # GAMMA1 / 2: L1 + GIoU mọi tầng
             return net(batch["images"], text, batch["valid_hw"], batch["target"], batch["whwh"], k=k, generator=gen)
         x0 = boxes_to_unit(batch["target"], norm_whwh(model, batch["whwh"], batch["images"].shape[-1]))  # GAMMA0: ε-MSE
         loss = net(batch["images"], text, batch["valid_hw"], x0, k=k, generator=gen)
@@ -252,6 +261,8 @@ def main():
     ap.add_argument("--density-index", default=None, help="ALPHA3: ghi đè data.density_index (.json)")
     ap.add_argument("--samples-root", default=None, help="GAMMA: ghi đè data.samples_root (thư mục samples/)")
     ap.add_argument("--turn-index", default=None, help="GAMMA: ghi đè data.turn_index (.json, cửa G0)")
+    ap.add_argument("--cache-dir", default=None, help="GAMMA2: cache uint8 (tools/build_add_cache.py) -> data.cache_dir")
+    ap.add_argument("--proposer-ckpt", default=None, help="GAMMA2: checkpoint CE-Loc pha 1 -> model.proposer_ckpt")
     ap.add_argument("--max-hours", type=float, default=0.0,
                     help="dừng sạch (ghi last.pth) nếu đoạn kế tiếp có thể vượt N giờ; 0 = tắt")
     ap.add_argument("--bench", type=int, default=0, help="G4: đo N iter rồi thoát, không ghi gì")
@@ -287,6 +298,10 @@ def main():
         cfg["data"]["samples_root"] = a.samples_root
     if a.turn_index:
         cfg["data"]["turn_index"] = a.turn_index
+    if a.cache_dir:
+        cfg["data"]["cache_dir"] = a.cache_dir
+    if a.proposer_ckpt:
+        cfg.setdefault("init", {})["proposer_ckpt"] = a.proposer_ckpt
     nw = cfg["data"]["num_workers"] if a.num_workers is None else a.num_workers
     task = cfg.get("task", "detect")
     if task not in TASKS:
@@ -383,7 +398,7 @@ def main():
         find_unused_parameters=True) if world > 1 else model
     n_learn = sum(p.numel() for p in model.parameters() if p.requires_grad)
     log(f"[model] arch={cfg['model'].get('arch', 'detector')} | memory={cfg['model'].get('memory')} | "
-        f"in_channels {model.backbone.in_channels} | {n_learn / 1e6:.2f}M tham số train | "
+        f"in_channels {conv1_of(model).in_channels} | {n_learn / 1e6:.2f}M tham số train | "
         f"N={cfg['diffusion'].get('num_proposals')} | {fmt_time(time.time() - t)}")
     opt = torch.optim.AdamW(model.parameters(), lr=float(tr["lr"]), weight_decay=float(tr["weight_decay"]))
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda it: lr_factor(it, tr))
@@ -487,6 +502,8 @@ def main():
                 if crit is None:
                     lps = st.get("loss_per_stage")
                     detail = "" if lps is None else " (tầng " + " ".join(f"{float(x):.3f}" for x in lps) + ")"
+                    if "loss_eps" in st:
+                        detail += f" | ε-MSE CE-Loc {float(st['loss_eps']):.4f}"
                 else:
                     lps = " ".join(f"{float(x):.2f}" for x in st["loss_per_stage"])
                     terms = " ".join(f"{LOG_LABEL.get(k, k)} {float(st[k + '_final']):.3f}" for k in crit.log_keys)
@@ -517,7 +534,7 @@ def main():
                     model.train()
                     val = res[sm]
                     is_best = best is None or val > best[sm]
-                    dw = density_weight_ratio(model.backbone)
+                    dw = density_ratio_of(model)
                     if task == "add":
                         K = cfg["eval"]["n_samples"]
                         keys = ("mean_iou_any", "box_hit50_any", f"best_iou@{K}_any", f"hit50@{K}_any",

@@ -60,9 +60,31 @@ def _paper_keys(m):
             "ss_kind": m.get("ss_kind", "masked"), "box_norm": m.get("box_norm", "valid")}
 
 
+def _box_policy_kw(m, d, pre):
+    """Tham số `BoxPolicy` từ nhánh config model / diffusion (dùng cho `box_policy` và proposer của `propose_refine`)."""
+    return dict(in_channels=m.get("in_channels", 3), pretrained_backbone=pre, fpn_dim=m.get("d_model", 256),
+                vis_dim=m["vis_dim"], text_in=m.get("text_dim", 512), text_dim=m["text_proj_dim"],
+                step_embed_dim=m["step_embed_dim"], down_dims=m["down_dims"], kernel_size=m["kernel_size"],
+                n_groups=m["n_groups"], num_timesteps=d["num_timesteps"], beta_start=d["beta_start"],
+                beta_end=d["beta_end"], ss_source=m.get("ss_source", "c5"), vision=m.get("vision", "r50_fpn"),
+                ss_mask=m.get("ss_mask", False), **_paper_keys(m))
+
+
+def load_proposer(model, path):
+    """Nạp checkpoint CE-Loc pha 1 (train.py, `model.arch: box_policy`) vào `model.proposer` — strict, và SpatialSoftmax mask
+    phải khớp (không có tham số nên strict không bắt được)."""
+    import torch
+    ck = torch.load(path, map_location="cpu", weights_only=False)
+    m = ck["config"]["model"]
+    if m.get("arch") != "box_policy" or m.get("ss_mask", False) != model.proposer.vision.ss_mask:
+        raise ValueError(f"{path}: không phải CE-Loc pha 1 khớp proposer (arch {m.get('arch')}, ss_mask {m.get('ss_mask')})")
+    model.proposer.load_state_dict(ck["model"])
+    return ck.get("iter")
+
+
 def build_model(cfg, pretrained_backbone=None):
-    """`model.arch`: `detector` (mặc định — ALPHA / BETA, bài detect) | `box_policy` (GAMMA0, bài add) |
-    `box_refiner` (GAMMA1, bài add)."""
+    """`model.arch`: `detector` (mặc định — ALPHA / BETA, bài detect) | `box_policy` (GAMMA0 / GAMMA2 pha 1, bài add) |
+    `box_refiner` (GAMMA1) | `propose_refine` (GAMMA2 / 2.1: CE-Loc pha 1 -> refine kiểu DiffusionDet, backbone chung)."""
     m, d = cfg["model"], cfg["diffusion"]
     pre = m.get("pretrained_backbone", True) if pretrained_backbone is None else pretrained_backbone
     if m.get("arch", "detector") == "box_refiner":
@@ -72,15 +94,24 @@ def build_model(cfg, pretrained_backbone=None):
             n_head=m["n_head"], dim_feedforward=m["dim_feedforward"], dropout=m["dropout"],
             text_dim=m.get("text_dim", 512), num_timesteps=d["num_timesteps"], beta_start=d["beta_start"],
             beta_end=d["beta_end"], l1_weight=cfg["loss"]["l1_weight"], giou_weight=cfg["loss"]["giou_weight"],
-            **_paper_keys(m))
+            box_token=m.get("box_token", "roi"), **_paper_keys(m))
     if m.get("arch", "detector") == "box_policy":
         from ce_localization.models.box_policy import BoxPolicy
-        return BoxPolicy(
-            in_channels=m.get("in_channels", 3), pretrained_backbone=pre, fpn_dim=m["d_model"],
-            vis_dim=m["vis_dim"], text_in=m.get("text_dim", 512), text_dim=m["text_proj_dim"],
-            step_embed_dim=m["step_embed_dim"], down_dims=m["down_dims"], kernel_size=m["kernel_size"],
-            n_groups=m["n_groups"], num_timesteps=d["num_timesteps"], beta_start=d["beta_start"],
-            beta_end=d["beta_end"], ss_source=m.get("ss_source", "c5"), **_paper_keys(m))
+        return BoxPolicy(**_box_policy_kw(m, d, pre))
+    if m.get("arch") == "propose_refine":
+        from ce_localization.models.propose_refine import ProposeRefine
+        model = ProposeRefine(
+            _box_policy_kw(m["proposer"], d["proposer"], False), d_model=m["d_model"], n_stage=m["n_stage"],  # weight: pha 1
+            dim_feedforward=m["dim_feedforward"], nhead=m["n_head"], dropout=m["dropout"], dim_dynamic=m["dim_dynamic"],
+            num_dynamic=m["num_dynamic"], text_dim=m.get("text_dim", 512), num_timesteps=d["num_timesteps"],
+            snr_scale=d["snr_scale"], l1_weight=cfg["loss"]["l1_weight"], giou_weight=cfg["loss"]["giou_weight"],
+            freeze_proposer=m["freeze_proposer"], proposer_weight=cfg["loss"].get("proposer_weight", 1.0))
+        ck = cfg.get("init", {}).get("proposer_ckpt")
+        if pre:                         # train: CE-Loc pha 1 ; eval (pre=False) nạp cả mô hình từ checkpoint của chính nó
+            if not ck:
+                raise ValueError("propose_refine cần init.proposer_ckpt (checkpoint CE-Loc pha 1) — --proposer-ckpt")
+            load_proposer(model, ck)
+        return model
     return Detector(
         memory=m["memory"], d_model=m["d_model"], n_stage=m["n_stage"], n_head=m["n_head"],
         dim_feedforward=m["dim_feedforward"], dropout=m["dropout"], text_dim=m.get("text_dim", 512),

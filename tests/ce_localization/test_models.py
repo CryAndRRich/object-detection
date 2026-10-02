@@ -316,11 +316,11 @@ def test_paired_giou_matches_matrix_diagonal():
     assert torch.allclose(paired_giou(a, b), torch.diagonal(generalized_box_iou(a, b)), atol=1e-6)
 
 
-@pytest.mark.parametrize("in_ch", [3, 4])
-def test_box_refiner_loss_every_stage_trains_all_parts(in_ch):
+@pytest.mark.parametrize("in_ch,tok", [(3, "roi"), (4, "roi"), (4, "coords")])
+def test_box_refiner_loss_every_stage_trains_all_parts(in_ch, tok):
     from ce_localization.models.box_refiner import BoxRefiner
     torch.manual_seed(0)
-    m = BoxRefiner(in_channels=in_ch, pretrained_backbone=False, num_timesteps=20)
+    m = BoxRefiner(in_channels=in_ch, pretrained_backbone=False, num_timesteps=20, box_token=tok)
     assert not any("self_attn" in n for n, _ in m.named_parameters())      # không self-attention
     x = torch.randn(2, in_ch, 128, 128)
     whwh = torch.tensor([[128.0, 96.0, 128.0, 96.0], [128.0, 128.0, 128.0, 128.0]])
@@ -329,28 +329,34 @@ def test_box_refiner_loss_every_stage_trains_all_parts(in_ch):
     assert st["loss_per_stage"].shape == (6,) and torch.isclose(loss, st["loss_per_stage"].sum())
     loss.backward()
     g = {n: p.grad for n, p in m.named_parameters()}
-    names = ["backbone.stem.0.weight", "backbone.layer4.2.conv3.weight", "backbone.fpn.layer_blocks.0.0.weight",
-             "memory.ss_proj.weight", "memory.text_proj.weight", "memory.encoder.0.weight"]
-    names += [f"head.stages.{i}.{p}" for i in range(6) for p in ("roi_proj.weight", "cross_attn.in_proj_weight",
+    names = ["backbone.stem.0.weight", "backbone.layer4.2.conv3.weight", "memory.ss_proj.weight",
+             "memory.text_proj.weight", "memory.encoder.0.weight"] + (["backbone.fpn.layer_blocks.0.0.weight"] if tok == "roi" else [])
+    proj = "roi_proj.weight" if tok == "roi" else "box_proj.weight"
+    names += [f"head.stages.{i}.{p}" for i in range(6) for p in (proj, "cross_attn.in_proj_weight",
                                                                  "ffn.0.weight", "bboxes_delta.weight")]
     for n in names:
         assert g[n] is not None and g[n].abs().sum() > 0, n
+    if tok == "coords":                                                 # GAMMA1.1: không RoI, FPN không dùng
+        assert not any("roi_proj" in n for n in g) and g["backbone.fpn.layer_blocks.0.0.weight"] is None
+        assert m.head.stages[0].box_proj.in_features == 4
 
 
-def test_box_refiner_samples_are_independent():
+@pytest.mark.parametrize("tok", ["roi", "coords"])
+def test_box_refiner_samples_are_independent(tok):
     """Không self-attn: box của một mẫu không đổi khi có / không có mẫu khác cùng ảnh."""
     from ce_localization.models.box_refiner import BoxRefiner
     torch.manual_seed(0)
-    m = BoxRefiner(pretrained_backbone=False, num_timesteps=20).eval()
+    m = BoxRefiner(pretrained_backbone=False, num_timesteps=20, box_token=tok).eval()
     x, vhw = torch.randn(1, 3, 128, 128), torch.tensor([[128, 128]])
     with torch.no_grad():
         feats, vis = m.encode_image(x, vhw)
         boxes = torch.tensor([[[10.0, 10.0, 40.0, 50.0], [60.0, 30.0, 120.0, 90.0], [5.0, 70.0, 30.0, 100.0]]])
         t = torch.tensor([3, 11, 19])
         text = torch.randn(1, 512)
-        all_, _ = m.refine(feats, vis, text, t, boxes)
+        norm = torch.full((3, 4), 128.0)
+        all_, _ = m.refine(feats, vis, text, t, boxes, norm=norm)
         for j in range(3):
-            one, _ = m.refine(feats, vis, text, t[j:j + 1], boxes[:, j:j + 1])
+            one, _ = m.refine(feats, vis, text, t[j:j + 1], boxes[:, j:j + 1], norm=norm[j:j + 1])
             assert torch.allclose(one[:, 0], all_[:, j], rtol=1e-4, atol=1e-3), j
 
 
@@ -435,3 +441,112 @@ def test_gamma_paper_keys_build_train_sample(arch):
     with torch.no_grad():
         s = m.sample(x, torch.randn(2, 512), vhw, 3) if arch == "box_policy" else m.sample(x, torch.randn(2, 512), vhw, 3, steps=2)
     assert s.shape == (2, 3, 4) and torch.isfinite(s).all()
+
+
+# ----------------------------------------------------------------------------- GAMMA2: CE-Loc ResNet18 + refine DiffusionDet
+
+def test_paper_encoder_masked_spatial_softmax_ignores_padding():
+    from ce_localization.models.box_policy import PaperVisionEncoder, _paper_spatial_softmax
+    torch.manual_seed(0)
+    enc = PaperVisionEncoder(128, 4, pretrained=False, ss_mask=True).eval()
+    x = torch.rand(2, 4, 128, 128)
+    c = enc.features(x)
+    assert [f.shape[1] for f in c] == [64, 128, 256, 512] and c[-1].shape[-1] == 4
+    assert torch.equal(c[-1], enc.backbone(x))
+    vhw = torch.tensor([[64, 128], [128, 128]])                           # ảnh 0: nửa dưới là phần đệm
+    with torch.no_grad():
+        xy, att = enc.keypoints(x, vhw)
+        assert float(att[0, :, 2:].abs().sum()) == 0 and torch.allclose(att[1].sum((1, 2)), torch.ones(512))
+        assert torch.equal(enc.keypoints_flat(c[-1], vhw)[1], _paper_spatial_softmax(c[-1])[1])   # không đệm: như bài
+    enc.ss_mask = False
+    assert torch.equal(enc.keypoints_flat(c[-1], vhw), _paper_spatial_softmax(c[-1]))
+
+
+def test_box_policy_r18_trainable_with_mask():
+    from ce_localization.models.box_policy import BoxPolicy
+    torch.manual_seed(0)
+    m = BoxPolicy(in_channels=4, pretrained_backbone=False, num_timesteps=20, vision="r18_paper", ss_mask=True)
+    assert m.box_norm == "canvas" and m.vision.ss_mask
+    x, vhw = torch.rand(2, 4, 128, 128), torch.tensor([[64, 128], [128, 96]])
+    loss = m(x, torch.randn(2, 512), vhw, torch.rand(2, 4) * 2 - 1, k=1)
+    loss.backward()
+    assert m.vision.backbone[0].weight.grad.abs().sum() > 0 and m.vision.projection.weight.grad.abs().sum() > 0
+    with torch.no_grad():
+        s = m.sample(x, torch.randn(2, 512), vhw, 3)
+        kp = m.vision.keypoints_flat(m.vision.backbone(x), vhw)
+        g1, g2 = torch.Generator().manual_seed(3), torch.Generator().manual_seed(3)
+        a = m.sample(x, torch.randn(2, 512, generator=torch.Generator().manual_seed(1)), vhw, 3, generator=g1)
+        b = m.sample_from_cond(m.cond_from_keypoints(kp, torch.randn(2, 512, generator=torch.Generator().manual_seed(1))),
+                               3, g2)
+    assert s.shape == (2, 3, 4) and torch.allclose(a, b, atol=1e-5)
+
+
+def test_dynamic_conv_matches_diffusiondet_formula():
+    from ce_localization.models.dynamic_head import DynamicConv
+    torch.manual_seed(0)
+    dc = DynamicConv(16, 4, 2, 3).eval()
+    pro, roi = torch.randn(1, 5, 16), torch.randn(9, 5, 16)
+    out = dc(pro, roi)
+    p = dc.dynamic_layer(pro).permute(1, 0, 2)
+    p1, p2 = p[:, :, :64].reshape(5, 16, 4), p[:, :, 64:].reshape(5, 4, 16)
+    f = roi.permute(1, 0, 2)
+    f = torch.relu(dc.norm1(f @ p1))
+    f = torch.relu(dc.norm2(f @ p2))
+    ref = torch.relu(dc.norm3(dc.out_layer(f.flatten(1))))
+    assert out.shape == (5, 16) and torch.allclose(out, ref, atol=1e-6)
+
+
+def _propose_refine(freeze):
+    from ce_localization.models.propose_refine import ProposeRefine
+    pk = dict(in_channels=4, pretrained_backbone=False, num_timesteps=20, vision="r18_paper", ss_mask=True)
+    torch.manual_seed(0)
+    return ProposeRefine(pk, d_model=64, dim_feedforward=128, nhead=4, dim_dynamic=8, num_timesteps=20,
+                         freeze_proposer=freeze)
+
+
+@pytest.mark.parametrize("freeze", [True, False])
+def test_propose_refine_freeze_and_joint_loss(freeze):
+    m = _propose_refine(freeze).train()
+    assert m.proposer.training is not freeze                              # đóng băng: BN của CE-Loc ở eval
+    before = {k: v.clone() for k, v in m.proposer.state_dict().items()}
+    x, vhw = torch.rand(2, 4, 128, 128), torch.tensor([[96, 128], [128, 128]])
+    whwh = torch.tensor([[128.0, 96.0, 128.0, 96.0], [128.0, 128.0, 128.0, 128.0]])
+    tgt = torch.tensor([[10.0, 20.0, 50.0, 60.0], [60.0, 70.0, 100.0, 120.0]])
+    opt = torch.optim.AdamW([p for p in m.parameters() if p.requires_grad], lr=1e-3)
+    loss, st = m(x, torch.randn(2, 512), vhw, tgt, whwh, k=3)
+    assert st["loss_per_stage"].shape == (6,) and (float(st["loss_eps"]) > 0) is not freeze
+    loss.backward()
+    g = {n: p.grad for n, p in m.named_parameters()}
+    for n in ("fpn.layer_blocks.0.0.weight", "memory.ss_proj.weight", "head.stages.0.inst_interact.dynamic_layer.weight",
+              "head.stages.5.cross_attn.in_proj_weight", "head.time_mlp.1.weight"):
+        assert g[n] is not None and g[n].abs().sum() > 0, n
+    pg = g["proposer.vision.backbone.0.weight"]
+    if freeze:
+        assert pg is None and not any(p.requires_grad for p in m.proposer.parameters())
+    else:
+        assert pg.abs().sum() > 0 and g["proposer.noise_net.final_conv.1.weight"].abs().sum() > 0
+    opt.step()
+    same = all(torch.equal(before[k], v) for k, v in m.proposer.state_dict().items())
+    assert same is freeze                                                 # đóng băng: kể cả thống kê BN không đổi
+
+
+def test_propose_refine_sample_variants():
+    m = _propose_refine(True).eval()
+    x, vhw = torch.rand(2, 4, 128, 128), torch.tensor([[96, 128], [128, 128]])
+    text = torch.randn(2, 512)
+    g = torch.Generator().manual_seed(0)
+    ce, r5, rn = m.sample_variants(x, text, vhw, 3, g, [{"refine_t": None}, {"refine_t": 5, "refine_steps": 2},
+                                                        {"refine_t": "noise"}])
+    assert ce.shape == r5.shape == rn.shape == (2, 3, 4) and torch.isfinite(r5).all() and torch.isfinite(rn).all()
+    # biến thể none = đúng box CE-Loc (đổi từ chuẩn hoá canvas sang chuẩn hoá vùng thật)
+    from ce_localization.models.box_policy import boxes_to_unit, unit_to_boxes
+    g2 = torch.Generator().manual_seed(0)
+    with torch.no_grad():
+        u = m.proposer.sample(x, text, vhw, 3, generator=g2)
+    canvas = torch.full((4,), 128.0)
+    whwh = torch.tensor([[128.0, 96.0, 128.0, 96.0], [128.0, 128.0, 128.0, 128.0]])[:, None]
+    assert torch.allclose(ce, boxes_to_unit(unit_to_boxes(u, canvas), whwh), atol=1e-4)
+    m.track_attn = True
+    m.sample(x, text, vhw, 2, refine_t=5)
+    att = m.pop_attn()
+    assert len(att) == 6 and abs(sum(att[0].values()) - 1) < 1e-4

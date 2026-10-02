@@ -15,8 +15,18 @@ _STAGE = re.compile(r"head\.stages\.(\d+)\.(\w+)")
 
 
 def group_of(name):
-    """Tên tham số của `models.detector.Detector` / `models.box_policy.BoxPolicy` / `models.box_refiner.BoxRefiner`
-    -> nhóm."""
+    """Tên tham số của `models.detector.Detector` / `models.box_policy.BoxPolicy` / `models.box_refiner.BoxRefiner` /
+    `models.propose_refine.ProposeRefine` -> nhóm."""
+    if name.startswith("proposer.vision.backbone."):              # GAMMA2.1: backbone ResNet18 dùng chung
+        return "proposer.resnet18"
+    if name.startswith("proposer."):
+        return "proposer.khác"
+    if name.startswith("fpn."):
+        return "fpn"
+    if name.startswith("head.time_mlp."):
+        return "time_mlp"
+    if name.startswith("vision.backbone."):                       # GAMMA2 pha 1: ResNet18 của bài
+        return "resnet18"
     if name.startswith("noise_net."):
         return "unet1d"
     if name.startswith(("vis_proj.", "text_proj.")):
@@ -30,7 +40,7 @@ def group_of(name):
     m = _STAGE.match(name)
     if m:
         i, sub = int(m.group(1)), m.group(2)
-        if sub in ("roi_proj", "decoder", "cross_attn"):
+        if sub in ("roi_proj", "box_proj", "decoder", "cross_attn", "inst_interact"):
             return f"{sub}[{i}]"
         return f"heads[{i}]"
     return "khác"

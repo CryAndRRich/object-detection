@@ -42,43 +42,54 @@ KNN = 3
 
 
 @torch.no_grad()
-def predict_add(model, loader, text_table, n_samples=30, seed=0, log_every=0, log=print, steps=None, sampler=None):
+def predict_add(model, loader, text_table, n_samples=30, seed=0, log_every=0, log=print, steps=None, sampler=None,
+                sample_kw=None, variants=None):
     """-> list record numpy: image_id, t, wh (nw, nh), boxes [K,4] (thô), holes [t,4], objects [M,4].
     `steps`: số bước DDIM của `BoxRefiner` (GAMMA1; None = mặc định của model); `sampler`: ddpm | mock của `BoxPolicy`. BoxRefiner còn cộng dồn attention lên
-    [t ; text ; vis] — lấy bằng `model.pop_attn()` sau khi gọi."""
+    [t ; text ; vis] — lấy bằng `model.pop_attn()` sau khi gọi. `sample_kw`: tham số thêm cho `model.sample`; `variants`
+    (ProposeRefine): list biến thể refine -> list record của TỪNG biến thể, cùng box CE-Loc."""
     model.eval()
     kw = {"steps": steps} if steps else {}
     if sampler:                                       # BoxPolicy (GAMMA0 / checkpoint của bài): ddpm | mock
         kw["sampler"] = sampler
+    kw.update(sample_kw or {})                        # ProposeRefine: refine_t / refine_steps / proposer_sampler
+    multi = variants is not None                      # ProposeRefine: nhiều biến thể refine trên CÙNG box CE-Loc
     if hasattr(model, "track_attn"):
         model.track_attn = True
     dev = next(model.parameters()).device
     gen = torch.Generator(device=dev.type).manual_seed(seed)
-    records, t0, n = [], time.time(), len(loader.dataset)
+    records, t0, n = ([[] for _ in variants] if multi else []), time.time(), len(loader.dataset)
     for bi, batch in enumerate(loader):
         batch = to_device_add(batch, dev)
-        u = model.sample(batch["images"], text_table(batch["text"], dev), batch["valid_hw"], n_samples, generator=gen,
-                         **kw)
+        text = text_table(batch["text"], dev)
+        if multi:
+            us = model.sample_variants(batch["images"], text, batch["valid_hw"], n_samples, generator=gen,
+                                       variants=variants, **kw)
+        else:
+            us = [model.sample(batch["images"], text, batch["valid_hw"], n_samples, generator=gen, **kw)]
         nwhwh = norm_whwh(model, batch["whwh"], batch["images"].shape[-1])
-        boxes = unit_to_boxes(u.float(), nwhwh[:, None, :]).cpu().numpy().astype(np.float64)
         wh = batch["whwh"][:, :2].cpu().numpy()
-        for i in range(len(batch["image_id"])):
-            records.append({"image_id": batch["image_id"][i], "t": batch["t"][i], "wh": wh[i].astype(np.float64),
+        for vi, u in enumerate(us):
+            boxes = unit_to_boxes(u.float(), nwhwh[:, None, :]).cpu().numpy().astype(np.float64)
+            dst = records[vi] if multi else records
+            for i in range(len(batch["image_id"])):
+                dst.append({"image_id": batch["image_id"][i], "t": batch["t"][i], "wh": wh[i].astype(np.float64),
                             "boxes": boxes[i], "holes": batch["holes"][i].numpy().astype(np.float64),
                             "objects": batch["objects"][i].numpy().astype(np.float64)})
-        if log_every and (bi % log_every == 0 or len(records) == n):
+        done = len(records[0] if multi else records)
+        if log_every and (bi % log_every == 0 or done == n):
             el = time.time() - t0
-            log(f"    [eval {len(records):5d}/{n}] {el / len(records) * 1000:.0f} ms/mẫu | {fmt_time(el)} | "
-                f"còn ~{fmt_time(el / len(records) * (n - len(records)))}")
+            log(f"    [eval {done:5d}/{n}] {el / done * 1000:.0f} ms/mẫu | {fmt_time(el)} | "
+                f"còn ~{fmt_time(el / done * (n - done))}")
     if hasattr(model, "track_attn"):
         model.track_attn = False
     return records
 
 
-def prior_unit_boxes(index, split="train"):
-    """Lỗ MỚI NHẤT của mọi mẫu `split`, cxcywh chia (W, H) ảnh gốc -> [N,4]. Mốc `prior` không nhìn ảnh."""
+def prior_unit_boxes(index, split="train", source="ce130"):
+    """Lỗ MỚI NHẤT của mọi mẫu `split` (`source`: ce130 | samples), cxcywh chia (W, H) ảnh gốc -> [N,4]. Mốc `prior`."""
     out = []
-    for k in index.keys(split):
+    for k in index.keys(split, source):
         e = index.turns[k]
         b = index.branches[e["branch"]]
         W, H = b["wh"]

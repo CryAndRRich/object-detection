@@ -158,22 +158,31 @@ def _run_g0(monkeypatch, base, out, report, extra=()):
 # ----------------------------------------------------------------------------- GAMMA (bài add)
 
 CFG_G = {"density": os.path.join(CFG_DIR, "gamma", "gamma0.yaml"), "rgb": os.path.join(CFG_DIR, "gamma", "gamma0_1.yaml"),
-         "refiner": os.path.join(CFG_DIR, "gamma", "gamma1.yaml")}
+         "refiner": os.path.join(CFG_DIR, "gamma", "gamma1.yaml"),
+         "refiner_coords": os.path.join(CFG_DIR, "gamma", "gamma1_1.yaml"),
+         "celoc2": os.path.join(CFG_DIR, "gamma", "gamma2_celoc.yaml"),
+         "pr": os.path.join(CFG_DIR, "gamma", "gamma2.yaml"),
+         "pr_joint": os.path.join(CFG_DIR, "gamma", "gamma2_1.yaml")}
 
 
 def _fake_ce130_turns(base, seed=0):
     """CE-130 giả theo (nhánh, lượt) + `samples/` của bài: mỗi ảnh gốc 1–2 nhánh, nhánh xoá cộng dồn T <= 4 vật
     (lỗ tô xám, `inpainted_bboxes` lệch vật `all_bboxes` 1 px như dữ liệu thật); file samples đặt tên
     `{iid}_{j}` với j XÁO TRỘN (không theo nhánh / lượt), train + val -> `samples/train`, test -> `samples/test`
-    như bài. -> (ce130_root, samples_root). Vật thứ 0..1 KHÔNG bao giờ bị xoá."""
+    như bài, trừ ảnh gốc val 2001 -> `samples/test` (bài cũng để ~130 ảnh gốc val trong samples/test — split `samples`
+    của GAMMA2 lấy val từ đó). -> (ce130_root, samples_root). Vật thứ 0..1 KHÔNG bao giờ bị xoá."""
     rng = np.random.default_rng(seed)
     root, samples = os.path.join(base, "all_phase2_V2"), os.path.join(base, "samples")
     plan = (("train", ["1000", "1001", "1002"], "apple"), ("val", ["2000", "2001"], "bird"), ("test", ["3000", "3001"], "cup"))
     for split, iids, cat in plan:
+        # như bài: samples/train = train + val CE-130, samples/test = phần còn lại (cả vài ảnh gốc val — ở đây 2001)
         sdir = os.path.join(samples, "test" if split == "test" else "train")
         for d in ("images", "density", "annotation"):
             os.makedirs(os.path.join(sdir, d), exist_ok=True)
         for iid in iids:
+            sdir = os.path.join(samples, "test" if split == "test" or iid == "2001" else "train")
+            for d in ("images", "density", "annotation"):
+                os.makedirs(os.path.join(sdir, d), exist_ok=True)
             W, H = 200, 150
             gt = rng.integers(0, 255, (H, W, 3), dtype=np.uint8)
             objs = []
@@ -234,6 +243,30 @@ def _gamma_cfg(tmp_path, base, kind="density"):
                            eval_every=2)
     cfg["eval"].update(n_samples=3, batch_size=2)
     p = str(tmp_path / f"cfg_gamma_{kind}.yaml")
+    with open(p, "w") as f:
+        yaml.safe_dump(cfg, f)
+    return p, cfg
+
+
+def _gamma2_cfg(tmp_path, base, kind, proposer_ckpt=None):
+    """Config GAMMA2 thật (`celoc2` | `pr` | `pr_joint`) thu nhỏ cho CE-130 giả: canvas 128, T = 20, 4 iter, batch 2."""
+    with open(CFG_G[kind]) as f:
+        cfg = yaml.safe_load(f)
+    cfg["data"].update(root=os.path.join(base, "all_phase2_V2"), samples_root=os.path.join(base, "samples"),
+                       turn_index=os.path.join(base, "turn_index.json"),
+                       density_index=os.path.join(base, "density_index.json"),
+                       density_root=os.path.join(base, "samples"), image_size=128, num_workers=0)
+    cfg["model"]["pretrained_backbone"] = kind != "celoc2"                  # pha 2: True = nạp proposer_ckpt
+    cfg["diffusion"].update(num_timesteps=20, noise_per_image=2)
+    if "proposer" in cfg["diffusion"]:
+        cfg["diffusion"]["proposer"]["num_timesteps"] = 20
+    if proposer_ckpt:
+        cfg["init"]["proposer_ckpt"] = proposer_ckpt
+    cfg["training"].update(batch_size=2, max_iter=4, warmup_iters=2, log_every=1, ckpt_every=2, eval_every=2,
+                           cosine_t_max=100, steps=[3])
+    cfg["eval"].update(n_samples=3, batch_size=2,
+                       sample_kw={} if kind == "celoc2" else {"refine_t": 10, "refine_steps": 1, "proposer_sampler": "ddpm"})
+    p = str(tmp_path / f"cfg_{kind}.yaml")
     with open(p, "w") as f:
         yaml.safe_dump(cfg, f)
     return p, cfg

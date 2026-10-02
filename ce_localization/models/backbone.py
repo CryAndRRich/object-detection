@@ -23,7 +23,8 @@ import torchvision
 from torchvision.ops import FeaturePyramidNetwork
 from torchvision.ops.misc import FrozenBatchNorm2d
 
-__all__ = ["ResNet50FPN", "STRIDES", "LEVELS", "NORMS", "DENSITY_INITS", "density_weight_ratio"]
+__all__ = ["ResNet50FPN", "STRIDES", "LEVELS", "NORMS", "DENSITY_INITS", "density_weight_ratio", "conv1_of",
+           "density_ratio_of"]
 
 LEVELS = ("p2", "p3", "p4", "p5")
 NORMS = ("frozen", "bn")
@@ -77,6 +78,21 @@ class ResNet50FPN(nn.Module):
         `forward()["p5"]`."""
         c5 = self.layer4(self.layer3(self.layer2(self.layer1(self.stem(x)))))
         return self.fpn.get_result_from_layer_blocks(self.fpn.get_result_from_inner_blocks(c5, -1), -1)
+
+
+def conv1_of(model):
+    """conv1 của backbone ảnh trong mọi kiến trúc: Detector / BoxPolicy R-50 / BoxRefiner (`backbone.stem[0]`),
+    BoxPolicy ResNet18 của bài (`vision.backbone[0]`), ProposeRefine (của `proposer`)."""
+    m = getattr(model, "proposer", model)
+    if hasattr(m, "backbone"):
+        return m.backbone.stem[0]
+    return m.vision.backbone[0]
+
+
+def density_ratio_of(model):
+    """‖W_conv1[:, density]‖ / ‖W_conv1[:, RGB]‖ của backbone ảnh trong `model`, None nếu 3 kênh."""
+    w = conv1_of(model).weight.detach()
+    return None if w.shape[1] != 4 else float(w[:, 3:].norm() / w[:, :3].norm().clamp_min(1e-12))
 
 
 def density_weight_ratio(backbone):
