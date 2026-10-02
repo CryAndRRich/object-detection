@@ -51,6 +51,9 @@ class MultiLevelRoIAlign(nn.Module):
         for li, (f, sc) in enumerate(zip(feats, self.scales)):
             idx = torch.nonzero(lvl == li, as_tuple=True)[0]
             if idx.numel() == 0:
+                # tầng không có RoI vẫn góp 0 vào đầu ra: mọi tham số FPN luôn có grad (= 0) mỗi iteration ⇒ DDP chạy được
+                # không find_unused_parameters (khỏi duyệt đồ thị mỗi iter). Giá trị đầu ra không đổi.
+                out = out + f[:1, :1, :1, :1].sum() * 0
                 continue
             out[idx] = roi_align(f, rois[idx].to(f.dtype), self.output_size, spatial_scale=sc,
                                  sampling_ratio=self.sampling_ratio, aligned=True)

@@ -121,7 +121,10 @@ class ProposeRefine(nn.Module):
         per = torch.stack([self.l1_weight * ((p - gt) / wk).abs().sum(-1).mean()
                            + self.giou_weight * (1 - paired_giou(p, gt)).mean() for p in preds])
         loss = per.sum() + self.proposer_weight * loss_eps
-        return loss, {"loss": loss.detach(), "loss_per_stage": per.detach(), "loss_eps": loss_eps.detach()}
+        st = {"loss": loss.detach(), "loss_per_stage": per.detach()}
+        if not self.freeze_proposer and self.proposer_weight > 0:              # GAMMA2 đóng băng: không có ε-MSE để báo
+            st["loss_eps"] = loss_eps.detach()
+        return loss, st
 
     # ------------------------------------------------------------------ suy luận
     @torch.no_grad()

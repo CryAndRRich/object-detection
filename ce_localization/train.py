@@ -229,12 +229,26 @@ def bench(model, net, crit, loader_fn, text_table, cfg, opt, dev, n, log, todev=
 
 
 def ddp_find_unused(cfg):
-    """DDP `find_unused_parameters`: True khi có tham số train có thể KHÔNG nhận grad ở một iteration — conv 3x3 đầu ra
-    của một tầng FPN chỉ có gradient khi có RoI rơi vào tầng đó (ở canvas 512, P5 cần sqrt(diện tích) >= 448 px nên ở
-    ALPHA0 gần như không bao giờ được dùng); `box_policy` R-50 chỉ đọc C5 nên FPN không dùng. Chỉ CE-Loc gốc ResNet18
-    (`box_policy` + `r18_paper`) dùng MỌI tham số mỗi iteration (có test) — tắt thì DDP khỏi duyệt đồ thị mỗi iter."""
+    """DDP `find_unused_parameters`: True khi có tham số train có thể KHÔNG nhận grad ở một iteration (`box_policy` R-50 chỉ
+    đọc C5 nên FPN không dùng; ALPHA / BETA / GAMMA1 giữ True như lúc đã chạy). Tắt (DDP khỏi duyệt đồ thị mỗi iter) khi
+    MỌI tham số train luôn có grad — có test: CE-Loc gốc ResNet18 (`box_policy` + `r18_paper`); `propose_refine` (tầng FPN
+    không có RoI vẫn góp 0 — `MultiLevelRoIAlign`) khi CE-Loc đóng băng hoặc ε-MSE của nó có trong loss."""
     m = cfg["model"]
-    return not (m.get("arch") == "box_policy" and m.get("vision") == "r18_paper")
+    if m.get("arch") == "box_policy" and m.get("vision") == "r18_paper":
+        return False
+    if m.get("arch") == "propose_refine":
+        return not (m.get("freeze_proposer", True) or float(cfg.get("loss", {}).get("proposer_weight", 1.0)) > 0)
+    return True
+
+
+def advance_lr(sched):
+    """= `LambdaLR.step()` mà không gọi step(): lịch lr theo SỐ ITER nên bước bị bỏ (NaN / GradScaler dò thang ở vài bước
+    đầu AMP) vẫn phải tiến; gọi step() khi optimizer chưa step thì PyTorch cảnh báo sai."""
+    sched.last_epoch += 1
+    lrs = [base * f(sched.last_epoch) for base, f in zip(sched.base_lrs, sched.lr_lambdas)]
+    for g, lr in zip(sched.optimizer.param_groups, lrs):
+        g["lr"] = lr
+    sched._last_lr = lrs
 
 
 def _step_loss(net, crit, batch, text_table, cfg, model, gen, dev):
@@ -535,7 +549,7 @@ def main():
                         sys.exit(f"[nan-debug] opt.step() với grad hữu hạn làm {len(bp)} tham số thành "
                                  f"không hữu hạn ở it {it}: {bp[:10]}")
             scaler.update()
-            sched.step()
+            advance_lr(sched)
             win["loss"] += float(st["loss"])
             win["n"] += 1
             win["gn"].append(float(gn))

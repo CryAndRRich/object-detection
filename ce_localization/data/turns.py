@@ -28,7 +28,7 @@ import json
 import os
 import zlib
 from collections import defaultdict
-from multiprocessing import Pool
+from multiprocessing import get_context
 
 import numpy as np
 import torch
@@ -66,6 +66,11 @@ def image_inputs(img_rgb, density_path=None, target=512, style="ours"):
               np.asarray(den.convert("L"), dtype=np.uint8))
         x = np.concatenate([x, letterbox_density(lv, nw, nh, target)[None]], axis=0)
     return torch.from_numpy(np.ascontiguousarray(x)), scale, nw, nh
+
+
+def _pool(workers):
+    """Pool `spawn`: tiến trình gọi đã nạp torch (đa luồng) — fork từ đó có thể treo con (Python 3.12 cảnh báo)."""
+    return get_context("spawn").Pool(workers)
 
 
 def pixel_hash(path):
@@ -154,7 +159,7 @@ def build_turn_index(ce130_root, samples_root, workers=8, log=print):
     log(f"  {len(branches)} nhánh, {n_turns} (nhánh, lượt) | {n_samples} file samples — hash pixel {len(turns_by_iid)} ảnh gốc")
     jobs = [(iid, turns_by_iid[iid], samples_by_iid.get(iid, [])) for iid in sorted(turns_by_iid)]
     match, issues, extra = {}, [], []
-    pool = Pool(workers) if workers > 0 else None
+    pool = _pool(workers) if workers > 0 else None
     for done, (iid, m, iss, ex) in enumerate(pool.imap_unordered(_hash_iid, jobs, chunksize=4) if pool else
                                              map(_hash_iid, jobs), 1):
         match.update(m)
@@ -279,7 +284,7 @@ def build_add_cache(index, samples_root, keys, out_dir, image_size=512, workers=
     else:
         sink = open(os.path.join(out_dir, "data.zlib"), "wb")
     rows, geom, off = {}, {}, 0
-    pool = Pool(workers) if workers > 0 else None
+    pool = _pool(workers) if workers > 0 else None
     it = pool.imap(_cache_one, jobs, chunksize=16) if pool else map(_cache_one, jobs)
     t0 = __import__("time").time()
     for i, (k, data, g) in enumerate(it):
@@ -334,7 +339,7 @@ def convert_add_cache(src_dir, out_dir, workers=4, log=print):
     chunk = max(1, -(-n // max(workers * 8, 1)))
     jobs = [(src_dir, dst_path, n, size, items[j:j + chunk]) for j in range(0, n, chunk)]
     t0, done = __import__("time").time(), 0
-    pool = Pool(workers) if workers > 0 else None
+    pool = _pool(workers) if workers > 0 else None
     for m in (pool.imap_unordered(_unzip_rows, jobs) if pool else map(_unzip_rows, jobs)):
         done += m
         if done == n or done // 4000 != (done - m) // 4000:

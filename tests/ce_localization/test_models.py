@@ -484,13 +484,27 @@ def test_box_policy_r18_trainable_with_mask():
 
 
 def test_ddp_find_unused_only_off_for_paper_r18():
-    """Chỉ CE-Loc gốc ResNet18 (box_policy + r18_paper) tắt find_unused_parameters; R-50 (FPN không dùng) và mọi
-    model RoI (tầng FPN có thể trống) giữ bật."""
+    """Tắt find_unused_parameters: CE-Loc gốc ResNet18 và propose_refine (GAMMA2 / 2.1 — mọi tham số train luôn có grad);
+    GAMMA0 / 0.1 (R-50: FPN không dùng) và GAMMA1 / 1.1 (box_refiner) giữ bật như lúc đã chạy; GAMMA2.1 bỏ ε-MSE CE-Loc thì U-Net không có grad -> bật."""
     import yaml
     from ce_localization.train import ddp_find_unused
     from tests.ce_localization.helpers import CFG_G
     on = {k: ddp_find_unused(yaml.safe_load(open(p))) for k, p in CFG_G.items()}
-    assert on == {k: k != "celoc2" for k in CFG_G}, on
+    assert on == {k: k in ("density", "rgb", "refiner", "refiner_coords") for k in CFG_G}, on
+    joint = yaml.safe_load(open(CFG_G["pr_joint"]))
+    joint["loss"]["proposer_weight"] = 0.0
+    assert ddp_find_unused(joint)
+
+
+def test_roi_pooler_empty_levels_still_get_grad():
+    """Mọi RoI rơi vào MỘT tầng: các tầng khác vẫn vào đồ thị (grad 0) — điều kiện để DDP chạy không find_unused."""
+    from ce_localization.models.roi import MultiLevelRoIAlign
+    feats = [torch.randn(2, 8, 128 // s, 128 // s, requires_grad=True) for s in (4, 8, 16, 32)]
+    boxes = torch.tensor([[[10.0, 10.0, 20.0, 20.0]] * 3, [[30.0, 30.0, 42.0, 40.0]] * 3])     # nhỏ -> chỉ P2
+    out = MultiLevelRoIAlign(7)(feats, boxes)
+    out.sum().backward()
+    assert all(f.grad is not None for f in feats)
+    assert feats[0].grad.abs().sum() > 0 and all(float(f.grad.abs().sum()) == 0 for f in feats[1:])
 
 
 def test_dynamic_conv_matches_diffusiondet_formula():
@@ -526,7 +540,8 @@ def test_propose_refine_freeze_and_joint_loss(freeze):
     tgt = torch.tensor([[10.0, 20.0, 50.0, 60.0], [60.0, 70.0, 100.0, 120.0]])
     opt = torch.optim.AdamW([p for p in m.parameters() if p.requires_grad], lr=1e-3)
     loss, st = m(x, torch.randn(2, 512), vhw, tgt, whwh, k=3)
-    assert st["loss_per_stage"].shape == (6,) and (float(st["loss_eps"]) > 0) is not freeze
+    assert st["loss_per_stage"].shape == (6,) and ("loss_eps" in st) is not freeze              # đóng băng: không báo ε-MSE
+    assert freeze or float(st["loss_eps"]) > 0
     loss.backward()
     g = {n: p.grad for n, p in m.named_parameters()}
     for n in ("fpn.layer_blocks.0.0.weight", "memory.ss_proj.weight", "head.stages.0.inst_interact.dynamic_layer.weight",
