@@ -9,6 +9,9 @@ Giao thức (docs/EXPERIMENT_ALPHA.md mục 6.2): test, N=200, top-k 100, NMS 0,
   --density M    : model 4 kênh (ALPHA3): density đưa vào — full (mặc định) / partial / empty (mục 5).
 Config lấy từ checkpoint (an toàn hơn), trừ khi truyền --config.
 
+Checkpoint CE-Loc gốc của bài (`model_state_dict`, vd weights/add/paper/best_model.pth) + `--config config/gamma/gamma0.yaml`
+(đường dẫn dữ liệu): eval bài add như GAMMA, kèm `excl_paper_train` (bỏ mẫu samples/train mà bài đã train).
+
 GAMMA (`task: add`, docs/EXPERIMENT_GAMMA.md mục 5): mỗi mẫu (nhánh, lượt) sinh `--n-samples` box độc lập (DDPM ở
 GAMMA0; DDIM `--steps` bước ở GAMMA1, mỗi số bước một lượt), chấm IoU với lỗ + C-NLL + on_object (`engine/add_eval.py`),
 kèm mốc `prior` (lỗ train ngẫu nhiên, không nhìn ảnh). GAMMA1 in thêm attention của query lên [t ; text ; vis].
@@ -45,6 +48,7 @@ from ce_localization.data.turns import ADD_DENSITY, IMAGE_KINDS, CE130AddDataset
 from ce_localization.engine.add_eval import add_metrics, predict_add, prior_records, prior_unit_boxes  # noqa: E402
 from ce_localization.engine.evaluate import attention_diagnostics, predict, score  # noqa: E402
 from ce_localization.models.backbone import density_weight_ratio  # noqa: E402
+from ce_localization.models.box_policy import BoxPolicy  # noqa: E402
 from ce_localization.models.detector import build_model  # noqa: E402
 from ce_localization.utils.log import fmt_time  # noqa: E402
 import ce_localization.train as train_mod  # noqa: E402
@@ -97,8 +101,17 @@ def print_add(tag, res, prior, K):
               f"best_iou_latest {d['best_latest']:.4f}")
 
 
+def paper_train_mask(index, rec):
+    """Record nào là mẫu `samples/train` — tập checkpoint CE-Loc gốc của bài ĐÃ TRAIN (gồm 182 / 779 ảnh gốc test CE-130;
+    samples/train và samples/test không chung ảnh gốc) -> list bool."""
+    return [index.turns[r["image_id"]]["sample"].startswith("train/") for r in rec]
+
+
 def main_add(a, cfg, ck, dev, t0):
-    """GAMMA: eval bài add trên `--split`, mỗi loại ảnh của `--image` một lượt."""
+    """GAMMA: eval bài add trên `--split`, mỗi loại ảnh của `--image` một lượt. `ck` là checkpoint của train.py hoặc
+    checkpoint CE-Loc gốc của bài (`model_state_dict`; dữ liệu lấy từ `--config`, đầu vào kiểu bài, text bằng CLIP của
+    checkpoint). Mọi checkpoint đều báo thêm `excl_paper_train` = chỉ số trên phần KHÔNG thuộc samples/train (so sòng phẳng
+    với checkpoint của bài)."""
     d = cfg["data"]
     for k, v in (("samples_root", a.samples_root), ("turn_index", a.turn_index), ("density_index", a.density_index),
                  ("density_root", a.density_root)):
@@ -108,15 +121,30 @@ def main_add(a, cfg, ck, dev, t0):
         index = TurnIndex(d["turn_index"])
     except FileNotFoundError as e:
         sys.exit(str(e))
-    four = cfg["model"].get("in_channels", 3) == 4
     K = a.n_samples or cfg["eval"]["n_samples"]
-    model = build_model(cfg, pretrained_backbone=False).to(dev)
-    model.load_state_dict(ck["model"])
-    model.eval()
+    paper = "model_state_dict" in ck
+    clip = None
+    if paper:                                         # CE-Loc gốc của bài: ResNet18, đầu vào kiểu bài, box chia canvas
+        model, clip, info = BoxPolicy.load_celoc_paper(ck)
+        four = info["in_channels"] == 4
+        d["input_style"] = "paper"
+        it, dwr = f"epoch {info['epoch']}", None
+        print(f"[eval] checkpoint CE-Loc gốc của bài: {info}", flush=True)
+    else:
+        four = cfg["model"].get("in_channels", 3) == 4
+        model = build_model(cfg, pretrained_backbone=False)
+        model.load_state_dict(ck["model"])
+        it, dwr = ck.get("iter"), density_weight_ratio(model.backbone)
+    model = model.to(dev).eval()
     prior_unit = prior_unit_boxes(index, "train")
-    step_list = a.steps if cfg["model"].get("arch") == "box_refiner" else [None]
-    out = {"ckpt": a.ckpt, "iter": ck.get("iter"), "split": a.split, "n_samples": K, "density": {}, "results": {},
-           "prior": {}, "density_weight_ratio": density_weight_ratio(model.backbone)}
+    if cfg["model"].get("arch") == "box_refiner" and not paper:
+        variants = [(f"_steps{s}", f"DDIM {s} bước", {"steps": s}) for s in a.steps]
+    elif a.add_samplers == ["ddpm"]:                  # GAMMA0 / bài: một lượt DDPM, khoá cũ (không hậu tố)
+        variants = [("", "DDPM", {})]
+    else:
+        variants = [(f"_{sm}", sm, {"sampler": sm}) for sm in a.add_samplers]
+    out = {"ckpt": a.ckpt, "iter": it, "split": a.split, "n_samples": K, "density": {}, "results": {},
+           "prior": {}, "density_weight_ratio": dwr}
     text_table = None
     for image in a.image:
         dens = (a.add_density or ("sample" if image == "inpainted" else "full")) if four else None
@@ -126,26 +154,36 @@ def main_add(a, cfg, ck, dev, t0):
         if a.limit:
             ds.keys = ds.keys[: a.limit]
         if text_table is None:
-            text_table = train_mod.build_text_table(ds.classes(), cfg, dev)
+            text_table = train_mod.build_text_table(ds.classes(), cfg, dev, **({"state_dict": clip} if paper else {}))
         loader = DataLoader(ds, batch_size=a.batch_size or cfg["eval"]["batch_size"], shuffle=False,
                             num_workers=a.num_workers, collate_fn=collate_add)
         out["density"][image] = dens
-        for steps in step_list:                       # GAMMA1: mỗi số bước DDIM một lượt; GAMMA0: một lượt DDPM
-            key = image if steps is None else f"{image}_steps{steps}"
-            print(f"[eval] {a.ckpt} (iter {ck.get('iter')}) | ảnh {image} | density {dens} | split {a.split} "
-                  f"({len(ds)} mẫu) | {K} mẫu/ảnh" + ("" if steps is None else f" | DDIM {steps} bước")
-                  + f" | {fmt_time(time.time() - t0)}", flush=True)
+        for suffix, desc, kw in variants:             # GAMMA1: mỗi số bước DDIM; GAMMA0 / bài: DDPM (+ mock nếu xin)
+            key = image + suffix
+            print(f"[eval] {a.ckpt} ({it}) | ảnh {image} | density {dens} | split {a.split} ({len(ds)} mẫu) | {K} mẫu/ảnh"
+                  f" | {desc} | {fmt_time(time.time() - t0)}", flush=True)
             t = time.time()
-            rec = predict_add(model, loader, text_table, K, seed=a.seed, log_every=max(len(loader) // 10, 1),
-                              steps=steps)
+            rec = predict_add(model, loader, text_table, K, seed=a.seed, log_every=max(len(loader) // 10, 1), **kw)
             holes = image == "inpainted"
             res = add_metrics(rec, with_holes=holes)
             res["eval_sec"] = time.time() - t
             if hasattr(model, "pop_attn"):
                 res["attn"] = model.pop_attn()
-            pri = add_metrics(prior_records(rec, prior_unit, K, seed=a.seed), with_holes=holes)
-            print_add(f"ảnh {image}" + ("" if steps is None else f", {steps} bước") + f" ({fmt_time(res['eval_sec'])})",
-                      res, pri, K)
+            pri_rec = prior_records(rec, prior_unit, K, seed=a.seed)
+            pri = add_metrics(pri_rec, with_holes=holes)
+            seen = paper_train_mask(index, rec)
+            if any(seen) and not all(seen):
+                keep = [i for i, m in enumerate(seen) if not m]
+                res["excl_paper_train"] = add_metrics([rec[i] for i in keep], with_holes=holes)
+                pri["excl_paper_train"] = add_metrics([pri_rec[i] for i in keep], with_holes=holes)
+            res["n_paper_train"] = int(sum(seen))
+            print_add(f"ảnh {image}, {desc} ({fmt_time(res['eval_sec'])})", res, pri, K)
+            if "excl_paper_train" in res:
+                ex = res["excl_paper_train"]
+                print(f"  -- bỏ {res['n_paper_train']} mẫu thuộc samples/train (bài đã train), còn {ex['n']}: " + " | ".join(
+                    f"{k.format(K=K)} {ex[k.format(K=K)]:.4f} (prior {pri['excl_paper_train'][k.format(K=K)]:.4f})"
+                    for k in ("best_iou@{K}_latest", "hit50@{K}_latest", "mean_iou_latest", "mean_iou_any", "on_object")
+                    if k.format(K=K) in ex))
             if res.get("attn"):
                 print("  attention query -> [t ; text ; vis] theo tầng: " + " | ".join(
                     "/".join(f"{x[k]:.2f}" for k in ("t", "text", "vis")) for x in res["attn"]))
@@ -187,6 +225,8 @@ def main():
     ap.add_argument("--image", nargs="+", default=list(IMAGE_KINDS), choices=IMAGE_KINDS, help="GAMMA: loại ảnh vào")
     ap.add_argument("--add-density", default=None, choices=ADD_DENSITY, help="GAMMA, model 4 kênh: density đưa vào")
     ap.add_argument("--n-samples", type=int, default=None, help="GAMMA: số box / mẫu (mặc định eval.n_samples)")
+    ap.add_argument("--add-samplers", nargs="+", default=["ddpm"], choices=["ddpm", "mock"],
+                    help="GAMMA0 / checkpoint của bài (U-Net 1D): ddpm (đúng công thức) và / hoặc mock (vòng của bài)")
     ap.add_argument("--samples-root", default=None, help="GAMMA: ghi đè data.samples_root")
     ap.add_argument("--turn-index", default=None, help="GAMMA: ghi đè data.turn_index")
     a = ap.parse_args()
@@ -194,6 +234,14 @@ def main():
     t0 = time.time()
     dev = torch.device(a.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     ck = torch.load(a.ckpt, map_location="cpu", weights_only=False)
+    if "model_state_dict" in ck:                     # checkpoint CE-Loc gốc của bài: dữ liệu / bộ đo từ --config
+        if not a.config:
+            sys.exit("checkpoint CE-Loc gốc của bài: cần --config (vd config/gamma/gamma0.yaml) để lấy đường dẫn dữ liệu")
+        with open(a.config) as f:
+            cfg = yaml.safe_load(f)
+        if a.data_root:
+            cfg["data"]["root"] = a.data_root
+        return main_add(a, cfg, ck, dev, t0)
     if a.config:
         with open(a.config) as f:
             cfg = yaml.safe_load(f)

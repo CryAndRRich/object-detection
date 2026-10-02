@@ -394,6 +394,15 @@ def test_plot_denoise_trajectory_full_flow(tmp_path, monkeypatch):
     r = res["cases"][2]                                                   # ddpm, case1: ảnh lớp cup, text apple
     assert r["text"] == "apple" and r["gt_class"] == "cup" and r["steps"] == [99, 50, 0]
     assert len(r["boxes_canvas"]) == 3 and all(0 <= v <= 1 for v in r["iou"]) and len(r["center_dist_px"]) == 3
+    assert "iou_output" in rows[0] and len(rows[0]["x_t_path"]) == 4
+    out3 = str(tmp_path / "out3")
+    monkeypatch.setattr(sys, "argv", ["plot_refiner_steps.py", "--ckpt", ck, "--ce130", root, "--samples", samples,
+                                      "--density-index", didx, "--branches", "3000_b1", "--sampler", "mock",
+                                      "--mock-steps", "10", "--show-x0", "--out", out3])
+    tool.main()
+    with open(os.path.join(out3, "refiner_steps.json")) as f:
+        r0 = json.load(f)[0]["rows"][0]
+    assert [s["t"] for s in r0["steps"]] == [9, 6, 3, 0] and len(r0["x_t_path"]) == 10
     out2 = str(tmp_path / "out2")                                         # text rỗng / bỏ hẳn text
     monkeypatch.setattr(sys, "argv", ["plot_denoise_trajectory.py", "--ckpt", ck, "--samples", samples, "--samplers", "mock",
                                       "--files", "test/images/3000_1.png:<empty>", "test/images/3000_1.png:<zero>:empty",
@@ -446,3 +455,101 @@ def test_plot_spatial_softmax_full_flow(tmp_path, monkeypatch):
     with open(os.path.join(out, "spatial_softmax.json")) as f:
         rows = json.load(f)
     assert [r["density"] for r in rows] == ["full", "blank"] and all(0 <= r["sharp_frac"] <= 1 for r in rows)
+
+
+def test_plot_refiner_steps_full_flow(tmp_path, monkeypatch):
+    """Tool soi GAMMA1: checkpoint box_refiner giả (config gamma1 thật) trên CE-130 giả -> mỗi ca một PNG 4×6 + JSON (hàng
+    inpaint own / blank rồi gốc own / blank; 4 trạng thái sau mỗi bước DDIM, ô cuối = đầu ra; IoU chỉ ở ảnh inpaint).
+    `--files` dò ngược file samples/ ra (split, nhánh, lượt) bằng hash; `--quota` tự chọn phần còn lại; mock 10 bước."""
+    import ce_localization.tools.plot_refiner_steps as tool
+    from ce_localization.data.density import build_index
+    from ce_localization.models.detector import build_model
+    from tests.ce_localization.helpers import CFG_G, _fake_ce130_turns
+    root, samples = _fake_ce130_turns(str(tmp_path / "d"))
+    with open(CFG_G["refiner"]) as f:
+        cfg = yaml.safe_load(f)
+    cfg["data"]["image_size"] = 128
+    cfg["diffusion"]["num_timesteps"] = 20
+    torch.manual_seed(0)
+    ck = str(tmp_path / "gamma1" / "best.pth")
+    os.makedirs(os.path.dirname(ck))
+    torch.save({"config": cfg, "model": build_model(cfg, pretrained_backbone=False).state_dict(), "iter": 7}, ck)
+    didx = str(tmp_path / "density_index.json")
+    with open(didx, "w") as f:
+        json.dump(build_index(samples, workers=0, log=lambda *x: None), f)
+    monkeypatch.setattr(tool, "encode_class_names", lambda names, *a, **k: {n: torch.randn(512) for n in names})
+    base = ["plot_refiner_steps.py", "--ckpt", ck, "--ce130", root, "--samples", samples, "--density-index", didx]
+
+    # file samples/ của nhánh test 3000_b1 lượt 2 -> dò ngược đúng (split, nhánh, lượt)
+    a = type("A", (), {"samples": samples, "ce130": root})()
+    hit = None
+    for p in sorted(os.listdir(os.path.join(samples, "test", "images"))):
+        f = tool.find_turn(a, f"test/images/{p}")
+        if f == ("test", "3000_b1", 2):
+            hit = f"test/images/{p}"
+    assert hit is not None
+    out = str(tmp_path / "out")
+    monkeypatch.setattr(sys, "argv", base + ["--files", hit, "--cases", "test/3001_b1", "--quota", "1", "1", "2",
+                                             "--pool", "3", "--out", out])
+    tool.main()
+    with open(os.path.join(out, "refiner_steps.json")) as f:
+        cases = json.load(f)
+    assert [c["split"] for c in cases] == ["train", "val", "test", "test"]
+    assert {(c["branch"], c["turn"]) for c in cases if c["split"] == "test"} == {("3000_b1", 2), ("3001_b1", 1)}
+    assert set(os.listdir(out)) == {f"{c['split']}_{c['branch']}_t{c['turn']}.png" for c in cases} | {"refiner_steps.json"}
+    rows = cases[0]["rows"]
+    assert [(r["image"], r["density"]) for r in rows] == list(tool.ROWS)
+    assert [s["t"] for s in rows[0]["states"]] == [14, 9, 4, 0] and len(rows[0]["path"]) == 5   # sau bước 1..4; ô cuối = ra
+    assert all(("iou_hole" in r["states"][-1]) == (r["image"] == "inpainted") for r in rows)
+    assert rows[0]["path"][0][1:] == rows[2]["path"][0][1:]                      # cùng seed ⇒ cùng nhiễu ban đầu
+
+    out3 = str(tmp_path / "out3")
+    monkeypatch.setattr(sys, "argv", base + ["--cases", "test/3000_b1", "--quota", "0", "0", "0", "--sampler", "mock",
+                                             "--mock-steps", "10", "--show-x0", "--out", out3])
+    tool.main()
+    with open(os.path.join(out3, "refiner_steps.json")) as f:
+        r0 = json.load(f)[0]["rows"][0]
+    assert [s["after_step"] for s in r0["states"]] == [1, 4, 7, 10] and len(r0["path"]) == 11
+
+    out4 = str(tmp_path / "out4")                                               # 6 tầng trong MỘT lượt ở t cao nhất
+    monkeypatch.setattr(sys, "argv", base + ["--cases", "test/3000_b1", "--quota", "0", "0", "0", "--mode", "stages",
+                                             "--out", out4])
+    tool.main()
+    with open(os.path.join(out4, "refiner_steps.json")) as f:
+        r0 = json.load(f)[0]["rows"][0]
+    assert [s["stage"] for s in r0["states"]] == [1, 2, 3, 4, 5, 6] and {s["t"] for s in r0["states"]} == {19}
+    assert r0["path"][0][0] == "input t=19" and len(r0["path"]) == 7
+
+
+def test_eval_paper_checkpoint_on_ce130_add(tmp_path, monkeypatch):
+    """eval.py nhận checkpoint CE-Loc gốc của bài (khuôn `model_state_dict`) + `--config` GAMMA0 -> eval bài add trên CE-130
+    (ảnh inpaint + ảnh gốc, ddpm + mock), text bằng CLIP của checkpoint; đếm mẫu samples/train (bài đã train)."""
+    import ce_localization.eval as ea
+    import ce_localization.train as ta
+    from tests.ce_localization.helpers import _fake_paper_ckpt, _fake_text_table, _fake_turn_index, _gamma_cfg
+    base = str(tmp_path / "d")
+    os.makedirs(base)
+    _fake_turn_index(base)
+    cfg_path, _ = _gamma_cfg(tmp_path, base, "density")
+    ck = str(tmp_path / "best_model.pth")
+    _fake_paper_ckpt(ck, T=100)
+    seen_sd = []
+    monkeypatch.setattr(ta, "build_text_table",
+                        lambda names, cfg, dev, state_dict=None: seen_sd.append(state_dict) or _fake_text_table(names, cfg, dev))
+    with pytest.raises(SystemExit):                                       # thiếu --config
+        monkeypatch.setattr(sys, "argv", ["eval.py", "--ckpt", ck, "--device", "cpu"])
+        ea.main()
+    for split, n_seen_all in (("test", False), ("val", True)):
+        out = str(tmp_path / f"paper_{split}.json")
+        monkeypatch.setattr(sys, "argv", ["eval.py", "--ckpt", ck, "--config", cfg_path, "--split", split, "--n-samples",
+                                          "3", "--add-samplers", "ddpm", "mock", "--num-workers", "0", "--out", out,
+                                          "--device", "cpu"])
+        ea.main()
+        with open(out) as f:
+            res = json.load(f)
+        assert set(res["results"]) == {f"{i}_{s}" for i in ("inpainted", "original") for s in ("ddpm", "mock")}
+        r = res["results"]["inpainted_ddpm"]
+        assert res["density"] == {"inpainted": "sample", "original": "full"} and str(res["iter"]).startswith("epoch")
+        assert 0 <= r["best_iou@3_latest"] <= 1 and (r["n_paper_train"] == r["n"]) == n_seen_all
+        assert "excl_paper_train" not in r                                # cả split cùng một phía
+    assert seen_sd and all(sd is not None and "text_model.final_layer_norm.weight" in sd for sd in seen_sd)

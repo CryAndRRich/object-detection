@@ -20,6 +20,7 @@ Box nhiễu vào tầng 1: kẹp [−1, 1] rồi w, h >= MIN_WH (tỉ lệ vùng
 w hoặc h <= 0 sau kẹp; apply_deltas nhân delta với w = 0 nên box kẹt suy biến qua cả 6 tầng.
 Suy luận: DDIM (eta 1 như DiffusionDet) S bước từ nhiễu thuần; mỗi bước x̂0 = box tầng cuối (kẹp [−1, 1]), ε suy lại
 từ x̂0; đầu ra = box tầng cuối của bước cuối, KHÔNG kẹp (như DiffusionDet; box suy biến / tràn ảnh do bộ chấm báo).
+Chỉ để soi: `t_start` (DDIM bắt đầu ở t nhỏ hơn) và `sampler="mock"` (vòng "mock" của CE-Loc gốc, t = 99..0).
 """
 
 import torch
@@ -183,29 +184,47 @@ class BoxRefiner(nn.Module):
         return loss, {"loss": loss.detach(), "loss_per_stage": per.detach()}
 
     @torch.no_grad()
-    def sample(self, images, text_raw, valid_hw, n_samples, generator=None, steps=1, eta=1.0, return_stages=False):
-        """n_samples mẫu ĐỘC LẬP mỗi ảnh, DDIM `steps` bước. -> [B, n_samples, 4] trong [−1, 1] (cùng quy ước
-        `box_policy.unit_to_boxes` với `norm_whwh`); `return_stages` -> (box, box mọi tầng ở MỖI bước: list [S,B,K,4] xyxy pixel)."""
+    def sample(self, images, text_raw, valid_hw, n_samples, generator=None, steps=1, eta=1.0, return_stages=False,
+               sampler="ddim", t_start=None):
+        """n_samples mẫu ĐỘC LẬP mỗi ảnh. -> [B, n_samples, 4] trong [−1, 1] (cùng quy ước `box_policy.unit_to_boxes` với
+        `norm_whwh`); `return_stages` -> (box, list MỖI bước {"t", "x": x_t [B,K,4] (không gian khuếch tán, KHÔNG kẹp),
+        "noisy": box tầng 1 nhận [B,K,4], "stages": box mọi tầng [S,B,K,4]} — box xyxy pixel canvas).
+          ddim  `steps` bước DDIM (eta `eta`) từ t = `t_start` (mặc định T − 1) về 0; đầu ra = box tầng 6 của bước cuối.
+          mock  vòng của repo CE-Loc gốc (`inference.py`, model ε): nhiễu thuần nhưng t = steps−1..0, `x -= ε̂/steps` với ε̂
+                suy từ x̂0 = box tầng 6 (model ở đây dự đoán x0); đầu ra = x sau vòng (như bài)."""
+        if sampler not in ("ddim", "mock"):
+            raise ValueError(f"sampler {sampler!r} không thuộc ('ddim', 'mock')")
         feats, vis = self.encode_image(images, valid_hw)
         B, K, dev = images.shape[0], n_samples, images.device
         whwh = torch.stack([valid_hw[:, 1], valid_hw[:, 0], valid_hw[:, 1], valid_hw[:, 0]], 1).float()
         wk = norm_whwh(self, whwh, images.shape[-1]).repeat_interleave(K, 0)
         ac = self.alphas_cumprod
+        if sampler == "mock":
+            if steps > self.num_timesteps:
+                raise ValueError(f"mock {steps} bước nhưng lịch train chỉ có T = {self.num_timesteps}")
+            pairs = [(t, t - 1) for t in reversed(range(steps))]
+        else:
+            pairs = ddim_time_pairs((self.num_timesteps - 1 if t_start is None else t_start) + 1, steps)
         x = torch.randn((B * K, 4), device=dev, generator=generator)
         stages = []
-        for t, t_next in ddim_time_pairs(self.num_timesteps, steps):
+        for t, t_next in pairs:
             tb = torch.full((B * K,), t, device=dev, dtype=torch.long)
-            preds, attn = self.refine(feats, vis, text_raw, tb, noisy_to_boxes(x, wk).view(B, K, 4), self.track_attn)
+            noisy = noisy_to_boxes(x, wk).view(B, K, 4)
+            preds, attn = self.refine(feats, vis, text_raw, tb, noisy, self.track_attn)
             if attn is not None:
                 s = attn.float().sum(1)                                          # [S, 3]
                 self._attn_sum = s if self._attn_sum is None else self._attn_sum + s
                 self._attn_n += attn.shape[1]
             if return_stages:
-                stages.append(preds.view(-1, B, K, 4).cpu())
+                stages.append({"t": int(t), "x": x.view(B, K, 4).cpu().clone(), "noisy": noisy.cpu(),
+                               "stages": preds.view(-1, B, K, 4).cpu()})
+            x0 = diffusion_from_boxes(preds[-1], wk, 1.0)    # kẹp [−1, 1] chỉ để suy ε (như DiffusionDet)
+            if sampler == "mock":
+                x = x - predict_noise_from_start(x, t, x0, ac) / steps
+                continue
             if t_next < 0:                       # đầu ra = box tầng cuối, không kẹp (như DiffusionDet)
                 x = boxes_to_unit(preds[-1], wk)
                 break
-            x0 = diffusion_from_boxes(preds[-1], wk, 1.0)    # kẹp [−1, 1] chỉ để suy ε (như DiffusionDet)
             eps = predict_noise_from_start(x, t, x0, ac)
             a, a_next = ac[t], ac[t_next]
             sigma = eta * ((1 - a / a_next) * (1 - a_next) / (1 - a)).sqrt()

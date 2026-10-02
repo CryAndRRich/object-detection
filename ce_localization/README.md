@@ -40,7 +40,7 @@ L1 + GIoU ở mọi tầng; suy luận DDIM `--steps`.
 | `models/` | `backbone`, `roi`, `memory`, `head`, `detector`, `text` (CLIP ViT-B/32 frozen); bài add: `box_policy` + `unet1d` (GAMMA0), `box_refiner` (GAMMA1) |
 | `engine/` | `diffusion`, `criterion` (SimOTA + loss, chế độ box / điểm), `evaluate` (suy luận + chỉ số), `add_eval` (bài add: K mẫu, IoU với lỗ, C-NLL, on_object), `train_utils`, `nan_debug` |
 | `utils/` | hình học box (torch / numpy), toán khuếch tán, chấm điểm numpy, checkpoint ghi nguyên tử, grad theo nhóm, log |
-| `tools/` | `build_density_index`, `build_density_points`, `build_turn_index` (bài add, cửa G0), `visualize_data` (xem đầu vào bằng mắt), `check_data_facts`, `plot_denoise_trajectory` (bài add: box qua từng bước khử nhiễu, checkpoint của bài hoặc GAMMA) |
+| `tools/` | `build_density_index`, `build_density_points`, `build_turn_index` (bài add, cửa G0), `visualize_data` (xem đầu vào bằng mắt), `check_data_facts`, `plot_denoise_trajectory` (bài add: box qua từng bước khử nhiễu, checkpoint của bài hoặc GAMMA0), `plot_refiner_steps` (GAMMA1: 4 bước DDIM × 6 tầng + SpatialSoftmax, ảnh inpaint / gốc × density của ảnh / trống) |
 | `notebooks/` | `train_kaggle.ipynb` (một config trên T4×2) — gitignore, chỉ ở local |
 
 Test ở `object-detection/tests/ce_localization/` theo module: `test_data`, `test_models`,

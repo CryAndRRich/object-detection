@@ -85,9 +85,10 @@ def config_diff(saved, cfg):
     return errors, warns
 
 
-def build_text_table(names, cfg, dev):
-    """Tách ra hàm riêng để test thay bằng embedding giả (không tải CLIP)."""
-    return TextTable(encode_class_names(names, cfg["model"]["clip_text"], device=str(dev)))
+def build_text_table(names, cfg, dev, state_dict=None):
+    """Tách ra hàm riêng để test thay bằng embedding giả (không tải CLIP). `state_dict`: CLIP text lưu trong checkpoint CE-Loc
+    gốc của bài (eval.py)."""
+    return TextTable(encode_class_names(names, cfg["model"]["clip_text"], device=str(dev), state_dict=state_dict))
 
 
 def density_setup(cfg):

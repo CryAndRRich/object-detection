@@ -365,9 +365,19 @@ def test_box_refiner_sample_steps_and_attention():
         g = torch.Generator().manual_seed(1)
         u, stages = m.sample(x, torch.randn(2, 512), vhw, 5, generator=g, steps=steps, return_stages=True)
         assert u.shape == (2, 5, 4) and torch.isfinite(u).all()
-        assert len(stages) == steps and stages[0].shape == (6, 2, 5, 4)
+        assert len(stages) == steps and stages[0]["stages"].shape == (6, 2, 5, 4) and stages[0]["noisy"].shape == (2, 5, 4)
+        assert stages[0]["t"] == 19
         b = unit_to_boxes(u, torch.tensor([[128.0, 96.0, 128.0, 96.0], [128.0, 128.0, 128.0, 128.0]])[:, None])
-        assert torch.allclose(b, stages[-1][-1], rtol=1e-4, atol=1e-2)     # bước cuối: box tầng cuối, KHÔNG kẹp
+        assert torch.allclose(b, stages[-1]["stages"][-1], rtol=1e-4, atol=1e-2)   # bước cuối: box tầng cuối, KHÔNG kẹp
+    g = torch.Generator().manual_seed(1)
+    u, st = m.sample(x, torch.randn(2, 512), vhw, 3, generator=g, steps=4, t_start=9, return_stages=True)
+    assert [d["t"] for d in st] == [9, 6, 4, 1] and u.shape == (2, 3, 4)                    # DDIM từ t = 9
+    g = torch.Generator().manual_seed(1)
+    u, st = m.sample(x, torch.randn(2, 512), vhw, 3, generator=g, steps=10, sampler="mock", return_stages=True)
+    assert [d["t"] for d in st] == list(range(9, -1, -1)) and torch.isfinite(u).all()
+    assert torch.equal(st[0]["x"], torch.randn(6, 4, generator=torch.Generator().manual_seed(1)).view(2, 3, 4))
+    with pytest.raises(ValueError):
+        m.sample(x, torch.randn(2, 512), vhw, 3, steps=30, sampler="mock")
     att = m.pop_attn()
     assert len(att) == 6 and all(abs(sum(a.values()) - 1) < 1e-4 for a in att) and set(att[0]) == {"t", "text", "vis"}
     assert m.pop_attn() is None

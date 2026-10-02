@@ -55,7 +55,7 @@ def _fake_ce130(root, n_train=4, n_val=2, n_test=2):
             k += 1
 
 
-def _fake_text_table(names, cfg, dev):
+def _fake_text_table(names, cfg, dev, state_dict=None):
     table = {}
     for n in names:
         g = torch.Generator().manual_seed(sum(map(ord, n)))

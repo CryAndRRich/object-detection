@@ -42,12 +42,14 @@ KNN = 3
 
 
 @torch.no_grad()
-def predict_add(model, loader, text_table, n_samples=30, seed=0, log_every=0, log=print, steps=None):
+def predict_add(model, loader, text_table, n_samples=30, seed=0, log_every=0, log=print, steps=None, sampler=None):
     """-> list record numpy: image_id, t, wh (nw, nh), boxes [K,4] (thô), holes [t,4], objects [M,4].
-    `steps`: số bước DDIM của `BoxRefiner` (GAMMA1; None = mặc định của model). BoxRefiner còn cộng dồn attention lên
+    `steps`: số bước DDIM của `BoxRefiner` (GAMMA1; None = mặc định của model); `sampler`: ddpm | mock của `BoxPolicy`. BoxRefiner còn cộng dồn attention lên
     [t ; text ; vis] — lấy bằng `model.pop_attn()` sau khi gọi."""
     model.eval()
     kw = {"steps": steps} if steps else {}
+    if sampler:                                       # BoxPolicy (GAMMA0 / checkpoint của bài): ddpm | mock
+        kw["sampler"] = sampler
     if hasattr(model, "track_attn"):
         model.track_attn = True
     dev = next(model.parameters()).device
