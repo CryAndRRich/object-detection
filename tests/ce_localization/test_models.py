@@ -522,12 +522,12 @@ def test_dynamic_conv_matches_diffusiondet_formula():
     assert out.shape == (5, 16) and torch.allclose(out, ref, atol=1e-6)
 
 
-def _propose_refine(freeze):
+def _propose_refine(freeze, geo=False):
     from ce_localization.models.propose_refine import ProposeRefine
     pk = dict(in_channels=4, pretrained_backbone=False, num_timesteps=20, vision="r18_paper", ss_mask=True)
     torch.manual_seed(0)
     return ProposeRefine(pk, d_model=64, dim_feedforward=128, nhead=4, dim_dynamic=8, num_timesteps=20,
-                         freeze_proposer=freeze)
+                         freeze_proposer=freeze, geo=geo, geo_hidden=32)
 
 
 @pytest.mark.parametrize("freeze", [True, False])
@@ -596,3 +596,70 @@ def test_propose_refine_sample_variants():
     m.sample(x, text, vhw, 2, refine_t=5)
     att = m.pop_attn()
     assert len(att) == 6 and abs(sum(att[0].values()) - 1) < 1e-4
+
+
+# ----------------------------------------------------------------------------- GAMMA3: FiLM theo box vật đang có
+
+def test_geo_features_geometry():
+    """Box trùng vật 1, vật 2 cách 2 bề rộng sang phải cùng cỡ: đúng từng thành phần (models/geo.py); thiếu vật -> 0, cờ 0."""
+    import math
+    from ce_localization.models.geo import GEO_DIM, GEO_K, geo_features, pad_objects
+    box = torch.tensor([[10.0, 10.0, 30.0, 50.0]])
+    objs, mask = pad_objects([torch.tensor([[10.0, 10.0, 30.0, 50.0], [50.0, 10.0, 70.0, 50.0]])], "cpu")
+    assert objs.shape == (1, GEO_K, 4) and mask.tolist() == [[True, True, False, False]]
+    f = geo_features(box, objs, mask)
+    assert f.shape == (1, GEO_DIM) and torch.isfinite(f).all()
+    assert torch.isclose(f[0, 0], torch.tensor(1.0)) and torch.isclose(f[0, 1], torch.tensor(math.log(2)))  # max IoU, log(1+ΣIoA)
+    near = f[0, 2:2 + GEO_K * 7].view(GEO_K, 7)
+    assert torch.allclose(near[0], torch.tensor([0, 0, 0, 0, 1, 1, 1.0]))                  # chính nó: IoU = IoA = 1
+    assert torch.allclose(near[1], torch.tensor([math.log(3), 0, 0, 0, 0, 0, 1.0]), atol=1e-6)   # Δx/w = 2 -> slog = log 3
+    assert (near[2:] == 0).all()
+    tail = f[0, 2 + GEO_K * 7:]
+    assert torch.allclose(tail, torch.tensor([0.0, 0.0, math.log(2), math.log(3)]), atol=1e-6)   # trung vị cỡ, gần (|Δ| < 2), số vật
+
+
+def test_geo_features_ignore_padding_and_order():
+    from ce_localization.models.geo import geo_features, pad_objects
+    g = torch.Generator().manual_seed(0)
+    lt = torch.rand(9, 2, generator=g) * 100
+    o = torch.cat([lt, lt + torch.rand(9, 2, generator=g) * 30 + 1], 1)
+    boxes = torch.tensor([[20.0, 20.0, 45.0, 60.0], [0.0, 0.0, 3.0, 2.0], [50.0, 50.0, 140.0, 130.0]])
+    objs, mask = pad_objects([o], "cpu")
+    ref = geo_features(boxes, objs.expand(3, -1, -1), mask.expand(3, -1))
+    junk = torch.cat([objs, torch.rand(1, 5, 4) * 500], 1)                                   # ô đệm rác, mask False
+    jm = torch.cat([mask, torch.zeros(1, 5, dtype=torch.bool)], 1)
+    assert torch.allclose(geo_features(boxes, junk.expand(3, -1, -1), jm.expand(3, -1)), ref, atol=1e-6)
+    perm = torch.randperm(9, generator=g)
+    po, pm = pad_objects([o[perm]], "cpu")
+    assert torch.allclose(geo_features(boxes, po.expand(3, -1, -1), pm.expand(3, -1)), ref, atol=1e-6)
+    eo, em = pad_objects([torch.zeros(0, 4)], "cpu")                                         # không vật nào
+    e = geo_features(boxes, eo.expand(3, -1, -1), em.expand(3, -1))
+    assert torch.isfinite(e).all() and (e == 0).all()
+
+
+def test_propose_refine_geo_zero_init_then_used():
+    """Lớp cuối MLP geo khởi tạo 0 => lúc đầu box ra y hệt khi tắt geo (= GAMMA2); có weight thì box đổi; train có grad tới
+    nhánh geo; model.geo mà không truyền vật thì báo lỗi."""
+    m = _propose_refine(True, geo=True).eval()
+    x, vhw = torch.rand(2, 4, 128, 128), torch.tensor([[96, 128], [128, 128]])
+    text = torch.randn(2, 512)
+    objects = [torch.tensor([[5.0, 5.0, 30.0, 40.0], [60.0, 50.0, 90.0, 90.0]]), torch.zeros(0, 4)]
+    with pytest.raises(ValueError, match="objects"):
+        m.sample(x, text, vhw, 3, refine_t=5)
+
+    def run(v):
+        return m.sample_variants(x, text, vhw, 3, torch.Generator().manual_seed(0), [v], objects=objects)[0]
+    off = run({"refine_t": 5, "geo": False})
+    assert torch.allclose(run({"refine_t": 5}), off, atol=1e-6)
+    for f in m.head.geo_films:
+        torch.nn.init.normal_(f[-1].weight, std=0.5)
+    assert not torch.allclose(run({"refine_t": 5}), off, atol=1e-4)
+    assert torch.allclose(run({"refine_t": 5, "geo": False}), off, atol=1e-6)                 # tắt geo: không phụ thuộc weight geo
+
+    m = _propose_refine(True, geo=True).train()
+    whwh = torch.tensor([[128.0, 96.0, 128.0, 96.0], [128.0, 128.0, 128.0, 128.0]])
+    tgt = torch.tensor([[10.0, 20.0, 50.0, 60.0], [60.0, 70.0, 100.0, 120.0]])
+    loss, _ = m(x, text, vhw, tgt, whwh, k=3, objects=objects)
+    loss.backward()
+    for i in range(6):
+        assert m.head.geo_films[i][-1].weight.grad.abs().sum() > 0, i

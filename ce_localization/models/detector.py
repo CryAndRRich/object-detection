@@ -105,7 +105,8 @@ def build_model(cfg, pretrained_backbone=None):
             dim_feedforward=m["dim_feedforward"], nhead=m["n_head"], dropout=m["dropout"], dim_dynamic=m["dim_dynamic"],
             num_dynamic=m["num_dynamic"], text_dim=m.get("text_dim", 512), num_timesteps=d["num_timesteps"],
             snr_scale=d["snr_scale"], l1_weight=cfg["loss"]["l1_weight"], giou_weight=cfg["loss"]["giou_weight"],
-            freeze_proposer=m["freeze_proposer"], proposer_weight=cfg["loss"].get("proposer_weight", 1.0))
+            freeze_proposer=m["freeze_proposer"], proposer_weight=cfg["loss"].get("proposer_weight", 1.0),
+            geo=m.get("geo", False), geo_hidden=m.get("geo_hidden", 256))
         ck = cfg.get("init", {}).get("proposer_ckpt")
         if pre:                         # train: CE-Loc pha 1 ; eval (pre=False) nạp cả mô hình từ checkpoint của chính nó
             if not ck:

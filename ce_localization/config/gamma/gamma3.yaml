@@ -1,0 +1,91 @@
+# EXPERIMENT GAMMA3 — GAMMA2 (CE-Loc pha 1 đóng băng -> refine 6 stage kiểu DiffusionDet) + box các VẬT ĐANG CÓ làm điều kiện:
+# đầu mỗi stage, đặc trưng hình học tương đối giữa box của stage và mọi vật (Δ tâm / cỡ, log tỉ lệ cỡ, IoU, IoA; 4 vật gần nhất,
+# max IoU, Σ IoA, ...; models/geo.py) -> MLP -> FiLM lên `pro` TRƯỚC cross-attn (lớp cuối khởi tạo 0 ⇒ lúc đầu = GAMMA2).
+# Box vật = GT (ảnh inpaint: bỏ các vật đã xoá tới lượt t), KHÔNG nhiễu. Mọi khoá khác Y HỆT gamma2.yaml (có test) ⇒
+# GAMMA3 − GAMMA2 = đóng góp của box vật. Eval thêm `_nogeo` (tắt nhánh geo). Kế hoạch: docs/EXPERIMENT_GAMMA.md mục 14.
+
+experiment: "gamma3"
+description: "bài add: GAMMA2 + FiLM theo hình học tương đối với box các vật đang có (GT) ở đầu mỗi stage refine, trước cross-attn"
+task: "add"
+
+data:
+  root: "../data/all_phase2_V2"
+  samples_root: "../data/samples"
+  turn_index: "../data/turn_index.json"
+  density_index: "../data/density_index.json"
+  density_root: "../data/samples"
+  split_source: "samples"
+  cache_dir: null
+  image_size: 512
+  num_workers: 4
+  input_style: "paper"
+  density: "sample"
+
+model:
+  arch: "propose_refine"
+  pretrained_backbone: true         # train: nạp CE-Loc pha 1 từ init.proposer_ckpt
+  freeze_proposer: true             # GAMMA2: CE-Loc + backbone + điều kiện đóng băng ; gamma2_1: false (train chung 2 loss)
+  proposer:                         # PHẢI khớp gamma2_celoc.yaml (load_proposer kiểm strict)
+    vision: "r18_paper"
+    ss_mask: true
+    in_channels: 4
+    vis_dim: 128
+    text_dim: 512
+    text_proj_dim: 128
+    step_embed_dim: 256
+    down_dims: [64, 128, 256]
+    kernel_size: 3
+    n_groups: 8
+  d_model: 256                      # cấu hình mặc định DiffusionDet
+  n_stage: 6
+  n_head: 8
+  dim_feedforward: 2048
+  dropout: 0.0
+  dim_dynamic: 64
+  num_dynamic: 2
+  text_dim: 512
+  clip_text: "openai/clip-vit-base-patch32"
+  geo: true                         # GAMMA3: FiLM theo box vật đang có (models/geo.py), trước cross-attn mỗi stage
+  geo_hidden: 256
+
+diffusion:                          # khuếch tán của REFINE như DiffusionDet
+  num_timesteps: 1000               # cosine
+  snr_scale: 2.0
+  noise_per_image: 8                # 8 box nhiễu độc lập / ảnh (1 đích)
+  proposer:                         # khuếch tán của CE-Loc (như bài)
+    num_timesteps: 1000
+    beta_start: 1.0e-4
+    beta_end: 0.02
+
+loss:
+  l1_weight: 5.0                    # DiffusionDet, mỗi stage như nhau
+  giou_weight: 2.0
+  proposer_weight: 1.0              # chỉ dùng khi freeze_proposer: false — ε-MSE của CE-Loc
+
+init:
+  proposer_ckpt: "../weights/add/gamma2_celoc/best.pth"   # Kaggle: --proposer-ckpt
+
+training:                           # DiffusionDet (AdamW 2,5e-5 @ batch 16, clip toàn mô hình 1,0, warmup) — lr ×4 theo batch 64
+  batch_size: 64                    # TOÀN CỤC: 32 / GPU như pha 1 (người dùng chốt 2026-10-02; trước: 32 = 16 / GPU)
+  sync_bn: false                    # BN thường, 32 / GPU = batch BN của pha 1 (chỉ có tác dụng ở gamma2_1; gamma2: CE-Loc ở eval)
+  amp: true                         # fp16 cho backbone + FPN + U-Net; memory + head refine (kiểu DiffusionDet) luôn fp32
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  max_iter: 10000                   # ≈ 32 epoch của 19.998 mẫu (cùng số lượt xem ảnh như bản batch 32 × 20.000)
+  steps: [7500, 9250]
+  gamma: 0.1
+  warmup_iters: 500
+  warmup_factor: 0.01
+  grad_clip: 1.0
+  seed: 0
+  log_every: 50
+  ckpt_every: 500
+  eval_every: 1250
+
+eval:
+  split: "val"
+  limit: 500
+  n_samples: 30
+  batch_size: 16
+  sample_kw: {refine_t: 200, refine_steps: 1, proposer_sampler: "mock"}   # eval định kỳ; test quét t* (eval.py --refine-t)
+  select_metric: "mean_iou_any"

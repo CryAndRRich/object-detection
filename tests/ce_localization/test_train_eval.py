@@ -158,8 +158,8 @@ def test_ddp_gamma2_celoc_bucket_view_no_stride_warning(tmp_path):
     assert ck["iter"] == 3 and all(np.isfinite(h["loss"]) and h["skipped"] == 0 for h in ck["history"] if "loss" in h)
     with pytest.raises(Exception, match="Grad strides"):
         run(str(tmp_path / "old"), True)
-    # pha 2 (đóng băng / train chung) trên DDP KHÔNG find_unused: tham số nào thiếu grad thì DDP báo lỗi ngay
-    for kind in ("pr", "pr_joint"):
+    # pha 2 (đóng băng / train chung / GAMMA3 geo) trên DDP KHÔNG find_unused: tham số nào thiếu grad thì DDP báo lỗi ngay
+    for kind in ("pr", "pr_joint", "geo"):
         p2, c2 = _gamma2_cfg(tmp_path, base, kind)
         assert not __import__("ce_localization.train", fromlist=["x"]).ddp_find_unused(c2)
         run(str(tmp_path / kind), None, p2, ("--proposer-ckpt", os.path.join(str(tmp_path / "new"), "best.pth")))
@@ -685,3 +685,69 @@ def test_gamma2_configs():
         assert m1[k] == v, k
     assert {k: cfg["celoc2"]["diffusion"][k] for k in ("num_timesteps", "beta_start", "beta_end")} == a["diffusion"]["proposer"]
     assert cfg["celoc2"]["data"] == {k: v for k, v in a["data"].items()}
+
+
+# ----------------------------------------------------------------------------- GAMMA3: GAMMA2 + FiLM theo box vật đang có
+
+def test_gamma3_config_only_adds_geo():
+    """gamma3 = gamma2 + `model.geo` / `geo_hidden` (+ tên) ⇒ GAMMA3 − GAMMA2 = đóng góp của box vật."""
+    from tests.ce_localization.helpers import CFG_G
+    with open(CFG_G["pr"]) as f:
+        a = yaml.safe_load(f)
+    with open(CFG_G["geo"]) as f:
+        b = yaml.safe_load(f)
+    assert (b["model"].pop("geo"), b["model"].pop("geo_hidden")) == (True, 256)
+    for k in ("experiment", "description"):
+        a.pop(k), b.pop(k)
+    assert a == b
+
+
+def test_gamma3_objects_never_contain_target_hole(tmp_path):
+    """Box vật đưa vào geo (`objects` của mẫu ảnh inpaint) không chứa lỗ đích hay lỗ cũ — không rò đáp án."""
+    from ce_localization.data.turns import CE130AddDataset
+    from ce_localization.utils.box_ops_np import box_iou
+    from tests.ce_localization.helpers import _fake_turn_index
+    base = str(tmp_path / "d")
+    os.makedirs(base)
+    root, samples, _, index, _ = _fake_turn_index(base)
+    for split in ("train", "val", "test"):
+        ds = CE130AddDataset(index, root, samples, split, 128, style="paper", split_source="samples")
+        for i in range(len(ds)):
+            s = ds[i]
+            assert len(s["objects"]) and box_iou(s["holes"].numpy(), s["objects"].numpy())[0].max() < 0.5
+
+
+def test_full_flow_gamma3_geo_train_eval(tmp_path, monkeypatch):
+    """GAMMA3: pha 1 -> train gamma3 (thu nhỏ) nạp CE-Loc pha 1, nhánh geo học (lớp cuối rời 0), CE-Loc không đổi; eval có
+    thêm `_nogeo` cho mọi biến thể refine, cùng số mẫu."""
+    import ce_localization.eval as ea
+    import ce_localization.train as ta
+    from tests.ce_localization.helpers import _fake_text_table, _fake_turn_index, _gamma2_cfg
+    base = str(tmp_path / "d")
+    os.makedirs(base)
+    _fake_turn_index(base)
+    c1_path, _ = _gamma2_cfg(tmp_path, base, "celoc2")
+    p1 = str(tmp_path / "celoc")
+    _run_train(monkeypatch, ["--config", c1_path, "--save-dir", p1, "--max-iter", "2"])
+    ck1 = torch.load(os.path.join(p1, "last.pth"), weights_only=False)
+    c3_path, _ = _gamma2_cfg(tmp_path, base, "geo")
+    g = str(tmp_path / "geo")
+    _run_train(monkeypatch, ["--config", c3_path, "--save-dir", g, "--proposer-ckpt", os.path.join(p1, "last.pth")])
+    k3 = torch.load(os.path.join(g, "last.pth"), weights_only=False)
+    assert k3["iter"] == 4 and k3["config"]["model"]["geo"]
+    assert all(k3["model"][f"head.geo_films.{i}.2.weight"].abs().sum() > 0 for i in range(6))
+    for k, v in ck1["model"].items():
+        assert torch.equal(k3["model"]["proposer." + k], v), k
+
+    monkeypatch.setattr(ta, "build_text_table", _fake_text_table)
+    out = str(tmp_path / "res.json")
+    monkeypatch.setattr(sys, "argv", ["eval.py", "--ckpt", os.path.join(g, "best.pth"), "--split", "test", "--n-samples", "3",
+                                      "--refine-t", "none", "5", "noise", "--proposer-sampler", "ddpm",
+                                      "--num-workers", "0", "--out", out, "--device", "cpu"])
+    ea.main()
+    with open(out) as f:
+        res = json.load(f)
+    assert set(res["results"]) == {f"{i}_{v}" for i in ("inpainted", "original")
+                                   for v in ("ce", "t5", "noise", "t5_nogeo", "noise_nogeo")}
+    r = res["results"]
+    assert r["inpainted_t5_nogeo"]["n"] == r["inpainted_t5"]["n"] > 0 and len(r["inpainted_t5_nogeo"]["attn"]) == 6

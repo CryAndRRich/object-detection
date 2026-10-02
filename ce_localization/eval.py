@@ -11,6 +11,7 @@ Config lấy từ checkpoint (an toàn hơn), trừ khi truyền --config.
 
 GAMMA2 (`model.arch: propose_refine`): CE-Loc sinh `--n-samples` box MỘT lần (`--proposer-sampler`), mỗi `--refine-t`
 (none / t* / noise) chấm riêng trên cùng box đó (khoá `<ảnh>_ce`, `<ảnh>_t<t*>`, `<ảnh>_noise`).
+GAMMA3 (`model.geo`): thêm `<ảnh>_t<t*>_nogeo`, `<ảnh>_noise_nogeo` = cùng biến thể nhưng TẮT nhánh geo.
 
 Checkpoint CE-Loc gốc của bài (`model_state_dict`, vd weights/add/paper/best_model.pth) + `--config config/gamma/gamma0.yaml`
 (đường dẫn dữ liệu): eval bài add như GAMMA, kèm `excl_paper_train` (bỏ mẫu samples/train mà bài đã train).
@@ -159,6 +160,9 @@ def main_add(a, cfg, ck, dev, t0):
             desc = ("CE-Loc một mình" if rt is None else f"refine từ nhiễu thuần, {a.refine_steps} bước" if rt == "noise"
                     else f"CE-Loc -> refine t*={rt}, {a.refine_steps} bước")
             refine_vars.append((suffix, desc, {"refine_t": rt, "refine_steps": a.refine_steps}))
+        if cfg["model"].get("geo"):                   # GAMMA3: mỗi biến thể refine thêm bản TẮT nhánh geo (cùng box CE-Loc)
+            refine_vars += [(s_ + "_nogeo", d_ + ", TẮT geo", {**v_, "geo": False}) for s_, d_, v_ in refine_vars
+                            if v_["refine_t"] is not None]
     out = {"ckpt": a.ckpt, "iter": it, "split": a.split, "n_samples": K, "density": {}, "results": {},
            "prior": {}, "density_weight_ratio": dwr, "add_samplers": a.add_samplers, "proposer_sampler": a.proposer_sampler,
            "amp": amp}

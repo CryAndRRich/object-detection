@@ -9,6 +9,8 @@ Mỗi stage (weight riêng), MỘT box mỗi mẫu:
     obj   = LN(pro + FFN(pro))                                      (relu, 2048)
     fc    = obj · (1 + scale) + shift,  (scale, shift) = block_time_mlp(time_mlp(t))   (y DiffusionDet)
     delta = Linear(reg tower 3 × (Linear không bias -> LN -> ReLU)) ; b_{k+1} = apply_deltas(delta, b_k), detach
+`geo_hidden` (GAMMA3, `model.geo`): đầu mỗi stage `pro = pro · (1 + γ) + β`, (γ, β) = MLP_stage(geo_features(b_k, vật đang có))
+(models/geo.py) — TRƯỚC cross-attn; lớp cuối MLP khởi tạo 0 ⇒ lúc đầu = GAMMA2. `geo=None` khi gọi = tắt (eval `_nogeo`).
 Không nhánh class (một lần sinh = một box). Post-norm, dropout 0, d 256, 8 head, FFN 2048, dynamic 64 × 2 như cấu hình mặc
 định của DiffusionDet (`diffusiondet/config.py`). Khởi tạo: xavier_uniform mọi tham số ≥ 2 chiều (`_reset_parameters`).
 """
@@ -19,6 +21,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ce_localization.models.geo import GEO_DIM, geo_features
 from ce_localization.models.head import apply_deltas
 from ce_localization.models.roi import MultiLevelRoIAlign
 
@@ -87,14 +90,16 @@ class DynamicStage(nn.Module):
         self.reg_module = nn.ModuleList(reg)
         self.bboxes_delta = nn.Linear(d_model, 4)
 
-    def forward(self, features, boxes, pro_features, pooler, time_emb, memory, need_weights=False):
-        """boxes [B,K,4] xyxy pixel (detach), pro_features [B·K, d] | None, time_emb [B·K, 4d], memory [B·K, M, d].
-        -> (box [B,K,4], obj_features [B·K, d], attention [B·K, M] | None)."""
+    def forward(self, features, boxes, pro_features, pooler, time_emb, memory, need_weights=False, film=None):
+        """boxes [B,K,4] xyxy pixel (detach), pro_features [B·K, d] | None, time_emb [B·K, 4d], memory [B·K, M, d],
+        film (γ, β) [B·K, d] | None. -> (box [B,K,4], obj_features [B·K, d], attention [B·K, M] | None)."""
         B, K = boxes.shape[:2]
         N = B * K
         roi = pooler(features, boxes)                                       # [N, d, 7, 7]
         if pro_features is None:
             pro_features = roi.view(N, self.d_model, -1).mean(-1)
+        if film is not None:                                                # geo: FiLM trước cross-attn
+            pro_features = pro_features * (1 + film[0]) + film[1]
         roi = roi.view(N, self.d_model, -1).permute(2, 0, 1)                # [49, N, d]
         a, w = self.cross_attn(pro_features[:, None], memory, memory, need_weights=need_weights)
         pro = self.norm1(pro_features + self.dropout1(a[:, 0]))
@@ -112,24 +117,36 @@ class DynamicRefineHead(nn.Module):
     """`DynamicHead` của DiffusionDet: time_mlp + 6 `DynamicStage`, box detach giữa các stage, trả box MỌI stage."""
 
     def __init__(self, n_stage=6, d_model=256, dim_feedforward=2048, nhead=8, dropout=0.0, dim_dynamic=64, num_dynamic=2,
-                 num_reg=3):
+                 num_reg=3, geo_hidden=None):
         super().__init__()
         self.pooler = MultiLevelRoIAlign(output_size=7, sampling_ratio=2)
         self.stages = nn.ModuleList([DynamicStage(d_model, dim_feedforward, nhead, dropout, dim_dynamic, num_dynamic, num_reg)
                                      for _ in range(n_stage)])
         self.time_mlp = nn.Sequential(SinusoidalPositionEmbeddings(d_model), nn.Linear(d_model, d_model * 4), nn.GELU(),
                                       nn.Linear(d_model * 4, d_model * 4))
+        self.geo_films = (nn.ModuleList([nn.Sequential(nn.Linear(GEO_DIM, geo_hidden), nn.SiLU(),
+                                                       nn.Linear(geo_hidden, 2 * d_model)) for _ in range(n_stage)])
+                          if geo_hidden else None)
         for p in self.parameters():                                         # `_reset_parameters` của DiffusionDet
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
+        if self.geo_films is not None:                                      # SAU xavier: bắt đầu đúng bằng không geo
+            for f in self.geo_films:
+                nn.init.zeros_(f[-1].weight)
+                nn.init.zeros_(f[-1].bias)
 
-    def forward(self, features, init_boxes, t, memory, need_weights=False):
-        """features P2..P5, init_boxes [B,K,4], t [B·K], memory [B·K, M, d]
+    def forward(self, features, init_boxes, t, memory, need_weights=False, geo=None):
+        """features P2..P5, init_boxes [B,K,4], t [B·K], memory [B·K, M, d], geo (vật [B·K, M, 4], mask [B·K, M]) | None
         -> (box mọi stage [S, B·K, 4], attention [S, B·K, M] | None)."""
+        if geo is not None and self.geo_films is None:
+            raise ValueError("head không có nhánh geo (geo_hidden None) mà vẫn truyền vật")
         time = self.time_mlp(t)
         boxes, pro, outs, attn = init_boxes, None, [], []
-        for st in self.stages:
-            pred, pro, w = st(features, boxes, pro, self.pooler, time, memory, need_weights)
+        for si, st in enumerate(self.stages):
+            film = None
+            if geo is not None:
+                film = self.geo_films[si](geo_features(boxes.reshape(-1, 4), *geo)).chunk(2, dim=-1)
+            pred, pro, w = st(features, boxes, pro, self.pooler, time, memory, need_weights, film)
             outs.append(pred.flatten(0, 1))
             attn.append(w)
             boxes = pred.detach()

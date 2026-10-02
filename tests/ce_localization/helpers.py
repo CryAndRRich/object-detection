@@ -162,7 +162,8 @@ CFG_G = {"density": os.path.join(CFG_DIR, "gamma", "gamma0.yaml"), "rgb": os.pat
          "refiner_coords": os.path.join(CFG_DIR, "gamma", "gamma1_1.yaml"),
          "celoc2": os.path.join(CFG_DIR, "gamma", "gamma2_celoc.yaml"),
          "pr": os.path.join(CFG_DIR, "gamma", "gamma2.yaml"),
-         "pr_joint": os.path.join(CFG_DIR, "gamma", "gamma2_1.yaml")}
+         "pr_joint": os.path.join(CFG_DIR, "gamma", "gamma2_1.yaml"),
+         "geo": os.path.join(CFG_DIR, "gamma", "gamma3.yaml")}
 
 
 def _fake_ce130_turns(base, seed=0):
@@ -249,7 +250,7 @@ def _gamma_cfg(tmp_path, base, kind="density"):
 
 
 def _gamma2_cfg(tmp_path, base, kind, proposer_ckpt=None):
-    """Config GAMMA2 thật (`celoc2` | `pr` | `pr_joint`) thu nhỏ cho CE-130 giả: canvas 128, T = 20, 4 iter, batch 2."""
+    """Config GAMMA2 / 3 thật (`celoc2` | `pr` | `pr_joint` | `geo`) thu nhỏ cho CE-130 giả: canvas 128, T = 20, 4 iter, batch 2."""
     with open(CFG_G[kind]) as f:
         cfg = yaml.safe_load(f)
     cfg["data"].update(root=os.path.join(base, "all_phase2_V2"), samples_root=os.path.join(base, "samples"),
