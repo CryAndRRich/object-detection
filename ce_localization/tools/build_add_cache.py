@@ -6,6 +6,8 @@ file — `zlib` (mặc định, `data.zlib`, ~0,41 MiB / mẫu: train samples/ �
 ~15–30 phút với 4 worker:
   python tools/build_add_cache.py --turn-index ../data/turn_index.json --samples ../data/samples --split-source samples \\
       --splits train --out /kaggle/temp/add_cache
+Bung cache zlib có sẵn thành raw (đọc không giải nén; Kaggle: vào /kaggle/temp đầu mỗi phiên, ~20 GB):
+  python tools/build_add_cache.py --from-cache /kaggle/working/add_cache --out /kaggle/temp/add_cache_raw
 """
 
 import argparse
@@ -15,7 +17,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from ce_localization.data.turns import SPLIT_SOURCES, TurnIndex, build_add_cache  # noqa: E402
+from ce_localization.data.turns import SPLIT_SOURCES, TurnIndex, build_add_cache, convert_add_cache  # noqa: E402
 
 
 def main():
@@ -27,9 +29,14 @@ def main():
     ap.add_argument("--image-size", type=int, default=512)
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--format", default="zlib", choices=["zlib", "raw"])
+    ap.add_argument("--from-cache", default=None, help="bung cache zlib có sẵn thành raw (bỏ qua dựng từ PNG)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     t0 = time.time()
+    if a.from_cache:
+        n = convert_add_cache(a.from_cache, a.out, a.workers, log=lambda m: print(m, flush=True))
+        print(f"[cache] raw xong {n} mẫu -> {a.out} | {time.time() - t0:.0f}s", flush=True)
+        return
     index = TurnIndex(a.turn_index)
     keys = sorted({k for s in a.splits for k in index.keys(s, a.split_source)})
     raw_gb = len(keys) * a.image_size ** 2 * 4 / 2 ** 30

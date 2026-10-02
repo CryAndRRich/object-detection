@@ -63,21 +63,22 @@ loss:
 init:
   proposer_ckpt: "../weights/add/gamma2_celoc/best.pth"   # Kaggle: --proposer-ckpt
 
-training:                           # DiffusionDet (AdamW 2,5e-5 @ batch 16, clip toàn mô hình 1,0, warmup) — lr ×2 theo batch 32
-  batch_size: 32                    # TOÀN CỤC: 16 / GPU
+training:                           # DiffusionDet (AdamW 2,5e-5 @ batch 16, clip toàn mô hình 1,0, warmup) — lr ×4 theo batch 64
+  batch_size: 64                    # TOÀN CỤC: 32 / GPU như pha 1 (người dùng chốt 2026-10-02; trước: 32 = 16 / GPU)
+  sync_bn: false                    # BN thường, 32 / GPU = batch BN của pha 1 (chỉ có tác dụng ở gamma2_1; gamma2: CE-Loc ở eval)
   amp: true                         # fp16 cho backbone + FPN + U-Net; memory + head refine (kiểu DiffusionDet) luôn fp32
-  lr: 5.0e-5
+  lr: 1.0e-4
   weight_decay: 1.0e-4
-  max_iter: 20000                   # ≈ 32 epoch của 19.998 mẫu
-  steps: [15000, 18500]
+  max_iter: 10000                   # ≈ 32 epoch của 19.998 mẫu (cùng số lượt xem ảnh như bản batch 32 × 20.000)
+  steps: [7500, 9250]
   gamma: 0.1
-  warmup_iters: 1000
+  warmup_iters: 500
   warmup_factor: 0.01
   grad_clip: 1.0
   seed: 0
   log_every: 50
-  ckpt_every: 1000
-  eval_every: 2500
+  ckpt_every: 500
+  eval_every: 1250
 
 eval:
   split: "val"

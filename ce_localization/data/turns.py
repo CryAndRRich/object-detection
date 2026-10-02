@@ -40,7 +40,7 @@ from ce_localization.data.density import decode_jet, letterbox_density, load_den
 from ce_localization.utils.box_ops_np import box_iou, filter_degenerate
 
 __all__ = ["SPLITS", "IMAGE_KINDS", "ADD_DENSITY", "INPUT_STYLES", "SPLIT_SOURCES", "pixel_hash", "assign_removed",
-           "build_turn_index", "TurnIndex", "AddCache", "build_add_cache", "CE130AddDataset", "collate_add", "to_device_add",
+           "build_turn_index", "TurnIndex", "AddCache", "build_add_cache", "convert_add_cache", "CE130AddDataset", "collate_add", "to_device_add",
            "paper_to_float", "image_inputs"]
 
 SPLITS = ("train", "val", "test")
@@ -240,12 +240,12 @@ class AddCache:
                 self._fh = open(os.path.join(self.dir, "data.zlib"), "rb")
             off, n = self.rows[key]
             self._fh.seek(off)
-            arr = np.frombuffer(zlib.decompress(self._fh.read(n)), dtype=np.uint8)
+            arr = np.frombuffer(bytearray(zlib.decompress(self._fh.read(n))), dtype=np.uint8)   # ghi được (torch.from_numpy)
             return arr.reshape(self.size, self.size, 4), scale, nw, nh
         if self._fh is None:
             self._fh = np.memmap(os.path.join(self.dir, "data.u8"), dtype=np.uint8, mode="r",
                                  shape=(len(self.rows), self.size, self.size, 4))
-        return np.asarray(self._fh[self.rows[key]]), scale, nw, nh
+        return np.array(self._fh[self.rows[key]]), scale, nw, nh          # bản sao ghi được (memmap chỉ đọc)
 
 
 def _letterbox_l_u8(gray_u8, nw, nh, target):
@@ -307,6 +307,47 @@ def build_add_cache(index, samples_root, keys, out_dir, image_size=512, workers=
     return len(jobs)
 
 
+def _unzip_rows(job):
+    src_dir, dst_path, n, size, items = job
+    src = AddCache(src_dir)
+    dst = np.memmap(dst_path, dtype=np.uint8, mode="r+", shape=(n, size, size, 4))
+    for i, key in items:
+        dst[i] = src.get(key)[0]
+    dst.flush()
+    return len(items)
+
+
+def convert_add_cache(src_dir, out_dir, workers=4, log=print):
+    """Cache `zlib` -> `raw` (memmap `data.u8`, ~1 MiB / mẫu, đọc = memcpy, KHÔNG giải nén mỗi lượt đọc). Cùng khoá / geom, trùng
+    từng byte (có test). Kaggle: cache zlib nằm trong output (lưu giữa phiên), bản raw bung ra /kaggle/temp đầu mỗi phiên —
+    giải nén zlib ~5 ms / mẫu là phần chính của thời gian worker."""
+    src = AddCache(src_dir)
+    if src.format != "zlib":
+        raise ValueError(f"{src_dir}: cache đã là {src.format}")
+    os.makedirs(out_dir, exist_ok=True)
+    keys = sorted(src.rows)
+    n, size = len(keys), src.size
+    dst_path = os.path.join(out_dir, "data.u8")
+    np.memmap(dst_path, dtype=np.uint8, mode="w+", shape=(n, size, size, 4)).flush()
+    rows = {k: i for i, k in enumerate(keys)}
+    items = list(enumerate(keys))
+    chunk = max(1, -(-n // max(workers * 8, 1)))
+    jobs = [(src_dir, dst_path, n, size, items[j:j + chunk]) for j in range(0, n, chunk)]
+    t0, done = __import__("time").time(), 0
+    pool = Pool(workers) if workers > 0 else None
+    for m in (pool.imap_unordered(_unzip_rows, jobs) if pool else map(_unzip_rows, jobs)):
+        done += m
+        if done == n or done // 4000 != (done - m) // 4000:
+            el = __import__("time").time() - t0
+            log(f"  [cache raw] {done}/{n} | {el:.0f}s | còn ~{el / done * (n - done):.0f}s")
+    if pool:
+        pool.close()
+        pool.join()
+    with open(os.path.join(out_dir, "meta.json"), "w") as f:     # ghi CUỐI: có meta.json = cache đầy đủ
+        json.dump({"image_size": size, "format": "raw", "rows": rows, "geom": src.geom}, f)
+    return n
+
+
 class CE130AddDataset(Dataset):
     """Một phần tử = một (nhánh, lượt). Box ra là xyxy PIXEL CANVAS như ALPHA.
     `style`: `ours` = chuẩn hoá ImageNet + density giải mã jet (ALPHA3); `paper` = CE-Loc gốc: `to_tensor` (/255) + density
@@ -347,18 +388,17 @@ class CE130AddDataset(Dataset):
         e, b = self.entry(i)
         t = e["t"]
         paper = self.style == "paper"
+        ch = -1 if paper else 0                          # kiểu bài: uint8 HWC (không chép sang CHW trong worker)
         if self.cache is not None and key in self.cache:
             arr, scale, nw, nh = self.cache.get(key)
-            x = arr.transpose(2, 0, 1)
-            if self.density is None:
-                x = x[:3]
+            x = arr if self.density is not None else arr[..., :3]
         else:
             path = (os.path.join(self.samples_root, e["sample"]) if self.image == "inpainted" else
                     os.path.join(self.ce130_root, e["branch"], "ground_truth.jpg"))
             img = Image.open(path).convert("RGB")
             canvas, scale, nw, nh = letterbox(img, self.image_size)
-            x = canvas.transpose(2, 0, 1) if paper else normalize(canvas)
-        if self.density is not None and x.shape[0] == 3:
+            x = canvas if paper else normalize(canvas)
+        if self.density is not None and x.shape[ch] == 3:
             if self.density == "empty" and paper:
                 den = _letterbox_l_u8(np.asarray(Image.new("RGB", img.size, (0, 0, 127)).convert("L")), nw, nh,
                                       self.image_size)
@@ -373,7 +413,7 @@ class CE130AddDataset(Dataset):
                                           self.image_size)
                 else:
                     den = letterbox_density(load_density_levels(path_d), nw, nh, self.image_size)
-            x = np.concatenate([x, den[None]], axis=0)
+            x = np.concatenate([x, np.expand_dims(den, ch)], axis=ch)
         holes = scale_boxes(b["holes"][:t], scale, nw, nh)
         if len(holes) != t:
             raise ValueError(f"{key}: lỗ rơi ra ngoài vùng ảnh thật sau letterbox")
@@ -382,7 +422,9 @@ class CE130AddDataset(Dataset):
         if self.image == "inpainted":                    # vật còn trong ảnh lượt t: chưa bị xoá tới lượt t
             objs = objs[(removed == 0) | (removed > t)]
         return {
-            "image": torch.from_numpy(np.ascontiguousarray(x, dtype=np.uint8 if paper else np.float32)),
+            # kiểu bài: [C,T,T] uint8 là VIEW permute của mảng HWC liền (= bố cục channels_last), `collate_add` gom HWC
+            "image": (torch.from_numpy(np.ascontiguousarray(x, dtype=np.uint8)).permute(2, 0, 1) if paper else
+                      torch.from_numpy(np.ascontiguousarray(x, dtype=np.float32))),
             "target": torch.from_numpy(holes[-1]).float(),               # lỗ MỚI NHẤT = đích train
             "holes": torch.from_numpy(holes).float(),                    # mọi lỗ tới lượt t (chấm)
             "objects": torch.from_numpy(scale_boxes(objs, scale, nw, nh)).float(),   # vật đang có (chấm)
@@ -394,10 +436,14 @@ class CE130AddDataset(Dataset):
 
 
 def collate_add(batch):
+    """Ảnh float (kiểu ours) -> `images` [B,C,T,T]. Ảnh uint8 (kiểu bài) -> `images` [B,T,T,C] liền (NHWC: gom = memcpy, không
+    hoán trục trên CPU) + `images_nhwc` True; `to_device_add` permute thành NCHW channels_last SAU khi lên thiết bị."""
     nh = torch.tensor([b["valid_hw"][0] for b in batch], dtype=torch.float32)
     nw = torch.tensor([b["valid_hw"][1] for b in batch], dtype=torch.float32)
+    nhwc = batch[0]["image"].dtype == torch.uint8
     return {
-        "images": torch.stack([b["image"] for b in batch]),
+        "images": torch.stack([b["image"].permute(1, 2, 0) if nhwc else b["image"] for b in batch]),
+        "images_nhwc": nhwc,
         "target": torch.stack([b["target"] for b in batch]),
         "holes": [b["holes"] for b in batch],
         "objects": [b["objects"] for b in batch],
@@ -422,6 +468,8 @@ def to_device_add(batch, dev):
     out = dict(batch)
     for k in ("images", "target", "whwh", "valid_hw"):
         out[k] = batch[k].to(dev, non_blocking=nb)
+    if out.pop("images_nhwc", False):                   # NHWC -> NCHW: view, bố cục channels_last
+        out["images"] = out["images"].permute(0, 3, 1, 2)
     if out["images"].dtype == torch.uint8:
         out["images"] = paper_to_float(out["images"])
     return out

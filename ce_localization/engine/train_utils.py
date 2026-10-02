@@ -3,6 +3,7 @@
 import bisect
 import math
 import datetime
+import inspect
 import os
 
 import torch
@@ -35,8 +36,10 @@ def setup_dist(device=None):
         dev = torch.device("cuda", local)
     else:
         dev = torch.device("cpu")
-    dist.init_process_group("nccl" if dev.type == "cuda" else "gloo",
-                            timeout=datetime.timedelta(hours=1))
+    # device_id (torch >= 2.3): NCCL gắn đúng GPU của tiến trình — barrier() khỏi đoán thiết bị (và khỏi cảnh báo)
+    kw = ({"device_id": dev} if dev.type == "cuda" and "device_id" in inspect.signature(dist.init_process_group).parameters
+          else {})
+    dist.init_process_group("nccl" if dev.type == "cuda" else "gloo", timeout=datetime.timedelta(hours=1), **kw)
     return dist.get_rank(), world, dev
 
 

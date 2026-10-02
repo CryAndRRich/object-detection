@@ -507,7 +507,7 @@ def main():
             gn = torch.nn.utils.clip_grad_norm_(model.parameters(), tr["grad_clip"] or float("inf"))
             finite = bool(torch.isfinite(gn)) and bool(torch.isfinite(loss))
             if a.nan_debug:
-                log(f"  [nan-debug] it {it} | loss {float(loss):.4f} | grad trước clip {float(gn):.4g} | "
+                log(f"  [nan-debug] it {it} | loss {float(loss.detach()):.4f} | grad trước clip {float(gn):.4g} | "
                     f"lr {sched.get_last_lr()[0]:.3e} | density {batch.get('density_kind')} | ảnh {batch['image_id']}")
                 if not finite and task == "add":
                     sys.exit(f"[nan-debug] dừng ở NaN đầu tiên, it {it} (bài add: chưa có báo cáo module)")

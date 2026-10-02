@@ -420,8 +420,11 @@ def test_add_dataset_paper_style_matches_image_inputs(tmp_path):
     ref = image_inputs(Image.open(os.path.join(samples, e["sample"])).convert("RGB"),
                        os.path.join(samples, e["density"]), 128, "paper")[0]
     assert b["image"].dtype == torch.uint8 and torch.equal(paper_to_float(b["image"]), ref)
-    bt = to_device_add(collate_add([b, pap[1]]), torch.device("cpu"))
-    assert bt["images"].dtype == torch.float32 and torch.equal(bt["images"][0], ref)
+    raw = collate_add([b, pap[1]])                       # kiểu bài: gom NHWC liền (memcpy), không hoán trục trên CPU
+    assert raw["images_nhwc"] and raw["images"].shape == (2, 128, 128, 4) and raw["images"].is_contiguous()
+    bt = to_device_add(raw, torch.device("cpu"))
+    assert bt["images"].dtype == torch.float32 and bt["images"].shape == (2, 4, 128, 128) and "images_nhwc" not in bt
+    assert torch.equal(bt["images"][0], ref) and bt["images"].is_contiguous(memory_format=torch.channels_last)
     assert torch.equal(paper_to_float(torch.arange(256, dtype=torch.uint8)),
                        torch.from_numpy(np.arange(256, dtype=np.uint8).astype(np.float32) / 255.0))
     assert a["image"].dtype == torch.float32                                      # style ours giữ float
@@ -462,6 +465,17 @@ def test_samples_split_source_and_uint8_cache(tmp_path):
             assert torch.equal(a["image"], b["image"]), (fmt, i)
             for k in ("target", "holes", "objects", "valid_hw", "text"):
                 assert (torch.equal(a[k], b[k]) if torch.is_tensor(a[k]) else a[k] == b[k]), k
+    from ce_localization.data.turns import convert_add_cache          # zlib -> raw (Kaggle: /kaggle/temp đầu phiên)
+    zdir, rdir = str(tmp_path / "cache_zlib"), str(tmp_path / "cache_unz")
+    assert convert_add_cache(zdir, rdir, workers=2, log=lambda *a: None) == len(tr)
+    unz = AddCache(rdir)
+    assert unz.format == "raw" and set(unz.rows) == set(AddCache(zdir).rows)
+    with pytest.raises(ValueError):
+        convert_add_cache(rdir, str(tmp_path / "x"), workers=0)
+    fast = CE130AddDataset(index, root, samples, "train", 128, density="sample", style="paper", split_source="samples",
+                           cache=unz)
+    for i in range(len(plain)):
+        assert torch.equal(plain[i]["image"], fast[i]["image"]), i
     rgb = CE130AddDataset(index, root, samples, "train", 128, style="paper", split_source="samples", cache=cache)
     assert rgb[0]["image"].shape[0] == 3 and torch.equal(rgb[0]["image"], plain[0]["image"][:3])
     orig = CE130AddDataset(index, root, samples, "train", 128, style="paper", split_source="samples", cache=cache,

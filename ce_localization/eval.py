@@ -140,7 +140,8 @@ def main_add(a, cfg, ck, dev, t0):
         model.load_state_dict(ck["model"])
         it, dwr = ck.get("iter"), density_ratio_of(model)
     model = model.to(dev).eval()
-    amp = bool(cfg.get("training", {}).get("amp")) and dev.type == "cuda"     # model train AMP -> eval cùng autocast fp16
+    # model train AMP -> eval cùng autocast fp16; checkpoint của bài (fp32) luôn fp32 dù --config có training.amp
+    amp = bool(cfg.get("training", {}).get("amp")) and dev.type == "cuda" and not paper
     src = d.get("split_source", "ce130")
     prior_unit = prior_unit_boxes(index, "train", src)
     if cfg["model"].get("arch") == "box_refiner" and not paper:
