@@ -1,0 +1,92 @@
+# EXPERIMENT GAMMA3.1 — GAMMA2 (CE-Loc pha 1 đóng băng -> refine 6 stage kiểu DiffusionDet) + box các VẬT ĐANG CÓ qua attention
+# kiểu Relation-DETR: bước ĐẦU mỗi stage (chỗ self-attn của DiffusionDet / Relation-DETR), box (pro + PE) attend feature RoI của
+# `relation_k` vật có tâm gần nhất, điểm = q·k/√d + Rel(box, vật) (log |Δ|/cỡ, log tỉ lệ cỡ -> sine -> Linear -> ReLU / head);
+# models/relation.py. Box vật = GT, KHÔNG nhiễu. Mọi khoá khác Y HỆT gamma2.yaml (có test). Eval thêm `_nogeo` (bỏ bước đó),
+# `_norel` (bỏ Rel). Kế hoạch: docs/EXPERIMENT_GAMMA.md mục 15.
+
+experiment: "gamma3_1"
+description: "bài add: GAMMA2 + attention kiểu Relation-DETR từ box tới feature RoI các vật đang có (GT), điểm cộng Rel hình học, đầu mỗi stage refine"
+task: "add"
+
+data:
+  root: "../data/all_phase2_V2"
+  samples_root: "../data/samples"
+  turn_index: "../data/turn_index.json"
+  density_index: "../data/density_index.json"
+  density_root: "../data/samples"
+  split_source: "samples"
+  cache_dir: null
+  image_size: 512
+  num_workers: 4
+  input_style: "paper"
+  density: "sample"
+
+model:
+  arch: "propose_refine"
+  pretrained_backbone: true         # train: nạp CE-Loc pha 1 từ init.proposer_ckpt
+  freeze_proposer: true             # GAMMA2: CE-Loc + backbone + điều kiện đóng băng ; gamma2_1: false (train chung 2 loss)
+  proposer:                         # PHẢI khớp gamma2_celoc.yaml (load_proposer kiểm strict)
+    vision: "r18_paper"
+    ss_mask: true
+    in_channels: 4
+    vis_dim: 128
+    text_dim: 512
+    text_proj_dim: 128
+    step_embed_dim: 256
+    down_dims: [64, 128, 256]
+    kernel_size: 3
+    n_groups: 8
+  d_model: 256                      # cấu hình mặc định DiffusionDet
+  n_stage: 6
+  n_head: 8
+  dim_feedforward: 2048
+  dropout: 0.0
+  dim_dynamic: 64
+  num_dynamic: 2
+  text_dim: 512
+  clip_text: "openai/clip-vit-base-patch32"
+  relation: true                    # GAMMA3.1: attention tới vật kiểu Relation-DETR (models/relation.py), 8 head = n_head
+  relation_k: 32                    # số vật có tâm gần box nhất được nhìn (Relation-DETR: tất cả; 2/3 mẫu có <= 32 vật)
+  relation_embed: 16                # sine 16 / số của Rel, như Relation-DETR (PositionRelationEmbedding(16, n_head))
+
+diffusion:                          # khuếch tán của REFINE như DiffusionDet
+  num_timesteps: 1000               # cosine
+  snr_scale: 2.0
+  noise_per_image: 8                # 8 box nhiễu độc lập / ảnh (1 đích)
+  proposer:                         # khuếch tán của CE-Loc (như bài)
+    num_timesteps: 1000
+    beta_start: 1.0e-4
+    beta_end: 0.02
+
+loss:
+  l1_weight: 5.0                    # DiffusionDet, mỗi stage như nhau
+  giou_weight: 2.0
+  proposer_weight: 1.0              # chỉ dùng khi freeze_proposer: false — ε-MSE của CE-Loc
+
+init:
+  proposer_ckpt: "../weights/add/gamma2_celoc/best.pth"   # Kaggle: --proposer-ckpt
+
+training:                           # DiffusionDet (AdamW 2,5e-5 @ batch 16, clip toàn mô hình 1,0, warmup) — lr ×4 theo batch 64
+  batch_size: 64                    # TOÀN CỤC: 32 / GPU như pha 1 (người dùng chốt 2026-10-02; trước: 32 = 16 / GPU)
+  sync_bn: false                    # BN thường, 32 / GPU = batch BN của pha 1 (chỉ có tác dụng ở gamma2_1; gamma2: CE-Loc ở eval)
+  amp: true                         # fp16 cho backbone + FPN + U-Net; memory + head refine (kiểu DiffusionDet) luôn fp32
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  max_iter: 10000                   # ≈ 32 epoch của 19.998 mẫu (cùng số lượt xem ảnh như bản batch 32 × 20.000)
+  steps: [7500, 9250]
+  gamma: 0.1
+  warmup_iters: 500
+  warmup_factor: 0.01
+  grad_clip: 1.0
+  seed: 0
+  log_every: 50
+  ckpt_every: 500
+  eval_every: 1250
+
+eval:
+  split: "val"
+  limit: 500
+  n_samples: 30
+  batch_size: 16
+  sample_kw: {refine_t: 200, refine_steps: 1, proposer_sampler: "mock"}   # eval định kỳ; test quét t* (eval.py --refine-t)
+  select_metric: "mean_iou_any"

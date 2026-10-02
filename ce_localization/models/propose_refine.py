@@ -20,6 +20,8 @@ CE-Loc -> không gian refine -> cộng nhiễu tới t* -> DDIM (eta 1) `refine_
 `geo` (GAMMA3, mục 14): head nhận thêm box các vật đang có (`objects`, GT, không nhiễu) — FiLM theo đặc trưng hình học tương
 đối ở đầu mỗi stage (models/geo.py, models/dynamic_head.py). Biến thể suy luận `{"geo": False}` = tắt nhánh geo (phép thử
 mô hình có dùng box vật không).
+`relation` (GAMMA3.1, mục 15): bước đầu mỗi stage = attention box -> feature RoI của các vật gần nhất, điểm cộng Rel hình học kiểu
+Relation-DETR (models/relation.py). Biến thể `{"geo": False}` = bỏ bước đó, `{"rel_bias": False}` = giữ attention, bỏ Rel.
 """
 
 from collections import OrderedDict
@@ -52,16 +54,18 @@ def refine_noisy_boxes(x, whwh, snr):
 class ProposeRefine(nn.Module):
     def __init__(self, proposer_kw, d_model=256, n_stage=6, dim_feedforward=2048, nhead=8, dropout=0.0, dim_dynamic=64,
                  num_dynamic=2, text_dim=512, num_timesteps=1000, snr_scale=2.0, l1_weight=5.0, giou_weight=2.0,
-                 freeze_proposer=True, proposer_weight=1.0, geo=False, geo_hidden=256):
+                 freeze_proposer=True, proposer_weight=1.0, geo=False, geo_hidden=256, relation=False, relation_k=32,
+                 relation_embed=16):
         super().__init__()
         self.proposer = BoxPolicy(**proposer_kw)
         if self.proposer.vision_kind != "r18_paper":
             raise ValueError("ProposeRefine dùng chung ResNet18 của CE-Loc: proposer cần vision r18_paper")
         self.fpn = FeaturePyramidNetwork(list(R18_CHANNELS), d_model)
         self.memory = MemoryEncoder("spatial_softmax", d_model, text_dim, feat_channels=R18_CHANNELS[-1], feat_stride=32)
-        self.geo = bool(geo)
+        self.geo, self.relation = bool(geo), bool(relation)
         self.head = DynamicRefineHead(n_stage, d_model, dim_feedforward, nhead, dropout, dim_dynamic, num_dynamic,
-                                      geo_hidden=geo_hidden if self.geo else None)
+                                      geo_hidden=geo_hidden if self.geo else None,
+                                      relation=dict(k_near=relation_k, rel_embed_dim=relation_embed) if self.relation else None)
         self.num_timesteps, self.snr = num_timesteps, snr_scale
         self.l1_weight, self.giou_weight, self.proposer_weight = l1_weight, giou_weight, proposer_weight
         self.register_buffer("alphas_cumprod", cosine_alphas_cumprod(num_timesteps).float(), persistent=False)
@@ -92,8 +96,13 @@ class ProposeRefine(nn.Module):
     def vis_token(self, kp):
         return self.memory.ss_proj(kp)[:, None] + self.memory.cond_pos_emb[:, 2:3]
 
-    def refine(self, feats, vis, text_raw, t, boxes, need_weights=False, geo=None):
-        """boxes [B,K,4] xyxy pixel, t [B·K], geo (vật [B·K,M,4], mask) | None
+    @property
+    def needs_objects(self):
+        """Train / suy luận cần `objects` (box các vật đang có) — GAMMA3 / 3.1."""
+        return self.geo or self.relation
+
+    def refine(self, feats, vis, text_raw, t, boxes, need_weights=False, geo=None, rel=None):
+        """boxes [B,K,4] xyxy pixel, t [B·K], geo (vật [B·K,M,4], mask) | None, rel (`_rel`) | None
         -> (box mọi stage [S, B·K, 4], attention [S, B·K, 3] | None).
         Memory + head LUÔN fp32 kể cả khi train AMP (`training.amp`): head kiểu DiffusionDet vỡ với fp16 (CLAUDE.md);
         AMP chỉ áp cho backbone + FPN + U-Net 1D."""
@@ -101,7 +110,7 @@ class ProposeRefine(nn.Module):
         with torch.autocast(device_type=boxes.device.type, enabled=False):
             feats = [f.float() for f in feats]
             mem, _ = self.memory(t, text_raw.float().repeat_interleave(K, 0), vis.float().repeat_interleave(K, 0))
-            return self.head(feats, boxes.float(), t, mem, need_weights, geo)
+            return self.head(feats, boxes.float(), t, mem, need_weights, geo, rel)
 
     def _geo(self, objects, K, dev):
         """objects: list B tensor [Mᵢ,4] xyxy pixel canvas -> (vật [B·K,M,4], mask [B·K,M]) | None khi không có nhánh geo."""
@@ -111,6 +120,17 @@ class ProposeRefine(nn.Module):
             raise ValueError("model.geo cần `objects` (box các vật đang có) khi train / suy luận")
         objs, mask = pad_objects(objects, dev)
         return objs.repeat_interleave(K, 0), mask.repeat_interleave(K, 0)
+
+    def _rel(self, objects, K, whwh, dev):
+        """-> dict vật cho `relation` (models/relation.py) | None. whwh [B,4] vùng thật của từng ảnh."""
+        if not self.relation:
+            return None
+        if objects is None:
+            raise ValueError("model.relation cần `objects` (box các vật đang có) khi train / suy luận")
+        objs, mask = pad_objects(objects, dev, min_m=1)
+        B = len(objects)
+        return {"objs": objs, "mask": mask, "img": torch.arange(B, device=dev).repeat_interleave(K),
+                "whwh": whwh.float().repeat_interleave(K, 0), "whwh_img": whwh.float()}
 
     @staticmethod
     def _whwh(valid_hw):
@@ -135,7 +155,7 @@ class ProposeRefine(nn.Module):
         ab = self.alphas_cumprod[t].unsqueeze(-1)
         xt = ab.sqrt() * x0 + (1 - ab).sqrt() * noise
         preds, _ = self.refine(feats, self.vis_token(kp), text_raw, t, refine_noisy_boxes(xt, wk, self.snr).view(B, k, 4),
-                               geo=self._geo(objects, k, dev))
+                               geo=self._geo(objects, k, dev), rel=self._rel(objects, k, whwh, dev))
         per = torch.stack([self.l1_weight * ((p - gt) / wk).abs().sum(-1).mean()
                            + self.giou_weight * (1 - paired_giou(p, gt)).mean() for p in preds])
         loss = per.sum() + self.proposer_weight * loss_eps
@@ -146,7 +166,7 @@ class ProposeRefine(nn.Module):
 
     # ------------------------------------------------------------------ suy luận
     @torch.no_grad()
-    def _refine_from(self, feats, vis, text_raw, x, wk, B, K, t_start, steps, eta, generator, geo=None):
+    def _refine_from(self, feats, vis, text_raw, x, wk, B, K, t_start, steps, eta, generator, geo=None, rel=None):
         """DDIM của refine từ x (không gian khuếch tán, [B·K,4]) ở t_start -> box xyxy pixel [B·K,4]."""
         ac = self.alphas_cumprod
         dev = x.device
@@ -154,7 +174,7 @@ class ProposeRefine(nn.Module):
         for t, t_next in ddim_time_pairs(t_start + 1, min(steps, t_start + 1)):   # t* nhỏ: không lặp lại cùng một t
             tb = torch.full((B * K,), t, device=dev, dtype=torch.long)
             preds, attn = self.refine(feats, vis, text_raw, tb, refine_noisy_boxes(x, wk, self.snr).view(B, K, 4),
-                                      self.track_attn, geo)
+                                      self.track_attn, geo, rel)
             if attn is not None:
                 s, n = self._attn.get(self._attn_key, (0.0, 0))
                 self._attn[self._attn_key] = (s + attn.float().sum(1), n + attn.shape[1])
@@ -173,7 +193,8 @@ class ProposeRefine(nn.Module):
     def sample_variants(self, images, text_raw, valid_hw, n_samples, generator=None, variants=({"refine_t": None},),
                         proposer_sampler="ddpm", eta=1.0, objects=None):
         """CE-Loc sinh n_samples box MỘT lần, mỗi biến thể refine dùng lại -> list [B, n, 4] chuẩn hoá theo vùng thật.
-        Biến thể: {"refine_t": None | int t* | "noise", "refine_steps": S (mặc định 1), "geo": True | False (tắt nhánh geo)}."""
+        Biến thể: {"refine_t": None | int t* | "noise", "refine_steps": S (mặc định 1), "geo": True | False (tắt nhánh geo /
+        relation), "rel_bias": True | False (relation: bỏ Rel hình học)}."""
         feats, kp = self.encode(images, valid_hw)
         B, K, dev = images.shape[0], n_samples, images.device
         whwh = self._whwh(valid_hw)
@@ -183,22 +204,25 @@ class ProposeRefine(nn.Module):
         box_ce = unit_to_boxes(u_ce.reshape(-1, 4), canvas)                 # [B·K,4] xyxy pixel canvas
         vis = self.vis_token(kp)
         geo_all = self._geo(objects, K, dev)
+        rel_all = self._rel(objects, K, whwh, dev)
         outs = []
         for vi, v in enumerate(variants):
             self._attn_key = vi
             rt, S = v.get("refine_t"), v.get("refine_steps", 1)
             geo = geo_all if v.get("geo", True) else None
+            rel = (None if rel_all is None or not v.get("geo", True) else
+                   {**rel_all, "bias": bool(v.get("rel_bias", True))})
             if rt is None:
                 box = box_ce
             elif rt == "noise":
                 x = torch.randn((B * K, 4), device=dev, generator=generator)
-                box = self._refine_from(feats, vis, text_raw, x, wk, B, K, self.num_timesteps - 1, S, eta, generator, geo)
+                box = self._refine_from(feats, vis, text_raw, x, wk, B, K, self.num_timesteps - 1, S, eta, generator, geo, rel)
             else:
                 rt = int(rt)
                 ab = self.alphas_cumprod[rt]
                 x0 = diffusion_from_boxes(box_ce, wk, self.snr)
                 x = ab.sqrt() * x0 + (1 - ab).sqrt() * torch.randn(x0.shape, device=dev, generator=generator)
-                box = self._refine_from(feats, vis, text_raw, x, wk, B, K, rt, S, eta, generator, geo)
+                box = self._refine_from(feats, vis, text_raw, x, wk, B, K, rt, S, eta, generator, geo, rel)
             outs.append(boxes_to_unit(box, wk).view(B, K, 4))
         return outs
 

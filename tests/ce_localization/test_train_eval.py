@@ -158,8 +158,8 @@ def test_ddp_gamma2_celoc_bucket_view_no_stride_warning(tmp_path):
     assert ck["iter"] == 3 and all(np.isfinite(h["loss"]) and h["skipped"] == 0 for h in ck["history"] if "loss" in h)
     with pytest.raises(Exception, match="Grad strides"):
         run(str(tmp_path / "old"), True)
-    # pha 2 (đóng băng / train chung / GAMMA3 geo) trên DDP KHÔNG find_unused: tham số nào thiếu grad thì DDP báo lỗi ngay
-    for kind in ("pr", "pr_joint", "geo"):
+    # pha 2 (đóng băng / train chung / GAMMA3 geo / GAMMA3.1 relation) trên DDP KHÔNG find_unused: tham số nào thiếu grad thì DDP báo lỗi ngay
+    for kind in ("pr", "pr_joint", "geo", "rel"):
         p2, c2 = _gamma2_cfg(tmp_path, base, kind)
         assert not __import__("ce_localization.train", fromlist=["x"]).ddp_find_unused(c2)
         run(str(tmp_path / kind), None, p2, ("--proposer-ckpt", os.path.join(str(tmp_path / "new"), "best.pth")))
@@ -751,3 +751,52 @@ def test_full_flow_gamma3_geo_train_eval(tmp_path, monkeypatch):
                                    for v in ("ce", "t5", "noise", "t5_nogeo", "noise_nogeo")}
     r = res["results"]
     assert r["inpainted_t5_nogeo"]["n"] == r["inpainted_t5"]["n"] > 0 and len(r["inpainted_t5_nogeo"]["attn"]) == 6
+
+
+# ----------------------------------------------------------------------------- GAMMA3.1: attention tới vật kiểu Relation-DETR
+
+def test_gamma3_1_config_only_adds_relation():
+    from tests.ce_localization.helpers import CFG_G
+    with open(CFG_G["pr"]) as f:
+        a = yaml.safe_load(f)
+    with open(CFG_G["rel"]) as f:
+        b = yaml.safe_load(f)
+    assert (b["model"].pop("relation"), b["model"].pop("relation_k"), b["model"].pop("relation_embed")) == (True, 32, 16)
+    for k in ("experiment", "description"):
+        a.pop(k), b.pop(k)
+    assert a == b
+
+
+def test_full_flow_gamma3_1_relation_train_eval(tmp_path, monkeypatch):
+    """GAMMA3.1: pha 1 -> train gamma3_1 (thu nhỏ), CE-Loc không đổi, có weight attention tới vật; eval có `_nogeo` + `_norel`."""
+    import ce_localization.eval as ea
+    import ce_localization.train as ta
+    from tests.ce_localization.helpers import _fake_text_table, _fake_turn_index, _gamma2_cfg
+    base = str(tmp_path / "d")
+    os.makedirs(base)
+    _fake_turn_index(base)
+    c1_path, _ = _gamma2_cfg(tmp_path, base, "celoc2")
+    p1 = str(tmp_path / "celoc")
+    _run_train(monkeypatch, ["--config", c1_path, "--save-dir", p1, "--max-iter", "2"])
+    ck1 = torch.load(os.path.join(p1, "last.pth"), weights_only=False)
+    c_path, _ = _gamma2_cfg(tmp_path, base, "rel")
+    g = str(tmp_path / "rel")
+    _run_train(monkeypatch, ["--config", c_path, "--save-dir", g, "--proposer-ckpt", os.path.join(p1, "last.pth")])
+    k = torch.load(os.path.join(g, "last.pth"), weights_only=False)
+    assert k["iter"] == 4 and k["config"]["model"]["relation"]
+    assert "head.stages.0.rel_attn.in_proj_weight" in k["model"] and "head.relation.rel_embed.pos_proj.weight" in k["model"]
+    for n, v in ck1["model"].items():
+        assert torch.equal(k["model"]["proposer." + n], v), n
+
+    monkeypatch.setattr(ta, "build_text_table", _fake_text_table)
+    out = str(tmp_path / "res.json")
+    monkeypatch.setattr(sys, "argv", ["eval.py", "--ckpt", os.path.join(g, "best.pth"), "--split", "test", "--n-samples", "3",
+                                      "--refine-t", "none", "5", "noise", "--proposer-sampler", "ddpm",
+                                      "--num-workers", "0", "--out", out, "--device", "cpu"])
+    ea.main()
+    with open(out) as f:
+        res = json.load(f)
+    assert set(res["results"]) == {f"{i}_{v}" for i in ("inpainted", "original")
+                                   for v in ("ce", "t5", "noise", "t5_nogeo", "noise_nogeo", "t5_norel", "noise_norel")}
+    r = res["results"]
+    assert r["inpainted_t5_norel"]["n"] == r["inpainted_t5"]["n"] > 0

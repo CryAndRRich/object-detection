@@ -43,11 +43,14 @@ class MultiLevelRoIAlign(nn.Module):
         -> [B*N, C, S, S], thứ tự (ảnh 0: box 0..N-1, ảnh 1: ...)."""
         B, N = boxes.shape[:2]
         flat = boxes.reshape(-1, 4)
-        bidx = torch.arange(B, device=boxes.device, dtype=flat.dtype).repeat_interleave(N)
-        rois = torch.cat([bidx[:, None], flat], dim=1)
+        return self.pool(feats, torch.arange(B, device=boxes.device).repeat_interleave(N), flat)
+
+    def pool(self, feats, bidx, flat):
+        """Box phẳng: bidx [R] chỉ số ảnh, flat [R,4] xyxy tuyệt đối -> [R, C, S, S] (số box mỗi ảnh tuỳ ý, R = 0 được)."""
+        rois = torch.cat([bidx.to(flat.dtype)[:, None], flat], dim=1)
         lvl = assign_levels(flat, self.min_level, self.max_level)
         C = feats[0].shape[1]
-        out = flat.new_zeros((B * N, C, self.output_size, self.output_size), dtype=feats[0].dtype)
+        out = flat.new_zeros((flat.shape[0], C, self.output_size, self.output_size), dtype=feats[0].dtype)
         for li, (f, sc) in enumerate(zip(feats, self.scales)):
             idx = torch.nonzero(lvl == li, as_tuple=True)[0]
             if idx.numel() == 0:

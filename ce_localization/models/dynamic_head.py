@@ -11,6 +11,8 @@ Mỗi stage (weight riêng), MỘT box mỗi mẫu:
     delta = Linear(reg tower 3 × (Linear không bias -> LN -> ReLU)) ; b_{k+1} = apply_deltas(delta, b_k), detach
 `geo_hidden` (GAMMA3, `model.geo`): đầu mỗi stage `pro = pro · (1 + γ) + β`, (γ, β) = MLP_stage(geo_features(b_k, vật đang có))
 (models/geo.py) — TRƯỚC cross-attn; lớp cuối MLP khởi tạo 0 ⇒ lúc đầu = GAMMA2. `geo=None` khi gọi = tắt (eval `_nogeo`).
+`relation` (GAMMA3.1, `model.relation`): bước ĐẦU mỗi stage (chỗ self-attn của DiffusionDet / Relation-DETR)
+`pro = LN(pro + MHA(pro + PE(b_k) -> feature các vật gần nhất, điểm + Rel(b_k, vật)))` (models/relation.py). `rel=None` = tắt.
 Không nhánh class (một lần sinh = một box). Post-norm, dropout 0, d 256, 8 head, FFN 2048, dynamic 64 × 2 như cấu hình mặc
 định của DiffusionDet (`diffusiondet/config.py`). Khởi tạo: xavier_uniform mọi tham số ≥ 2 chiều (`_reset_parameters`).
 """
@@ -23,6 +25,7 @@ import torch.nn.functional as F
 
 from ce_localization.models.geo import GEO_DIM, geo_features
 from ce_localization.models.head import apply_deltas
+from ce_localization.models.relation import ObjectRelation, relation_attend
 from ce_localization.models.roi import MultiLevelRoIAlign
 
 __all__ = ["SinusoidalPositionEmbeddings", "DynamicConv", "DynamicStage", "DynamicRefineHead"]
@@ -73,9 +76,12 @@ class DynamicStage(nn.Module):
     """`RCNNHead` của DiffusionDet, MỘT box mỗi mẫu, self-attn -> cross-attn tới memory, bỏ nhánh class."""
 
     def __init__(self, d_model=256, dim_feedforward=2048, nhead=8, dropout=0.0, dim_dynamic=64, num_dynamic=2,
-                 num_reg=3, pooler_resolution=7):
+                 num_reg=3, pooler_resolution=7, relation=False):
         super().__init__()
         self.d_model = d_model
+        if relation:                                                        # GAMMA3.1: self-attn của Relation-DETR -> vật
+            self.rel_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+            self.rel_norm = nn.LayerNorm(d_model)
         self.cross_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
         self.inst_interact = DynamicConv(d_model, dim_dynamic, num_dynamic, pooler_resolution)
         self.linear1 = nn.Linear(d_model, dim_feedforward)
@@ -90,9 +96,10 @@ class DynamicStage(nn.Module):
         self.reg_module = nn.ModuleList(reg)
         self.bboxes_delta = nn.Linear(d_model, 4)
 
-    def forward(self, features, boxes, pro_features, pooler, time_emb, memory, need_weights=False, film=None):
+    def forward(self, features, boxes, pro_features, pooler, time_emb, memory, need_weights=False, film=None, rel=None):
         """boxes [B,K,4] xyxy pixel (detach), pro_features [B·K, d] | None, time_emb [B·K, 4d], memory [B·K, M, d],
-        film (γ, β) [B·K, d] | None. -> (box [B,K,4], obj_features [B·K, d], attention [B·K, M] | None)."""
+        film (γ, β) [B·K, d] | None, rel (ObjectRelation dùng chung, vật đã gom, whwh [B·K,4], dùng Rel?) | None.
+        -> (box [B,K,4], obj_features [B·K, d], attention [B·K, M] | None)."""
         B, K = boxes.shape[:2]
         N = B * K
         roi = pooler(features, boxes)                                       # [N, d, 7, 7]
@@ -100,6 +107,10 @@ class DynamicStage(nn.Module):
             pro_features = roi.view(N, self.d_model, -1).mean(-1)
         if film is not None:                                                # geo: FiLM trước cross-attn
             pro_features = pro_features * (1 + film[0]) + film[1]
+        if rel is not None:                                                 # relation: nhìn các vật, trước cross-attn
+            shared, gathered, whwh, use_bias = rel
+            pro_features = relation_attend(self.rel_attn, self.rel_norm, pro_features, boxes.reshape(-1, 4), whwh,
+                                           shared, gathered, use_bias)
         roi = roi.view(N, self.d_model, -1).permute(2, 0, 1)                # [49, N, d]
         a, w = self.cross_attn(pro_features[:, None], memory, memory, need_weights=need_weights)
         pro = self.norm1(pro_features + self.dropout1(a[:, 0]))
@@ -117,11 +128,13 @@ class DynamicRefineHead(nn.Module):
     """`DynamicHead` của DiffusionDet: time_mlp + 6 `DynamicStage`, box detach giữa các stage, trả box MỌI stage."""
 
     def __init__(self, n_stage=6, d_model=256, dim_feedforward=2048, nhead=8, dropout=0.0, dim_dynamic=64, num_dynamic=2,
-                 num_reg=3, geo_hidden=None):
+                 num_reg=3, geo_hidden=None, relation=None):
         super().__init__()
         self.pooler = MultiLevelRoIAlign(output_size=7, sampling_ratio=2)
-        self.stages = nn.ModuleList([DynamicStage(d_model, dim_feedforward, nhead, dropout, dim_dynamic, num_dynamic, num_reg)
-                                     for _ in range(n_stage)])
+        self.stages = nn.ModuleList([DynamicStage(d_model, dim_feedforward, nhead, dropout, dim_dynamic, num_dynamic, num_reg,
+                                                  relation=relation is not None) for _ in range(n_stage)])
+        # relation: dict(k_near, rel_embed_dim) -> phần dùng chung 6 stage (Rel + PE, như decoder Relation-DETR)
+        self.relation = ObjectRelation(d_model, nhead, **relation) if relation is not None else None
         self.time_mlp = nn.Sequential(SinusoidalPositionEmbeddings(d_model), nn.Linear(d_model, d_model * 4), nn.GELU(),
                                       nn.Linear(d_model * 4, d_model * 4))
         self.geo_films = (nn.ModuleList([nn.Sequential(nn.Linear(GEO_DIM, geo_hidden), nn.SiLU(),
@@ -135,18 +148,26 @@ class DynamicRefineHead(nn.Module):
                 nn.init.zeros_(f[-1].weight)
                 nn.init.zeros_(f[-1].bias)
 
-    def forward(self, features, init_boxes, t, memory, need_weights=False, geo=None):
-        """features P2..P5, init_boxes [B,K,4], t [B·K], memory [B·K, M, d], geo (vật [B·K, M, 4], mask [B·K, M]) | None
+    def forward(self, features, init_boxes, t, memory, need_weights=False, geo=None, rel=None):
+        """features P2..P5, init_boxes [B,K,4], t [B·K], memory [B·K, M, d], geo (vật [B·K, M, 4], mask [B·K, M]) | None,
+        rel dict(objs [B,M,4] xyxy, mask [B,M], img [B·K], whwh [B·K,4], whwh_img [B,4], bias) | None
         -> (box mọi stage [S, B·K, 4], attention [S, B·K, M] | None)."""
         if geo is not None and self.geo_films is None:
             raise ValueError("head không có nhánh geo (geo_hidden None) mà vẫn truyền vật")
+        if rel is not None and self.relation is None:
+            raise ValueError("head không có nhánh relation mà vẫn truyền vật")
+        if rel is not None:                                                 # feature vật: MỘT lần cho cả 6 stage
+            rel = self.relation.object_features(features, self.pooler, rel)
         time = self.time_mlp(t)
         boxes, pro, outs, attn = init_boxes, None, [], []
         for si, st in enumerate(self.stages):
             film = None
             if geo is not None:
                 film = self.geo_films[si](geo_features(boxes.reshape(-1, 4), *geo)).chunk(2, dim=-1)
-            pred, pro, w = st(features, boxes, pro, self.pooler, time, memory, need_weights, film)
+            r = None
+            if rel is not None:
+                r = (self.relation, self.relation.gather(boxes.reshape(-1, 4), rel), rel["whwh"], rel.get("bias", True))
+            pred, pro, w = st(features, boxes, pro, self.pooler, time, memory, need_weights, film, r)
             outs.append(pred.flatten(0, 1))
             attn.append(w)
             boxes = pred.detach()

@@ -522,12 +522,12 @@ def test_dynamic_conv_matches_diffusiondet_formula():
     assert out.shape == (5, 16) and torch.allclose(out, ref, atol=1e-6)
 
 
-def _propose_refine(freeze, geo=False):
+def _propose_refine(freeze, geo=False, relation=False, relation_k=32):
     from ce_localization.models.propose_refine import ProposeRefine
     pk = dict(in_channels=4, pretrained_backbone=False, num_timesteps=20, vision="r18_paper", ss_mask=True)
     torch.manual_seed(0)
     return ProposeRefine(pk, d_model=64, dim_feedforward=128, nhead=4, dim_dynamic=8, num_timesteps=20,
-                         freeze_proposer=freeze, geo=geo, geo_hidden=32)
+                         freeze_proposer=freeze, geo=geo, geo_hidden=32, relation=relation, relation_k=relation_k)
 
 
 @pytest.mark.parametrize("freeze", [True, False])
@@ -663,3 +663,88 @@ def test_propose_refine_geo_zero_init_then_used():
     loss.backward()
     for i in range(6):
         assert m.head.geo_films[i][-1].weight.grad.abs().sum() > 0, i
+
+
+# ----------------------------------------------------------------------------- GAMMA3.1: attention tới vật kiểu Relation-DETR
+
+def test_relation_encoding_matches_relation_detr_formula():
+    """e(b, i) = [log(|Δx|/w + 1), log(|Δy|/h + 1), log(w/wᵢ), log(h/hᵢ)] (paper công thức (2)); sine như get_sine_pos_embed."""
+    import math
+    from ce_localization.models.relation import PositionRelationEmbedding, box_rel_encoding, sine_embed
+    e = box_rel_encoding(torch.tensor([100.0, 100.0, 40.0, 60.0]), torch.tensor([20.0, 100.0, 60.0, 90.0]))
+    assert torch.allclose(e, torch.tensor([math.log(3), 0.0, math.log(40 / 60), math.log(60 / 90)]), atol=1e-5)
+    # dim_t = 10000^(2j/4) = [1, 100] ; x·scale/dim_t = [50, 0.5] ; sin / cos xen kẽ
+    se = sine_embed(torch.tensor([0.5]), 4, 10000.0, 100.0)
+    assert torch.allclose(se, torch.tensor([math.sin(50), math.cos(50), math.sin(0.5), math.cos(0.5)]), atol=1e-6)
+    assert sine_embed(torch.rand(3, 5, 4), 16, scale=100.0).shape == (3, 5, 64)
+    pe = PositionRelationEmbedding(16, 4)
+    src = (torch.rand(6, 4) * 50 + 1).requires_grad_()
+    r = pe(src, torch.rand(6, 4) * 50 + 1)
+    assert r.shape == (6, 4) and (r >= 0).all()
+    r.sum().backward()
+    assert src.grad is None and pe.pos_proj.weight.grad is not None        # phần mã hoá dưới no_grad như bài
+
+
+def _rel_inputs():
+    x, vhw = torch.rand(2, 4, 128, 128), torch.tensor([[96, 128], [128, 128]])
+    return x, vhw, torch.randn(2, 512)
+
+
+def test_object_relation_uses_near_objects_only():
+    """Mức module: chỉ k vật có tâm gần box nhất vào attention — đổi vật xa -> y nguyên, đổi vật gần -> đổi; thứ tự vật không quan
+    trọng; bỏ Rel -> đổi; không vật nào -> chỉ LayerNorm (cộng 0)."""
+    from ce_localization.models.relation import ObjectRelation, relation_attend
+    torch.manual_seed(0)
+    sh = ObjectRelation(d_model=32, n_head=4, k_near=2)
+    attn, norm = nn.MultiheadAttention(32, 4, batch_first=True), nn.LayerNorm(32)
+    W = torch.randn(4, 32)
+    box = torch.tensor([[37.5, 37.5, 67.5, 67.5]])
+    pro = torch.randn(1, 32)
+    whwh = torch.tensor([[128.0, 128.0, 128.0, 128.0]])
+
+    def run(objs, use_bias=True, mask=None):
+        o = torch.tensor(objs)[None]
+        rel = {"objs": o, "mask": torch.ones(o.shape[:2], dtype=torch.bool) if mask is None else mask,
+               "img": torch.zeros(1, dtype=torch.long), "whwh": whwh, "whwh_img": whwh}
+        rel = {**rel, "feat": torch.tanh(o / 64 @ W), "pos": sh.pos(o, whwh[:, None])}   # feature theo chính box vật
+        return relation_attend(attn, norm, pro, box, whwh, sh, sh.gather(box, rel), use_bias)
+    near = [[30.0, 30.0, 60.0, 70.0], [50.0, 40.0, 80.0, 75.0]]
+    far = [[0.0, 0.0, 4.0, 4.0], [120.0, 0.0, 127.0, 6.0], [0.0, 90.0, 5.0, 95.0]]
+    ref = run(near + far)
+    assert torch.allclose(run(near + [[0.0, 0.0, 2.0, 9.0]] + far[1:]), ref, atol=1e-6)
+    assert torch.allclose(run(far[::-1] + near[::-1]), ref, atol=1e-6)
+    assert not torch.allclose(run([[30.0, 30.0, 40.0, 40.0]] + near[1:] + far), ref, atol=1e-4)
+    assert not torch.allclose(run(near + far, use_bias=False), ref, atol=1e-4)
+    assert torch.allclose(run([[0.0, 0.0, 1.0, 1.0]], mask=torch.zeros(1, 1, dtype=torch.bool)), norm(pro), atol=1e-6)
+
+
+def test_propose_refine_relation_variants():
+    """`geo: False` (bỏ bước attention tới vật) và `rel_bias: False` (bỏ Rel) đều đổi box ra; ảnh không có vật -> hữu hạn."""
+    m = _propose_refine(True, relation=True).eval()
+    x, vhw, text = _rel_inputs()
+    objects = [torch.tensor([[5.0, 5.0, 30.0, 40.0], [60.0, 50.0, 90.0, 90.0], [20.0, 60.0, 50.0, 90.0]]), torch.zeros(0, 4)]
+
+    def run(v):
+        return m.sample_variants(x, text, vhw, 3, torch.Generator().manual_seed(0), [v], objects=objects)[0]
+    ref = run({"refine_t": 5})
+    assert torch.isfinite(ref).all()
+    assert not torch.allclose(run({"refine_t": 5, "geo": False})[0], ref[0], atol=1e-4)
+    assert not torch.allclose(run({"refine_t": 5, "rel_bias": False})[0], ref[0], atol=1e-4)
+    assert torch.allclose(run({"refine_t": 5}), ref)
+
+
+def test_propose_refine_relation_trains():
+    m = _propose_refine(True, relation=True).train()
+    x, vhw, text = _rel_inputs()
+    whwh = torch.tensor([[128.0, 96.0, 128.0, 96.0], [128.0, 128.0, 128.0, 128.0]])
+    tgt = torch.tensor([[10.0, 20.0, 50.0, 60.0], [60.0, 70.0, 100.0, 120.0]])
+    with pytest.raises(ValueError, match="objects"):
+        m(x, text, vhw, tgt, whwh, k=3)
+    objects = [torch.tensor([[5.0, 5.0, 30.0, 40.0], [60.0, 50.0, 90.0, 90.0]]), torch.zeros(0, 4)]
+    loss, _ = m(x, text, vhw, tgt, whwh, k=3, objects=objects)
+    assert torch.isfinite(loss)
+    loss.backward()
+    g = {n: p.grad for n, p in m.named_parameters()}
+    for n in ("head.stages.0.rel_attn.in_proj_weight", "head.stages.5.rel_attn.out_proj.weight", "head.relation.rel_embed.pos_proj.weight",
+              "head.relation.ref_point_head.0.weight", "fpn.layer_blocks.0.0.weight"):
+        assert g[n] is not None and g[n].abs().sum() > 0, n

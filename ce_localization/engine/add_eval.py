@@ -63,7 +63,7 @@ def predict_add(model, loader, text_table, n_samples=30, seed=0, log_every=0, lo
     for bi, batch in enumerate(loader):
         batch = to_device_add(batch, dev)
         text = text_table(batch["text"], dev)
-        geo = {"objects": batch["objects"]} if getattr(model, "geo", False) else {}     # GAMMA3: box vật đang có
+        geo = {"objects": batch["objects"]} if getattr(model, "needs_objects", False) else {}   # GAMMA3 / 3.1: box vật
         with torch.autocast(device_type=dev.type, dtype=torch.float16, enabled=amp and dev.type == "cuda"):
             if multi:
                 us = model.sample_variants(batch["images"], text, batch["valid_hw"], n_samples, generator=gen,
