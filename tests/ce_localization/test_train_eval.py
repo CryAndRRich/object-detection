@@ -159,6 +159,11 @@ def test_ddp_gamma2_celoc_bucket_view_no_stride_warning(tmp_path):
     with pytest.raises(Exception, match="Grad strides"):
         run(str(tmp_path / "old"), True)
     # pha 2 (đóng băng / train chung / GAMMA3 geo / GAMMA3.1 relation) trên DDP KHÔNG find_unused: tham số nào thiếu grad thì DDP báo lỗi ngay
+    p_o, c_o = _gamma2_cfg(tmp_path, base, "obj")                           # GAMMA4: CE-Loc đứng một mình + box vật
+    assert not __import__("ce_localization.train", fromlist=["x"]).ddp_find_unused(c_o)
+    run(str(tmp_path / "obj"), None, p_o)
+    k_o = torch.load(os.path.join(str(tmp_path / "obj"), "last.pth"), weights_only=False)
+    assert k_o["iter"] == 3 and all(np.isfinite(h["loss"]) for h in k_o["history"] if "loss" in h)
     for kind in ("pr", "pr_joint", "geo", "rel"):
         p2, c2 = _gamma2_cfg(tmp_path, base, kind)
         assert not __import__("ce_localization.train", fromlist=["x"]).ddp_find_unused(c2)
@@ -568,6 +573,121 @@ def test_plot_refiner_steps_full_flow(tmp_path, monkeypatch):
     assert r0["path"][0][0] == "input t=19" and len(r0["path"]) == 7
 
 
+def test_plot_refiner_steps_box_policy(tmp_path, monkeypatch):
+    """Tool soi nhận CE-Loc pha 1 (box_policy r18_paper, config gamma2_celoc thật): vòng mock 100 bước, 4 trạng thái sau bước
+    25 / 50 / 75 / 100 (ô cuối = đầu ra), SpatialSoftmax 512 kênh C5 có mask; DDPM cũng chạy; stages / ddim bị từ chối."""
+    import ce_localization.tools.plot_refiner_steps as tool
+    from ce_localization.data.density import build_index
+    from ce_localization.models.detector import build_model
+    from tests.ce_localization.helpers import CFG_G, _fake_ce130_turns
+    root, samples = _fake_ce130_turns(str(tmp_path / "d"))
+    with open(CFG_G["celoc2"]) as f:
+        cfg = yaml.safe_load(f)
+    cfg["data"]["image_size"] = 128
+    cfg["model"]["pretrained_backbone"] = False
+    torch.manual_seed(0)
+    ck = str(tmp_path / "gamma2_celoc" / "best.pth")
+    os.makedirs(os.path.dirname(ck))
+    torch.save({"config": cfg, "model": build_model(cfg, pretrained_backbone=False).state_dict(), "iter": 9}, ck)
+    didx = str(tmp_path / "density_index.json")
+    with open(didx, "w") as f:
+        json.dump(build_index(samples, workers=0, log=lambda *x: None), f)
+    monkeypatch.setattr(tool, "encode_class_names", lambda names, *a, **k: {n: torch.randn(512) for n in names})
+    base = ["plot_refiner_steps.py", "--ckpt", ck, "--ce130", root, "--samples", samples, "--density-index", didx,
+            "--cases", "test/3000_b1:2", "--quota", "0", "0", "0"]
+    out = str(tmp_path / "out")
+    monkeypatch.setattr(sys, "argv", base + ["--show-x0", "--out", out])
+    tool.main()
+    with open(os.path.join(out, "refiner_steps.json")) as f:
+        cases = json.load(f)
+    assert set(os.listdir(out)) == {"test_3000_b1_t2.png", "refiner_steps.json"}
+    rows = cases[0]["rows"]
+    assert [(r["image"], r["density"]) for r in rows] == list(tool.ROWS)
+    assert [s["after_step"] for s in rows[0]["states"]] == [25, 50, 75, 100] and len(rows[0]["path"]) == 101
+    assert [s["t"] for s in rows[0]["states"]] == [74, 49, 24, 0]
+    assert all(("iou_hole" in r["states"][-1]) == (r["image"] == "inpainted") for r in rows)
+    assert rows[0]["path"][0][1:] == rows[2]["path"][0][1:]                      # cùng seed ⇒ cùng nhiễu ban đầu
+    assert all(0 <= r["sharp_frac"] <= 1 for r in rows)
+    out2 = str(tmp_path / "out2")
+    monkeypatch.setattr(sys, "argv", base + ["--sampler", "ddpm", "--out", out2])
+    tool.main()
+    with open(os.path.join(out2, "refiner_steps.json")) as f:
+        r0 = json.load(f)[0]["rows"][0]
+    assert [s["after_step"] for s in r0["states"]] == [250, 500, 750, 1000] and len(r0["path"]) == 1001
+    for bad in (["--mode", "stages"], ["--sampler", "ddim"]):
+        monkeypatch.setattr(sys, "argv", base + bad + ["--out", str(tmp_path / "bad")])
+        with pytest.raises(SystemExit):
+            tool.main()
+
+    # checkpoint CE-Loc gốc của bài (`model_state_dict`, CLIP trong checkpoint, canvas 512, SpatialSoftmax không mask)
+    from tests.ce_localization.helpers import _fake_paper_ckpt
+    pk = str(tmp_path / "paper" / "best_model.pth")
+    os.makedirs(os.path.dirname(pk))
+    _fake_paper_ckpt(pk, T=100)
+    seen = []
+    monkeypatch.setattr(tool, "encode_class_names",
+                        lambda names, *a, **k: seen.append(k.get("state_dict")) or {n: torch.randn(512) for n in names})
+    out5 = str(tmp_path / "out5")
+    monkeypatch.setattr(sys, "argv", [base[0], "--ckpt", pk] + base[3:] + ["--name", "CE-Loc (paper)", "--out", out5])
+    tool.main()
+    with open(os.path.join(out5, "refiner_steps.json")) as f:
+        r0 = json.load(f)[0]["rows"][0]
+    assert [s_["after_step"] for s_ in r0["states"]] == [25, 50, 75, 100]
+    assert seen and all(sd is not None and "text_model.final_layer_norm.weight" in sd for sd in seen)
+
+
+def test_plot_refine_stages_full_flow(tmp_path, monkeypatch):
+    """Tool soi refine (propose_refine): mỗi ca một PNG 3 hàng (t0 / ce / noise) × 9 cột + JSON 6 stage có attention; model có
+    box vật (GAMMA3) nhận hàng `_nogeo`; `--scan` ghi scan.json; hàng `_nogeo` với model không box vật bị từ chối."""
+    import ce_localization.tools.plot_refine_stages as tool
+    import ce_localization.tools.plot_refiner_steps as steps_tool
+    from ce_localization.data.density import build_index
+    from ce_localization.models.detector import build_model
+    from tests.ce_localization.helpers import _fake_turn_index, _gamma2_cfg
+    base_d = str(tmp_path / "d")
+    os.makedirs(base_d)
+    root, samples, tidx, _, _ = _fake_turn_index(base_d)
+    didx = str(tmp_path / "density_index.json")
+    with open(didx, "w") as f:
+        json.dump(build_index(samples, workers=0, log=lambda *x: None), f)
+    fake_text = lambda names, *a, **k: {n: torch.randn(512) for n in names}  # noqa: E731
+    monkeypatch.setattr(tool, "encode_class_names", fake_text)
+    monkeypatch.setattr(steps_tool, "encode_class_names", fake_text)
+
+    def ckpt(kind):
+        _, cfg = _gamma2_cfg(tmp_path, base_d, kind)
+        cfg["diffusion"]["proposer"]["num_timesteps"] = 100                     # vòng mock của CE-Loc = 100 bước
+        torch.manual_seed(0)
+        p = str(tmp_path / kind / "best.pth")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        torch.save({"config": cfg, "model": build_model(cfg, pretrained_backbone=False).state_dict(), "iter": 5}, p)
+        return p
+    common = ["--ce130", root, "--samples", samples, "--density-index", didx, "--turn-index", tidx, "--refine-t", "10"]
+    pr = ckpt("pr")
+    out = str(tmp_path / "out")
+    monkeypatch.setattr(sys, "argv", ["x", "--ckpt", pr, *common, "--cases", "test/3000_b1:2", "--quota", "0", "0", "0",
+                                      "--name", "CE-Loc (frozen) + Refiner", "--out", out])
+    tool.main()
+    with open(os.path.join(out, "refine_stages.json")) as f:
+        case = json.load(f)[0]
+    assert set(os.listdir(out)) == {"test_3000_b1_t2.png", "refine_stages.json"}
+    assert [r["mode"] for r in case["rows"]] == ["t0", "ce", "noise"] and [r["t"] for r in case["rows"]] == [0, 10, 19]
+    assert all(len(r["stages"]) == 6 and len(r["stages"][0]["attn"]) == 3 for r in case["rows"])
+    assert case["rows"][0]["ce"] == case["rows"][1]["ce"] and "ce" not in case["rows"][2]     # cùng seed ⇒ cùng box CE-Loc
+    monkeypatch.setattr(sys, "argv", ["x", "--ckpt", pr, *common, "--rows", "ce", "ce_nogeo", "--cases", "test/3000_b1:2",
+                                      "--quota", "0", "0", "0", "--out", str(tmp_path / "bad")])
+    with pytest.raises(SystemExit):
+        tool.main()
+    geo = ckpt("geo")
+    out2 = str(tmp_path / "out2")
+    monkeypatch.setattr(sys, "argv", ["x", "--ckpt", geo, *common, "--rows", "ce", "ce_nogeo", "--scan", "2", "--pick", "1",
+                                      "--out", out2])
+    tool.main()
+    with open(os.path.join(out2, "scan.json")) as f:
+        scan = json.load(f)
+    assert 1 <= len(scan) <= 2 and all(set(c["iou_latest_any"]) == {"ce", "ce_nogeo"} for c in scan)
+
+
 def test_eval_paper_checkpoint_on_ce130_add(tmp_path, monkeypatch):
     """eval.py nhận checkpoint CE-Loc gốc của bài (khuôn `model_state_dict`) + `--config` GAMMA0 -> eval bài add trên CE-130
     (ảnh inpaint + ảnh gốc, ddpm + mock), text bằng CLIP của checkpoint; đếm mẫu samples/train (bài đã train)."""
@@ -800,3 +920,48 @@ def test_full_flow_gamma3_1_relation_train_eval(tmp_path, monkeypatch):
                                    for v in ("ce", "t5", "noise", "t5_nogeo", "noise_nogeo", "t5_norel", "noise_norel")}
     r = res["results"]
     assert r["inpainted_t5_norel"]["n"] == r["inpainted_t5"]["n"] > 0
+
+
+# ----------------------------------------------------------------------------- GAMMA4: CE-Loc + cross-attn tới box vật
+
+def test_gamma4_config_only_adds_obj_attn():
+    """gamma4 = gamma2_celoc + `model.obj_attn` / `obj_heads` / `obj_max` (+ tên) ⇒ gamma2_celoc là đối chứng."""
+    from tests.ce_localization.helpers import CFG_G
+    with open(CFG_G["celoc2"]) as f:
+        a = yaml.safe_load(f)
+    with open(CFG_G["obj"]) as f:
+        b = yaml.safe_load(f)
+    assert (b["model"].pop("obj_attn"), b["model"].pop("obj_heads"), b["model"].pop("obj_max")) == (True, 4, 300)
+    for k in ("experiment", "description"):
+        a.pop(k), b.pop(k)
+    assert a == b
+
+
+def test_full_flow_gamma4_train_resume_eval(tmp_path, monkeypatch):
+    """GAMMA4 thu nhỏ: train 2 + --resume tới 4 == train liền 4; có weight cross-attn; eval có `_noobj` cho cả 2 loại ảnh."""
+    import ce_localization.eval as ea
+    import ce_localization.train as ta
+    from tests.ce_localization.helpers import _fake_text_table, _fake_turn_index, _gamma2_cfg
+    base = str(tmp_path / "d")
+    os.makedirs(base)
+    _fake_turn_index(base)
+    c_path, _ = _gamma2_cfg(tmp_path, base, "obj")
+    a, b = str(tmp_path / "a"), str(tmp_path / "b")
+    _run_train(monkeypatch, ["--config", c_path, "--save-dir", a, "--max-iter", "2"])
+    _run_train(monkeypatch, ["--config", c_path, "--save-dir", a, "--resume"])
+    _run_train(monkeypatch, ["--config", c_path, "--save-dir", b])
+    ka = torch.load(os.path.join(a, "last.pth"), weights_only=False)
+    kb = torch.load(os.path.join(b, "last.pth"), weights_only=False)
+    assert ka["iter"] == kb["iter"] == 4 and kb["config"]["model"]["obj_attn"]
+    assert any("noise_net.obj_xattn.5.attn.out_proj.weight" == k for k in kb["model"])
+    for k in kb["model"]:
+        assert torch.allclose(ka["model"][k].float(), kb["model"][k].float(), atol=1e-5), k
+    monkeypatch.setattr(ta, "build_text_table", _fake_text_table)
+    out = str(tmp_path / "res.json")
+    monkeypatch.setattr(sys, "argv", ["eval.py", "--ckpt", os.path.join(b, "best.pth"), "--split", "test", "--n-samples", "3",
+                                      "--add-samplers", "ddpm", "--num-workers", "0", "--out", out, "--device", "cpu"])
+    ea.main()
+    with open(out) as f:
+        res = json.load(f)
+    assert set(res["results"]) == {"inpainted", "inpainted_noobj", "original", "original_noobj"}
+    assert res["results"]["inpainted_noobj"]["n"] == res["results"]["inpainted"]["n"] > 0

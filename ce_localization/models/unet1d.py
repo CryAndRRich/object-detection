@@ -5,6 +5,12 @@
 Cấu hình CE-Loc gốc: `down_dims (64, 128, 256)`, kernel 3, GroupNorm 8, embedding bước khuếch tán 256-d,
 FiLM CHỈ cộng bias (`cond_predict_scale=False`). Horizon = 1 (một box 4 số): `Upsample1d` cắt đầu ra dài 2
 về 1 như bản gốc. cond = `[emb(t) ; global_cond]` vào MỌI khối residual.
+
+`obj_attn` (GAMMA4, docs/EXPERIMENT_GAMMA.md mục 16): box nhiễu cross-attend tới box CÁC VẬT ĐANG CÓ ở 6 vị trí — sau cặp ResBlock
+của mỗi tầng (down 64 / 128 / 256, mid 256, up 128 / 64), trước skip / Down / Up. Token vật mã hoá GƯƠNG (`encode_objects`): box vật
+(cùng dạng 4 số với box nhiễu) đi qua CHÍNH các ResBlock đó (chung weight) với cond `[emb(0) ; global_cond]` (box sạch, t = 0),
+lấy feature ở đúng 6 vị trí ⇒ ở mọi tầng token vật cùng số chiều, cùng không gian với feature box nhiễu. `ObjCrossAttn`:
+`h + out_proj(MHA(LN(h) -> LN(token)))`, out_proj khởi tạo 0 (lúc đầu = U-Net không attention), tính fp32.
 """
 
 import math
@@ -12,7 +18,7 @@ import math
 import torch
 import torch.nn as nn
 
-__all__ = ["SinusoidalPosEmb", "ConditionalResidualBlock1D", "ConditionalUnet1D"]
+__all__ = ["SinusoidalPosEmb", "ConditionalResidualBlock1D", "ObjCrossAttn", "ConditionalUnet1D"]
 
 
 class SinusoidalPosEmb(nn.Module):
@@ -89,9 +95,30 @@ class ConditionalResidualBlock1D(nn.Module):
         return out + self.residual_conv(x)
 
 
+class ObjCrossAttn(nn.Module):
+    """Một vị trí: h [N, d, 1] (box nhiễu) attend token vật [N, M, d] (mask [N, M], True = có vật). Ảnh 0 vật: cộng 0."""
+
+    def __init__(self, dim, heads=4):
+        super().__init__()
+        self.ln_q, self.ln_kv = nn.LayerNorm(dim), nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(dim, heads, batch_first=True)
+        nn.init.zeros_(self.attn.out_proj.weight)
+        nn.init.zeros_(self.attn.out_proj.bias)
+
+    def forward(self, h, tok, mask):
+        with torch.autocast(device_type=h.device.type, enabled=False):
+            q = self.ln_q(h[..., 0].float())[:, None]
+            kv = self.ln_kv(tok.float())
+            none = ~mask.any(1)
+            ok = mask | (none[:, None] & (torch.arange(mask.shape[1], device=mask.device) == 0))   # tránh softmax toàn −inf
+            a = self.attn(q, kv, kv, key_padding_mask=~ok, need_weights=False)[0][:, 0]
+            a = a * (~none).float()[:, None]
+        return h + a.to(h.dtype)[..., None]
+
+
 class ConditionalUnet1D(nn.Module):
     def __init__(self, input_dim, global_cond_dim, diffusion_step_embed_dim=256,
-                 down_dims=(64, 128, 256), kernel_size=3, n_groups=8):
+                 down_dims=(64, 128, 256), kernel_size=3, n_groups=8, obj_attn=False, obj_heads=4):
         super().__init__()
         all_dims = [input_dim] + list(down_dims)
         start_dim = down_dims[0]
@@ -122,20 +149,55 @@ class ConditionalUnet1D(nn.Module):
         )
         self.diffusion_step_encoder = nn.Sequential(
             SinusoidalPosEmb(dsed), nn.Linear(dsed, dsed * 4), nn.Mish(), nn.Linear(dsed * 4, dsed))
+        self.obj_attn = bool(obj_attn)
+        if self.obj_attn:                                    # 6 vị trí: down × 3, mid, up × 2
+            site_dims = list(down_dims) + [mid_dim] + [d_in for d_in, _ in reversed(in_out[1:])]
+            self.obj_xattn = nn.ModuleList([ObjCrossAttn(d, obj_heads) for d in site_dims])
 
-    def forward(self, sample, timestep, global_cond):
-        """sample [B, 1, 4] (horizon 1), timestep [B] long, global_cond [B, G] -> [B, 1, 4]."""
-        x = sample.permute(0, 2, 1)                          # b h t -> b t h
-        timesteps = timestep.expand(sample.shape[0])
-        g = torch.cat([self.diffusion_step_encoder(timesteps), global_cond], dim=-1)
-        h = []
+    def _trunk(self, x, g, site):
+        """Thân U-Net (down / mid / up, chưa final conv); `site(i, x) -> x` gọi ở 6 vị trí (sau cặp ResBlock mỗi tầng)."""
+        h, i = [], 0
         for resnet, resnet2, downsample in self.down_modules:
-            x = resnet2(resnet(x, g), g)
+            x = site(i, resnet2(resnet(x, g), g))
+            i += 1
             h.append(x)
             x = downsample(x)
         for mid in self.mid_modules:
             x = mid(x, g)
+        x = site(i, x)
+        i += 1
         for resnet, resnet2, upsample in self.up_modules:
             x = torch.cat((x, h.pop()), dim=1)
-            x = upsample(resnet2(resnet(x, g), g))
+            x = upsample(site(i, resnet2(resnet(x, g), g)))
+            i += 1
+        return x
+
+    def encode_objects(self, objs, mask, global_cond):
+        """Mã hoá GƯƠNG box vật: objs [N, M, 4] (cùng chuẩn hoá với box nhiễu), mask [N, M], global_cond [N, G] -> list 6 token
+        [N, M, d_ℓ]: feature của box vật ở 6 vị trí attention khi chạy CHÍNH các ResBlock với t = 0 (không attention).
+        Chỉ tính hàng có vật; ô đệm = 0."""
+        N, M = mask.shape
+        bi, mi = mask.nonzero(as_tuple=True)
+        if bi.numel() == 0:                                  # cả batch không có vật: token 0 (XAttn tự cộng 0)
+            return [objs.new_zeros(N, M, x.ln_q.normalized_shape[0]) for x in self.obj_xattn]
+        t0 = self.diffusion_step_encoder(torch.zeros(N, dtype=torch.long, device=objs.device))
+        g = torch.cat([t0, global_cond], dim=-1)[bi]
+        feats = []
+
+        def collect(_, x):
+            feats.append(x[..., 0])
+            return x
+        self._trunk(objs[bi, mi][..., None], g, collect)
+        return [f.new_zeros(N, M, f.shape[-1]).index_put((bi, mi), f) for f in feats]
+
+    def forward(self, sample, timestep, global_cond, obj_tokens=None, obj_mask=None):
+        """sample [B, 1, 4] (horizon 1), timestep [B] long, global_cond [B, G] -> [B, 1, 4].
+        obj_tokens (list 6 [B, M, d_ℓ] của `encode_objects`) + obj_mask [B, M]: cross-attend box vật; None = không (như bài)."""
+        x = sample.permute(0, 2, 1)                          # b h t -> b t h
+        timesteps = timestep.expand(sample.shape[0])
+        g = torch.cat([self.diffusion_step_encoder(timesteps), global_cond], dim=-1)
+        if obj_tokens is None:
+            x = self._trunk(x, g, lambda i, x_: x_)
+        else:
+            x = self._trunk(x, g, lambda i, x_: self.obj_xattn[i](x_, obj_tokens[i], obj_mask))
         return self.final_conv(x).permute(0, 2, 1)

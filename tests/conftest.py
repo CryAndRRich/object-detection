@@ -18,6 +18,8 @@ def pytest_configure(config):
     # backend Agg luôn import mathtext, nên mọi test lưu hình đều dính dù hình không có chữ toán. Lỗi của thư viện, không
     # của code: chỉ bỏ ĐÚNG loại này từ ĐÚNG module đó. (Nhãn trục log của tool đã bỏ mathtext — các lần parse không còn.)
     config.addinivalue_line("filterwarnings", r"ignore::DeprecationWarning:matplotlib\._mathtext")
+    # cùng lỗi thư viện ở bộ phân tích tên font (`_fontconfig_pattern`, lần đầu dựng font trong phiên)
+    config.addinivalue_line("filterwarnings", r"ignore::DeprecationWarning:matplotlib\._fontconfig_pattern")
 
 
 @pytest.hookimpl(hookwrapper=True)

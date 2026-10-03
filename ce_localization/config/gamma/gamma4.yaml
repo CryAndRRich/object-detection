@@ -1,0 +1,69 @@
+# EXPERIMENT GAMMA4 — CE-Loc gốc (ResNet18 + SpatialSoftmax mask phần đệm, y gamma2_celoc) + CROSS-ATTENTION từ box nhiễu tới box
+# các VẬT ĐANG CÓ (GT, không nhiễu) ở MỌI tầng U-Net 1D (down 64/128/256, mid 256, up 128/64). Token vật mã hoá GƯƠNG: box vật (cùng
+# dạng 4 số cxcywh·2 − 1 với box nhiễu) đi qua CHÍNH các ResBlock của U-Net (chung weight, t = 0) ⇒ mọi tầng cùng không gian với box
+# nhiễu (models/unet1d.py). Train TỪ ĐẦU, mọi khoá khác Y HỆT gamma2_celoc.yaml (có test) ⇒ gamma2_celoc là đối chứng.
+# Eval thêm `_noobj` (tắt cross-attn). Kế hoạch: docs/EXPERIMENT_GAMMA.md mục 16.
+
+experiment: "gamma4"
+description: "bài add: CE-Loc gốc (ResNet18, SpatialSoftmax mask phần đệm) + cross-attn box nhiễu -> box vật đang có ở mọi tầng U-Net, token vật mã hoá gương qua chính U-Net"
+task: "add"
+
+data:
+  root: "../data/all_phase2_V2"
+  samples_root: "../data/samples"
+  turn_index: "../data/turn_index.json"
+  density_index: "../data/density_index.json"   # eval ảnh gốc với density `full`
+  density_root: "../data/samples"
+  split_source: "samples"           # train = samples/train ; val / test = samples/test theo split CE-130 của ảnh gốc
+  cache_dir: null                   # Kaggle: --cache-dir /kaggle/temp/add_cache (tools/build_add_cache.py)
+  image_size: 512
+  num_workers: 4
+  input_style: "paper"              # to_tensor, density .convert("L")
+  density: "sample"
+
+model:
+  arch: "box_policy"
+  vision: "r18_paper"               # ResNet18 của bài (BN train, ImageNet, conv1 kênh 4 = TB RGB), box chia canvas
+  ss_mask: true                     # SpatialSoftmax: ô đệm −inf trước softmax (lưới toạ độ canvas của bài)
+  in_channels: 4
+  pretrained_backbone: true
+  vis_dim: 128                      # Linear(2·512, 128) như bài
+  text_dim: 512
+  text_proj_dim: 128
+  step_embed_dim: 256
+  down_dims: [64, 128, 256]
+  kernel_size: 3
+  n_groups: 8
+  clip_text: "openai/clip-vit-base-patch32"
+  obj_attn: true                    # GAMMA4: cross-attn tới box vật đang có ở 6 vị trí U-Net (models/unet1d.py)
+  obj_heads: 4
+  obj_max: 300                      # > 300 vật: train lấy ngẫu nhiên 300 (p99 train 248), eval giữ hết
+
+diffusion:
+  num_timesteps: 1000
+  beta_start: 1.0e-4
+  beta_end: 0.02
+  noise_per_image: 1
+
+training:                           # như bài trừ batch (gấp đôi) / số iter (nửa)
+  batch_size: 64                    # TOÀN CỤC: Kaggle 2 GPU -> 32 / GPU
+  sync_bn: false                    # BN thường: thống kê trên 32 ảnh / GPU = đúng batch BN của bài (SyncBN sẽ thành 64, chậm hơn)
+  amp: true                         # Kaggle T4: autocast fp16 + GradScaler + channels_last (tensor core) — người dùng chốt 2026-10-02
+  lr: 5.0e-5
+  weight_decay: 0.01
+  schedule: "cosine"
+  cosine_t_max: 93900               # = 300 epoch × 313 bước (⌈19.998 / 64⌉) — CosineAnnealingLR(T_max=300) của bài theo iter
+  max_iter: 37500
+  grad_clip: null
+  seed: 0
+  log_every: 50
+  ckpt_every: 1000
+  eval_every: 2500
+
+eval:
+  split: "val"
+  limit: 500
+  n_samples: 30
+  batch_size: 16
+  sample_kw: {sampler: "mock"}      # eval định kỳ bằng vòng mock 100 bước của bài (DDPM 1000 bước quá chậm trên T4); test báo cả hai
+  select_metric: "mean_iou_any"

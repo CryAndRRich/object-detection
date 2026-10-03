@@ -748,3 +748,108 @@ def test_propose_refine_relation_trains():
     for n in ("head.stages.0.rel_attn.in_proj_weight", "head.stages.5.rel_attn.out_proj.weight", "head.relation.rel_embed.pos_proj.weight",
               "head.relation.ref_point_head.0.weight", "fpn.layer_blocks.0.0.weight"):
         assert g[n] is not None and g[n].abs().sum() > 0, n
+
+
+# ----------------------------------------------------------------------------- GAMMA4: CE-Loc + cross-attn tới box vật (mã hoá gương)
+
+def _unet(obj_attn, seed=0):
+    from ce_localization.models.unet1d import ConditionalUnet1D
+    torch.manual_seed(seed)
+    return ConditionalUnet1D(4, 32, 64, (16, 32, 64), 3, 8, obj_attn=obj_attn, obj_heads=4).eval()
+
+
+def _obj_batch():
+    g = torch.Generator().manual_seed(1)
+    objs = torch.rand(2, 5, 4, generator=g) * 2 - 1
+    mask = torch.tensor([[True, True, True, False, False], [True, True, True, True, True]])
+    return objs, mask, torch.randn(2, 32, generator=g)
+
+
+def test_unet_obj_attn_zero_init_equals_plain_and_keeps_old_checkpoints():
+    """obj_attn=False: không thêm tham số (checkpoint CE-Loc cũ nạp strict); obj_attn=True với out_proj = 0: ra y hệt bản không
+    attention dù có token vật; có weight thì ra khác; không vật nào = y hệt không attention."""
+    plain, obj = _unet(False), _unet(True)
+    assert not any("obj_xattn" in k for k in plain.state_dict())
+    missing, unexpected = obj.load_state_dict(plain.state_dict(), strict=False)
+    assert not unexpected and all("obj_xattn" in k for k in missing) and len(obj.obj_xattn) == 6
+    assert [x.ln_q.normalized_shape[0] for x in obj.obj_xattn] == [16, 32, 64, 64, 32, 16]
+    objs, mask, cond = _obj_batch()
+    x, t = torch.randn(2, 1, 4), torch.tensor([3, 700])
+    with torch.no_grad():
+        ref = plain(x, t, cond)
+        tok = obj.encode_objects(objs, mask, cond)
+        assert torch.allclose(obj(x, t, cond, tok, mask), ref, atol=1e-6)
+        for xa in obj.obj_xattn:
+            torch.nn.init.normal_(xa.attn.out_proj.weight, std=0.2)
+        out = obj(x, t, cond, tok, mask)
+        assert not torch.allclose(out, ref, atol=1e-4)
+        none = torch.zeros_like(mask)
+        assert torch.allclose(obj(x, t, cond, obj.encode_objects(objs, none, cond), none), ref, atol=1e-6)
+        perm = torch.tensor([4, 2, 0, 3, 1])
+        po, pm = objs[:, perm], mask[:, perm]
+        assert torch.allclose(obj(x, t, cond, obj.encode_objects(po, pm, cond), pm), out, atol=1e-5)
+
+
+def test_unet_mirror_tokens_are_the_same_resblocks_at_t0():
+    """Token tầng 1 / tầng mid của box vật = đúng đầu ra của CHÍNH các ResBlock khi cho box vật làm 'box nhiễu' với t = 0."""
+    net = _unet(True)
+    objs, mask, cond = _obj_batch()
+    with torch.no_grad():
+        tok = net.encode_objects(objs, mask, cond)
+        g = torch.cat([net.diffusion_step_encoder(torch.zeros(2, dtype=torch.long)), cond], -1)
+        b, m = 1, 3
+        x = objs[b, m][None, :, None]
+        r1, r2, down = net.down_modules[0]
+        h1 = r2(r1(x, g[b:b + 1]), g[b:b + 1])
+        assert torch.allclose(tok[0][b, m], h1[0, :, 0], atol=1e-5)
+        y = down(h1)
+        for r1_, r2_, d_ in net.down_modules[1:]:
+            y = d_(r2_(r1_(y, g[b:b + 1]), g[b:b + 1]))
+        for mid in net.mid_modules:
+            y = mid(y, g[b:b + 1])
+        assert torch.allclose(tok[3][b, m], y[0, :, 0], atol=1e-5)
+        assert (tok[0][0, 3:] == 0).all()                                     # ô đệm = 0
+
+
+def test_unet_obj_attn_grad_flows_through_object_path():
+    net = _unet(True).train()
+    for xa in net.obj_xattn:
+        torch.nn.init.normal_(xa.attn.out_proj.weight, std=0.2)
+    objs, mask, cond = _obj_batch()
+    tok = net.encode_objects(objs, mask, cond)
+    net(torch.randn(2, 1, 4), torch.tensor([3, 700]), cond, tok, mask).pow(2).sum().backward()
+    for i in range(6):
+        assert net.obj_xattn[i].attn.in_proj_weight.grad.abs().sum() > 0, i
+    # ResBlock tầng 1 nhận grad qua CẢ luồng vật: so với lượt chỉ có luồng box nhiễu
+    g_both = net.down_modules[0][0].blocks[0].block[0].weight.grad.clone()
+    net.zero_grad()
+    net(torch.randn(2, 1, 4), torch.tensor([3, 700]), cond, [t_.detach() for t_ in tok], mask).pow(2).sum().backward()
+    assert not torch.allclose(net.down_modules[0][0].blocks[0].block[0].weight.grad, g_both)
+
+
+def test_box_policy_obj_attn_loss_sample_and_cap():
+    from ce_localization.models.box_policy import BoxPolicy
+    torch.manual_seed(0)
+    m = BoxPolicy(in_channels=4, pretrained_backbone=False, num_timesteps=20, vision="r18_paper", ss_mask=True,
+                  obj_attn=True, obj_max=3)
+    x, vhw = torch.rand(2, 4, 128, 128), torch.tensor([[96, 128], [128, 128]])
+    text = torch.randn(2, 512)
+    objects = [torch.tensor([[5.0, 5.0, 30.0, 40.0], [60.0, 50.0, 90.0, 90.0]]), torch.rand(7, 2).repeat(1, 2) * 60 +
+               torch.tensor([0.0, 0.0, 20.0, 20.0])]
+    x0 = torch.rand(2, 4) * 2 - 1
+    with pytest.raises(ValueError, match="objects"):
+        m(x, text, vhw, x0)
+    m.train()
+    loss = m(x, text, vhw, x0, objects=objects, generator=torch.Generator().manual_seed(0))
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert m.noise_net.obj_xattn[0].attn.out_proj.weight.grad.abs().sum() > 0
+    cond = m.condition(x, text, vhw)
+    _, mask = m.object_tokens(objects, vhw, 128, cond, torch.Generator().manual_seed(0), cap=True)
+    assert mask.sum(1).tolist() == [2, 3]                                      # 7 vật > obj_max 3 -> cắt khi train
+    _, mask = m.object_tokens(objects, vhw, 128, cond)
+    assert mask.sum(1).tolist() == [2, 7]                                      # eval giữ hết
+    m.eval()
+    a = m.sample(x, text, vhw, 3, torch.Generator().manual_seed(0), objects=objects)
+    b = m.sample(x, text, vhw, 3, torch.Generator().manual_seed(0), objects=objects, use_objects=False)
+    assert a.shape == (2, 3, 4) and torch.allclose(a, b, atol=1e-5)           # out_proj = 0: tắt box vật = y hệt

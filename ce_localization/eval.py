@@ -13,6 +13,7 @@ GAMMA2 (`model.arch: propose_refine`): CE-Loc sinh `--n-samples` box MỘT lần
 (none / t* / noise) chấm riêng trên cùng box đó (khoá `<ảnh>_ce`, `<ảnh>_t<t*>`, `<ảnh>_noise`).
 GAMMA3 (`model.geo`): thêm `<ảnh>_t<t*>_nogeo`, `<ảnh>_noise_nogeo` = cùng biến thể nhưng TẮT nhánh geo.
 GAMMA3.1 (`model.relation`): thêm `_nogeo` (bỏ attention tới vật) và `_norel` (giữ attention, bỏ Rel hình học).
+GAMMA4 (`model.obj_attn`, CE-Loc + cross-attn tới box vật): thêm `<ảnh>_noobj` = cùng checkpoint, tắt cross-attn tới box vật.
 
 Checkpoint CE-Loc gốc của bài (`model_state_dict`, vd weights/add/paper/best_model.pth) + `--config config/gamma/gamma0.yaml`
 (đường dẫn dữ liệu): eval bài add như GAMMA, kèm `excl_paper_train` (bỏ mẫu samples/train mà bài đã train).
@@ -153,6 +154,9 @@ def main_add(a, cfg, ck, dev, t0):
         variants = [("", "mock 100 bước (vòng của bài)" if sm == "mock" else "DDPM 1000 bước", {"sampler": sm})]
     else:
         variants = [(f"_{sm}", sm, {"sampler": sm}) for sm in a.add_samplers]
+    if cfg["model"].get("obj_attn") and not paper:     # GAMMA4: mỗi sampler thêm bản TẮT box vật (cùng checkpoint)
+        variants += [(s_ + "_noobj", d_ + ", TẮT box vật", {**v_, "sample_kw": {"use_objects": False}})
+                     for s_, d_, v_ in variants]
     refine_vars = []
     if cfg["model"].get("arch") == "propose_refine" and not paper:
         for v in a.refine_t:

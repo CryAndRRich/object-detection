@@ -164,7 +164,8 @@ CFG_G = {"density": os.path.join(CFG_DIR, "gamma", "gamma0.yaml"), "rgb": os.pat
          "pr": os.path.join(CFG_DIR, "gamma", "gamma2.yaml"),
          "pr_joint": os.path.join(CFG_DIR, "gamma", "gamma2_1.yaml"),
          "geo": os.path.join(CFG_DIR, "gamma", "gamma3.yaml"),
-         "rel": os.path.join(CFG_DIR, "gamma", "gamma3_1.yaml")}
+         "rel": os.path.join(CFG_DIR, "gamma", "gamma3_1.yaml"),
+         "obj": os.path.join(CFG_DIR, "gamma", "gamma4.yaml")}
 
 
 def _fake_ce130_turns(base, seed=0):
@@ -251,14 +252,15 @@ def _gamma_cfg(tmp_path, base, kind="density"):
 
 
 def _gamma2_cfg(tmp_path, base, kind, proposer_ckpt=None):
-    """Config GAMMA2 / 3 thật (`celoc2` | `pr` | `pr_joint` | `geo` | `rel`) thu nhỏ cho CE-130 giả: canvas 128, T = 20, 4 iter, batch 2."""
+    """Config GAMMA2 / 3 thật (`celoc2` | `pr` | `pr_joint` | `geo` | `rel` | `obj`) thu nhỏ cho CE-130 giả: canvas 128, T = 20, 4 iter, batch 2."""
     with open(CFG_G[kind]) as f:
         cfg = yaml.safe_load(f)
     cfg["data"].update(root=os.path.join(base, "all_phase2_V2"), samples_root=os.path.join(base, "samples"),
                        turn_index=os.path.join(base, "turn_index.json"),
                        density_index=os.path.join(base, "density_index.json"),
                        density_root=os.path.join(base, "samples"), image_size=128, num_workers=0)
-    cfg["model"]["pretrained_backbone"] = kind != "celoc2"                  # pha 2: True = nạp proposer_ckpt
+    standalone = kind in ("celoc2", "obj")                                  # CE-Loc đứng một mình (pha 1 / GAMMA4)
+    cfg["model"]["pretrained_backbone"] = not standalone                     # pha 2: True = nạp proposer_ckpt
     cfg["diffusion"].update(num_timesteps=20, noise_per_image=2)
     if "proposer" in cfg["diffusion"]:
         cfg["diffusion"]["proposer"]["num_timesteps"] = 20
@@ -267,7 +269,7 @@ def _gamma2_cfg(tmp_path, base, kind, proposer_ckpt=None):
     cfg["training"].update(batch_size=2, max_iter=4, warmup_iters=2, log_every=1, ckpt_every=2, eval_every=2,
                            cosine_t_max=100, steps=[3])
     cfg["eval"].update(n_samples=3, batch_size=2,
-                       sample_kw={} if kind == "celoc2" else {"refine_t": 10, "refine_steps": 1, "proposer_sampler": "ddpm"})
+                       sample_kw={} if standalone else {"refine_t": 10, "refine_steps": 1, "proposer_sampler": "ddpm"})
     p = str(tmp_path / f"cfg_{kind}.yaml")
     with open(p, "w") as f:
         yaml.safe_dump(cfg, f)

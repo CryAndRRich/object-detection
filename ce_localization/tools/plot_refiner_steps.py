@@ -19,6 +19,14 @@
   cột 6     SpatialSoftmax Output trên C5 (token `vis`): mỗi chấm = một kênh trong 2048, vị trí = toạ độ kỳ vọng (đổi trục
             như `tools/plot_spatial_softmax.py`), màu = số ô hiệu dụng (log), cỡ ∝ ‖W ss_proj‖ của kênh.
 
+CE-Loc kiểu bài (`model.arch: box_policy`, `vision: r18_paper` — GAMMA2-pha 1; hoặc checkpoint CE-Loc gốc của bài
+`weights/add/paper/best_model.pth`, nạp bằng `BoxPolicy.load_celoc_paper`, SpatialSoftmax không mask): cùng bố cục; vòng `--sampler mock` (mặc định,
+100 bước như bài: nhiễu thuần, t = 99..0, x -= ε̂/100) hoặc `ddpm` (1000 bước), vẽ 4 trạng thái SAU bước N/4, N/2, 3N/4, N (ô cuối = đầu
+ra); x̂0 = box suy từ ε̂ theo ᾱ_t; box chuẩn hoá theo canvas; SpatialSoftmax C5 512 kênh của ResNet18, CÓ mask phần đệm nếu
+checkpoint `ss_mask` (đúng phép tính model dùng); cỡ chấm ∝ ‖W projection‖. Không có `--mode stages`.
+  python tools/plot_refiner_steps.py --ckpt ../weights/add/gamma2_celoc/best.pth --quota 5 5 10 \
+      --files test/images/3342_3.png ... --out ../../output/gamma/viz/gamma2_celoc/4_step
+
 `--mode stages`: thay 4 cột quỹ đạo bằng 6 cột = box ra của 6 tầng trong MỘT lượt khử nhiễu ở t = `--stage-t`: trạng
 thái 0 = box nhiễu đã kẹp mà tầng 1 nhận (mặc định t = T − 1 = 999), rồi tầng 1..6 (box tầng k là đầu vào RoI của tầng k + 1); hình 4 × 8 cột.
 
@@ -51,7 +59,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from ce_localization.data.dataset import _read_annotation  # noqa: E402
 from ce_localization.data.density import DensityIndex  # noqa: E402
 from ce_localization.data.turns import image_inputs, pixel_hash  # noqa: E402
-from ce_localization.models.box_policy import _paper_spatial_softmax, unit_to_boxes  # noqa: E402
+from ce_localization.models.box_policy import _paper_spatial_softmax, norm_whwh, unit_to_boxes  # noqa: E402
 from ce_localization.models.detector import build_model  # noqa: E402
 from ce_localization.models.text import TextTable, encode_class_names  # noqa: E402
 from ce_localization.tools.plot_spatial_softmax import SHARP, effective_cells, keypoint_pixels  # noqa: E402
@@ -68,18 +76,31 @@ def row_label(kind, dens, turn):
     return f"Original (nothing removed)\ndensity: {'own (original image)' if dens == 'own' else 'blank'}"
 
 
+PAPER_CFG = {"data": {"image_size": 512, "input_style": "paper"},
+             "model": {"arch": "box_policy", "vision": "r18_paper", "clip_text": "openai/clip-vit-base-patch32"}}
+
+
 def load_model(path, device):
+    """-> (model, cfg, nhãn iter, state CLIP text | None). Checkpoint CE-Loc gốc của bài (`model_state_dict`) nạp bằng
+    `BoxPolicy.load_celoc_paper` (canvas 512, đầu vào kiểu bài, SpatialSoftmax KHÔNG mask, text bằng CLIP của chính checkpoint)."""
     ck = torch.load(path, map_location="cpu", weights_only=False)
+    if "model_state_dict" in ck:
+        from ce_localization.models.box_policy import BoxPolicy
+        model, clip, info = BoxPolicy.load_celoc_paper(ck)
+        return model.to(device).eval(), PAPER_CFG, f"epoch {info['epoch']}", clip
     cfg = ck["config"]
-    if cfg["model"].get("arch") != "box_refiner":
-        sys.exit(f"{path}: không phải checkpoint box_refiner (model.arch {cfg['model'].get('arch')})")
+    arch = cfg["model"].get("arch")
+    if arch not in ("box_refiner", "box_policy") or (arch == "box_policy" and cfg["model"].get("vision") != "r18_paper"):
+        sys.exit(f"{path}: chỉ nhận box_refiner (GAMMA1) hoặc box_policy r18_paper (GAMMA2-pha 1) — model.arch {arch}")
     if cfg["data"].get("input_style", "ours") != "paper":
         sys.exit("tool chỉ vẽ đầu vào kiểu bài (`data.input_style: paper`)")
     model = build_model(cfg, pretrained_backbone=False)
     model.load_state_dict(ck["model"])
+    if arch == "box_policy":
+        return model.to(device).eval(), cfg, ck.get("iter"), None
     if model.ss_kind != "paper":
         sys.exit("tool chỉ vẽ SpatialSoftmax kiểu bài (`model.ss_kind: paper`)")
-    return model.to(device).eval(), cfg, ck.get("iter")
+    return model.to(device).eval(), cfg, ck.get("iter"), None
 
 
 def match_sample(samples, image_path, iid):
@@ -126,7 +147,8 @@ def load_case(a, split, br, turn, dindex, T):
         den[kind] = x[3].numpy()
     holes = np.asarray(ann["inpainted_bboxes"][:turn], dtype=np.float64).reshape(-1, 4) * scale
     x1, y1, x2, y2 = [int(round(v)) for v in holes[-1]]
-    gap = float(den["original"][y1:y2, x1:x2].mean() - den["inpainted"][y1:y2, x1:x2].mean()) if x2 > x1 and y2 > y1 else 0.0
+    cut_o, cut_i = den["original"][y1:y2, x1:x2], den["inpainted"][y1:y2, x1:x2]       # lỗ rất nhỏ / sát mép: có thể rỗng
+    gap = float(cut_o.mean() - cut_i.mean()) if cut_o.size and cut_i.size else 0.0
     w, h = holes[-1, 2] - holes[-1, 0], holes[-1, 3] - holes[-1, 1]
     return {"split": split, "branch": br, "turn": turn, "class": ann["class_based_caption"], "sample": sample,
             "imgs": imgs, "own": own, "holes": holes, "gap": gap, "size": float(np.sqrt(max(w * h, 0)) / T)}
@@ -192,17 +214,26 @@ def center(b):
 
 
 @torch.no_grad()
-def spatial_softmax(model, x):
-    """-> (toạ độ [C,2] (dọc, ngang) trong [−1, 1], attention [C,H,W]) trên C5, đúng phép tính của token `vis`."""
+def spatial_softmax(model, x, valid_hw=None):
+    """-> (toạ độ [C,2] (dọc, ngang) trong [−1, 1], attention [C,H,W]) trên C5, đúng phép tính của token `vis` (GAMMA1) /
+    của CE-Loc (box_policy r18_paper: ResNet18, mask phần đệm nếu `ss_mask`)."""
+    if is_policy(model):
+        xy, att = model.vision.keypoints(x, valid_hw)
+        return xy[0].cpu(), att[0].cpu()
     c5 = model.backbone.forward_c5(x)
     N, C, H, W = c5.shape
     att = F.softmax(c5.reshape(N, C, -1), dim=-1).reshape(N, C, H, W)
     return _paper_spatial_softmax(c5).reshape(N, C, 2)[0].cpu(), att[0].cpu()
 
 
+def is_policy(model):
+    return getattr(model, "vision_kind", None) == "r18_paper"
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ckpt", required=True, help="checkpoint box_refiner (vd ../weights/add/gamma1/best.pth)")
+    ap.add_argument("--ckpt", required=True, help="checkpoint box_refiner (../weights/add/gamma1/best.pth) hoặc box_policy "
+                                                  "r18_paper (../weights/add/gamma2_celoc/best.pth)")
     ap.add_argument("--ce130", default="../data/all_phase2_V2")
     ap.add_argument("--samples", default="../data/samples")
     ap.add_argument("--density-index", default="../data/density_index.json")
@@ -214,14 +245,17 @@ def main():
     ap.add_argument("--steps", type=int, default=4)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--eta", type=float, default=1.0, help="DDIM eta: 1 = như eval (thêm nhiễu MỚI mỗi bước), 0 = tất định")
-    ap.add_argument("--sampler", default="ddim", choices=["ddim", "mock"],
-                    help="mock = vòng của CE-Loc gốc: nhiễu thuần nhưng t = mock_steps−1..0, x -= ε̂/mock_steps")
+    ap.add_argument("--sampler", default=None, choices=["ddim", "mock", "ddpm"],
+                    help="mock = vòng của CE-Loc gốc: nhiễu thuần nhưng t = mock_steps−1..0, x -= ε̂/mock_steps; mặc định ddim "
+                         "(box_refiner) / mock (box_policy); ddpm chỉ box_policy")
     ap.add_argument("--t-start", type=int, default=None, help="DDIM bắt đầu ở t này (mặc định T − 1 = 999)")
     ap.add_argument("--mock-steps", type=int, default=100, help="số bước vòng mock (bài: 100); vẽ 4 trạng thái cách đều")
     ap.add_argument("--show-x0", action="store_true", help="vẽ thêm x̂0 (box tầng 6 model đoán ở bước đó), xanh chấm chấm")
     ap.add_argument("--mode", default="steps", choices=["steps", "stages"],
                     help="steps = quỹ đạo khử nhiễu (4 trạng thái); stages = MỘT lượt ở t = --stage-t, cột = box ra của 6 tầng")
     ap.add_argument("--stage-t", type=int, default=None, help="--mode stages: mức nhiễu của lượt (mặc định T − 1, cao nhất)")
+    ap.add_argument("--name", default=None, help="tên hiển thị trên tiêu đề hình (mặc định <thư mục>/<file> của --ckpt), "
+                                                 "vd 'CE-Loc (masked SpatialSoftmax)' — docs/EXPERIMENT_GAMMA.md mục 13.0")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
@@ -234,7 +268,16 @@ def main():
     from matplotlib.lines import Line2D
 
     dev = torch.device(a.device)
-    model, cfg, it = load_model(a.ckpt, dev)
+    model, cfg, it, clip_sd = load_model(a.ckpt, dev)
+    policy = is_policy(model)
+    if a.sampler is None:
+        a.sampler = "mock" if policy else "ddim"
+    if policy and (a.sampler == "ddim" or a.mode == "stages"):
+        sys.exit("box_policy (CE-Loc): chỉ --sampler mock | ddpm, --mode steps")
+    if not policy and a.sampler == "ddpm":
+        sys.exit("box_refiner: --sampler ddim | mock")
+    if policy:
+        a.mock_steps = 100                                                        # mock_sample của BoxPolicy: 100 bước như bài
     T = cfg["data"]["image_size"]
     ab = model.alphas_cumprod.cpu()
     if a.stage_t is None:
@@ -242,17 +285,18 @@ def main():
     if not 0 <= a.stage_t < model.num_timesteps:
         sys.exit(f"--stage-t {a.stage_t} ngoài [0, {model.num_timesteps - 1}]")
     dindex = DensityIndex(a.density_index, a.samples)
-    w = model.memory.ss_proj.weight.detach().reshape(model.memory.ss_proj.out_features, -1, 2).norm(dim=(0, 2)).cpu().numpy()
+    proj = model.vision.projection if policy else model.memory.ss_proj
+    w = proj.weight.detach().reshape(proj.out_features, -1, 2).norm(dim=(0, 2)).cpu().numpy()
     size = 4 + 60 * w / w.max()
     os.makedirs(a.out, exist_ok=True)
     cases = pick_cases(a, dindex, T, np.random.default_rng(a.seed))
-    name = "mock" if a.sampler == "mock" else "DDIM"
+    name = {"mock": "mock", "ddpm": "DDPM"}.get(a.sampler, "DDIM")
     summary = []
     for cs in cases:
         split, br, turn, cls, holes = cs["split"], cs["branch"], cs["turn"], cs["class"], cs["holes"]
         hole = holes[-1]                                                          # lỗ mới nhất = đích
         hc = center(hole)
-        text = TextTable(encode_class_names([cls], cfg["model"]["clip_text"], device=str(dev)))([cls], dev)
+        text = TextTable(encode_class_names([cls], cfg["model"]["clip_text"], device=str(dev), state_dict=clip_sd))([cls], dev)
         ncol = 8 if a.mode == "stages" else 6
         fig, axes = plt.subplots(4, ncol, figsize=(ncol * 3.3, 4 * 3.5), squeeze=False)
         case = {k: cs[k] for k in ("split", "branch", "turn", "class", "sample", "size")}
@@ -263,8 +307,18 @@ def main():
             x, _, nw, nh = image_inputs(img, dsrc, T, "paper")
             xb, vhw = x[None].to(dev), torch.tensor([[nh, nw]], device=dev)
             g = torch.Generator(device=dev.type).manual_seed(a.seed)
-            canvas = torch.full((4,), float(T))
-            if a.mode == "stages":                                               # MỘT lượt ở t = --stage-t: 6 tầng
+            canvas = norm_whwh(model, torch.tensor([[nw, nh, nw, nh]], dtype=torch.float32), T)[0] if policy else \
+                torch.full((4,), float(T))
+            if policy:                                                           # CE-Loc: mock 100 / DDPM 1000 bước, ghi mọi bước
+                u, traj = model.sample(xb, text, vhw, 1, generator=g, sampler=a.sampler, record="all")
+                steps = [{"t": s["t"], "x": s["x_t"],
+                          "x0": sorted_box(unit_to_boxes(s["x0_hat"][0, 0], canvas).numpy())} for s in traj]
+                boxes = [sorted_box(unit_to_boxes(st["x"][0, 0], canvas).numpy()) for st in steps]
+                boxes.append(sorted_box(unit_to_boxes(u[0, 0].cpu(), canvas).numpy()))
+                tlabel = [f"t={st['t']}" for st in steps] + ["output"]
+                n = len(boxes) - 1
+                snaps = sorted(set(np.linspace(n / 4, n, 4).round().astype(int).tolist()))   # sau bước N/4, N/2, 3N/4, N
+            elif a.mode == "stages":                                               # MỘT lượt ở t = --stage-t: 6 tầng
                 _, steps = model.sample(xb, text, vhw, 1, generator=g, steps=1, return_stages=True, t_start=a.stage_t)
                 st0 = steps[0]
                 boxes = [st0["noisy"][0, 0].numpy()] + [b for b in st0["stages"][:, 0, 0].numpy()]
@@ -313,7 +367,8 @@ def main():
                                 bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="none", alpha=0.7), zorder=7)
                 ax.plot(*cents[si], "o", color="red", mec="black", mew=0.6, ms=7, zorder=8)
                 if a.show_x0 and a.mode == "steps":
-                    rect(ax, steps[si - 1]["stages"][-1, 0, 0].numpy(), "deepskyblue", lw=1.2, ls=":")
+                    rect(ax, steps[si - 1]["x0"] if policy else steps[si - 1]["stages"][-1, 0, 0].numpy(), "deepskyblue",
+                         lw=1.2, ls=":")
                 is_out = si == len(boxes) - 1
                 if a.mode == "stages":
                     ttl = f"stage {si}/{len(boxes) - 1} output (t = {steps[0]['t']})"
@@ -331,7 +386,7 @@ def main():
                 ax.set_title(ttl, fontsize=8.5)
                 row["states"].append(rec)
             row["path"] = [[lab, *b.tolist()] for lab, b in zip(tlabel, boxes)]
-            xy, att = spatial_softmax(model, xb)
+            xy, att = spatial_softmax(model, xb, vhw)
             eff = effective_cells(att).numpy()
             px, py = keypoint_pixels(xy.numpy(), att.shape[1])
             ax = axes[r, ncol - 1]
@@ -365,17 +420,20 @@ def main():
                    Line2D([], [], color="black", marker="o", mfc="0.7", lw=1.4,
                           label="center path: input -> stage 1..k" if a.mode == "stages" else "center path, every step")]
         if a.show_x0:
-            handles.append(Line2D([], [], color="deepskyblue", ls=":", label="predicted x0 (stage 6) of that step"))
+            handles.append(Line2D([], [], color="deepskyblue", ls=":", label="predicted x0 (from eps) of that step" if policy
+                                  else "predicted x0 (stage 6) of that step"))
         handles += [Line2D([], [], color="lime", lw=1.6, marker="+", label="latest removed object (target)"),
                     Line2D([], [], color="lime", lw=1.0, ls="--", label="earlier removed objects")]
         fig.legend(handles=handles, loc="lower center", ncol=6, fontsize=8, frameon=False)
         seen = "train image, seen class" if split == "train" else "unseen class"
-        fig.suptitle(f"{os.path.basename(os.path.dirname(os.path.abspath(a.ckpt)))}/{os.path.basename(a.ckpt)} (iter {it}) | "
+        fig.suptitle(f"{a.name or os.path.basename(os.path.dirname(os.path.abspath(a.ckpt))) + '/' + os.path.basename(a.ckpt)}"
+                     f" ({it if isinstance(it, str) else f'iter {it}'}) | "
                      f"{split} {br}, turn {turn} ({seen} '{cls}') | text = '{cls}' | one box per generation, seed {a.seed} | "
                      + (f"ONE denoising pass at t={a.stage_t}: noisy box (clipped to canvas, as stage 1 sees it) -> 6 stages"
                         if a.mode == "stages" else
                         f"mock sampler (paper): pure noise labelled t={a.mock_steps - 1}..0, x -= eps/{a.mock_steps}"
                         if a.sampler == "mock" else
+                        "DDPM 1000 steps (correct ancestral sampler)" if a.sampler == "ddpm" else
                         f"DDIM {a.steps} steps, eta {a.eta:g}, from t={model.num_timesteps - 1 if a.t_start is None else a.t_start}"),
                      fontsize=10)
         fig.tight_layout(rect=(0, 0.03, 1, 0.97))

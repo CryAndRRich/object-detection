@@ -260,7 +260,8 @@ def _step_loss(net, crit, batch, text_table, cfg, model, gen, dev):
                    else {})                                                       # GAMMA3 / 3.1: box vật đang có
             return net(batch["images"], text, batch["valid_hw"], batch["target"], batch["whwh"], k=k, generator=gen, **geo)
         x0 = boxes_to_unit(batch["target"], norm_whwh(model, batch["whwh"], batch["images"].shape[-1]))  # GAMMA0: ε-MSE
-        loss = net(batch["images"], text, batch["valid_hw"], x0, k=k, generator=gen)
+        obj = {"objects": batch["objects"]} if cfg["model"].get("obj_attn") else {}      # GAMMA4: box vật đang có
+        loss = net(batch["images"], text, batch["valid_hw"], x0, k=k, generator=gen, **obj)
         return loss, {"loss": loss.detach()}
     boxes, t = prepare_train_boxes(batch["boxes"], batch["whwh"], cfg["diffusion"]["num_proposals"],
                                    model.alphas_cumprod, model.snr_scale, gen)

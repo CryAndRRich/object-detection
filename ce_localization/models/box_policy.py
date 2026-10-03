@@ -35,6 +35,7 @@ import torch.nn.functional as F
 import torchvision
 
 from ce_localization.models.backbone import ResNet50FPN
+from ce_localization.models.geo import pad_objects
 from ce_localization.models.memory import masked_spatial_softmax, valid_cells_mask
 from ce_localization.models.unet1d import ConditionalUnet1D
 from ce_localization.utils.diffusion_math import linear_alphas_cumprod
@@ -202,7 +203,8 @@ class BoxPolicy(nn.Module):
     def __init__(self, in_channels=3, pretrained_backbone=True, fpn_dim=256, vis_dim=128, text_in=512,
                  text_dim=128, step_embed_dim=256, down_dims=(64, 128, 256), kernel_size=3, n_groups=8,
                  num_timesteps=1000, beta_start=1e-4, beta_end=0.02, vision="r50_fpn", ss_source="c5",
-                 backbone_norm="frozen", density_init="zero", ss_kind="masked", box_norm="valid", ss_mask=False):
+                 backbone_norm="frozen", density_init="zero", ss_kind="masked", box_norm="valid", ss_mask=False,
+                 obj_attn=False, obj_heads=4, obj_max=300):
         super().__init__()
         if vision not in VISIONS:
             raise ValueError(f"vision {vision!r} không thuộc {VISIONS}")
@@ -219,7 +221,8 @@ class BoxPolicy(nn.Module):
             self.vis_proj = nn.Linear(2 * (C5_CHANNELS if ss_source == "c5" else fpn_dim), vis_dim)
         self.text_proj = nn.Sequential(nn.Linear(text_in, text_dim), nn.Mish())
         self.noise_net = ConditionalUnet1D(4, vis_dim + text_dim, step_embed_dim, tuple(down_dims),
-                                           kernel_size, n_groups)
+                                           kernel_size, n_groups, obj_attn=obj_attn, obj_heads=obj_heads)
+        self.obj_attn, self.obj_max = bool(obj_attn), obj_max
         self.num_timesteps = num_timesteps
         self.register_buffer("alphas_cumprod", linear_alphas_cumprod(num_timesteps, beta_start, beta_end),
                              persistent=False)
@@ -241,13 +244,46 @@ class BoxPolicy(nn.Module):
         """ResNet18 của bài: toạ độ SpatialSoftmax [B, 2C] -> cond — để GAMMA2 dùng chung backbone với model refine."""
         return torch.cat([self.vision.projection(kp), self.text_emb(text_raw, null_text)], dim=-1)
 
-    def forward(self, images, text_raw, valid_hw, x0, k=1, generator=None):
-        """ε-MSE như `ObjectPlacementPolicy.compute_loss` của bài, k bộ (t, ε) mỗi ảnh.
-        x0 [B,4] trong [−1,1]. -> loss vô hướng (trung bình trên B·k·4)."""
-        return self.eps_loss(self.condition(images, text_raw, valid_hw), x0, k, generator)
+    @property
+    def needs_objects(self):
+        """Train / suy luận cần `objects` (box các vật đang có) — GAMMA4 (`obj_attn`)."""
+        return self.obj_attn
 
-    def eps_loss(self, cond, x0, k=1, generator=None):
-        """ε-MSE từ cond [B, D] đã tính sẵn."""
+    def object_tokens(self, objects, valid_hw, canvas, cond, generator=None, cap=False):
+        """objects: list B tensor [Mᵢ,4] xyxy pixel canvas -> (token 6 tầng, mask) cho `noise_net` (mã hoá gương, t = 0).
+        Box vật chuẩn hoá GIỐNG đích (`boxes_to_unit` theo `box_norm`). `cap`: > obj_max vật thì lấy ngẫu nhiên obj_max (train)."""
+        if objects is None:
+            raise ValueError("model.obj_attn cần `objects` (box các vật đang có) khi train / suy luận")
+        dev = cond.device
+        hw = valid_hw.float().cpu()
+        whwh = (torch.full((len(objects), 4), float(canvas)) if self.box_norm == "canvas" else
+                torch.stack([hw[:, 1], hw[:, 0], hw[:, 1], hw[:, 0]], 1))
+        units = []
+        for i, o in enumerate(objects):
+            o = torch.as_tensor(o, dtype=torch.float32).reshape(-1, 4).cpu()
+            if cap and len(o) > self.obj_max:
+                seed = int(torch.randint(0, 2 ** 31 - 1, (1,), generator=generator, device=generator.device)) if generator \
+                    is not None else 0
+                o = o[torch.randperm(len(o), generator=torch.Generator().manual_seed(seed))[: self.obj_max]]
+            units.append(boxes_to_unit(o, whwh[i]))
+        objs, mask = pad_objects(units, dev, min_m=1)
+        return self.noise_net.encode_objects(objs, mask, cond), mask
+
+    def forward(self, images, text_raw, valid_hw, x0, k=1, generator=None, objects=None):
+        """ε-MSE như `ObjectPlacementPolicy.compute_loss` của bài, k bộ (t, ε) mỗi ảnh.
+        x0 [B,4] trong [−1,1]. `objects` (GAMMA4): list B box vật xyxy pixel canvas. -> loss vô hướng (trung bình trên B·k·4)."""
+        cond = self.condition(images, text_raw, valid_hw)
+        obj = (self.object_tokens(objects, valid_hw, images.shape[-1], cond, generator, cap=True) if self.obj_attn
+               else None)
+        return self.eps_loss(cond, x0, k, generator, obj)
+
+    @staticmethod
+    def _repeat_obj(obj, n):
+        return None if obj is None else ([t.repeat_interleave(n, 0) for t in obj[0]], obj[1].repeat_interleave(n, 0))
+
+    def eps_loss(self, cond, x0, k=1, generator=None, obj=None):
+        """ε-MSE từ cond [B, D] đã tính sẵn; obj = (token, mask) của `object_tokens` | None."""
+        obj = self._repeat_obj(obj, k)
         cond = cond.repeat_interleave(k, dim=0)
         x0 = x0.repeat_interleave(k, dim=0)
         dev = x0.device
@@ -255,23 +291,26 @@ class BoxPolicy(nn.Module):
         noise = torch.randn(x0.shape, device=dev, generator=generator)
         ab = self.alphas_cumprod[t].unsqueeze(-1)
         noisy = ab.sqrt() * x0 + (1 - ab).sqrt() * noise
-        pred = self.noise_net(noisy.unsqueeze(1), t, cond).squeeze(1)
+        pred = self.noise_net(noisy.unsqueeze(1), t, cond, *(obj or (None, None))).squeeze(1)
         return F.mse_loss(pred, noise)
 
     @torch.no_grad()
     def sample(self, images, text_raw, valid_hw, n_samples, generator=None, sampler="ddpm", record=None,
-               null_text=False):
+               null_text=False, objects=None, use_objects=True):
         """n_samples mẫu ĐỘC LẬP mỗi ảnh (ảnh mã hoá một lần, các mẫu khử nhiễu song song).
-        -> [B, n_samples, 4] trong [−1,1]; `record` (tập t / "all") -> (box, quỹ đạo: list {t, x_t, x0_hat} [B,n,4])."""
-        return self.sample_from_cond(self.condition(images, text_raw, valid_hw, null_text), n_samples, generator, sampler,
-                                     record)
+        -> [B, n_samples, 4] trong [−1,1]; `record` (tập t / "all") -> (box, quỹ đạo: list {t, x_t, x0_hat} [B,n,4]).
+        GAMMA4: `objects` = box vật (token tính MỘT lần mỗi ảnh, dùng cho mọi bước); `use_objects=False` = tắt (`_noobj`)."""
+        cond = self.condition(images, text_raw, valid_hw, null_text)
+        obj = (self.object_tokens(objects, valid_hw, images.shape[-1], cond) if self.obj_attn and use_objects else None)
+        return self.sample_from_cond(cond, n_samples, generator, sampler, record, obj=obj)
 
     @torch.no_grad()
-    def sample_from_cond(self, cond, n_samples, generator=None, sampler="ddpm", record=None):
-        """Như `sample` nhưng từ cond [B, D] đã tính sẵn."""
+    def sample_from_cond(self, cond, n_samples, generator=None, sampler="ddpm", record=None, obj=None):
+        """Như `sample` nhưng từ cond [B, D] đã tính sẵn (+ token vật của `object_tokens`)."""
         B = cond.shape[0]
         cond = cond.repeat_interleave(n_samples, dim=0)
-        fn = lambda x, t: self.noise_net(x.unsqueeze(1), t, cond).squeeze(1)  # noqa: E731
+        ot, om = self._repeat_obj(obj, n_samples) or (None, None)
+        fn = lambda x, t: self.noise_net(x.unsqueeze(1), t, cond, ot, om).squeeze(1)  # noqa: E731
         run = ddpm_sample if sampler == "ddpm" else mock_sample
         out = run(fn, cond.shape[0], self.alphas_cumprod, generator=generator, device=cond.device, record=record)
         if record is None:

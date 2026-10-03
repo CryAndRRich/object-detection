@@ -67,7 +67,8 @@ def _box_policy_kw(m, d, pre):
                 step_embed_dim=m["step_embed_dim"], down_dims=m["down_dims"], kernel_size=m["kernel_size"],
                 n_groups=m["n_groups"], num_timesteps=d["num_timesteps"], beta_start=d["beta_start"],
                 beta_end=d["beta_end"], ss_source=m.get("ss_source", "c5"), vision=m.get("vision", "r50_fpn"),
-                ss_mask=m.get("ss_mask", False), **_paper_keys(m))
+                ss_mask=m.get("ss_mask", False), obj_attn=m.get("obj_attn", False), obj_heads=m.get("obj_heads", 4),
+                obj_max=m.get("obj_max", 300), **_paper_keys(m))
 
 
 def load_proposer(model, path):
