@@ -811,6 +811,19 @@ def test_unet_mirror_tokens_are_the_same_resblocks_at_t0():
         assert (tok[0][0, 3:] == 0).all()                                     # ô đệm = 0
 
 
+def test_unet_obj_bucket_padding_does_not_change_tokens():
+    """Luồng vật làm tròn số hàng lên bội `obj_bucket` (cố định cỡ cho cuDNN benchmark): token hàng thật y hệt không đệm."""
+    net = _unet(True)
+    objs, mask, cond = _obj_batch()
+    with torch.no_grad():
+        net.obj_bucket = 1
+        ref = net.encode_objects(objs, mask, cond)
+        for b_ in (7, 512):
+            net.obj_bucket = b_
+            for r_, o_ in zip(ref, net.encode_objects(objs, mask, cond)):
+                assert torch.allclose(r_, o_, atol=1e-6), b_
+
+
 def test_unet_obj_attn_grad_flows_through_object_path():
     net = _unet(True).train()
     for xa in net.obj_xattn:
