@@ -36,20 +36,24 @@ def test_select_boxes_vote_nms_rank_and_fill():
     assert clipped["boxes"] == [[0, 0, 30, 30]]
 
 
-def test_screen_order_blind_shuffle_and_repeats():
+def test_screen_order_per_model_and_repeats():
+    """Dãy màn mỗi model: đủ mọi mẫu, xáo, màn chấm lại sau bản gốc >= min_gap, tất định, KHÔNG phụ thuộc model khác."""
     from ce_localization.user_study.build import screen_order
-    ids, models = [f"i{j}" for j in range(40)], ["a", "b", "c"]
-    sc = screen_order(ids, models, seed=1, repeat=0.1, min_gap=10)
-    orig = [s for s in sc if s["repeat_of"] is None]
-    assert sorted((s["image_id"], s["model"]) for s in orig) == sorted((i, m) for i in ids for m in models)
-    reps = [(p, s) for p, s in enumerate(sc) if s["repeat_of"] is not None]
-    assert len(reps) == 12
-    for p, s in reps:
-        o = sc[s["repeat_of"]]
-        assert o["repeat_of"] is None and (o["image_id"], o["model"]) == (s["image_id"], s["model"])
-        assert p - s["repeat_of"] >= 10
-    assert [s["model"] for s in orig[:12]] != sorted(s["model"] for s in orig[:12])     # đã xáo
-    assert sc == screen_order(ids, models, seed=1, repeat=0.1, min_gap=10)
+    ids = [f"i{j}" for j in range(40)]
+    sc = screen_order(ids, "a", seed=1, repeat=0.1, min_gap=0.05)
+    orig = [x for x in sc if x["repeat_of"] is None]
+    assert sorted(x["image_id"] for x in orig) == sorted(ids) and all(x["id"] == f"a|{x['image_id']}" for x in orig)
+    assert len({x["id"] for x in sc}) == len(sc)
+    by_id = {x["id"]: x for x in sc}
+    reps = [x for x in sc if x["repeat_of"] is not None]
+    assert len(reps) == 4
+    for x in reps:
+        o = by_id[x["repeat_of"]]
+        assert o["image_id"] == x["image_id"] and x["id"] == o["id"] + "|repeat" and x["order"] >= o["order"] + 0.05
+    seq = [x["image_id"] for x in sorted(orig, key=lambda x: x["order"])]
+    assert seq != sorted(ids)                                                          # đã xáo
+    assert sc == screen_order(ids, "a", seed=1, repeat=0.1, min_gap=0.05)
+    assert [x["order"] for x in screen_order(ids, "b", seed=1)] != [x["order"] for x in sc[:40]]   # model khác: thứ tự khác
 
 
 def test_render_colors_and_box_at():
@@ -106,13 +110,26 @@ def test_full_flow_dump_build_rate_score(tmp_path, monkeypatch):
     assert [r["image_id"] for r in recs] == keys and all(np.asarray(r["boxes"]).shape == (6, 4) for r in recs)
 
     items = str(tmp_path / "us" / "items.json")
-    monkeypatch.setattr(sys, "argv", ["build.py", "--turn-index", tpath, "--out", items, "--repeat", "0.25", "--min-gap", "2",
-                                      "--model", "m_ddpm", dump, "inpainted_ddpm", "Model DDPM", "--model", "m_mock", dump, "inpainted_mock",
-                                      "Model mock"])
+    both = str(tmp_path / "us" / "items_both.json")
+    m_ddpm = ["--model", "m_ddpm", dump, "inpainted_ddpm", "Model DDPM"]
+    m_mock = ["--model", "m_mock", dump, "inpainted_mock", "Model mock"]
+    common = ["build.py", "--turn-index", tpath, "--repeat", "0.25", "--min-gap", "0.1"]
+    monkeypatch.setattr(sys, "argv", common + ["--out", both] + m_ddpm + m_mock)
+    bu.main()
+    monkeypatch.setattr(sys, "argv", common + ["--out", items] + m_ddpm)      # dựng một model ...
     bu.main()
     with open(items) as f:
+        d1 = json.load(f)
+    monkeypatch.setattr(sys, "argv", ["build.py", "--turn-index", tpath, "--add-to", items] + m_mock)   # ... rồi thêm model sau
+    bu.main()
+    with pytest.raises(ValueError):                                           # thêm trùng model
+        bu.build_items(index, [("m_mock", {}, {})], base=json.load(open(items)))
+    with open(items) as f:
         d = json.load(f)
-    assert set(d["items"]) == set(keys) and d["k"] == 4
+    with open(both) as f:
+        assert json.load(f) == d                                              # thêm sau = dựng cùng lúc, từng byte
+    assert [x for x in d["screens"] if x["model"] == "m_ddpm"] == d1["screens"]   # màn model cũ không đổi
+    assert set(d["items"]) == set(keys) and d["k"] == 4 and d["models"]["m_mock"]["name"] == "Model mock"
     for iid, it in d["items"].items():
         e = index.turns[iid]
         b = index.branches[e["branch"]]
@@ -126,11 +143,13 @@ def test_full_flow_dump_build_rate_score(tmp_path, monkeypatch):
             want = [min(max(px[i][0], 0), W), min(max(px[i][1], 0), H), min(max(px[i][2], 0), W), min(max(px[i][3], 0), H)]
             assert bx == pytest.approx(want, abs=0.02)
     n_orig = 2 * len(keys)
-    assert sum(s["repeat_of"] is None for s in d["screens"]) == n_orig
+    assert sum(x["repeat_of"] is None for x in d["screens"]) == n_orig
 
     ratings = str(tmp_path / "us" / "ratings.jsonl")
-    sess = Session(items, samples)
-    assert sess.s == 0 and not sess.done
+    sess = Session(items, samples, models=["m_mock"])                         # chấm riêng một model
+    nv = len(sess.view)
+    assert nv == sum(x["model"] == "m_mock" for x in d["screens"]) and sess.pos == 0 and not sess.done
+    assert all(sess.screens[j]["model"] == "m_mock" for j in sess.view)
     rated = 0
     while not sess.done and rated < 6:
         n = len(sess.labels)
@@ -146,41 +165,50 @@ def test_full_flow_dump_build_rate_score(tmp_path, monkeypatch):
                 assert sess.labels[1] == ["on_object", "wrong_size", "implausible"]
         if rated == 0:
             h = sess.header()
-            sc = sess.screen()[0]
-            assert "Model DDPM" in h or "Model mock" in h
-            assert sc["image_id"].rsplit("_t", 1)[0] in h and "not saved" in h
+            assert "Model mock" in h and sess.screen()[0]["image_id"].rsplit("_t", 1)[0] in h and "not saved" in h
             assert "·" not in h and "—" not in h
         sess.save()                                                            # lưu rồi sang màn sau
         rated += 1
-        assert sess.s == rated
+        assert sess.pos == rated
     assert len(open(ratings).read().splitlines()) == rated
-    s_now = sess.s
+    p_now = sess.pos
     sess.next()
     sess.next()                                                                # Next = bỏ qua, KHÔNG lưu
-    assert sess.s == s_now + 2 and len(open(ratings).read().splitlines()) == rated
+    assert sess.pos == p_now + 2 and len(open(ratings).read().splitlines()) == rated
     sess.save()
     sess.first_unsaved()                                                       # về màn bị bỏ qua đầu tiên
-    assert sess.s == s_now and s_now not in sess.store.latest and s_now + 2 in sess.store.latest
+    assert sess.pos == p_now and not sess.saved(p_now) and sess.saved(p_now + 2)
     rated += 1
-    sess2 = Session(items, samples)                                            # tắt mở lại: về màn chưa lưu đầu tiên
-    assert sess2.s == s_now and len(sess2.store.latest) == rated
+    sess.set_models(["m_ddpm"])                                                # đổi model: dãy khác, từ màn chưa lưu đầu
+    assert sess.pos == 0 and all(sess.screens[j]["model"] == "m_ddpm" for j in sess.view) and "Model DDPM" in sess.header()
+    sess.save()
+    rated += 1
+    sess.set_models(None)                                                      # mọi model: hai dãy xen nhau
+    assert len(sess.view) == len(d["screens"]) and len({sess.screens[j]["model"] for j in sess.view[:10]}) == 2
+    with pytest.raises(ValueError):
+        sess.set_models(["khong_co"])
+    sess2 = Session(items, samples, models=["m_mock"])                         # tắt mở lại: về màn chưa lưu đầu tiên
+    assert sess2.pos == p_now and len(sess2.store.latest) == rated
     sess2.prev()
-    assert sess2.s == s_now - 1 and sess2.labels == sess2.store.latest[s_now - 1]["labels"] and "(saved)" in sess2.header()
-    sess2.labels = [[] for _ in sess2.labels]
+    sid = sess2.screen()[0]["id"]
+    assert sess2.labels == sess2.store.latest[sid]["labels"] and "(saved)" in sess2.header()
+    nb = len(sess2.labels)
+    sess2.labels = [[] for _ in range(nb)]
     sess2.save()                                                               # sửa: bản sau thay bản trước
-    assert sess2.s == s_now and su.load_ratings(ratings)[s_now - 1]["labels"] == [[]] * len(sess2.labels)
+    assert sess2.pos == p_now and su.load_ratings(ratings)[sid]["labels"] == [[]] * nb
     sess2.go(0)
     sess2.prev()
-    assert sess2.s == 0                                                        # không lùi quá màn đầu
+    assert sess2.pos == 0                                                      # không lùi quá màn đầu
+    sess2.set_models(None)
     while not sess2.done:
         sess2.first_unsaved()
         sess2.save()
-    assert len(sess2.store.latest) == len(d["screens"]) and "ALL SCREENS SAVED" in sess2.header()
-    last = len(d["screens"]) - 1
+    assert len(sess2.store.latest) == len(d["screens"]) and "ALL SCREENS" in sess2.header()
+    last = len(sess2.view) - 1
     sess2.go(last)
     sess2.next()
     sess2.save()
-    assert sess2.s == last                                                     # màn cuối: đứng yên
+    assert sess2.pos == last                                                   # màn cuối: đứng yên
 
     monkeypatch.setattr(sys, "argv", ["score.py", "--items", items, "--boot", "50"])
     su.main()

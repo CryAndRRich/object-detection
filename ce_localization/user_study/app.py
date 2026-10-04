@@ -2,17 +2,19 @@
 """Web chấm user study (docs/EXPERIMENT_GAMMA.md mục 17). Chạy ở máy chấm (local), chỉ đọc `items.json` + ảnh `samples/`,
 không model, không GPU. Cần `pip install gradio` (không có trong requirements.txt của server). Chữ trên web tiếng Anh.
 
-Mỗi màn = một cặp (mẫu test, model) theo thứ tự đã xáo trong `items.json`; đầu màn ghi rõ mẫu (nhánh, lượt, file) và tên hiển thị
-của model (docs/EXPERIMENT_GAMMA.md mục 13.0). Ảnh inpaint lượt t + box vật đang có (xanh dương, tắt được) + K box đề xuất đánh số
+Mỗi màn = một cặp (mẫu test, model). Ô "Models to rate" (hoặc `--models`) chọn model đang chấm: một model = dãy màn của riêng nó
+(mẫu xáo ngẫu nhiên), nhiều model = các dãy xen ngẫu nhiên; đổi lựa chọn lúc nào cũng được, nhãn lưu theo mã màn nên không lẫn.
+Đầu màn ghi rõ mẫu (nhánh, lượt, file) và tên hiển thị của model (docs/EXPERIMENT_GAMMA.md mục 13.0). Ảnh inpaint lượt t + box vật đang có (xanh dương, tắt được) + K box đề xuất đánh số
 theo hạng (xanh lá = ổn, đỏ = không ổn). Lỗ GT không hiện. Nhãn mỗi box = DANH SÁCH lý do lỗi (rỗng = ổn; chọn được nhiều lý do
 cùng lúc ở cột phải). Bấm vào box hoặc phím 1..K để đổi ổn <-> không ổn; box vừa chuyển đỏ mặc định lý do "On object".
-  ← / → (Previous / Next)  sang màn trước / sau, KHÔNG lưu (Next = tạm bỏ qua màn)
+  ← / → (Previous / Next)  sang màn trước / sau trong dãy đang chọn, KHÔNG lưu (Next = tạm bỏ qua màn)
   Enter (Save)             lưu màn này (box còn xanh = ổn) rồi sang màn sau; lưu lại màn đã lưu thì bản sau thay bản trước
-  Go to first unsaved      về màn chưa lưu đầu tiên (lỡ Next bỏ qua)
-Mỗi lần lưu ghi nối một dòng vào `ratings.jsonl` ⇒ tắt mở lại vẫn tiếp từ màn chưa lưu đầu tiên.
+  Go to first unsaved      về màn chưa lưu đầu tiên của dãy đang chọn (lỡ Next bỏ qua)
+Mỗi lần lưu ghi nối một dòng vào `ratings.jsonl` (khoá = mã màn `<model>|<image_id>[|repeat]`) ⇒ tắt mở lại vẫn tiếp từ màn chưa
+lưu đầu tiên; thêm model vào items.json (`build.py --add-to`) không ảnh hưởng nhãn cũ.
 
   cd object-detection/ce_localization
-  python user_study/app.py --items ../../output/gamma/user_study/items.json --samples-root ../data/samples
+  python user_study/app.py --items ../../output/gamma/user_study/items.json --samples-root ../data/samples [--models gamma4]
 """
 
 import argparse
@@ -107,7 +109,7 @@ def render(img, objects, boxes, labels, show_objects=True, max_side=MAX_SIDE):
 
 
 class RatingStore:
-    """`ratings.jsonl`: mỗi lần lưu một dòng; bản ghi SAU CÙNG của mỗi màn `s` là bản dùng."""
+    """`ratings.jsonl`: mỗi lần lưu một dòng; bản ghi SAU CÙNG của mỗi mã màn `id` là bản dùng."""
 
     def __init__(self, path):
         self.path, self.latest = path, {}
@@ -116,7 +118,7 @@ class RatingStore:
                 for line in f:
                     if line.strip():
                         rec = json.loads(line)
-                        self.latest[rec["s"]] = rec
+                        self.latest[rec["id"]] = rec
 
     def save(self, rec):
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
@@ -124,13 +126,14 @@ class RatingStore:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             f.flush()
             os.fsync(f.fileno())
-        self.latest[rec["s"]] = rec
+        self.latest[rec["id"]] = rec
 
 
 class Session:
-    """Trạng thái chấm (một người chấm): màn hiện tại `s`, nhãn K box đang sửa."""
+    """Trạng thái chấm (một người chấm): model đang chọn, dãy màn `view` (chỉ số vào `screens`, theo `order`), vị trí `pos`,
+    nhãn K box đang sửa."""
 
-    def __init__(self, items_path, samples_root, ratings_path=None):
+    def __init__(self, items_path, samples_root, ratings_path=None, models=None):
         with open(items_path) as f:
             self.d = json.load(f)
         self.k, self.screens, self.items = self.d["k"], self.d["screens"], self.d["items"]
@@ -138,40 +141,57 @@ class Session:
         self.store = RatingStore(ratings_path or os.path.join(os.path.dirname(os.path.abspath(items_path)), "ratings.jsonl"))
         self._img = (None, None)
         self.r = 1.0
+        self.set_models(models)
+
+    def model_name(self, m):
+        return self.d["models"][m].get("name") or m
+
+    # ---- chọn model
+    def set_models(self, models=None):
+        """Chấm `models` (list mã; None / rỗng = mọi model) rồi về màn chưa lưu đầu tiên của dãy đó."""
+        bad = [m for m in models or [] if m not in self.d["models"]]
+        if bad:
+            raise ValueError(f"model không có trong items.json: {bad} (có {list(self.d['models'])})")
+        self.models = [m for m in self.d["models"] if not models or m in models]
+        self.view = sorted((j for j, sc in enumerate(self.screens) if sc["model"] in self.models),
+                           key=lambda j: (self.screens[j]["order"], self.screens[j]["id"]))
         self.first_unsaved()
 
     # ---- điều hướng
+    def saved(self, pos):
+        return self.screens[self.view[pos]]["id"] in self.store.latest
+
     def next_unrated(self, after):
-        """Màn chưa lưu đầu tiên sau `after`; hết thì quay vòng từ đầu; lưu hết -> None."""
-        n = len(self.screens)
-        for s in list(range(after + 1, n)) + list(range(0, min(after + 1, n))):
-            if s not in self.store.latest:
-                return s
+        """Vị trí chưa lưu đầu tiên sau `after` trong dãy; hết thì quay vòng từ đầu; lưu hết -> None."""
+        n = len(self.view)
+        for p in list(range(after + 1, n)) + list(range(0, min(after + 1, n))):
+            if not self.saved(p):
+                return p
         return None
 
-    def go(self, s):
-        self.s = min(max(s, 0), len(self.screens) - 1)
-        rec = self.store.latest.get(self.s)
+    def go(self, pos):
+        self.pos = min(max(pos, 0), len(self.view) - 1)
+        rec = self.store.latest.get(self.screen()[0]["id"])
         self.labels = [as_reasons(x) for x in rec["labels"]] if rec else [[] for _ in self.sel()["boxes"]]
         self.t_show = time.time()
 
     @property
     def done(self):
-        return len(self.store.latest) >= len(self.screens)
+        return all(self.saved(p) for p in range(len(self.view)))
 
     def first_unsaved(self):
-        s = self.next_unrated(-1)
-        self.go(len(self.screens) - 1 if s is None else s)
+        p = self.next_unrated(-1)
+        self.go(len(self.view) - 1 if p is None else p)
 
     def next(self):
         """Sang màn sau, KHÔNG lưu (tạm bỏ qua)."""
-        self.go(self.s + 1)
+        self.go(self.pos + 1)
 
     def prev(self):
-        self.go(self.s - 1)
+        self.go(self.pos - 1)
 
     def screen(self):
-        sc = self.screens[self.s]
+        sc = self.screens[self.view[self.pos]]
         return sc, self.items[sc["image_id"]]
 
     def sel(self):
@@ -198,10 +218,10 @@ class Session:
     def save(self):
         """Lưu màn này rồi sang màn sau (màn cuối: đứng yên)."""
         sc, it = self.screen()
-        self.store.save({"s": self.s, "image_id": sc["image_id"], "model": sc["model"], "repeat_of": sc["repeat_of"],
+        self.store.save({"id": sc["id"], "image_id": sc["image_id"], "model": sc["model"], "repeat_of": sc["repeat_of"],
                          "labels": [list(x) for x in self.labels], "sec": round(time.time() - self.t_show, 2),
                          "time": datetime.now().isoformat(timespec="seconds")})
-        if self.s < len(self.screens) - 1:
+        if self.pos < len(self.view) - 1:
             self.next()
 
     # ---- hiển thị
@@ -214,14 +234,14 @@ class Session:
 
     def header(self):
         sc, it = self.screen()
-        n, saved = len(self.screens), len(self.store.latest)
-        state = "saved" if self.s in self.store.latest else "not saved"
+        n = len(self.view)
+        saved = sum(self.saved(p) for p in range(n))
+        state = "saved" if self.saved(self.pos) else "not saved"
         if self.done:
-            state += " | ALL SCREENS SAVED"
+            state += " | ALL SCREENS OF THE SELECTED MODELS SAVED"
         branch, turn = sc["image_id"].rsplit("_t", 1)
-        name = self.d["models"][sc["model"]].get("name") or sc["model"]
-        return (f"Screen **{self.s + 1} / {n}** ({state}) | Saved {saved} / {n} ({saved / n * 100:.1f}%)\n\n"
-                f"Test sample: **{branch}**, turn {turn} ({it['image']}) | Model: **{name}** | "
+        return (f"Screen **{self.pos + 1} / {n}** ({state}) | Saved {saved} / {n} ({saved / n * 100:.1f}%)\n\n"
+                f"Test sample: **{branch}**, turn {turn} ({it['image']}) | Model: **{self.model_name(sc['model'])}** | "
                 f"{len(it['objects'])} existing objects\n\n"
                 f"### Add one more: **{it['class']}**")
 
@@ -238,6 +258,8 @@ def build_ui(sess, gr):
             with gr.Column(scale=4):
                 img = gr.Image(type="pil", interactive=False, show_label=False, elem_id="us_img")
             with gr.Column(scale=1, min_width=300):
+                models = gr.Dropdown(choices=[(sess.model_name(m), m) for m in sess.d["models"]], value=list(sess.models),
+                                     multiselect=True, label="Models to rate (empty = all)")
                 with gr.Row():
                     prev = gr.Button("← Previous", elem_id="us_prev", min_width=60, scale=1)
                     nxt = gr.Button("Next →", elem_id="us_next", min_width=60, scale=1)
@@ -262,6 +284,10 @@ def build_ui(sess, gr):
                 return full(show_objects)
             return f
 
+        def on_models(ms, show_objects):
+            sess.set_models(ms)
+            return full(show_objects)
+
         def on_click(show_objects, evt: gr.SelectData):
             sess.click(*evt.index[:2])
             return [sess.image(show_objects)] + radio_updates()
@@ -280,6 +306,7 @@ def build_ui(sess, gr):
 
         outs_full = [head, img] + radios
         demo.load(full, [show], outs_full, api_name="show")
+        models.input(on_models, [models, show], outs_full, api_name="models")
         img.select(on_click, [show], [img] + radios, api_name="click")
         for i, r_ in enumerate(radios):
             r_.input(make_radio(i), [r_, show], [img] + radios, api_name=f"reasons{i + 1}")
@@ -298,11 +325,13 @@ def main():
     ap.add_argument("--items", required=True, help="items.json của user_study/build.py")
     ap.add_argument("--samples-root", default="../data/samples")
     ap.add_argument("--ratings", default=None, help="mặc định ratings.jsonl cạnh items.json")
+    ap.add_argument("--models", nargs="*", default=None, help="mã model chấm lúc mở (mặc định mọi model; đổi được trên web)")
     ap.add_argument("--port", type=int, default=7860)
     a = ap.parse_args()
     import gradio as gr
-    sess = Session(a.items, a.samples_root, a.ratings)
-    print(f"{len(sess.screens)} màn, đã chấm {len(sess.store.latest)} -> {sess.store.path}", flush=True)
+    sess = Session(a.items, a.samples_root, a.ratings, a.models)
+    print(f"{len(sess.screens)} màn ({len(sess.d['models'])} model), đã lưu {len(sess.store.latest)} -> {sess.store.path}",
+          flush=True)
     demo, launch_kw = build_ui(sess, gr)
     demo.launch(server_name="127.0.0.1", server_port=a.port, inbrowser=True, **launch_kw)
 

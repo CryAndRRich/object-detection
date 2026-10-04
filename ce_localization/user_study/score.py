@@ -42,13 +42,13 @@ OBJ_BINS = ((0, 10, "<=10"), (11, 30, "11-30"), (31, 100, "31-100"), (101, 10 **
 
 
 def load_ratings(path):
-    """-> {s: bản ghi sau cùng}."""
+    """-> {mã màn: bản ghi sau cùng}."""
     latest = {}
     with open(path) as f:
         for line in f:
             if line.strip():
                 rec = json.loads(line)
-                latest[rec["s"]] = rec
+                latest[rec["id"]] = rec
     return latest
 
 
@@ -58,12 +58,12 @@ def _cnll_fn():
 
 
 def box_table(d, ratings):
-    """Mỗi box của màn đã chấm (không tính màn chấm lại) -> list dict: s, model, image_id, rank, ok, label, iou_hole, ioa_obj,
+    """Mỗi box của màn đã chấm (không tính màn chấm lại; bỏ model không còn trong items) -> list dict: s (mã màn), model, image_id, rank, ok, label, iou_hole, ioa_obj,
     n_obj, cnll_F1, cnll_F2 (`reasons` = list lý do, [] = ổn)."""
     cnll = _cnll_fn()
     rows, cache = [], {}
     for s, rec in sorted(ratings.items()):
-        if rec.get("repeat_of") is not None:
+        if rec.get("repeat_of") is not None or rec["model"] not in d["models"]:
             continue
         it = d["items"][rec["image_id"]]
         sel = it["models"][rec["model"]]
@@ -131,7 +131,8 @@ def score(d, ratings, boot=1000, seed=0):
            "n_repeat_rated": sum(r.get("repeat_of") is not None for r in ratings.values()), "models": {}, "pairs": {},
            "auto_vs_human": {}}
     K = d["k"]
-    per_screen = {(rec["model"], s): [] for s, rec in ratings.items() if rec.get("repeat_of") is None}   # kể cả màn 0 box
+    per_screen = {(rec["model"], s): [] for s, rec in ratings.items()                    # kể cả màn 0 box
+                  if rec.get("repeat_of") is None and rec["model"] in d["models"]}
     for r in rows:
         per_screen[(r["model"], r["s"])].append(r)
     for m in d["models"]:
