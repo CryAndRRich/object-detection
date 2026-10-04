@@ -866,3 +866,31 @@ def test_box_policy_obj_attn_loss_sample_and_cap():
     a = m.sample(x, text, vhw, 3, torch.Generator().manual_seed(0), objects=objects)
     b = m.sample(x, text, vhw, 3, torch.Generator().manual_seed(0), objects=objects, use_objects=False)
     assert a.shape == (2, 3, 4) and torch.allclose(a, b, atol=1e-5)           # out_proj = 0: tắt box vật = y hệt
+
+
+def test_propose_refine_proposer_obj_attn_uses_objects():
+    """GAMMA4.1: CE-Loc đề xuất có `obj_attn` ⇒ `sample_variants` truyền token box vật cho CE-Loc (box `_ce` = đúng
+    `proposer.sample_from_cond(..., obj=object_tokens)`), thiếu `objects` thì báo lỗi; needs_objects bật."""
+    from ce_localization.models.box_policy import boxes_to_unit, unit_to_boxes
+    from ce_localization.models.propose_refine import ProposeRefine
+    pk = dict(in_channels=4, pretrained_backbone=False, num_timesteps=20, vision="r18_paper", ss_mask=True, obj_attn=True)
+    torch.manual_seed(0)
+    m = ProposeRefine(pk, d_model=64, dim_feedforward=128, nhead=4, dim_dynamic=8, num_timesteps=20).eval()
+    for xa in m.proposer.noise_net.obj_xattn:
+        torch.nn.init.normal_(xa.attn.out_proj.weight, std=0.3)
+    assert m.needs_objects
+    x, vhw, text = torch.rand(2, 4, 128, 128), torch.tensor([[96, 128], [128, 128]]), torch.randn(2, 512)
+    objects = [torch.tensor([[5.0, 5.0, 30.0, 40.0], [60.0, 50.0, 90.0, 90.0]]), torch.zeros(0, 4)]
+    with pytest.raises(ValueError, match="objects"):
+        m.sample_variants(x, text, vhw, 3, torch.Generator().manual_seed(0))
+    ce = m.sample_variants(x, text, vhw, 3, torch.Generator().manual_seed(0), objects=objects)[0]
+    with torch.no_grad():
+        _, kp = m.encode(x, vhw)
+        cond = m.proposer.cond_from_keypoints(kp, text)
+        g = torch.Generator().manual_seed(0)
+        u = m.proposer.sample_from_cond(cond, 3, g, "ddpm", obj=m.proposer.object_tokens(objects, vhw, 128, cond))
+        u0 = m.proposer.sample_from_cond(cond, 3, torch.Generator().manual_seed(0), "ddpm")
+    whwh = torch.tensor([[128.0, 96.0, 128.0, 96.0], [128.0, 128.0, 128.0, 128.0]])[:, None]
+    canvas = torch.full((4,), 128.0)
+    assert torch.allclose(ce, boxes_to_unit(unit_to_boxes(u, canvas), whwh), atol=1e-4)
+    assert not torch.allclose(ce, boxes_to_unit(unit_to_boxes(u0, canvas), whwh), atol=1e-4)

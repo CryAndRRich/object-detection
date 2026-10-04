@@ -98,8 +98,14 @@ class ProposeRefine(nn.Module):
 
     @property
     def needs_objects(self):
-        """Train / suy luận cần `objects` (box các vật đang có) — GAMMA3 / 3.1."""
-        return self.geo or self.relation
+        """Train / suy luận cần `objects` (box các vật đang có) — GAMMA3 / 3.1 (refine), GAMMA4.1 (CE-Loc `obj_attn`)."""
+        return self.geo or self.relation or self.proposer.obj_attn
+
+    def proposer_obj(self, objects, valid_hw, canvas, cond, generator=None, cap=False):
+        """Token box vật cho CE-Loc đề xuất (GAMMA4.1: proposer `obj_attn`, như `BoxPolicy.sample`) | None."""
+        if not self.proposer.obj_attn:
+            return None
+        return self.proposer.object_tokens(objects, valid_hw, canvas, cond, generator, cap)
 
     def refine(self, feats, vis, text_raw, t, boxes, need_weights=False, geo=None, rel=None):
         """boxes [B,K,4] xyxy pixel, t [B·K], geo (vật [B·K,M,4], mask) | None, rel (`_rel`) | None
@@ -146,7 +152,8 @@ class ProposeRefine(nn.Module):
         if not self.freeze_proposer and self.proposer_weight > 0:          # GAMMA2.1: giữ CE-Loc khớp backbone chung
             canvas = torch.full_like(whwh, float(images.shape[-1]))
             cond = self.proposer.cond_from_keypoints(kp, text_raw)
-            loss_eps = self.proposer.eps_loss(cond, boxes_to_unit(target, canvas), 1, generator)
+            loss_eps = self.proposer.eps_loss(cond, boxes_to_unit(target, canvas), 1, generator,
+                                              self.proposer_obj(objects, valid_hw, images.shape[-1], cond, generator, cap=True))
         wk = whwh.repeat_interleave(k, 0)
         gt = target.repeat_interleave(k, 0)
         x0 = diffusion_from_boxes(gt, wk, self.snr)
@@ -200,7 +207,9 @@ class ProposeRefine(nn.Module):
         whwh = self._whwh(valid_hw)
         wk = whwh.repeat_interleave(K, 0)
         canvas = torch.full((4,), float(images.shape[-1]), device=dev)
-        u_ce = self.proposer.sample_from_cond(self.proposer.cond_from_keypoints(kp, text_raw), K, generator, proposer_sampler)
+        cond = self.proposer.cond_from_keypoints(kp, text_raw)
+        u_ce = self.proposer.sample_from_cond(cond, K, generator, proposer_sampler,
+                                              obj=self.proposer_obj(objects, valid_hw, images.shape[-1], cond))
         box_ce = unit_to_boxes(u_ce.reshape(-1, 4), canvas)                 # [B·K,4] xyxy pixel canvas
         vis = self.vis_token(kp)
         geo_all = self._geo(objects, K, dev)

@@ -153,23 +153,34 @@ def test_ddp_gamma2_celoc_bucket_view_no_stride_warning(tmp_path):
             port = so.getsockname()[1]
         tmp.spawn(_ddp_worker_strict, args=(2, port, ["--config", cfg, "--save-dir", save, "--max-iter", "3",
                                                       "--eval-every", "3", *extra], unused), nprocs=2, join=True)
+    import shutil
+    rm = lambda name: shutil.rmtree(str(tmp_path / name), ignore_errors=True)   # noqa: E731 — mỗi run vài trăm MB–GB: xoá ngay
     run(str(tmp_path / "new"), None)
     ck = torch.load(os.path.join(str(tmp_path / "new"), "last.pth"), weights_only=False)
     assert ck["iter"] == 3 and all(np.isfinite(h["loss"]) and h["skipped"] == 0 for h in ck["history"] if "loss" in h)
     with pytest.raises(Exception, match="Grad strides"):
         run(str(tmp_path / "old"), True)
+    rm("old")
     # pha 2 (đóng băng / train chung / GAMMA3 geo / GAMMA3.1 relation) trên DDP KHÔNG find_unused: tham số nào thiếu grad thì DDP báo lỗi ngay
     p_o, c_o = _gamma2_cfg(tmp_path, base, "obj")                           # GAMMA4: CE-Loc đứng một mình + box vật
     assert not __import__("ce_localization.train", fromlist=["x"]).ddp_find_unused(c_o)
     run(str(tmp_path / "obj"), None, p_o)
     k_o = torch.load(os.path.join(str(tmp_path / "obj"), "last.pth"), weights_only=False)
     assert k_o["iter"] == 3 and all(np.isfinite(h["loss"]) for h in k_o["history"] if "loss" in h)
+    p_po, c_po = _gamma2_cfg(tmp_path, base, "pr_obj")                     # GAMMA4.1: refine trên CE-Loc GAMMA4
+    assert not __import__("ce_localization.train", fromlist=["x"]).ddp_find_unused(c_po)
+    run(str(tmp_path / "pr_obj"), None, p_po, ("--proposer-ckpt", os.path.join(str(tmp_path / "obj"), "last.pth")))
+    k_po = torch.load(os.path.join(str(tmp_path / "pr_obj"), "last.pth"), weights_only=False)
+    assert k_po["iter"] == 3 and all(np.isfinite(h["loss"]) for h in k_po["history"] if "loss" in h)
+    rm("obj"), rm("pr_obj")
     for kind in ("pr", "pr_joint", "geo", "rel"):
         p2, c2 = _gamma2_cfg(tmp_path, base, kind)
         assert not __import__("ce_localization.train", fromlist=["x"]).ddp_find_unused(c2)
         run(str(tmp_path / kind), None, p2, ("--proposer-ckpt", os.path.join(str(tmp_path / "new"), "best.pth")))
         k2 = torch.load(os.path.join(str(tmp_path / kind), "last.pth"), weights_only=False)
         assert k2["iter"] == 3 and all(np.isfinite(h["loss"]) for h in k2["history"] if "loss" in h)
+        rm(kind)
+    rm("new")
 
 
 def test_config_diff_ignores_data_root_and_workers():
@@ -965,3 +976,53 @@ def test_full_flow_gamma4_train_resume_eval(tmp_path, monkeypatch):
         res = json.load(f)
     assert set(res["results"]) == {"inpainted", "inpainted_noobj", "original", "original_noobj"}
     assert res["results"]["inpainted_noobj"]["n"] == res["results"]["inpainted"]["n"] > 0
+
+
+def test_gamma4_1_config_only_swaps_proposer():
+    """gamma4_1 = gamma2 với CE-Loc đề xuất = gamma4 (khối proposer thêm 3 khoá obj_*, proposer_ckpt -> gamma4) (+ tên)."""
+    from tests.ce_localization.helpers import CFG_G
+    with open(CFG_G["pr"]) as f:
+        a = yaml.safe_load(f)
+    with open(CFG_G["pr_obj"]) as f:
+        b = yaml.safe_load(f)
+    with open(CFG_G["obj"]) as f:
+        g4 = yaml.safe_load(f)
+    pb = b["model"]["proposer"]
+    assert {k: pb[k] for k in ("obj_attn", "obj_heads", "obj_max")} == {k: g4["model"][k] for k in ("obj_attn", "obj_heads", "obj_max")}
+    for k in ("obj_attn", "obj_heads", "obj_max"):
+        pb.pop(k)
+    assert b["init"].pop("proposer_ckpt").endswith("gamma4/best.pth")
+    a["init"].pop("proposer_ckpt")
+    for k in ("experiment", "description"):
+        a.pop(k), b.pop(k)
+    assert a == b
+
+
+def test_full_flow_gamma4_then_refine(tmp_path, monkeypatch):
+    """GAMMA4 (CE-Loc + box vật) thu nhỏ -> GAMMA4.1 nạp nó làm CE-Loc đề xuất (đóng băng, CE-Loc không đổi) -> eval quét refine_t."""
+    import ce_localization.eval as ea
+    import ce_localization.train as ta
+    from tests.ce_localization.helpers import _fake_text_table, _fake_turn_index, _gamma2_cfg
+    base = str(tmp_path / "d")
+    os.makedirs(base)
+    _fake_turn_index(base)
+    c4, _ = _gamma2_cfg(tmp_path, base, "obj")
+    p4 = str(tmp_path / "g4")
+    _run_train(monkeypatch, ["--config", c4, "--save-dir", p4, "--max-iter", "2"])
+    ck4 = torch.load(os.path.join(p4, "last.pth"), weights_only=False)
+    c41, _ = _gamma2_cfg(tmp_path, base, "pr_obj")
+    g = str(tmp_path / "g41")
+    _run_train(monkeypatch, ["--config", c41, "--save-dir", g, "--proposer-ckpt", os.path.join(p4, "last.pth")])
+    k = torch.load(os.path.join(g, "last.pth"), weights_only=False)
+    assert k["iter"] == 4
+    for n, v in ck4["model"].items():
+        assert torch.equal(k["model"]["proposer." + n], v), n
+    monkeypatch.setattr(ta, "build_text_table", _fake_text_table)
+    out = str(tmp_path / "res.json")
+    monkeypatch.setattr(sys, "argv", ["eval.py", "--ckpt", os.path.join(g, "best.pth"), "--split", "test", "--n-samples", "3",
+                                      "--refine-t", "none", "5", "noise", "--proposer-sampler", "ddpm",
+                                      "--num-workers", "0", "--out", out, "--device", "cpu"])
+    ea.main()
+    with open(out) as f:
+        res = json.load(f)
+    assert set(res["results"]) == {f"{i}_{v}" for i in ("inpainted", "original") for v in ("ce", "t5", "noise")}

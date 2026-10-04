@@ -256,8 +256,9 @@ def _step_loss(net, crit, batch, text_table, cfg, model, gen, dev):
         k = cfg["diffusion"]["noise_per_image"]
         text = text_table(batch["text"], dev)
         if cfg["model"].get("arch") in ("box_refiner", "propose_refine"):   # GAMMA1 / 2: L1 + GIoU mọi tầng
-            geo = ({"objects": batch["objects"]} if cfg["model"].get("geo") or cfg["model"].get("relation")
-                   else {})                                                       # GAMMA3 / 3.1: box vật đang có
+            m_ = cfg["model"]
+            geo = ({"objects": batch["objects"]} if m_.get("geo") or m_.get("relation")
+                   or m_.get("proposer", {}).get("obj_attn") else {})            # GAMMA3 / 3.1 / 4.1: box vật đang có
             return net(batch["images"], text, batch["valid_hw"], batch["target"], batch["whwh"], k=k, generator=gen, **geo)
         x0 = boxes_to_unit(batch["target"], norm_whwh(model, batch["whwh"], batch["images"].shape[-1]))  # GAMMA0: ε-MSE
         obj = {"objects": batch["objects"]} if cfg["model"].get("obj_attn") else {}      # GAMMA4: box vật đang có

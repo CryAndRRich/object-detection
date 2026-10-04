@@ -63,7 +63,8 @@ def run_one(model, x, vhw, text, refine_t, generator, objects=None, use_objects=
     T = x.shape[-1]
     feats, kp = model.encode(x, vhw)
     whwh = model._whwh(vhw)
-    u = model.proposer.sample_from_cond(model.proposer.cond_from_keypoints(kp, text), 1, generator, "mock")
+    cond = model.proposer.cond_from_keypoints(kp, text)
+    u = model.proposer.sample_from_cond(cond, 1, generator, "mock", obj=model.proposer_obj(objects, vhw, T, cond))
     box_ce = unit_to_boxes(u.reshape(-1, 4), torch.full((4,), float(T), device=x.device))
     if refine_t == "noise":
         t = model.num_timesteps - 1

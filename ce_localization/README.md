@@ -41,7 +41,7 @@ L1 + GIoU ở mọi tầng; suy luận DDIM `--steps`.
 | `engine/` | `diffusion`, `criterion` (SimOTA + loss, chế độ box / điểm), `evaluate` (suy luận + chỉ số), `add_eval` (bài add: K mẫu, IoU với lỗ, C-NLL, on_object), `train_utils`, `nan_debug` |
 | `utils/` | hình học box (torch / numpy), toán khuếch tán, chấm điểm numpy, checkpoint ghi nguyên tử, grad theo nhóm, log |
 | `tools/` | `build_density_index`, `build_density_points`, `build_turn_index` (bài add, cửa G0), `visualize_data` (xem đầu vào bằng mắt), `check_data_facts`, `plot_denoise_trajectory` (bài add: box qua từng bước khử nhiễu, checkpoint của bài hoặc GAMMA0), `plot_refiner_steps` (GAMMA1: 4 bước DDIM × 6 tầng + SpatialSoftmax, ảnh inpaint / gốc × density của ảnh / trống) |
-| `notebooks/` | `train_kaggle.ipynb` (một config trên T4×2: ALPHA / BETA / GAMMA0–1), `add_kaggle.ipynb` (bài add từ GAMMA2: `gamma2_celoc` / `gamma2` / `gamma2_1` / `gamma3` / `gamma3_1` / `gamma4`) — gitignore, chỉ ở local |
+| `notebooks/` | `train_kaggle.ipynb` (một config trên T4×2: ALPHA / BETA / GAMMA0–1), `add_kaggle.ipynb` (bài add từ GAMMA2: `gamma2_celoc` / `gamma2` / `gamma2_1` / `gamma3` / `gamma3_1` / `gamma4` / `gamma4_1`) — gitignore, chỉ ở local |
 
 Test ở `object-detection/tests/ce_localization/` theo module: `test_data`, `test_models`,
 `test_engine`, `test_train_eval` (trọn luồng mọi loại config); dữ liệu giả dùng chung ở `helpers.py`.
@@ -69,6 +69,7 @@ Code soi SpatialSoftmax (`celoc_paper/`, `tools/inspect_*spatial_softmax.py`, TN
 | `gamma/gamma3.yaml` | như `gamma2` + `model.geo`: FiLM theo hình học tương đối với box vật đang có (`models/geo.py`) ở đầu mỗi stage refine | 〃 mục 14 |
 | `gamma/gamma3_1.yaml` | như `gamma2` + `model.relation`: attention kiểu Relation-DETR từ box tới feature RoI các vật gần nhất, điểm cộng Rel hình học (`models/relation.py`) | 〃 mục 15 |
 | `gamma/gamma4.yaml` | như `gamma2_celoc` (CE-Loc đứng một mình, train từ đầu) + `model.obj_attn`: cross-attn box nhiễu → box vật ở mọi tầng U-Net, token vật mã hoá gương (`models/unet1d.py`) | 〃 mục 16 |
+| `gamma/gamma4_1.yaml` | như `gamma2` nhưng CE-Loc đề xuất = `gamma4` (đóng băng, nhận box vật) → refine 6 stage | 〃 mục 16.7 |
 
 ## Chạy
 
