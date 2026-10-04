@@ -14,6 +14,8 @@ GAMMA2 (`model.arch: propose_refine`): CE-Loc sinh `--n-samples` box MỘT lần
 GAMMA3 (`model.geo`): thêm `<ảnh>_t<t*>_nogeo`, `<ảnh>_noise_nogeo` = cùng biến thể nhưng TẮT nhánh geo.
 GAMMA3.1 (`model.relation`): thêm `_nogeo` (bỏ attention tới vật) và `_norel` (giữ attention, bỏ Rel hình học).
 GAMMA4 (`model.obj_attn`, CE-Loc + cross-attn tới box vật): thêm `<ảnh>_noobj` = cùng checkpoint, tắt cross-attn tới box vật.
+`--dump-boxes F.json` (user study, docs/EXPERIMENT_GAMMA.md mục 17): ghi thêm box THÔ của từng mẫu mọi khoá kết quả
+(`image_id`, `t`, `wh` = (nw, nh) vùng ảnh thật trên canvas, `boxes` [K,4] xyxy pixel canvas) cho `user_study/build.py`.
 
 Checkpoint CE-Loc gốc của bài (`model_state_dict`, vd weights/add/paper/best_model.pth) + `--config config/gamma/gamma0.yaml`
 (đường dẫn dữ liệu): eval bài add như GAMMA, kèm `excl_paper_train` (bỏ mẫu samples/train mà bài đã train).
@@ -173,6 +175,7 @@ def main_add(a, cfg, ck, dev, t0):
     out = {"ckpt": a.ckpt, "iter": it, "split": a.split, "n_samples": K, "density": {}, "results": {},
            "prior": {}, "density_weight_ratio": dwr, "add_samplers": a.add_samplers, "proposer_sampler": a.proposer_sampler,
            "amp": amp}
+    dump = {"ckpt": a.ckpt, "iter": it, "split": a.split, "n_samples": K, "seed": a.seed, "results": {}} if a.dump_boxes else None
     text_table = None
     for image in a.image:
         dens = (a.add_density or ("sample" if image == "inpainted" else "full")) if four else None
@@ -212,6 +215,9 @@ def main_add(a, cfg, ck, dev, t0):
                 print("  attention query -> [t ; text ; vis] theo tầng: " + " | ".join(
                     "/".join(f"{x[k]:.2f}" for k in ("t", "text", "vis")) for x in res["attn"]))
             out["results"][key], out["prior"][key] = res, pri
+            if dump is not None:
+                dump["results"][key] = [{"image_id": r["image_id"], "t": int(r["t"]), "wh": r["wh"].round(3).tolist(),
+                                         "boxes": r["boxes"].round(2).tolist()} for r in rec]
 
         if refine_vars:                               # GAMMA2: CE-Loc chạy MỘT lần / batch, mọi biến thể refine dùng lại
             print(f"[eval] {a.ckpt} ({it}) | ảnh {image} | density {dens} | split {a.split} ({len(ds)} mẫu) | {K} mẫu/ảnh"
@@ -235,6 +241,11 @@ def main_add(a, cfg, ck, dev, t0):
         with open(a.out, "w") as f:
             json.dump(out, f, indent=2, ensure_ascii=False, default=float)
         print(f"  -> {a.out}")
+    if dump is not None:
+        os.makedirs(os.path.dirname(os.path.abspath(a.dump_boxes)), exist_ok=True)
+        with open(a.dump_boxes, "w") as f:
+            json.dump(dump, f)
+        print(f"  -> box từng mẫu {a.dump_boxes} ({list(dump['results'])})")
     print(f"[eval] xong {fmt_time(time.time() - t0)}", flush=True)
 
 
@@ -277,6 +288,7 @@ def main():
                          "ddpm (1000 bước đúng công thức)")
     ap.add_argument("--samples-root", default=None, help="GAMMA: ghi đè data.samples_root")
     ap.add_argument("--turn-index", default=None, help="GAMMA: ghi đè data.turn_index")
+    ap.add_argument("--dump-boxes", default=None, help="GAMMA: file .json ghi box thô từng mẫu (user study, user_study/build.py)")
     a = ap.parse_args()
 
     t0 = time.time()

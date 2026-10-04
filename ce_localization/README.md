@@ -41,6 +41,7 @@ L1 + GIoU ở mọi tầng; suy luận DDIM `--steps`.
 | `engine/` | `diffusion`, `criterion` (SimOTA + loss, chế độ box / điểm), `evaluate` (suy luận + chỉ số), `add_eval` (bài add: K mẫu, IoU với lỗ, C-NLL, on_object), `train_utils`, `nan_debug` |
 | `utils/` | hình học box (torch / numpy), toán khuếch tán, chấm điểm numpy, checkpoint ghi nguyên tử, grad theo nhóm, log |
 | `tools/` | `build_density_index`, `build_density_points`, `build_turn_index` (bài add, cửa G0), `visualize_data` (xem đầu vào bằng mắt), `check_data_facts`, `plot_denoise_trajectory` (bài add: box qua từng bước khử nhiễu, checkpoint của bài hoặc GAMMA0), `plot_refiner_steps` (GAMMA1: 4 bước DDIM × 6 tầng + SpatialSoftmax, ảnh inpaint / gốc × density của ảnh / trống) |
+| `user_study/` | user study bài add: `selection` (chọn 4 box từ 30 mẫu), `build` (gộp dump → `items.json`), `app` (web Gradio chấm), `score` (chỉ số) |
 | `notebooks/` | `train_kaggle.ipynb` (một config trên T4×2: ALPHA / BETA / GAMMA0–1), `add_kaggle.ipynb` (bài add từ GAMMA2: `gamma2_celoc` / `gamma2` / `gamma2_1` / `gamma3` / `gamma3_1` / `gamma4` / `gamma4_1`) — gitignore, chỉ ở local |
 
 Test ở `object-detection/tests/ce_localization/` theo module: `test_data`, `test_models`,
@@ -115,6 +116,10 @@ Chỉ mục (nhánh, lượt) ↔ `samples/` dựng một lần: `tools/build_tu
 eval như mọi config (`--save-dir ../weights/add/<tên>`, log `log/gamma/`, kết quả `output/gamma/`); `eval.py`
 tự nhận `task: add`: `--image inpainted original`, `--n-samples`, `--add-density`, `--steps` (GAMMA1). Lệnh đầy đủ:
 `docs/EXPERIMENT_GAMMA.md`.
+
+User study (người chấm box đề xuất, `user_study/`): `eval.py --dump-boxes` (server) → `user_study/build.py` (chọn 4 box / model,
+xáo màn) → `user_study/app.py` (web Gradio chấm ở local, `pip install gradio`) → `user_study/score.py`. Lệnh + chỉ số:
+`docs/EXPERIMENT_GAMMA.md` mục 17.
 
 ## Đọc số
 
