@@ -72,6 +72,26 @@ def test_render_colors_and_box_at():
     assert as_reasons("ok") == [] and as_reasons("wrong_size") == ["wrong_size"]          # dạng cũ một chuỗi
 
 
+def test_rating_store_one_line_per_screen(tmp_path):
+    """Mỗi màn một dòng: màn mới ghi nối, lưu lại ghi đè đúng dòng đó (giữ thứ tự); file cũ có dòng trùng được gộp khi mở (bản sau cùng)."""
+    from ce_localization.user_study.app import RatingStore
+    p = str(tmp_path / "r" / "ratings.jsonl")
+    st = RatingStore(p)
+    for i, lab in (("a", [[]]), ("b", [["other"]]), ("c", [[]])):
+        st.save({"id": i, "labels": lab})
+    st.save({"id": "b", "labels": [["wrong_size"]]})                          # lưu lại: ghi đè, vẫn ở vị trí 2
+    lines = [json.loads(x) for x in open(p).read().splitlines()]
+    assert [x["id"] for x in lines] == ["a", "b", "c"] and lines[1]["labels"] == [["wrong_size"]]
+    assert not os.path.exists(p + ".tmp")
+    with open(p, "a") as f:                                                   # file kiểu cũ: ghi nối cả bản lưu lại
+        f.write(json.dumps({"id": "a", "labels": [["on_object"]]}) + "\n")
+        f.write(json.dumps({"id": "d", "labels": [[]]}) + "\n")
+    st2 = RatingStore(p)
+    lines = [json.loads(x) for x in open(p).read().splitlines()]
+    assert [x["id"] for x in lines] == ["a", "b", "c", "d"] and lines[0]["labels"] == [["on_object"]]
+    assert st2.latest["a"]["labels"] == [["on_object"]] and len(st2.latest) == 4
+
+
 def test_auc():
     from ce_localization.user_study.score import auc
     assert auc([1, 2, 3, 4], [False, False, True, True]) == 1.0
@@ -196,6 +216,7 @@ def test_full_flow_dump_build_rate_score(tmp_path, monkeypatch):
     sess2.labels = [[] for _ in range(nb)]
     sess2.save()                                                               # sửa: bản sau thay bản trước
     assert sess2.pos == p_now and su.load_ratings(ratings)[sid]["labels"] == [[]] * nb
+    assert len(open(ratings).read().splitlines()) == len(sess2.store.latest) == rated     # lưu lại: ghi đè, không thêm dòng
     sess2.go(0)
     sess2.prev()
     assert sess2.pos == 0                                                      # không lùi quá màn đầu

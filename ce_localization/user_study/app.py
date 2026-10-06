@@ -8,13 +8,15 @@ Mỗi màn = một cặp (mẫu test, model). Ô "Models to rate" (hoặc `--mod
 theo hạng (xanh lá = ổn, đỏ = không ổn). Lỗ GT không hiện. Nhãn mỗi box = DANH SÁCH lý do lỗi (rỗng = ổn; chọn được nhiều lý do
 cùng lúc ở cột phải). Bấm vào box hoặc phím 1..K để đổi ổn <-> không ổn; box vừa chuyển đỏ mặc định lý do "On object".
   ← / → (Previous / Next)  sang màn trước / sau trong dãy đang chọn, KHÔNG lưu (Next = tạm bỏ qua màn)
-  Enter (Save)             lưu màn này (box còn xanh = ổn) rồi sang màn sau; lưu lại màn đã lưu thì bản sau thay bản trước
+  Enter (Save)             lưu màn này (box còn xanh = ổn) rồi sang màn sau; lưu lại màn đã lưu thì GHI ĐÈ dòng cũ
   Go to first unsaved      về màn chưa lưu đầu tiên của dãy đang chọn (lỡ Next bỏ qua)
-Mỗi lần lưu ghi nối một dòng vào `ratings.jsonl` (khoá = mã màn `<model>|<image_id>[|repeat]`) ⇒ tắt mở lại vẫn tiếp từ màn chưa
-lưu đầu tiên; thêm model vào items.json (`build.py --add-to`) không ảnh hưởng nhãn cũ.
+`ratings.jsonl`: MỘT dòng mỗi màn (khoá = mã màn `<model>|<image_id>[|repeat]`; người dùng, 2026-10-06), lưu xuống đĩa ngay mỗi lần
+Save ⇒ tắt mở lại vẫn tiếp từ màn chưa lưu đầu tiên; thêm model vào items.json (`build.py --add-to`) không ảnh hưởng nhãn cũ.
 
   cd object-detection/ce_localization
   python user_study/app.py --items ../../output/gamma/user_study/items.json --samples-root ../data/samples [--models gamma4]
+Người khác chấm qua link (chạy trên server, docs/EXPERIMENT_GAMMA.md mục 17): thêm `--share` (in link *.gradio.live) và
+`--ratings .../ratings_<tên>.jsonl` để file nhãn của họ không trùng tên `ratings.jsonl` của người chấm ở local khi tải về.
 """
 
 import argparse
@@ -22,6 +24,7 @@ import inspect
 import json
 import os
 import time
+import warnings
 from datetime import datetime
 
 from PIL import Image, ImageDraw, ImageFont
@@ -109,19 +112,38 @@ def render(img, objects, boxes, labels, show_objects=True, max_side=MAX_SIDE):
 
 
 class RatingStore:
-    """`ratings.jsonl`: mỗi lần lưu một dòng; bản ghi SAU CÙNG của mỗi mã màn `id` là bản dùng."""
+    """`ratings.jsonl`: MỘT dòng mỗi mã màn `id`, theo thứ tự lưu lần đầu. Màn mới: ghi nối một dòng. Lưu lại màn đã có: ghi đè dòng
+    đó (ghi cả file ra `.tmp` rồi `os.replace` — tắt ngang lúc ghi vẫn còn nguyên bản cũ hoặc bản mới, không nửa vời). File cũ có nhiều
+    dòng cùng `id` (bản trước 2026-10-06 ghi nối mọi lần lưu) được gộp ngay khi mở, giữ bản SAU CÙNG."""
 
     def __init__(self, path):
         self.path, self.latest = path, {}
+        n = 0
         if os.path.exists(path):
             with open(path) as f:
                 for line in f:
                     if line.strip():
                         rec = json.loads(line)
-                        self.latest[rec["id"]] = rec
+                        self.latest[rec["id"]] = rec          # dict giữ vị trí lần đầu, nội dung bản sau cùng
+                        n += 1
+        if n > len(self.latest):
+            self._rewrite()
+
+    def _rewrite(self):
+        tmp = self.path + ".tmp"
+        with open(tmp, "w") as f:
+            for rec in self.latest.values():
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self.path)
 
     def save(self, rec):
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+        if rec["id"] in self.latest:
+            self.latest[rec["id"]] = rec
+            self._rewrite()
+            return
         with open(self.path, "a") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             f.flush()
@@ -327,13 +349,18 @@ def main():
     ap.add_argument("--ratings", default=None, help="mặc định ratings.jsonl cạnh items.json")
     ap.add_argument("--models", nargs="*", default=None, help="mã model chấm lúc mở (mặc định mọi model; đổi được trên web)")
     ap.add_argument("--port", type=int, default=7860)
+    ap.add_argument("--share", action="store_true", help="tạo link công khai https://*.gradio.live (sống tối đa 1 tuần) để người "
+                                                          "khác chấm qua trình duyệt, vd chạy trên server")
     a = ap.parse_args()
+    # gradio 6.17 dựng bảng mã HTTP ở MỖI request, trong đó đọc `status.HTTP_422_UNPROCESSABLE_ENTITY` mà starlette 1.x đã đổi tên
+    # ⇒ một cảnh báo deprecated mỗi lần bấm (request vẫn thành công). Lỗi của thư viện: chỉ bỏ ĐÚNG cảnh báo này.
+    warnings.filterwarnings("ignore", message=r".*HTTP_422_UNPROCESSABLE_ENTITY.*")
     import gradio as gr
     sess = Session(a.items, a.samples_root, a.ratings, a.models)
     print(f"{len(sess.screens)} màn ({len(sess.d['models'])} model), đã lưu {len(sess.store.latest)} -> {sess.store.path}",
           flush=True)
     demo, launch_kw = build_ui(sess, gr)
-    demo.launch(server_name="127.0.0.1", server_port=a.port, inbrowser=True, **launch_kw)
+    demo.launch(server_name="127.0.0.1", server_port=a.port, inbrowser=not a.share, share=a.share, **launch_kw)
 
 
 if __name__ == "__main__":
