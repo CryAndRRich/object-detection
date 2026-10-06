@@ -17,25 +17,35 @@ Save ⇒ tắt mở lại vẫn tiếp từ màn chưa lưu đầu tiên; thêm 
   python user_study/app.py --items ../../output/gamma/user_study/items.json --samples-root ../data/samples [--models gamma4]
 Người khác chấm qua link (chạy trên server, docs/EXPERIMENT_GAMMA.md mục 17): thêm `--share` (in link *.gradio.live) và
 `--ratings .../ratings_<tên>.jsonl` để file nhãn của họ không trùng tên `ratings.jsonl` của người chấm ở local khi tải về.
+
+Hiển thị (2026-10-06, cho nhanh qua link share): ảnh nền = bản WebP cạnh dài MAX_SIDE dựng MỘT lần vào `--cache-dir`, trình duyệt
+tải thẳng qua `/gradio_api/file=` (cache được); box vẽ bằng SVG đè lên ảnh (bấm box = phím i) ⇒ đổi trạng thái box chỉ gửi vài KB
+HTML, không gửi lại ảnh; ảnh của PREFETCH màn kế tiếp được tải trước (thẻ <img> ẩn) ⇒ sang màn sau gần như tức thì.
 """
 
 import argparse
+import html
 import inspect
 import json
 import os
+import tempfile
 import time
 import warnings
 from datetime import datetime
+from urllib.parse import quote
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 
-__all__ = ["REASONS", "REASON_EN", "DEFAULT_BAD", "as_reasons", "box_at", "toggle", "render", "RatingStore", "Session"]
+__all__ = ["REASONS", "REASON_EN", "DEFAULT_BAD", "as_reasons", "toggle", "box_svg", "RatingStore", "Session"]
 
 REASONS = ("on_object", "wrong_size", "implausible", "other")   # nhãn box = list con (thứ tự này); [] = ổn
 REASON_EN = {"on_object": "On object", "wrong_size": "Wrong size", "implausible": "Implausible location", "other": "Other"}
 DEFAULT_BAD = "on_object"
-MAX_SIDE = 1100                                   # cạnh dài ảnh hiển thị (px): ảnh test nhỏ (vd 576 × 384) cũng phóng lên
-COLOR = {"obj": (30, 144, 255), "ok": (0, 220, 60), "bad": (235, 30, 30)}
+MAX_SIDE = 1100                                   # cạnh dài ảnh nền (px): ảnh test nhỏ (vd 576 × 384) cũng phóng lên
+WEBP_QUALITY = 90
+PREFETCH = 3                                      # số màn kế tiếp tải trước ảnh
+COLOR = {"obj": "#1e90ff", "ok": "#00dc3c", "bad": "#eb1e1e"}
+FILE_ROUTE = "/gradio_api/file="
 
 HELP = """**A box is OK** if adding one more object of this class there looks plausible:
 1. It does not cover an existing object
@@ -53,20 +63,17 @@ document.addEventListener('keydown', (e) => {
   const el = id && document.getElementById(id);
   if (el) { e.preventDefault(); el.click(); }
 });
+document.addEventListener('click', (e) => {          // bấm box trên SVG = bấm nút ẩn us_tog<i> (cùng đường với phím i)
+  const g = e.target.closest && e.target.closest('[data-box]');
+  const el = g && document.getElementById('us_tog' + g.dataset.box);
+  if (el) el.click();
+});
 </script>"""
-CSS = ("#us_img img {max-height: 86vh; object-fit: contain;} #us_head p {font-size: 1.1em; margin: 0.15em 0;} "
-       ".us_hidden {display: none !important;}")
-
-
-def box_at(boxes, x, y):
-    """Chỉ số box chứa điểm (x, y) — nhiều box thì box NHỎ nhất (box lồng trong box khác vẫn bấm được); không box nào -> None."""
-    best, area = None, None
-    for i, (x1, y1, x2, y2) in enumerate(boxes):
-        if x1 <= x <= x2 and y1 <= y <= y2:
-            a = (x2 - x1) * (y2 - y1)
-            if area is None or a < area:
-                best, area = i, a
-    return best
+CSS = ("#us_head p {font-size: 1.1em; margin: 0.15em 0;} .us_hidden {display: none !important;} "
+       ".us_wrap {position: relative; display: inline-block; line-height: 0; max-width: 100%;} "
+       ".us_wrap img.us_bg {display: block; max-width: 100%; max-height: 86vh; width: auto; height: auto;} "
+       ".us_wrap svg {position: absolute; left: 0; top: 0; width: 100%; height: 100%;} "
+       ".us_wrap g[data-box] {cursor: pointer;}")
 
 
 def as_reasons(label):
@@ -80,35 +87,29 @@ def toggle(reasons):
     return [] if reasons else [DEFAULT_BAD]
 
 
-def _font(size):
-    try:
-        return ImageFont.load_default(size=size)
-    except TypeError:                             # Pillow < 10.1
-        return ImageFont.load_default()
-
-
-def render(img, objects, boxes, labels, show_objects=True, max_side=MAX_SIDE):
-    """Ảnh PIL gốc + box (pixel ảnh gốc) -> (ảnh đã vẽ, cạnh dài = max_side; hệ số r: toạ độ hiển thị = r × toạ độ gốc)."""
-    W, H = img.size
-    r = max_side / max(W, H)
-    im = img.convert("RGB").resize((max(1, round(W * r)), max(1, round(H * r))), Image.BILINEAR)
-    dr = ImageDraw.Draw(im)
-    lw = max(2, round(max(im.size) / 300))
+def box_svg(wh, objects, boxes, labels, show_objects=True):
+    """SVG phủ lên ảnh, toạ độ = pixel ảnh gốc (viewBox W × H, co giãn theo ảnh). Box vật xanh dương (không bấm được); box đề xuất
+    xanh lá / đỏ + nhãn số, mỗi box một <g data-box="i+1"> (bấm = đổi box i+1). Box to vẽ trước, box nhỏ đè lên ⇒ bấm chỗ chồng nhau
+    trúng box nhỏ nhất."""
+    W, H = wh
+    fs = max(W, H) / 38                                                   # cỡ chữ nhãn theo đơn vị ảnh gốc
+    out = [f'<svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">']
     if show_objects:
-        for o in objects:
-            dr.rectangle([v * r for v in o], outline=COLOR["obj"], width=max(1, lw // 2))
-    font = _font(max(14, round(max(im.size) / 45)))
-    for i, (b, lab) in enumerate(zip(boxes, labels)):
-        c = COLOR["bad" if as_reasons(lab) else "ok"]
-        x1, y1, x2, y2 = (v * r for v in b)
-        dr.rectangle([x1, y1, x2, y2], outline=c, width=lw + 1)
-        tag = str(i + 1)
-        tb = dr.textbbox((0, 0), tag, font=font)
-        tw, th = tb[2] - tb[0] + 6, tb[3] - tb[1] + 6
-        tx, ty = x1, (y1 - th if y1 - th >= 0 else y1)
-        dr.rectangle([tx, ty, tx + tw, ty + th], fill=c)
-        dr.text((tx + 3 - tb[0], ty + 3 - tb[1]), tag, fill=(255, 255, 255), font=font)
-    return im, r
+        out += [f'<rect x="{x1:.1f}" y="{y1:.1f}" width="{max(x2 - x1, 0):.1f}" height="{max(y2 - y1, 0):.1f}" fill="none" '
+                f'stroke="{COLOR["obj"]}" stroke-width="1.5" vector-effect="non-scaling-stroke" pointer-events="none"/>'
+                for x1, y1, x2, y2 in objects]
+    order = sorted(range(len(boxes)), key=lambda i: -(boxes[i][2] - boxes[i][0]) * (boxes[i][3] - boxes[i][1]))
+    for i in order:
+        x1, y1, x2, y2 = boxes[i]
+        c = COLOR["bad" if as_reasons(labels[i]) else "ok"]
+        th, tw = fs * 1.25, fs * 0.9
+        ty = y1 - th if y1 - th >= 0 else y1
+        out.append(f'<g data-box="{i + 1}"><rect x="{x1:.1f}" y="{y1:.1f}" width="{max(x2 - x1, 0):.1f}" '
+                   f'height="{max(y2 - y1, 0):.1f}" fill="transparent" stroke="{c}" stroke-width="3.5" '
+                   f'vector-effect="non-scaling-stroke"/><rect x="{x1:.1f}" y="{ty:.1f}" width="{tw:.1f}" height="{th:.1f}" '
+                   f'fill="{c}"/><text x="{x1 + tw / 2:.1f}" y="{ty + th * 0.8:.1f}" font-size="{fs:.1f}" font-weight="bold" '
+                   f'fill="white" text-anchor="middle" font-family="sans-serif">{i + 1}</text></g>')
+    return "".join(out) + "</svg>"
 
 
 class RatingStore:
@@ -155,14 +156,15 @@ class Session:
     """Trạng thái chấm (một người chấm): model đang chọn, dãy màn `view` (chỉ số vào `screens`, theo `order`), vị trí `pos`,
     nhãn K box đang sửa."""
 
-    def __init__(self, items_path, samples_root, ratings_path=None, models=None):
+    def __init__(self, items_path, samples_root, ratings_path=None, models=None, cache_dir=None):
         with open(items_path) as f:
             self.d = json.load(f)
         self.k, self.screens, self.items = self.d["k"], self.d["screens"], self.d["items"]
         self.samples_root = samples_root
         self.store = RatingStore(ratings_path or os.path.join(os.path.dirname(os.path.abspath(items_path)), "ratings.jsonl"))
-        self._img = (None, None)
-        self.r = 1.0
+        self.cache_dir = os.path.abspath(cache_dir or os.path.join(
+            os.environ.get("GRADIO_TEMP_DIR") or tempfile.gettempdir(), "ce_loc_user_study"))
+        os.makedirs(self.cache_dir, exist_ok=True)
         self.set_models(models)
 
     def model_name(self, m):
@@ -230,13 +232,6 @@ class Session:
         if i < len(self.labels):
             self.labels[i] = toggle(self.labels[i])
 
-    def click(self, x, y):
-        """(x, y) toạ độ trên ảnh HIỂN THỊ -> đổi box chứa điểm đó; -> chỉ số box hoặc None."""
-        i = box_at(self.sel()["boxes"], x / self.r, y / self.r)
-        if i is not None:
-            self.toggle(i)
-        return i
-
     def save(self):
         """Lưu màn này rồi sang màn sau (màn cuối: đứng yên)."""
         sc, it = self.screen()
@@ -247,12 +242,28 @@ class Session:
             self.next()
 
     # ---- hiển thị
-    def image(self, show_objects=True):
+    def background(self, image):
+        """Ảnh nền của file `image` (đường dẫn trong samples/): WebP cạnh dài MAX_SIDE, dựng một lần vào cache -> đường dẫn tuyệt đối."""
+        out = os.path.join(self.cache_dir, image.replace("/", "__") + ".webp")
+        if not os.path.exists(out):
+            im = Image.open(os.path.join(self.samples_root, image)).convert("RGB")
+            r = MAX_SIDE / max(im.size)
+            im = im.resize((max(1, round(im.size[0] * r)), max(1, round(im.size[1] * r))), Image.BILINEAR)
+            tmp = out + ".tmp.webp"
+            im.save(tmp, "WEBP", quality=WEBP_QUALITY)
+            os.replace(tmp, out)
+        return out
+
+    def html(self, show_objects=True):
+        """Màn hiện tại: ảnh nền + SVG box + <img> ẩn tải trước ảnh của PREFETCH màn kế tiếp."""
         sc, it = self.screen()
-        if self._img[0] != it["image"]:
-            self._img = (it["image"], Image.open(os.path.join(self.samples_root, it["image"])).convert("RGB"))
-        im, self.r = render(self._img[1], it["objects"], self.sel()["boxes"], self.labels, show_objects)
-        return im
+        url = lambda p: FILE_ROUTE + html.escape(quote(p))  # noqa: E731
+        nxt = {self.items[self.screens[self.view[p]]["image_id"]]["image"]
+               for p in range(self.pos + 1, min(self.pos + 1 + PREFETCH, len(self.view)))} - {it["image"]}
+        pre = "".join(f'<img src="{url(self.background(im))}" alt="">' for im in sorted(nxt))
+        return (f'<div class="us_wrap"><img class="us_bg" src="{url(self.background(it["image"]))}" alt="">'
+                f'{box_svg(it["wh"], it["objects"], self.sel()["boxes"], self.labels, show_objects)}</div>'
+                f'<div style="display:none">{pre}</div>')
 
     def header(self):
         sc, it = self.screen()
@@ -278,7 +289,7 @@ def build_ui(sess, gr):
         head = gr.Markdown(elem_id="us_head")
         with gr.Row():
             with gr.Column(scale=4):
-                img = gr.Image(type="pil", interactive=False, show_label=False, elem_id="us_img")
+                img = gr.HTML(elem_id="us_img")
             with gr.Column(scale=1, min_width=300):
                 models = gr.Dropdown(choices=[(sess.model_name(m), m) for m in sess.d["models"]], value=list(sess.models),
                                      multiselect=True, label="Models to rate (empty = all)")
@@ -298,7 +309,7 @@ def build_ui(sess, gr):
                               label=f"Box {i + 1}: " + ("not OK" if i < n and sess.labels[i] else "OK")) for i in range(k)]
 
         def full(show_objects):
-            return [sess.header(), sess.image(show_objects)] + radio_updates()
+            return [sess.header(), sess.html(show_objects)] + radio_updates()
 
         def nav(fn):
             def f(show_objects):
@@ -310,35 +321,31 @@ def build_ui(sess, gr):
             sess.set_models(ms)
             return full(show_objects)
 
-        def on_click(show_objects, evt: gr.SelectData):
-            sess.click(*evt.index[:2])
-            return [sess.image(show_objects)] + radio_updates()
-
         def make_radio(i):
             def f(v, show_objects):
                 sess.set_reasons(i, v)
-                return [sess.image(show_objects)] + radio_updates()
+                return [sess.html(show_objects)] + radio_updates()
             return f
 
         def make_tog(i):
             def f(show_objects):
                 sess.toggle(i)
-                return [sess.image(show_objects)] + radio_updates()
+                return [sess.html(show_objects)] + radio_updates()
             return f
 
         outs_full = [head, img] + radios
-        demo.load(full, [show], outs_full, api_name="show")
-        models.input(on_models, [models, show], outs_full, api_name="models")
-        img.select(on_click, [show], [img] + radios, api_name="click")
+        q = {"queue": False}                       # một người chấm: gọi thẳng, không qua hàng đợi (bớt một vòng mạng qua link share)
+        demo.load(full, [show], outs_full, api_name="show", **q)
+        models.input(on_models, [models, show], outs_full, api_name="models", **q)
         for i, r_ in enumerate(radios):
-            r_.input(make_radio(i), [r_, show], [img] + radios, api_name=f"reasons{i + 1}")
+            r_.input(make_radio(i), [r_, show], [img] + radios, api_name=f"reasons{i + 1}", **q)
         for i, b in enumerate(togs):
-            b.click(make_tog(i), [show], [img] + radios, api_name=f"toggle{i + 1}")
-        prev.click(nav(sess.prev), [show], outs_full, api_name="prev")
-        nxt.click(nav(sess.next), [show], outs_full, api_name="next")
-        save.click(nav(sess.save), [show], outs_full, api_name="save")
-        first.click(nav(sess.first_unsaved), [show], outs_full, api_name="first_unsaved")
-        show.change(lambda s_: sess.image(s_), [show], [img], api_name="objects")
+            b.click(make_tog(i), [show], [img] + radios, api_name=f"toggle{i + 1}", **q)
+        prev.click(nav(sess.prev), [show], outs_full, api_name="prev", **q)
+        nxt.click(nav(sess.next), [show], outs_full, api_name="next", **q)
+        save.click(nav(sess.save), [show], outs_full, api_name="save", **q)
+        first.click(nav(sess.first_unsaved), [show], outs_full, api_name="first_unsaved", **q)
+        show.change(lambda s_: sess.html(s_), [show], [img], api_name="objects", **q)
     return demo, launch_kw
 
 
@@ -349,6 +356,8 @@ def main():
     ap.add_argument("--ratings", default=None, help="mặc định ratings.jsonl cạnh items.json")
     ap.add_argument("--models", nargs="*", default=None, help="mã model chấm lúc mở (mặc định mọi model; đổi được trên web)")
     ap.add_argument("--port", type=int, default=7860)
+    ap.add_argument("--cache-dir", default=None, help="ảnh nền WebP dựng sẵn (mặc định $GRADIO_TEMP_DIR hoặc thư mục tạm "
+                                                          "/ce_loc_user_study; ~25 KB / ảnh)")
     ap.add_argument("--share", action="store_true", help="tạo link công khai https://*.gradio.live (sống tối đa 1 tuần) để người "
                                                           "khác chấm qua trình duyệt, vd chạy trên server")
     a = ap.parse_args()
@@ -356,11 +365,12 @@ def main():
     # ⇒ một cảnh báo deprecated mỗi lần bấm (request vẫn thành công). Lỗi của thư viện: chỉ bỏ ĐÚNG cảnh báo này.
     warnings.filterwarnings("ignore", message=r".*HTTP_422_UNPROCESSABLE_ENTITY.*")
     import gradio as gr
-    sess = Session(a.items, a.samples_root, a.ratings, a.models)
+    sess = Session(a.items, a.samples_root, a.ratings, a.models, a.cache_dir)
     print(f"{len(sess.screens)} màn ({len(sess.d['models'])} model), đã lưu {len(sess.store.latest)} -> {sess.store.path}",
           flush=True)
     demo, launch_kw = build_ui(sess, gr)
-    demo.launch(server_name="127.0.0.1", server_port=a.port, inbrowser=not a.share, share=a.share, **launch_kw)
+    demo.launch(server_name="127.0.0.1", server_port=a.port, inbrowser=not a.share, share=a.share,
+                allowed_paths=[sess.cache_dir], **launch_kw)
 
 
 if __name__ == "__main__":

@@ -56,17 +56,22 @@ def test_screen_order_per_model_and_repeats():
     assert [x["order"] for x in screen_order(ids, "b", seed=1)] != [x["order"] for x in sc[:40]]   # model khác: thứ tự khác
 
 
-def test_render_colors_and_box_at():
-    from ce_localization.user_study.app import COLOR, as_reasons, box_at, render, toggle
-    img = Image.new("RGB", (2200, 1100), (0, 0, 0))
+def test_box_svg_colors_order_and_labels():
+    """SVG box: toạ độ pixel ảnh gốc (viewBox W × H), màu theo nhãn, box to vẽ trước (box nhỏ nằm trên, bấm trúng), data-box = số
+    box (khớp phím / nút us_tog<i>), tắt box vật thì không vẽ."""
+    import re
+    from ce_localization.user_study.app import COLOR, as_reasons, box_svg, toggle
     boxes = [[100, 100, 1000, 900], [200, 200, 400, 400]]
-    im, r = render(img, [[1500, 100, 1800, 400]], boxes, [[], ["wrong_size", "on_object"]], max_side=1100)
-    assert im.size == (1100, 550) and r == 0.5
-    px = np.asarray(im)
-    assert tuple(px[300, 50]) == COLOR["ok"]                    # cạnh trái box 1 (x = 100 * 0,5) — dưới nhãn số
-    assert tuple(px[150, 100]) == COLOR["bad"]
-    assert tuple(px[150, 750]) == COLOR["obj"]
-    assert box_at(boxes, 300, 300) == 1 and box_at(boxes, 900, 800) == 0 and box_at(boxes, 1500, 50) is None
+    svg = box_svg((2200, 1100), [[1500, 100, 1800, 400]], boxes, [[], ["wrong_size", "on_object"]])
+    assert svg.startswith('<svg viewBox="0 0 2200 1100"')
+    assert svg.count(f'stroke="{COLOR["obj"]}"') == 1 and 'pointer-events="none"' in svg
+    groups = re.findall(r'<g data-box="(\d)"><rect x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)" '
+                        r'fill="transparent" stroke="([^"]+)"', svg)
+    assert [g[0] for g in groups] == ["1", "2"]                               # box 1 (to) trước, box 2 (nhỏ) đè lên
+    assert [float(v) for v in groups[0][1:5]] == [100, 100, 900, 800] and groups[0][5] == COLOR["ok"]
+    assert groups[1][5] == COLOR["bad"]
+    big_last = box_svg((2200, 1100), [], [boxes[1], boxes[0]], [[], []], show_objects=False)
+    assert [g[0] for g in re.findall(r'<g data-box="(\d)">', big_last)] == ["2", "1"] and COLOR["obj"] not in big_last
     assert toggle([]) == ["on_object"] and toggle(["implausible", "other"]) == []
     assert as_reasons(["other", "on_object", "x"]) == ["on_object", "other"]               # thứ tự REASONS, bỏ lạ
     assert as_reasons("ok") == [] and as_reasons("wrong_size") == ["wrong_size"]          # dạng cũ một chuỗi
@@ -166,20 +171,25 @@ def test_full_flow_dump_build_rate_score(tmp_path, monkeypatch):
     assert sum(x["repeat_of"] is None for x in d["screens"]) == n_orig
 
     ratings = str(tmp_path / "us" / "ratings.jsonl")
-    sess = Session(items, samples, models=["m_mock"])                         # chấm riêng một model
+    sess = Session(items, samples, models=["m_mock"], cache_dir=str(tmp_path / "img"))   # chấm riêng một model
     nv = len(sess.view)
     assert nv == sum(x["model"] == "m_mock" for x in d["screens"]) and sess.pos == 0 and not sess.done
     assert all(sess.screens[j]["model"] == "m_mock" for j in sess.view)
     rated = 0
     while not sess.done and rated < 6:
         n = len(sess.labels)
-        im = sess.image(True)
-        W, H = d["items"][sess.screen()[0]["image_id"]]["wh"]
-        assert max(im.size) == 1100 and im.size == (round(W * sess.r), round(H * sess.r))     # ảnh nhỏ cũng phóng lên
+        it = d["items"][sess.screen()[0]["image_id"]]
+        page = sess.html(True)
+        bg = sess.background(it["image"])
+        assert os.path.dirname(bg) == sess.cache_dir and max(Image.open(bg).size) == 1100   # ảnh nền WebP, ảnh nhỏ cũng phóng lên
+        assert f'class="us_bg" src="/gradio_api/file={bg}"' in page and f'viewBox="0 0 {it["wh"][0]} {it["wh"][1]}"' in page
+        assert page.count("data-box=") == n
+        nxt_imgs = {d["items"][sess.screens[sess.view[p]]["image_id"]]["image"]
+                    for p in range(sess.pos + 1, min(sess.pos + 4, len(sess.view)))} - {it["image"]}
+        assert all(os.path.exists(sess.background(x)) and sess.background(x) in page for x in nxt_imgs)   # tải trước 3 màn sau
         if n:
-            b0 = sess.sel()["boxes"][0]
-            hit = sess.click((b0[0] + b0[2]) / 2 * sess.r, (b0[1] + b0[3]) / 2 * sess.r)
-            assert hit is not None and sess.labels.count(["on_object"]) == 1
+            sess.toggle(0)                                                     # = bấm box 1 / phím 1
+            assert sess.labels[0] == ["on_object"] and f'stroke="#eb1e1e"' in sess.html(True)
             if n > 1:
                 sess.set_reasons(1, ["implausible", "wrong_size", "on_object"])       # nhiều lý do một box
                 assert sess.labels[1] == ["on_object", "wrong_size", "implausible"]
@@ -207,7 +217,7 @@ def test_full_flow_dump_build_rate_score(tmp_path, monkeypatch):
     assert len(sess.view) == len(d["screens"]) and len({sess.screens[j]["model"] for j in sess.view[:10]}) == 2
     with pytest.raises(ValueError):
         sess.set_models(["khong_co"])
-    sess2 = Session(items, samples, models=["m_mock"])                         # tắt mở lại: về màn chưa lưu đầu tiên
+    sess2 = Session(items, samples, models=["m_mock"], cache_dir=str(tmp_path / "img"))  # mở lại: màn chưa lưu đầu
     assert sess2.pos == p_now and len(sess2.store.latest) == rated
     sess2.prev()
     sid = sess2.screen()[0]["id"]
