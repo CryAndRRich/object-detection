@@ -13,7 +13,8 @@ IoU với LỖ (ảnh inpaint — `with_holes=True`):
   hole_cover                          mẫu t >= 2: tỉ lệ lỗ được >= 1 box IoU >= 0,5 phủ
   by_turn                             theo lượt t
 Không cần GT (cả ảnh gốc không lỗ):
-  on_object      tỉ lệ box có IoA (giao / diện tích box) >= 0,5 với một vật đang có
+  on_object      tỉ lệ box có IoA (giao / diện tích box) >= 0,5 với một vật đang có (record có `objects_all` — CE-CoCount, hai lớp
+                 cùng ảnh — thì tính trên `objects_all`; C-NLL vẫn fit trên `objects` cùng lớp)
   in_image       tỉ lệ box nằm trọn trong vùng ảnh thật
   C-NLL (paper)  `−log q(x) − min_i(−log q(z_i))`, q = Gaussian 4-D fit trên vật đang có của ảnh. Paper tự mâu
                  thuẫn về đặc trưng ⇒ báo cả hai: F1 = [w, h, IoU lớn nhất với vật có sẵn, TB khoảng cách tới tâm
@@ -78,7 +79,9 @@ def predict_add(model, loader, text_table, n_samples=30, seed=0, log_every=0, lo
             for i in range(len(batch["image_id"])):
                 dst.append({"image_id": batch["image_id"][i], "t": batch["t"][i], "wh": wh[i].astype(np.float64),
                             "boxes": boxes[i], "holes": batch["holes"][i].numpy().astype(np.float64),
-                            "objects": batch["objects"][i].numpy().astype(np.float64)})
+                            "objects": batch["objects"][i].numpy().astype(np.float64),
+                            **({"objects_all": batch["objects_all"][i].numpy().astype(np.float64)}
+                               if "objects_all" in batch else {})})
         done = len(records[0] if multi else records)
         if log_every and (bi % log_every == 0 or done == n):
             el = time.time() - t0
@@ -173,8 +176,9 @@ def cnll(boxes, objects, wh, kind="F1"):
     return nll(x) - nll(z).min()
 
 
-def add_metrics(records, with_holes=True):
-    """records (box thô) -> dict chỉ số (mục docstring). Hàm thuần."""
+def add_metrics(records, with_holes=True, latest=True):
+    """records (box thô) -> dict chỉ số (mục docstring). Hàm thuần. `latest=False` (CE-CoCount: các lỗ = 10 chỗ trống GT, không có
+    thứ tự lượt) bỏ mọi chỉ số `_latest` và `by_turn`."""
     acc = {k: [] for k in ("best_any", "best_latest", "mean_any", "mean_latest", "boxhit_any", "boxhit_latest",
                            "on_object", "in_image", "degenerate")}
     cover, by_turn = [], {}
@@ -186,7 +190,8 @@ def add_metrics(records, with_holes=True):
         acc["degenerate"].append(deg.mean())
         acc["in_image"].append(((b[:, 0] >= 0) & (b[:, 1] >= 0) & (b[:, 2] <= nw) & (b[:, 3] <= nh) & ~deg).mean())
         obj = r["objects"].reshape(-1, 4)
-        acc["on_object"].append((_ioa(b, obj).max(1) >= HIT).mean() if len(obj) else 0.0)
+        obj_on = r["objects_all"].reshape(-1, 4) if "objects_all" in r else obj
+        acc["on_object"].append((_ioa(b, obj_on).max(1) >= HIT).mean() if len(obj_on) else 0.0)
         if with_holes:
             iou = box_iou(b, r["holes"])[0]                                  # [K, t]
             any_, lat = iou.max(1), iou[:, -1]
@@ -223,4 +228,6 @@ def add_metrics(records, with_holes=True):
                     "hole_cover": m(cover), "n_multi_hole": len(cover),
                     "by_turn": {t: {k: m(v) for k, v in d.items()} | {"n": len(d["best_any"])}
                                 for t, d in sorted(by_turn.items())}})
+        if not latest:
+            res = {k: v for k, v in res.items() if "latest" not in k and k != "by_turn"}
     return res

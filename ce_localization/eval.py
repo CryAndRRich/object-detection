@@ -14,6 +14,8 @@ GAMMA2 (`model.arch: propose_refine`): CE-Loc sinh `--n-samples` box MỘT lần
 GAMMA3 (`model.geo`): thêm `<ảnh>_t<t*>_nogeo`, `<ảnh>_noise_nogeo` = cùng biến thể nhưng TẮT nhánh geo.
 GAMMA3.1 (`model.relation`): thêm `_nogeo` (bỏ attention tới vật) và `_norel` (giữ attention, bỏ Rel hình học).
 GAMMA4 (`model.obj_attn`, CE-Loc + cross-attn tới box vật): thêm `<ảnh>_noobj` = cùng checkpoint, tắt cross-attn tới box vật.
+`--dataset cocount` (CE-CoCount, mục 18): cùng mọi checkpoint add, khoá `cocount<hậu tố>`; lỗ = 10 chỗ trống GT (chỉ số `_any`, không
+`_latest`), density trống, `on_object` trên box cả hai lớp, C-NLL trên box cùng lớp; `prior` = lỗ train CE-130 như cũ.
 `--dump-boxes F.json` (user study, docs/EXPERIMENT_GAMMA.md mục 17): ghi thêm box THÔ của từng mẫu mọi khoá kết quả
 (`image_id`, `t`, `wh` = (nw, nh) vùng ảnh thật trên canvas, `boxes` [K,4] xyxy pixel canvas) cho `user_study/build.py`.
 
@@ -53,6 +55,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ce_localization.data.dataset import CE130Dataset, collate  # noqa: E402
 from ce_localization.data.density import EVAL_MODES, DensityIndex  # noqa: E402
+from ce_localization.data.cocount import CoCountAddDataset  # noqa: E402
 from ce_localization.data.turns import ADD_DENSITY, IMAGE_KINDS, CE130AddDataset, TurnIndex, collate_add  # noqa: E402
 from ce_localization.engine.add_eval import add_metrics, predict_add, prior_records, prior_unit_boxes  # noqa: E402
 from ce_localization.engine.evaluate import attention_diagnostics, predict, score  # noqa: E402
@@ -172,16 +175,21 @@ def main_add(a, cfg, ck, dev, t0):
             refine_vars += [(s_ + "_nogeo", d_ + ", TẮT box vật", {**v_, "geo": False}) for s_, d_, v_ in base]
         if cfg["model"].get("relation"):              # GAMMA3.1: giữ attention tới vật, bỏ Rel hình học
             refine_vars += [(s_ + "_norel", d_ + ", bỏ Rel", {**v_, "rel_bias": False}) for s_, d_, v_ in base]
-    out = {"ckpt": a.ckpt, "iter": it, "split": a.split, "n_samples": K, "density": {}, "results": {},
+    out = {"ckpt": a.ckpt, "iter": it, "split": a.split, "dataset": a.dataset, "n_samples": K, "density": {}, "results": {},
            "prior": {}, "density_weight_ratio": dwr, "add_samplers": a.add_samplers, "proposer_sampler": a.proposer_sampler,
            "amp": amp}
     dump = {"ckpt": a.ckpt, "iter": it, "split": a.split, "n_samples": K, "seed": a.seed, "results": {}} if a.dump_boxes else None
     text_table = None
-    for image in a.image:
-        dens = (a.add_density or ("sample" if image == "inpainted" else "full")) if four else None
-        dindex = DensityIndex(d["density_index"], d["density_root"]) if dens == "full" else None
-        ds = CE130AddDataset(index, d["root"], d["samples_root"], a.split, d["image_size"], density=dens,
-                             density_index=dindex, image=image, style=d.get("input_style", "ours"), split_source=src)
+    cocount = a.dataset == "cocount"
+    for image in (["cocount"] if cocount else a.image):
+        if cocount:                                   # CE-CoCount (mục 18): ảnh gốc + 10 chỗ trống GT, KHÔNG density map -> trống
+            dens = "empty" if four else None
+            ds = CoCountAddDataset(a.cocount_root, d["image_size"], style=d.get("input_style", "ours"), density=dens)
+        else:
+            dens = (a.add_density or ("sample" if image == "inpainted" else "full")) if four else None
+            dindex = DensityIndex(d["density_index"], d["density_root"]) if dens == "full" else None
+            ds = CE130AddDataset(index, d["root"], d["samples_root"], a.split, d["image_size"], density=dens,
+                                 density_index=dindex, image=image, style=d.get("input_style", "ours"), split_source=src)
         if a.limit:
             ds.keys = ds.keys[: a.limit]
         if text_table is None:
@@ -189,16 +197,16 @@ def main_add(a, cfg, ck, dev, t0):
         loader = DataLoader(ds, batch_size=a.batch_size or cfg["eval"]["batch_size"], shuffle=False,
                             num_workers=a.num_workers, collate_fn=collate_add)
         out["density"][image] = dens
-        holes = image == "inpainted"
+        holes = image in ("inpainted", "cocount")
 
         def report(key, desc, rec, sec, attn_key=None):
-            res = add_metrics(rec, with_holes=holes)
+            res = add_metrics(rec, with_holes=holes, latest=not cocount)
             res["eval_sec"] = sec
             if hasattr(model, "pop_attn"):
                 res["attn"] = model.pop_attn() if attn_key is None else model.pop_attn(attn_key)
             pri_rec = prior_records(rec, prior_unit, K, seed=a.seed)
-            pri = add_metrics(pri_rec, with_holes=holes)
-            seen = paper_train_mask(index, rec)
+            pri = add_metrics(pri_rec, with_holes=holes, latest=not cocount)
+            seen = [False] * len(rec) if cocount else paper_train_mask(index, rec)
             if any(seen) and not all(seen):
                 keep = [i for i, m in enumerate(seen) if not m]
                 res["excl_paper_train"] = add_metrics([rec[i] for i in keep], with_holes=holes)
@@ -288,6 +296,10 @@ def main():
                          "ddpm (1000 bước đúng công thức)")
     ap.add_argument("--samples-root", default=None, help="GAMMA: ghi đè data.samples_root")
     ap.add_argument("--turn-index", default=None, help="GAMMA: ghi đè data.turn_index")
+    ap.add_argument("--dataset", default="ce130", choices=["ce130", "cocount"],
+                    help="GAMMA: ce130 (mặc định, --split / --image) | cocount = CE-CoCount (docs/EXPERIMENT_GAMMA.md mục 18: ảnh gốc, "
+                         "10 chỗ trống GT làm lỗ, density trống; bỏ qua --split / --image)")
+    ap.add_argument("--cocount-root", default="../data/cocount", help="GAMMA: thư mục CE-CoCount (Image/ Anno/ Anno_with_exam_bbox/)")
     ap.add_argument("--dump-boxes", default=None, help="GAMMA: file .json ghi box thô từng mẫu (user study, user_study/build.py)")
     a = ap.parse_args()
 

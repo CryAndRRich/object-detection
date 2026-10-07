@@ -37,6 +37,8 @@ weights/diffuse2seg/stable-diffusion-v1-5/   SD cho diffuse2seg (hoặc tải qu
 data/all_phase2_V2/, samples/                CE-130 (CE-Loc)
 data/cache_clip_1024/                        cache patch token CLIP @1024 (sinh bằng tools/build_cache.py)
 data/ce130_coco/                             CE-130 dạng COCO (baseline, diffuse2seg)
+data/cocount/                                CE-CoCount: test phụ của bài (1.484 truy vấn / 742 frame CoCount-train; Image/ Anno/
+                                             Anno_with_exam_bbox/ masks/) — docs/EXPERIMENT_GAMMA.md mục 18
 data/coco*, voc, crowdhuman, paco            dataset detector / PACO
 ```
 

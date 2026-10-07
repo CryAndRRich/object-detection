@@ -457,6 +457,7 @@ def collate_add(batch):
         "text": [b["text"] for b in batch],
         "image_id": [b["image_id"] for b in batch],
         "t": [b["t"] for b in batch],
+        **({"objects_all": [b["objects_all"] for b in batch]} if "objects_all" in batch[0] else {}),   # CE-CoCount: cả hai lớp
     }
 
 

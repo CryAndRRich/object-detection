@@ -117,6 +117,9 @@ eval như mọi config (`--save-dir ../weights/add/<tên>`, log `log/gamma/`, k�
 tự nhận `task: add`: `--image inpainted original`, `--n-samples`, `--add-density`, `--steps` (GAMMA1). Lệnh đầy đủ:
 `docs/EXPERIMENT_GAMMA.md`.
 
+CE-CoCount (tập test phụ của bài, `data/cocount/`): `eval.py --dataset cocount --cocount-root ../data/cocount` (ảnh gốc, 10 chỗ trống GT
+làm lỗ, density trống; `data/cocount.py`); C-NLL của box GT trên CE-130 + CE-CoCount: `tools/gt_cnll.py`. Mục 18 của EXPERIMENT_GAMMA.
+
 User study (người chấm box đề xuất, `user_study/`): `eval.py --dump-boxes` (server) → `user_study/build.py` (chọn 4 box / model,
 xáo màn) → `user_study/app.py` (web Gradio chấm ở local, `pip install gradio`) → `user_study/score.py`. Lệnh + chỉ số:
 `docs/EXPERIMENT_GAMMA.md` mục 17.
