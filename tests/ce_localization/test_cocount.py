@@ -44,6 +44,27 @@ def test_clean_class_and_twin():
     assert twin_name("A_B_positive") == "A_B_negative" and twin_name("A_B_negative") == "A_B_positive"
 
 
+def test_filter_objects_drops_giant_sam_boxes(tmp_path):
+    """Box SAM khoanh cả đống vật (cạnh > k × cạnh TB exemplar) bị bỏ ở cả lớp này lẫn lớp kia; không lọc thì giữ nguyên."""
+    from ce_localization.data.cocount import CoCountAddDataset, filter_objects, read_cocount
+    ex = np.array([[0, 0, 8, 8], [10, 0, 18, 8]], float)
+    objs = np.array([[0, 0, 8, 8], [0, 0, 20, 20], [0, 0, 30, 30], [0, 0, 100, 90]], float)   # cạnh 8 / 20 / 30 / ~95; mốc 8
+    assert len(filter_objects(objs, ex, 3)) == 2 and len(filter_objects(objs, ex, 2)) == 1
+    assert filter_objects(objs, ex, None) is objs and filter_objects(objs, np.zeros((0, 4)), 3) is objs
+    root = _fake_cocount(str(tmp_path / "cc"))
+    name, twin = NAMES[0] + "_positive", NAMES[0] + "_negative"
+    for n in (name, twin):                                                    # thêm 2 box khổng lồ vào mỗi lớp
+        f = os.path.join(root, "Anno_with_exam_bbox", n + ".json")
+        e = json.load(open(f))
+        e["exam_bbox"] += [{"bbox": [0, 0, 150, 110], "score": 0.9}, {"bbox": [1, 1, 149, 109], "score": 0.9}]
+        json.dump(e, open(f, "w"))
+    raw, filt = read_cocount(root, name), read_cocount(root, name, 3)
+    assert len(raw["objects"]) == 10 and len(filt["objects"]) == 8 and len(raw["objects_all"]) - len(filt["objects_all"]) == 4
+    assert np.allclose(filt["exemplars"], raw["exemplars"])
+    ds = CoCountAddDataset(root, 128, density=None, max_obj_ratio=3)
+    assert ds[ds.keys.index(name)]["objects"].shape == (8, 4)
+
+
 def test_cocount_dataset_fields_and_density(tmp_path):
     from ce_localization.data.cocount import CoCountAddDataset, read_cocount
     from ce_localization.data.turns import collate_add, to_device_add
@@ -125,15 +146,16 @@ def test_gt_cnll_tool(tmp_path, monkeypatch):
     root = _fake_cocount(str(tmp_path / "cc"))
     cc = g.cocount_gt(root)
     assert len(cc) == 4 and all(len(x[0]) == 10 for x in cc) and cc[0][2] in ((200, 120), (90, 160))
+    assert [len(x[1]) for x in g.cocount_gt(root, 3)] == [len(x[1]) for x in cc]          # dữ liệu giả không có box khổng lồ
     sc = g.summarize(cc)
     assert sc["n_cnll"] == 4 and not any("latest" in k for k in sc)
     out = str(tmp_path / "gt.json")
     monkeypatch.setattr(sys, "argv", ["gt_cnll.py", "--turn-index", tpath, "--split-source", "ce130", "--cocount-root", root,
-                                      "--out", out])
+                                      "--cocount-obj-filter", "3", "--out", out])
     g.main()
     with open(out) as f:
         res = json.load(f)
-    assert set(res) == {"ce130", "cocount"} and res["cocount"]["n_cnll"] == 4
+    assert set(res) == {"ce130", "cocount"} and res["cocount"]["n_cnll"] == 4 and res["cocount"]["obj_filter"] == 3
 
 
 @pytest.mark.parametrize("kind", ["paper", "obj", "pr"])
@@ -159,7 +181,7 @@ def test_eval_cocount_full_flow(tmp_path, monkeypatch, kind):
         model = build_model(cfg, pretrained_backbone=False)
         torch.save({"model": model.state_dict(), "config": cfg, "iter": 0}, ck)
         extra = (["--refine-t", "none", "5", "--proposer-sampler", "ddpm"] if kind == "pr" else
-                 ["--add-samplers", "ddpm"])                                  # config thu nhỏ T = 20: mock 100 bước không chạy
+                 ["--add-samplers", "ddpm", "--cocount-obj-filter", "3"])     # config thu nhỏ T = 20: mock 100 bước không chạy
     out, dump = str(tmp_path / "res.json"), str(tmp_path / "boxes.json")
     monkeypatch.setattr(sys, "argv", ["eval.py", "--ckpt", ck, "--dataset", "cocount", "--cocount-root", root, "--n-samples", "3",
                                       "--num-workers", "0", "--out", out, "--dump-boxes", dump, "--device", "cpu", "--obj-size", "mean",
@@ -171,6 +193,7 @@ def test_eval_cocount_full_flow(tmp_path, monkeypatch, kind):
     want = {"paper": {"cocount"}, "obj": {"cocount", "cocount_noobj"}, "pr": {"cocount_ce", "cocount_t5"}}[kind]
     want |= {k + sfx for k in want for sfx in ("_objsize", "_objsize_exemplar")}
     assert set(res["results"]) == want and res["dataset"] == "cocount" and res["density"] == {"cocount": "empty"}
+    assert res["cocount_obj_filter"] == (3 if kind == "obj" else None)
     for k, r in res["results"].items():
         assert r["n"] == 4 and 0 <= r["best_iou@3_any"] <= 1 and 0 <= r["on_object"] <= 1 and r["n_cnll"] == 4
         assert not any("latest" in kk for kk in r) and r["n_paper_train"] == 0

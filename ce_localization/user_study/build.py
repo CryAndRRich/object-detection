@@ -93,9 +93,10 @@ def _item(index, iid):
             "holes": [list(map(float, h)) for h in b["holes"][:t]], "models": {}}
 
 
-def cocount_item(root, iid):
-    """Mẫu CE-CoCount `iid` (tên file) -> item: ảnh gốc, t = 0, vật cùng lớp + vật lớp kia (pixel ảnh gốc), lỗ = 10 loc_bbox."""
-    r = read_cocount(root, iid)
+def cocount_item(root, iid, max_obj_ratio=None):
+    """Mẫu CE-CoCount `iid` (tên file) -> item: ảnh gốc, t = 0, vật cùng lớp + vật lớp kia (pixel ảnh gốc, lọc box SAM khổng lồ nếu
+    `max_obj_ratio`), lỗ = 10 loc_bbox."""
+    r = read_cocount(root, iid, max_obj_ratio)
     image = f"Image/{iid}.jpg"
     with Image.open(os.path.join(root, image)) as im:
         wh = list(im.size)
@@ -104,7 +105,7 @@ def cocount_item(root, iid):
             "objects_other": r["objects_all"][n:].round(2).tolist(), "holes": r["loc"].tolist(), "models": {}}
 
 
-def build_items(index, dumps, k=K, seed=0, repeat=0.1, min_gap=0.05, base=None, log=print, cocount_root=None):
+def build_items(index, dumps, k=K, seed=0, repeat=0.1, min_gap=0.05, base=None, log=print, cocount_root=None, max_obj_ratio=None):
     """dumps: list (model_id, meta, {image_id: record}) -> dict items.json. `base` (items.json đã có): THÊM các model vào, giữ nguyên
     tập mẫu + màn cũ; dump mới phải có đủ mọi mẫu của `base`. `cocount_root`: mẫu CE-CoCount (`index` bỏ qua)."""
     if base is not None:
@@ -125,9 +126,10 @@ def build_items(index, dumps, k=K, seed=0, repeat=0.1, min_gap=0.05, base=None, 
                 log(f"  [cảnh báo] {mid}: {len(recs)} mẫu, chỉ giữ {len(ids)} mẫu chung mọi model")
         if not ids:
             raise ValueError("các dump không có mẫu chung")
-        make = (lambda i: cocount_item(cocount_root, i)) if cocount_root else (lambda i: _item(index, i))
+        make = (lambda i: cocount_item(cocount_root, i, max_obj_ratio)) if cocount_root else (lambda i: _item(index, i))
         out = {"k": k, "seed": seed, "repeat": repeat, "min_gap": min_gap, "dataset": "cocount" if cocount_root else "ce130",
-               "models": {}, "items": {iid: make(iid) for iid in sorted(ids)}, "screens": []}
+               "models": {}, "items": {iid: make(iid) for iid in sorted(ids)}, "screens": [],
+               **({"cocount_obj_filter": max_obj_ratio} if cocount_root else {})}
     for mid, meta, recs in dumps:
         for iid, it in out["items"].items():
             r = recs[iid]
@@ -144,6 +146,7 @@ def main():
     ap.add_argument("--turn-index", default="../data/turn_index.json")
     ap.add_argument("--cocount-root", default=None, help="CE-CoCount (Image/ Anno/ Anno_with_exam_bbox/): dump của eval.py "
                                                        "--dataset cocount; bỏ qua --turn-index")
+    ap.add_argument("--cocount-obj-filter", type=float, default=None, help="CE-CoCount: bỏ box vật > K × cạnh TB exemplar (như eval.py)")
     ap.add_argument("--model", nargs=4, action="append", required=True, metavar=("ID", "DUMP", "KEY", "NAME"),
                     help="mã model, file --dump-boxes, khoá kết quả (vd inpainted / inpainted_t100), tên hiển thị trên web "
                          "(docs/EXPERIMENT_GAMMA.md mục 13.0)")
@@ -173,7 +176,8 @@ def main():
     splits = {d[1]["split"] for d in dumps} | ({m["split"] for m in base["models"].values()} if base else set())
     if len(splits) != 1:
         sys.exit(f"dump khác split: {sorted(splits)}")
-    out = build_items(index, dumps, k=a.k, seed=a.seed, repeat=a.repeat, min_gap=a.min_gap, base=base, cocount_root=a.cocount_root)
+    out = build_items(index, dumps, k=a.k, seed=a.seed, repeat=a.repeat, min_gap=a.min_gap, base=base, cocount_root=a.cocount_root,
+                      max_obj_ratio=a.cocount_obj_filter)
     path = a.add_to or a.out
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     tmp = path + ".tmp"

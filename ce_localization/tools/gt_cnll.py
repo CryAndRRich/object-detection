@@ -44,14 +44,14 @@ def ce130_gt(index, split="test", source="samples"):
     return out
 
 
-def cocount_gt(root):
-    """-> list (10 loc_bbox, vật cùng lớp, (W, H)) cho mọi mẫu CE-CoCount."""
+def cocount_gt(root, max_obj_ratio=None):
+    """-> list (10 loc_bbox, vật cùng lớp, (W, H)) cho mọi mẫu CE-CoCount (`max_obj_ratio`: lọc box vật như eval.py)."""
     out = []
     for f in sorted(os.listdir(os.path.join(root, "Anno"))):
         if not f.endswith(".json"):
             continue
         name = f[:-5]
-        r = read_cocount(root, name)
+        r = read_cocount(root, name, max_obj_ratio)
         with Image.open(os.path.join(root, "Image", name + ".jpg")) as im:
             wh = im.size
         out.append((r["loc"], r["objects"], wh))
@@ -86,12 +86,14 @@ def main():
     ap.add_argument("--split", default="test")
     ap.add_argument("--split-source", default="samples", help="như data.split_source của GAMMA2+ (samples: test 4.948 mẫu)")
     ap.add_argument("--cocount-root", default="../data/cocount", help="rỗng = bỏ CE-CoCount")
+    ap.add_argument("--cocount-obj-filter", type=float, default=None, help="như eval.py: bỏ box vật > K × cạnh TB exemplar")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     res = {"ce130": summarize(ce130_gt(TurnIndex(a.turn_index), a.split, a.split_source), latest=True)}
     res["ce130"].update(split=a.split, split_source=a.split_source)
     if a.cocount_root:
-        res["cocount"] = summarize(cocount_gt(a.cocount_root))
+        res["cocount"] = summarize(cocount_gt(a.cocount_root, a.cocount_obj_filter))
+        res["cocount"]["obj_filter"] = a.cocount_obj_filter
     for name, r in res.items():
         print(f"== {name}: {r['n_cnll']} / {r['n_samples']} mẫu có >= {r['min_obj']} vật")
         for k in sorted(k for k in r if k.startswith("cnll_") and k.endswith("_median")):

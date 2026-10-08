@@ -18,6 +18,8 @@ GAMMA4 (`model.obj_attn`, CE-Loc + cross-attn tới box vật): thêm `<ảnh>_n
 `_latest`), density trống, `on_object` trên box cả hai lớp, C-NLL trên box cùng lớp; `prior` = lỗ train CE-130 như cũ.
 `--dump-boxes F.json` (user study, docs/EXPERIMENT_GAMMA.md mục 17): ghi thêm box THÔ của từng mẫu mọi khoá kết quả
 (`image_id`, `t`, `wh` = (nw, nh) vùng ảnh thật trên canvas, `boxes` [K,4] xyxy pixel canvas) cho `user_study/build.py`.
+`--cocount-obj-filter K`: CE-CoCount, bỏ box vật SAM có cạnh > K × cạnh TB exemplar (`data/cocount.filter_objects`; ảnh hưởng box vật
+vào GAMMA4, C-NLL, `on_object`, `--obj-size`).
 `--obj-size [STAT ...]` (GAMMA): mỗi khoá thêm bản CÙNG box (cùng lượt sinh) giữ tâm, (w, h) đổi theo box vật cùng lớp của ảnh
 (`engine/add_eval.resize_to_objects`, STAT ∈ mean | median | trim | small | exemplar, mặc định mean): khoá `<khoá>_objsize` (mean) /
 `<khoá>_objsize_<STAT>`; `prior` của khoá đó đổi cỡ y như vậy. `exemplar` = 3 box mẫu gán tay, chỉ CE-CoCount.
@@ -188,7 +190,9 @@ def main_add(a, cfg, ck, dev, t0):
     for image in (["cocount"] if cocount else a.image):
         if cocount:                                   # CE-CoCount (mục 18): ảnh gốc + 10 chỗ trống GT, KHÔNG density map -> trống
             dens = "empty" if four else None
-            ds = CoCountAddDataset(a.cocount_root, d["image_size"], style=d.get("input_style", "ours"), density=dens)
+            ds = CoCountAddDataset(a.cocount_root, d["image_size"], style=d.get("input_style", "ours"), density=dens,
+                                   max_obj_ratio=a.cocount_obj_filter)
+            out["cocount_obj_filter"] = a.cocount_obj_filter
         else:
             dens = (a.add_density or ("sample" if image == "inpainted" else "full")) if four else None
             dindex = DensityIndex(d["density_index"], d["density_root"]) if dens == "full" else None
@@ -315,6 +319,8 @@ def main():
                     help="GAMMA: thêm khoá `<khoá>_objsize[_STAT]` = cùng box, giữ tâm, (w, h) theo box vật cùng lớp của ảnh; STAT "
                          "mean (mặc định khi không ghi) | median | trim (bỏ outlier IQR) | small (TB nửa nhỏ) | exemplar (3 box mẫu gán "
                          "tay, chỉ CE-CoCount)")
+    ap.add_argument("--cocount-obj-filter", type=float, default=None,
+                    help="GAMMA, CE-CoCount: bỏ box vật có cạnh > K × cạnh TB 3 exemplar gán tay (mặc định giữ hết; đề xuất 3)")
     ap.add_argument("--dump-boxes", default=None, help="GAMMA: file .json ghi box thô từng mẫu (user study, user_study/build.py)")
     a = ap.parse_args()
     if a.obj_size == []:                              # --obj-size không kèm STAT = mean (như trước)
