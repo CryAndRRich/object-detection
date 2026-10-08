@@ -258,3 +258,82 @@ def test_full_flow_dump_build_rate_score(tmp_path, monkeypatch):
     rr = res["models"]["m_mock"]
     if rr["n_reasons"] == rr["n_reasons"]:                                     # có box không ổn
         assert rr["n_reasons"] >= 1 and sum(rr["reasons"].values()) == pytest.approx(rr["n_reasons"])
+
+
+def test_default_ratings_path():
+    from ce_localization.user_study.app import default_ratings_path
+    assert default_ratings_path("/a/items.json") == "/a/ratings.jsonl"
+    assert default_ratings_path("/a/items_objsize.json") == "/a/ratings_objsize.jsonl"
+    assert default_ratings_path("/a/items.json", "rater2") == "/a/ratings_rater2.jsonl"
+    assert default_ratings_path("/a/foo.json") == "/a/foo_ratings.jsonl"
+
+
+def test_cocount_flow_two_datasets(tmp_path, monkeypatch):
+    """eval.py --dataset cocount --obj-size --dump-boxes -> build.py --cocount-root (cocount + cocount_objsize = 2 items.json) ->
+    hai phiên chấm (nhãn riêng từng bộ, vật lớp kia nét đứt) -> UI một ô Dataset đổi bộ -> score.py."""
+    import ce_localization.eval as ea
+    import ce_localization.train as ta
+    from ce_localization.data.cocount import read_cocount
+    from ce_localization.user_study import build as bu
+    from ce_localization.user_study import score as su
+    from ce_localization.user_study.app import Session, box_svg, build_ui
+    from tests.ce_localization.helpers import _fake_paper_ckpt, _fake_text_table, _fake_turn_index, _gamma_cfg
+    from tests.ce_localization.test_cocount import _fake_cocount
+    base = str(tmp_path / "d")
+    os.makedirs(base)
+    _fake_turn_index(base)
+    root = _fake_cocount(str(tmp_path / "cc"))
+    cfg_path, _ = _gamma_cfg(tmp_path, base, "density")
+    ck = str(tmp_path / "best_model.pth")
+    _fake_paper_ckpt(ck, T=100)
+    monkeypatch.setattr(ta, "build_text_table", lambda names, cfg, dev, state_dict=None: _fake_text_table(names, cfg, dev))
+    us = tmp_path / "us"
+    dump = str(us / "boxes.json")
+    monkeypatch.setattr(sys, "argv", ["eval.py", "--ckpt", ck, "--config", cfg_path, "--dataset", "cocount", "--cocount-root", root,
+                                      "--n-samples", "6", "--add-samplers", "mock", "--obj-size", "--num-workers", "0",
+                                      "--dump-boxes", dump, "--device", "cpu"])
+    ea.main()
+    items, items_rs = str(us / "items.json"), str(us / "items_objsize.json")
+    for out, key in ((items, "cocount"), (items_rs, "cocount_objsize")):
+        monkeypatch.setattr(sys, "argv", ["build.py", "--cocount-root", root, "--out", out, "--model", "paper", dump, key, "CE-Loc (paper)"])
+        bu.main()
+    with pytest.raises(SystemExit):                                           # thêm model CE-130 vào items CoCount: chặn
+        monkeypatch.setattr(sys, "argv", ["build.py", "--add-to", items, "--model", "x", dump, "cocount", "X"])
+        bu.main()
+    d, drs = json.load(open(items)), json.load(open(items_rs))
+    assert d["dataset"] == "cocount" and len(d["items"]) == 4 and set(d["items"]) == set(drs["items"])
+    for iid, it in d["items"].items():
+        r = read_cocount(root, iid)
+        W, H = Image.open(os.path.join(root, it["image"])).size
+        assert it["image"] == f"Image/{iid}.jpg" and it["wh"] == [W, H] and it["t"] == 0 and len(it["holes"]) == 10
+        assert len(it["objects"]) == len(r["objects"]) and len(it["objects_other"]) == len(r["objects_all"]) - len(r["objects"])
+        for b in drs["items"][iid]["models"]["paper"]["boxes"]:              # box resize: cỡ = TB vật cùng lớp (trừ box bị kẹp mép)
+            if 0 < b[0] and 0 < b[1] and b[2] < W and b[3] < H:
+                o = np.asarray(it["objects"])
+                assert b[2] - b[0] == pytest.approx((o[:, 2] - o[:, 0]).mean(), abs=0.05)
+
+    svg = box_svg((100, 100), [[0, 0, 5, 5]], [], [], others=[[10, 10, 20, 20], [30, 30, 40, 40]])
+    assert svg.count("stroke-dasharray") == 2 and svg.count(f'stroke="#1e90ff"') == 3
+    cache = str(tmp_path / "img")
+    s1 = Session(items, root, cache_dir=cache, name="CE-CoCount")
+    s2 = Session(items_rs, root, cache_dir=cache, name="CE-CoCount (box resize)")
+    assert s1.store.path == str(us / "ratings.jsonl") and s2.store.path == str(us / "ratings_objsize.jsonl")
+    sc, it = s1.screen()
+    h = s1.header()
+    assert "Dataset: **CE-CoCount**" in h and sc["image_id"] in h and f"{len(it['objects_other'])} of the other class" in h
+    assert s1.html(True).count("stroke-dasharray") == len(it["objects_other"])
+    assert os.path.exists(s1.background(it["image"]))
+    s1.save()
+    s2.save()
+    s2.save()
+    assert len(open(s1.store.path).read().splitlines()) == 1 and len(open(s2.store.path).read().splitlines()) == 2
+
+    gr = pytest.importorskip("gradio")
+    demo, _ = build_ui({"CE-CoCount": s1, "CE-CoCount (box resize)": s2}, gr)
+    fns = {getattr(f, "api_name", None): f for f in demo.fns.values()} if isinstance(demo.fns, dict) else {}
+    assert not fns or "dataset" in fns
+
+    monkeypatch.setattr(sys, "argv", ["score.py", "--items", items_rs, "--ratings", s2.store.path, "--boot", "20"])
+    su.main()
+    res = json.load(open(str(us / "score.json")))
+    assert res["models"]["paper"]["n_screens"] == 2

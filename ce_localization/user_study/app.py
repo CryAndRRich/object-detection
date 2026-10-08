@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
-"""Web chấm user study (docs/EXPERIMENT_GAMMA.md mục 17). Chạy ở máy chấm (local), chỉ đọc `items.json` + ảnh `samples/`,
+"""Web chấm user study (docs/EXPERIMENT_GAMMA.md mục 17). Chạy ở máy chấm (local), chỉ đọc `items.json` + ảnh,
 không model, không GPU. Cần `pip install gradio` (không có trong requirements.txt của server). Chữ trên web tiếng Anh.
+
+Nhiều bộ dữ liệu (`--data TÊN ITEMS THƯ_MỤC_ẢNH`, lặp lại; ô "Dataset" trên web đổi qua lại): mỗi bộ một items.json của `build.py`
++ file nhãn RIÊNG cạnh nó (`items.json` -> `ratings.jsonl`, `items_<x>.json` -> `ratings_<x>.jsonl`; `--rater R` thêm `_R`).
+CE-CoCount: box vật cùng lớp nét liền, vật lớp kia của frame nét đứt.
 
 Mỗi màn = một cặp (mẫu test, model). Ô "Models to rate" (hoặc `--models`) chọn model đang chấm: một model = dãy màn của riêng nó
 (mẫu xáo ngẫu nhiên), nhiều model = các dãy xen ngẫu nhiên; đổi lựa chọn lúc nào cũng được, nhãn lưu theo mã màn nên không lẫn.
@@ -15,8 +19,12 @@ Save ⇒ tắt mở lại vẫn tiếp từ màn chưa lưu đầu tiên; thêm 
 
   cd object-detection/ce_localization
   python user_study/app.py --items ../../output/gamma/user_study/items.json --samples-root ../data/samples [--models gamma4]
+  python user_study/app.py \\
+      --data "CE-130" ../../output/gamma/user_study/items.json ../data/samples \\
+      --data "CE-CoCount" ../../output/gamma/user_study_cocount/items.json ../data/cocount \\
+      --data "CE-CoCount (box resize)" ../../output/gamma/user_study_cocount/items_objsize.json ../data/cocount
 Người khác chấm qua link (chạy trên server, docs/EXPERIMENT_GAMMA.md mục 17): thêm `--share` (in link *.gradio.live) và
-`--ratings .../ratings_<tên>.jsonl` để file nhãn của họ không trùng tên `ratings.jsonl` của người chấm ở local khi tải về.
+`--rater <tên>` (hoặc `--ratings .../ratings_<tên>.jsonl` khi chỉ một bộ) để file nhãn của họ không trùng tên với người chấm ở local.
 
 Hiển thị (2026-10-06, cho nhanh qua link share): ảnh nền = bản WebP cạnh dài MAX_SIDE dựng MỘT lần vào `--cache-dir`, trình duyệt
 tải thẳng qua `/gradio_api/file=` (cache được); box vẽ bằng SVG đè lên ảnh (bấm box = phím i) ⇒ đổi trạng thái box chỉ gửi vài KB
@@ -31,12 +39,14 @@ import os
 import tempfile
 import time
 import warnings
+import zlib
 from datetime import datetime
 from urllib.parse import quote
 
 from PIL import Image
 
-__all__ = ["REASONS", "REASON_EN", "DEFAULT_BAD", "as_reasons", "toggle", "box_svg", "RatingStore", "Session"]
+__all__ = ["REASONS", "REASON_EN", "DEFAULT_BAD", "as_reasons", "toggle", "box_svg", "default_ratings_path", "RatingStore",
+           "Session"]
 
 REASONS = ("on_object", "wrong_size", "implausible", "other")   # nhãn box = list con (thứ tự này); [] = ổn
 REASON_EN = {"on_object": "On object", "wrong_size": "Wrong size", "implausible": "Implausible location", "other": "Other"}
@@ -87,17 +97,28 @@ def toggle(reasons):
     return [] if reasons else [DEFAULT_BAD]
 
 
-def box_svg(wh, objects, boxes, labels, show_objects=True):
-    """SVG phủ lên ảnh, toạ độ = pixel ảnh gốc (viewBox W × H, co giãn theo ảnh). Box vật xanh dương (không bấm được); box đề xuất
+def default_ratings_path(items_path, rater=None):
+    """File nhãn cạnh items.json: `items.json` -> `ratings.jsonl`, `items_<x>.json` -> `ratings_<x>.jsonl` (khác: `<tên>_ratings.jsonl`);
+    `rater` thêm hậu tố `_<rater>` (vd `ratings_rater2.jsonl`)."""
+    d, f = os.path.split(os.path.abspath(items_path))
+    stem = f[:-5] if f.endswith(".json") else f
+    name = "ratings" + stem[5:] if stem.startswith("items") else stem + "_ratings"
+    return os.path.join(d, name + (f"_{rater}" if rater else "") + ".jsonl")
+
+
+def box_svg(wh, objects, boxes, labels, show_objects=True, others=()):
+    """SVG phủ lên ảnh, toạ độ = pixel ảnh gốc (viewBox W × H, co giãn theo ảnh). Box vật xanh dương (`others` = vật lớp khác: nét
+    đứt; không bấm được); box đề xuất
     xanh lá / đỏ + nhãn số, mỗi box một <g data-box="i+1"> (bấm = đổi box i+1). Box to vẽ trước, box nhỏ đè lên ⇒ bấm chỗ chồng nhau
     trúng box nhỏ nhất."""
     W, H = wh
     fs = max(W, H) / 38                                                   # cỡ chữ nhãn theo đơn vị ảnh gốc
     out = [f'<svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">']
     if show_objects:
-        out += [f'<rect x="{x1:.1f}" y="{y1:.1f}" width="{max(x2 - x1, 0):.1f}" height="{max(y2 - y1, 0):.1f}" fill="none" '
-                f'stroke="{COLOR["obj"]}" stroke-width="1.5" vector-effect="non-scaling-stroke" pointer-events="none"/>'
-                for x1, y1, x2, y2 in objects]
+        for boxes_, dash in ((objects, ""), (others, ' stroke-dasharray="4 3"')):
+            out += [f'<rect x="{x1:.1f}" y="{y1:.1f}" width="{max(x2 - x1, 0):.1f}" height="{max(y2 - y1, 0):.1f}" fill="none" '
+                    f'stroke="{COLOR["obj"]}" stroke-width="1.5"{dash} vector-effect="non-scaling-stroke" pointer-events="none"/>'
+                    for x1, y1, x2, y2 in boxes_]
     order = sorted(range(len(boxes)), key=lambda i: -(boxes[i][2] - boxes[i][0]) * (boxes[i][3] - boxes[i][1]))
     for i in order:
         x1, y1, x2, y2 = boxes[i]
@@ -156,14 +177,19 @@ class Session:
     """Trạng thái chấm (một người chấm): model đang chọn, dãy màn `view` (chỉ số vào `screens`, theo `order`), vị trí `pos`,
     nhãn K box đang sửa."""
 
-    def __init__(self, items_path, samples_root, ratings_path=None, models=None, cache_dir=None):
+    def __init__(self, items_path, samples_root, ratings_path=None, models=None, cache_dir=None, name=None, rater=None):
+        """`samples_root`: thư mục chứa `image` của các item (CE-130: samples/, CE-CoCount: data/cocount). `name`: tên bộ dữ liệu."""
         with open(items_path) as f:
             self.d = json.load(f)
         self.k, self.screens, self.items = self.d["k"], self.d["screens"], self.d["items"]
+        self.cocount = self.d.get("dataset") == "cocount"
+        self.name = name
         self.samples_root = samples_root
-        self.store = RatingStore(ratings_path or os.path.join(os.path.dirname(os.path.abspath(items_path)), "ratings.jsonl"))
-        self.cache_dir = os.path.abspath(cache_dir or os.path.join(
+        self.store = RatingStore(ratings_path or default_ratings_path(items_path, rater))
+        self.cache_root = os.path.abspath(cache_dir or os.path.join(
             os.environ.get("GRADIO_TEMP_DIR") or tempfile.gettempdir(), "ce_loc_user_study"))
+        # mỗi thư mục ảnh một thư mục con: hai bộ trùng đường dẫn tương đối không đè ảnh nền của nhau
+        self.cache_dir = os.path.join(self.cache_root, f"{zlib.crc32(os.path.abspath(samples_root).encode()):08x}")
         os.makedirs(self.cache_dir, exist_ok=True)
         self.set_models(models)
 
@@ -171,8 +197,11 @@ class Session:
         return self.d["models"][m].get("name") or m
 
     # ---- chọn model
-    def set_models(self, models=None):
-        """Chấm `models` (list mã; None / rỗng = mọi model) rồi về màn chưa lưu đầu tiên của dãy đó."""
+    def set_models(self, models=None, strict=True):
+        """Chấm `models` (list mã; None / rỗng = mọi model) rồi về màn chưa lưu đầu tiên của dãy đó. strict=False: bỏ qua mã
+        không có trong bộ này (`--models` áp cho mọi bộ)."""
+        if not strict:
+            models = [m for m in models or [] if m in self.d["models"]]
         bad = [m for m in models or [] if m not in self.d["models"]]
         if bad:
             raise ValueError(f"model không có trong items.json: {bad} (có {list(self.d['models'])})")
@@ -262,7 +291,8 @@ class Session:
                for p in range(self.pos + 1, min(self.pos + 1 + PREFETCH, len(self.view)))} - {it["image"]}
         pre = "".join(f'<img src="{url(self.background(im))}" alt="">' for im in sorted(nxt))
         return (f'<div class="us_wrap"><img class="us_bg" src="{url(self.background(it["image"]))}" alt="">'
-                f'{box_svg(it["wh"], it["objects"], self.sel()["boxes"], self.labels, show_objects)}</div>'
+                f'{box_svg(it["wh"], it["objects"], self.sel()["boxes"], self.labels, show_objects, it.get("objects_other", ()))}'
+                '</div>'
                 f'<div style="display:none">{pre}</div>')
 
     def header(self):
@@ -272,15 +302,25 @@ class Session:
         state = "saved" if self.saved(self.pos) else "not saved"
         if self.done:
             state += " | ALL SCREENS OF THE SELECTED MODELS SAVED"
-        branch, turn = sc["image_id"].rsplit("_t", 1)
-        return (f"Screen **{self.pos + 1} / {n}** ({state}) | Saved {saved} / {n} ({saved / n * 100:.1f}%)\n\n"
-                f"Test sample: **{branch}**, turn {turn} ({it['image']}) | Model: **{self.model_name(sc['model'])}** | "
-                f"{len(it['objects'])} existing objects\n\n"
-                f"### Add one more: **{it['class']}**")
+        if self.cocount:
+            sample = (f"Sample: **{sc['image_id']}** | Model: **{self.model_name(sc['model'])}** | "
+                      f"{len(it['objects'])} objects of this class, {len(it.get('objects_other', []))} of the other class (dashed)")
+        else:
+            branch, turn = sc["image_id"].rsplit("_t", 1)
+            sample = (f"Test sample: **{branch}**, turn {turn} ({it['image']}) | Model: **{self.model_name(sc['model'])}** | "
+                      f"{len(it['objects'])} existing objects")
+        data = f"Dataset: **{self.name}** | " if self.name else ""
+        return (f"{data}Screen **{self.pos + 1} / {n}** ({state}) | Saved {saved} / {n} ({saved / n * 100:.1f}%)\n\n"
+                f"{sample}\n\n### Add one more: **{it['class']}**")
 
 
-def build_ui(sess, gr):
-    k = sess.k
+def build_ui(sessions, gr):
+    """sessions: {tên bộ dữ liệu: Session} (hoặc một Session). Ô "Dataset" đổi bộ đang chấm; mỗi bộ giữ model đang chọn + vị trí."""
+    if isinstance(sessions, Session):
+        sessions = {sessions.name or "data": sessions}
+    cur = {"name": next(iter(sessions))}
+    S = lambda: sessions[cur["name"]]  # noqa: E731
+    k = max(s_.k for s_ in sessions.values())
     choices = [(REASON_EN[r], r) for r in REASONS]
     kw = {"title": "CE-Loc user study", "css": CSS, "head": KEYS_JS}
     bparams = inspect.signature(gr.Blocks.__init__).parameters
@@ -291,7 +331,8 @@ def build_ui(sess, gr):
             with gr.Column(scale=4):
                 img = gr.HTML(elem_id="us_img")
             with gr.Column(scale=1, min_width=300):
-                models = gr.Dropdown(choices=[(sess.model_name(m), m) for m in sess.d["models"]], value=list(sess.models),
+                data = gr.Dropdown(choices=list(sessions), value=cur["name"], label="Dataset", visible=len(sessions) > 1)
+                models = gr.Dropdown(choices=[(S().model_name(m), m) for m in S().d["models"]], value=list(S().models),
                                      multiselect=True, label="Models to rate (empty = all)")
                 with gr.Row():
                     prev = gr.Button("← Previous", elem_id="us_prev", min_width=60, scale=1)
@@ -304,73 +345,96 @@ def build_ui(sess, gr):
                 gr.Markdown(HELP)
 
         def radio_updates():
-            n = len(sess.labels)
-            return [gr.update(value=sess.labels[i] if i < n else [], visible=i < n,
-                              label=f"Box {i + 1}: " + ("not OK" if i < n and sess.labels[i] else "OK")) for i in range(k)]
+            n = len(S().labels)
+            return [gr.update(value=S().labels[i] if i < n else [], visible=i < n,
+                              label=f"Box {i + 1}: " + ("not OK" if i < n and S().labels[i] else "OK")) for i in range(k)]
 
         def full(show_objects):
-            return [sess.header(), sess.html(show_objects)] + radio_updates()
+            return [S().header(), S().html(show_objects)] + radio_updates()
 
-        def nav(fn):
+        def nav(name):
             def f(show_objects):
-                fn()
+                getattr(S(), name)()
                 return full(show_objects)
             return f
 
+        def on_data(name, show_objects):
+            cur["name"] = name
+            s_ = S()
+            return [gr.update(choices=[(s_.model_name(m), m) for m in s_.d["models"]], value=list(s_.models))] + full(show_objects)
+
         def on_models(ms, show_objects):
-            sess.set_models(ms)
+            S().set_models(ms)
             return full(show_objects)
 
         def make_radio(i):
             def f(v, show_objects):
-                sess.set_reasons(i, v)
-                return [sess.html(show_objects)] + radio_updates()
+                S().set_reasons(i, v)
+                return [S().html(show_objects)] + radio_updates()
             return f
 
         def make_tog(i):
             def f(show_objects):
-                sess.toggle(i)
-                return [sess.html(show_objects)] + radio_updates()
+                S().toggle(i)
+                return [S().html(show_objects)] + radio_updates()
             return f
 
         outs_full = [head, img] + radios
         q = {"queue": False}                       # một người chấm: gọi thẳng, không qua hàng đợi (bớt một vòng mạng qua link share)
         demo.load(full, [show], outs_full, api_name="show", **q)
+        data.input(on_data, [data, show], [models] + outs_full, api_name="dataset", **q)
         models.input(on_models, [models, show], outs_full, api_name="models", **q)
         for i, r_ in enumerate(radios):
             r_.input(make_radio(i), [r_, show], [img] + radios, api_name=f"reasons{i + 1}", **q)
         for i, b in enumerate(togs):
             b.click(make_tog(i), [show], [img] + radios, api_name=f"toggle{i + 1}", **q)
-        prev.click(nav(sess.prev), [show], outs_full, api_name="prev", **q)
-        nxt.click(nav(sess.next), [show], outs_full, api_name="next", **q)
-        save.click(nav(sess.save), [show], outs_full, api_name="save", **q)
-        first.click(nav(sess.first_unsaved), [show], outs_full, api_name="first_unsaved", **q)
-        show.change(lambda s_: sess.html(s_), [show], [img], api_name="objects", **q)
+        prev.click(nav("prev"), [show], outs_full, api_name="prev", **q)
+        nxt.click(nav("next"), [show], outs_full, api_name="next", **q)
+        save.click(nav("save"), [show], outs_full, api_name="save", **q)
+        first.click(nav("first_unsaved"), [show], outs_full, api_name="first_unsaved", **q)
+        show.change(lambda s_: S().html(s_), [show], [img], api_name="objects", **q)
     return demo, launch_kw
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--items", required=True, help="items.json của user_study/build.py")
+    ap.add_argument("--data", nargs=3, action="append", default=None, metavar=("NAME", "ITEMS", "IMAGE_ROOT"),
+                    help="bộ dữ liệu: tên hiện trên web, items.json của build.py, thư mục ảnh (CE-130: ../data/samples, CE-CoCount: "
+                         "../data/cocount); lặp lại cho nhiều bộ, bộ đầu mở trước")
+    ap.add_argument("--items", default=None, help="một bộ (cách cũ, = --data CE-130 ITEMS --samples-root)")
     ap.add_argument("--samples-root", default="../data/samples")
-    ap.add_argument("--ratings", default=None, help="mặc định ratings.jsonl cạnh items.json")
-    ap.add_argument("--models", nargs="*", default=None, help="mã model chấm lúc mở (mặc định mọi model; đổi được trên web)")
+    ap.add_argument("--ratings", default=None, help="chỉ khi một bộ: file nhãn (mặc định ratings*.jsonl cạnh items.json)")
+    ap.add_argument("--rater", default=None, help="hậu tố file nhãn mọi bộ, vd rater2 -> ratings_rater2.jsonl")
+    ap.add_argument("--models", nargs="*", default=None, help="mã model chấm lúc mở, áp cho mọi bộ có model đó (mặc định mọi "
+                                                             "model; đổi được trên web)")
     ap.add_argument("--port", type=int, default=7860)
     ap.add_argument("--cache-dir", default=None, help="ảnh nền WebP dựng sẵn (mặc định $GRADIO_TEMP_DIR hoặc thư mục tạm "
                                                           "/ce_loc_user_study; ~25 KB / ảnh)")
     ap.add_argument("--share", action="store_true", help="tạo link công khai https://*.gradio.live (sống tối đa 1 tuần) để người "
                                                           "khác chấm qua trình duyệt, vd chạy trên server")
     a = ap.parse_args()
+    data = list(a.data or []) + ([("CE-130", a.items, a.samples_root)] if a.items else [])
+    if not data:
+        ap.error("cần --data (hoặc --items)")
+    if a.ratings and len(data) > 1:
+        ap.error("--ratings chỉ dùng với một bộ dữ liệu; nhiều bộ thì dùng --rater")
+    if len({n for n, _, _ in data}) != len(data):
+        ap.error("tên bộ dữ liệu trùng nhau")
     # gradio 6.17 dựng bảng mã HTTP ở MỖI request, trong đó đọc `status.HTTP_422_UNPROCESSABLE_ENTITY` mà starlette 1.x đã đổi tên
     # ⇒ một cảnh báo deprecated mỗi lần bấm (request vẫn thành công). Lỗi của thư viện: chỉ bỏ ĐÚNG cảnh báo này.
     warnings.filterwarnings("ignore", message=r".*HTTP_422_UNPROCESSABLE_ENTITY.*")
     import gradio as gr
-    sess = Session(a.items, a.samples_root, a.ratings, a.models, a.cache_dir)
-    print(f"{len(sess.screens)} màn ({len(sess.d['models'])} model), đã lưu {len(sess.store.latest)} -> {sess.store.path}",
-          flush=True)
-    demo, launch_kw = build_ui(sess, gr)
+    sessions = {}
+    for name, items, root in data:
+        s_ = Session(items, root, a.ratings, None, a.cache_dir, name=name, rater=a.rater)
+        if a.models:
+            s_.set_models(a.models, strict=False)
+        sessions[name] = s_
+        print(f"[{name}] {len(s_.screens)} màn ({len(s_.d['models'])} model), đã lưu {len(s_.store.latest)} -> {s_.store.path}",
+              flush=True)
+    demo, launch_kw = build_ui(sessions, gr)
     demo.launch(server_name="127.0.0.1", server_port=a.port, inbrowser=not a.share, share=a.share,
-                allowed_paths=[sess.cache_dir], **launch_kw)
+                allowed_paths=sorted({s_.cache_root for s_ in sessions.values()}), **launch_kw)
 
 
 if __name__ == "__main__":
