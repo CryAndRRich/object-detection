@@ -278,7 +278,8 @@ class Session:
             im = Image.open(os.path.join(self.samples_root, image)).convert("RGB")
             r = MAX_SIDE / max(im.size)
             im = im.resize((max(1, round(im.size[0] * r)), max(1, round(im.size[1] * r))), Image.BILINEAR)
-            tmp = out + ".tmp.webp"
+            fd, tmp = tempfile.mkstemp(suffix=".webp", dir=self.cache_dir)   # tên tạm riêng mỗi lần ghi: hai bộ dùng chung thư mục
+            os.close(fd)                                                     # ảnh có thể dựng cùng ảnh nền một lúc
             im.save(tmp, "WEBP", quality=WEBP_QUALITY)
             os.replace(tmp, out)
         return out

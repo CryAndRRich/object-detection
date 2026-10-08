@@ -22,7 +22,10 @@ Không cần GT (cả ảnh gốc không lỗ):
                  khoảng cách chia sqrt(nw·nh). Hai chế độ: `n1` = mọi box (một mẫu ngẫu nhiên — chất lượng mô hình),
                  `sel` = box có q lớn nhất trong K (bộ chọn của paper; paper chọn theo box CountGD + SAM, ở đây theo
                  cùng `all_bboxes` — ghi rõ khi báo cáo). Ảnh có < CNLL_MIN_OBJ vật đang có thì bỏ (n_cnll).
-Hậu xử lý `resize_to_objects` (`eval.py --obj-size`): giữ tâm box, đặt w / h = TB w / h của box vật cùng lớp (`objects`) của ảnh.
+Hậu xử lý `resize_to_objects` (`eval.py --obj-size`): giữ tâm box, đặt w / h theo box vật cùng lớp của ảnh — `SIZE_STATS`:
+  mean      TB w / TB h của `objects`            median    trung vị w / trung vị h
+  trim      TB sau khi bỏ outlier (cạnh √(wh) > Q3 + 1,5·IQR)     small     TB nửa nhỏ (cạnh √(wh) <= trung vị)
+  exemplar  TB 3 box mẫu GÁN TAY (`exemplars`, chỉ CE-CoCount — box SAM của ~10 % mẫu khoanh cả đống vật)
 """
 
 import time
@@ -35,12 +38,14 @@ from ce_localization.models.box_policy import norm_whwh, unit_to_boxes
 from ce_localization.utils.box_ops_np import box_iou
 from ce_localization.utils.log import fmt_time
 
-__all__ = ["CNLL_MIN_OBJ", "predict_add", "prior_unit_boxes", "prior_records", "resize_to_objects", "clip_boxes", "cnll", "add_metrics"]
+__all__ = ["CNLL_MIN_OBJ", "SIZE_STATS", "predict_add", "prior_unit_boxes", "prior_records", "object_size", "resize_to_objects",
+           "clip_boxes", "cnll", "add_metrics"]
 
 HIT = 0.5
 CNLL_MIN_OBJ = 5                 # Gaussian 4-D cần >= 5 điểm để hiệp phương sai có hạng đủ
 CNLL_RIDGE = 1e-6
 KNN = 3
+SIZE_STATS = ("mean", "median", "trim", "small", "exemplar")
 
 
 @torch.no_grad()
@@ -81,8 +86,7 @@ def predict_add(model, loader, text_table, n_samples=30, seed=0, log_every=0, lo
                 dst.append({"image_id": batch["image_id"][i], "t": batch["t"][i], "wh": wh[i].astype(np.float64),
                             "boxes": boxes[i], "holes": batch["holes"][i].numpy().astype(np.float64),
                             "objects": batch["objects"][i].numpy().astype(np.float64),
-                            **({"objects_all": batch["objects_all"][i].numpy().astype(np.float64)}
-                               if "objects_all" in batch else {})})
+                            **{k: batch[k][i].numpy().astype(np.float64) for k in ("objects_all", "exemplars") if k in batch}})
         done = len(records[0] if multi else records)
         if log_every and (bi % log_every == 0 or done == n):
             el = time.time() - t0
@@ -116,17 +120,38 @@ def prior_records(records, prior_unit, n_samples=30, seed=0):
     return out
 
 
-def resize_to_objects(records):
-    """Giữ tâm mỗi box, đặt w = TB w và h = TB h của `objects` (vật cùng lớp) trong ảnh, không kẹp vào ảnh. Ảnh 0 vật: giữ nguyên."""
+def object_size(r, stat="mean"):
+    """(w, h) đích của record theo `stat` (SIZE_STATS); None nếu không có box nguồn (0 vật / không có `exemplars`)."""
+    if stat not in SIZE_STATS:
+        raise ValueError(f"stat {stat!r} không thuộc {SIZE_STATS}")
+    obj = np.asarray(r.get("exemplars" if stat == "exemplar" else "objects", np.zeros((0, 4))), dtype=np.float64).reshape(-1, 4)
+    if not len(obj):
+        return None
+    w, h = obj[:, 2] - obj[:, 0], obj[:, 3] - obj[:, 1]
+    if stat == "median":
+        return float(np.median(w)), float(np.median(h))
+    if stat in ("trim", "small"):
+        s = np.sqrt(np.clip(w, 0, None) * np.clip(h, 0, None))
+        if stat == "trim":
+            q1, q3 = np.percentile(s, [25, 75])
+            keep = s <= q3 + 1.5 * (q3 - q1)
+        else:
+            keep = s <= np.median(s)
+        w, h = w[keep], h[keep]
+    return float(w.mean()), float(h.mean())
+
+
+def resize_to_objects(records, stat="mean"):
+    """Giữ tâm mỗi box, đặt (w, h) = `object_size(r, stat)` (vật cùng lớp / box mẫu), không kẹp vào ảnh. Không có box nguồn: giữ nguyên."""
     out = []
     for r in records:
-        obj = r["objects"].reshape(-1, 4)
-        if not len(obj):
+        wh = object_size(r, stat)
+        if wh is None:
             out.append(r)
             continue
         b = np.asarray(r["boxes"], dtype=np.float64).reshape(-1, 4)
         cx, cy = (b[:, 0] + b[:, 2]) / 2, (b[:, 1] + b[:, 3]) / 2
-        w, h = (obj[:, 2] - obj[:, 0]).mean(), (obj[:, 3] - obj[:, 1]).mean()
+        w, h = wh
         out.append({**r, "boxes": np.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], 1)})
     return out
 

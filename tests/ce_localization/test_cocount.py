@@ -56,12 +56,13 @@ def test_cocount_dataset_fields_and_density(tmp_path):
     scale = 128 / 200
     assert it["holes"].shape == (10, 4) and torch.allclose(it["holes"][0], torch.tensor(r["loc"][0]).float() * scale)
     assert it["objects"].shape == (8, 4) and it["objects_all"].shape == (14, 4) and it["t"] == 0
+    assert len(r["exemplars"]) == 3 and torch.allclose(it["exemplars"], torch.tensor(r["exemplars"]).float() * scale)
     assert it["text"] == "normal tomato" and it["valid_hw"] == (int(120 * scale), 128)
     img = it["image"]                                                         # [4, T, T] uint8 (view HWC), kênh 4 = density trống
     nh, nw = it["valid_hw"]
     assert img.shape == (4, 128, 128) and int(img[3, :nh, :nw].unique().item()) == 14 and int(img[3, nh:, :].max()) == 0
     b = to_device_add(collate_add([ds[0], ds[1]]), torch.device("cpu"))
-    assert len(b["objects_all"]) == 2 and b["images"].shape == (2, 4, 128, 128)
+    assert len(b["objects_all"]) == 2 and len(b["exemplars"]) == 2 and b["images"].shape == (2, 4, 128, 128)
     ours = CoCountAddDataset(root, 128, style="ours", density="empty")[0]["image"]
     assert ours.dtype == torch.float32 and ours.shape == (4, 128, 128) and float(ours[3].abs().max()) == 0
     assert CoCountAddDataset(root, 128, density=None)[0]["image"].shape[0] == 3
@@ -92,6 +93,17 @@ def test_resize_to_objects():
     out = resize_to_objects([rec, dict(rec, objects=np.zeros((0, 4)))])
     assert np.allclose(out[0]["boxes"], [[12.5, 22.5, 27.5, 37.5], [-7, -7, 8, 8]])  # giữ tâm, không kẹp, chỉ vật cùng lớp
     assert out[1]["boxes"] is rec["boxes"] and rec["boxes"][0, 2] == 30          # 0 vật: giữ nguyên; record gốc không đổi
+    from ce_localization.engine.add_eval import object_size
+    many = np.array([[0, 0, 10, 10]] * 7 + [[0, 0, 12, 8], [0, 0, 200, 300]], float)   # 1 box SAM khoanh cả đống
+    r = dict(rec, objects=many, exemplars=np.array([[0, 0, 4, 6], [0, 0, 6, 8]], float))
+    assert object_size(r, "mean")[0] == pytest.approx((70 + 12 + 200) / 9)
+    assert object_size(r, "median") == (10.0, 10.0)
+    assert object_size(r, "trim") == pytest.approx((82 / 8, 78 / 8))           # bỏ đúng box outlier
+    assert object_size(r, "small") == pytest.approx((82 / 8, 78 / 8))           # cạnh <= trung vị 10: 7 box 10×10 + box 12×8 (cạnh 9,8)
+    assert object_size(r, "exemplar") == (5.0, 7.0) and object_size(rec, "exemplar") is None
+    assert resize_to_objects([rec], "exemplar")[0] is rec                       # không có box mẫu: giữ nguyên
+    with pytest.raises(ValueError):
+        object_size(r, "max")
 
 
 def test_gt_cnll_tool(tmp_path, monkeypatch):
@@ -150,13 +162,14 @@ def test_eval_cocount_full_flow(tmp_path, monkeypatch, kind):
                  ["--add-samplers", "ddpm"])                                  # config thu nhỏ T = 20: mock 100 bước không chạy
     out, dump = str(tmp_path / "res.json"), str(tmp_path / "boxes.json")
     monkeypatch.setattr(sys, "argv", ["eval.py", "--ckpt", ck, "--dataset", "cocount", "--cocount-root", root, "--n-samples", "3",
-                                      "--num-workers", "0", "--out", out, "--dump-boxes", dump, "--device", "cpu", "--obj-size"]
+                                      "--num-workers", "0", "--out", out, "--dump-boxes", dump, "--device", "cpu", "--obj-size", "mean",
+                                      "exemplar"]
                         + extra)
     ea.main()
     with open(out) as f:
         res = json.load(f)
     want = {"paper": {"cocount"}, "obj": {"cocount", "cocount_noobj"}, "pr": {"cocount_ce", "cocount_t5"}}[kind]
-    want |= {k + "_objsize" for k in want}
+    want |= {k + sfx for k in want for sfx in ("_objsize", "_objsize_exemplar")}
     assert set(res["results"]) == want and res["dataset"] == "cocount" and res["density"] == {"cocount": "empty"}
     for k, r in res["results"].items():
         assert r["n"] == 4 and 0 <= r["best_iou@3_any"] <= 1 and 0 <= r["on_object"] <= 1 and r["n_cnll"] == 4
@@ -165,11 +178,12 @@ def test_eval_cocount_full_flow(tmp_path, monkeypatch, kind):
         dd = json.load(f)
     assert set(dd["results"]) == want and all(np.asarray(x["boxes"]).shape == (3, 4) for x in dd["results"][sorted(want)[0]])
     from ce_localization.data.cocount import read_cocount
-    for k in want - {k for k in want if k.endswith("_objsize")}:            # cùng box: giữ tâm, cỡ = TB box vật cùng lớp
-        for x, y in zip(dd["results"][k], dd["results"][k + "_objsize"]):
-            b, c = np.asarray(x["boxes"]), np.asarray(y["boxes"])
-            with Image.open(os.path.join(root, "Image", x["image_id"] + ".jpg")) as im:
-                o = read_cocount(root, x["image_id"])["objects"] * (x["wh"][0] / im.size[0])   # pixel gốc -> canvas
-            assert np.allclose(b[:, :2] + b[:, 2:], c[:, :2] + c[:, 2:], atol=0.02)
-            assert np.allclose(c[:, 2] - c[:, 0], (o[:, 2] - o[:, 0]).mean(), atol=0.02)
-            assert np.allclose(c[:, 3] - c[:, 1], (o[:, 3] - o[:, 1]).mean(), atol=0.02)
+    for k in want - {k for k in want if "_objsize" in k}:                    # cùng box: giữ tâm, cỡ = TB box vật cùng lớp / box mẫu
+        for sfx, field in (("_objsize", "objects"), ("_objsize_exemplar", "exemplars")):
+            for x, y in zip(dd["results"][k], dd["results"][k + sfx]):
+                b, c = np.asarray(x["boxes"]), np.asarray(y["boxes"])
+                with Image.open(os.path.join(root, "Image", x["image_id"] + ".jpg")) as im:
+                    o = read_cocount(root, x["image_id"])[field] * (x["wh"][0] / im.size[0])   # pixel gốc -> canvas
+                assert np.allclose(b[:, :2] + b[:, 2:], c[:, :2] + c[:, 2:], atol=0.02)
+                assert np.allclose(c[:, 2] - c[:, 0], (o[:, 2] - o[:, 0]).mean(), atol=0.02)
+                assert np.allclose(c[:, 3] - c[:, 1], (o[:, 3] - o[:, 1]).mean(), atol=0.02)

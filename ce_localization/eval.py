@@ -18,8 +18,9 @@ GAMMA4 (`model.obj_attn`, CE-Loc + cross-attn tới box vật): thêm `<ảnh>_n
 `_latest`), density trống, `on_object` trên box cả hai lớp, C-NLL trên box cùng lớp; `prior` = lỗ train CE-130 như cũ.
 `--dump-boxes F.json` (user study, docs/EXPERIMENT_GAMMA.md mục 17): ghi thêm box THÔ của từng mẫu mọi khoá kết quả
 (`image_id`, `t`, `wh` = (nw, nh) vùng ảnh thật trên canvas, `boxes` [K,4] xyxy pixel canvas) cho `user_study/build.py`.
-`--obj-size` (GAMMA): mỗi khoá thêm `<khoá>_objsize` = CÙNG box (cùng lượt sinh) giữ tâm, w / h đổi thành TB w / h box vật cùng lớp
-của ảnh (`engine/add_eval.resize_to_objects`); `prior` của khoá đó đổi cỡ y như vậy.
+`--obj-size [STAT ...]` (GAMMA): mỗi khoá thêm bản CÙNG box (cùng lượt sinh) giữ tâm, (w, h) đổi theo box vật cùng lớp của ảnh
+(`engine/add_eval.resize_to_objects`, STAT ∈ mean | median | trim | small | exemplar, mặc định mean): khoá `<khoá>_objsize` (mean) /
+`<khoá>_objsize_<STAT>`; `prior` của khoá đó đổi cỡ y như vậy. `exemplar` = 3 box mẫu gán tay, chỉ CE-CoCount.
 
 Checkpoint CE-Loc gốc của bài (`model_state_dict`, vd weights/add/paper/best_model.pth) + `--config config/gamma/gamma0.yaml`
 (đường dẫn dữ liệu): eval bài add như GAMMA, kèm `excl_paper_train` (bỏ mẫu samples/train mà bài đã train).
@@ -59,8 +60,8 @@ from ce_localization.data.dataset import CE130Dataset, collate  # noqa: E402
 from ce_localization.data.density import EVAL_MODES, DensityIndex  # noqa: E402
 from ce_localization.data.cocount import CoCountAddDataset  # noqa: E402
 from ce_localization.data.turns import ADD_DENSITY, IMAGE_KINDS, CE130AddDataset, TurnIndex, collate_add  # noqa: E402
-from ce_localization.engine.add_eval import (add_metrics, predict_add, prior_records, prior_unit_boxes,  # noqa: E402
-                                             resize_to_objects)
+from ce_localization.engine.add_eval import (SIZE_STATS, add_metrics, predict_add, prior_records,  # noqa: E402
+                                             prior_unit_boxes, resize_to_objects)
 from ce_localization.engine.evaluate import attention_diagnostics, predict, score  # noqa: E402
 from ce_localization.models.backbone import density_ratio_of  # noqa: E402
 from ce_localization.models.box_policy import BoxPolicy  # noqa: E402
@@ -233,8 +234,9 @@ def main_add(a, cfg, ck, dev, t0):
             if dump is not None:
                 dump["results"][key] = [{"image_id": r["image_id"], "t": int(r["t"]), "wh": r["wh"].round(3).tolist(),
                                          "boxes": r["boxes"].round(2).tolist()} for r in rec]
-            if a.obj_size and post is None:
-                report(key + "_objsize", desc + ", giữ tâm, cỡ = TB box vật", rec, sec, post=resize_to_objects)
+            for st in (a.obj_size or []) if post is None else []:
+                report(key + "_objsize" + ("" if st == "mean" else f"_{st}"), desc + f", giữ tâm, cỡ = box vật ({st})", rec, sec,
+                       post=lambda r_, st=st: resize_to_objects(r_, st))
 
         if refine_vars:                               # GAMMA2: CE-Loc chạy MỘT lần / batch, mọi biến thể refine dùng lại
             print(f"[eval] {a.ckpt} ({it}) | ảnh {image} | density {dens} | split {a.split} ({len(ds)} mẫu) | {K} mẫu/ảnh"
@@ -309,10 +311,14 @@ def main():
                     help="GAMMA: ce130 (mặc định, --split / --image) | cocount = CE-CoCount (docs/EXPERIMENT_GAMMA.md mục 18: ảnh gốc, "
                          "10 chỗ trống GT làm lỗ, density trống; bỏ qua --split / --image)")
     ap.add_argument("--cocount-root", default="../data/cocount", help="GAMMA: thư mục CE-CoCount (Image/ Anno/ Anno_with_exam_bbox/)")
-    ap.add_argument("--obj-size", action="store_true",
-                    help="GAMMA: thêm khoá `<khoá>_objsize` = cùng box, giữ tâm, w / h = TB box vật cùng lớp của ảnh")
+    ap.add_argument("--obj-size", nargs="*", default=None, choices=SIZE_STATS,
+                    help="GAMMA: thêm khoá `<khoá>_objsize[_STAT]` = cùng box, giữ tâm, (w, h) theo box vật cùng lớp của ảnh; STAT "
+                         "mean (mặc định khi không ghi) | median | trim (bỏ outlier IQR) | small (TB nửa nhỏ) | exemplar (3 box mẫu gán "
+                         "tay, chỉ CE-CoCount)")
     ap.add_argument("--dump-boxes", default=None, help="GAMMA: file .json ghi box thô từng mẫu (user study, user_study/build.py)")
     a = ap.parse_args()
+    if a.obj_size == []:                              # --obj-size không kèm STAT = mean (như trước)
+        a.obj_size = ["mean"]
 
     t0 = time.time()
     dev = torch.device(a.device or ("cuda" if torch.cuda.is_available() else "cpu"))

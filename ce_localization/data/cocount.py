@@ -9,6 +9,8 @@ Một phần tử = một tên (một lớp cần thêm), cùng khuôn `CE130Add
   holes       = 10 `loc_bbox` (đáp án; không có thứ tự lượt ⇒ chỉ số `_latest` vô nghĩa — `add_metrics(latest=False)`)
   objects     = box vật CÙNG lớp (GAMMA4 nhận làm box vật; C-NLL fit trên chúng)
   objects_all = box vật CẢ HAI lớp của frame (file `_positive` + `_negative`) — `on_object` tính trên đây
+  exemplars   = 3 box mẫu GÁN TAY (`counting_anno.exemplars`) — cỡ vật đáng tin nhất (box SAM của ~10 % mẫu khoanh cả đống vật);
+                chỉ dùng cho `eval.py --obj-size exemplar`
   t = 0, density TRỐNG (bản tải về không có density map; người dùng chốt 2026-10-07), text = `class_name` bỏ phần trong ngoặc và dấu chấm.
 """
 
@@ -39,7 +41,7 @@ def twin_name(name):
 
 
 def read_cocount(root, name):
-    """-> dict thô (pixel ảnh gốc): class, loc [10,4], objects [M,4] cùng lớp, objects_all [M',4] cả hai lớp, count."""
+    """-> dict thô (pixel ảnh gốc): class, loc [10,4], objects [M,4] cùng lớp, objects_all [M',4] cả hai lớp, exemplars [3,4], count."""
     def load(sub, n):
         with open(os.path.join(root, sub, n + ".json")) as f:
             return json.load(f)
@@ -50,7 +52,8 @@ def read_cocount(root, name):
     other = (np.asarray([x["bbox"] for x in load("Anno_with_exam_bbox", tw)["exam_bbox"]], dtype=np.float64).reshape(-1, 4)
              if os.path.exists(os.path.join(root, "Anno_with_exam_bbox", tw + ".json")) else np.zeros((0, 4)))
     return {"class": clean_class(a["class_name"]), "loc": np.asarray(a["loc_bbox"], dtype=np.float64).reshape(-1, 4),
-            "objects": objs, "objects_all": np.concatenate([objs, other]), "count": a["counting_anno"]["count"]}
+            "objects": objs, "objects_all": np.concatenate([objs, other]), "count": a["counting_anno"]["count"],
+            "exemplars": np.asarray(a["counting_anno"].get("exemplars", []), dtype=np.float64).reshape(-1, 4)}
 
 
 class CoCountAddDataset(Dataset):
@@ -98,6 +101,7 @@ class CoCountAddDataset(Dataset):
             "holes": torch.from_numpy(holes).float(),
             "objects": torch.from_numpy(scale_boxes(r["objects"], scale, nw, nh)).float(),
             "objects_all": torch.from_numpy(scale_boxes(r["objects_all"], scale, nw, nh)).float(),
+            "exemplars": torch.from_numpy(scale_boxes(r["exemplars"], scale, nw, nh)).float(),
             "valid_hw": (nh, nw),
             "text": r["class"],
             "image_id": key,
