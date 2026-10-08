@@ -337,3 +337,48 @@ def test_cocount_flow_two_datasets(tmp_path, monkeypatch):
     su.main()
     res = json.load(open(str(us / "score.json")))
     assert res["models"]["paper"]["n_screens"] == 2
+
+
+def test_pack_zip_runs_standalone(tmp_path, monkeypatch):
+    """pack.py: zip chỉ chứa app.py + items + ĐÚNG ảnh items dùng (bộ chung thư mục ảnh: một bản) + run.sh / run.bat; giải nén ra
+    nơi khác thì app.py (không cần repo) mở được mọi bộ, nhãn ghi cạnh items theo --rater."""
+    import importlib.util
+    import zipfile
+    from ce_localization.user_study import pack as pk
+    root = tmp_path / "imgs"
+    (root / "test" / "images").mkdir(parents=True)
+    for n in ("a", "b", "unused"):
+        Image.new("RGB", (40, 30), (n == "a") * 200).save(root / "test" / "images" / f"{n}.png")
+
+    def items(path, ids):
+        sc = [{"id": f"m|{i}", "image_id": i, "model": "m", "order": k / 10, "repeat_of": None} for k, i in enumerate(ids)]
+        d = {"k": 4, "dataset": "cocount", "models": {"m": {"name": "M"}}, "screens": sc,
+             "items": {i: {"t": 0, "class": "x", "image": f"test/images/{i}.png", "wh": [40, 30], "objects": [[1, 1, 5, 5]],
+                           "objects_other": [], "holes": [], "models": {"m": {"boxes": [[2, 2, 9, 9]], "idx": [0]}}} for i in ids}}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(d))
+        return str(path)
+
+    i1, i2 = items(tmp_path / "s1" / "items.json", ["a"]), items(tmp_path / "s2" / "items_objsize.json", ["a", "b"])
+    out = str(tmp_path / "pkg" / "us.zip")
+    monkeypatch.setattr(sys, "argv", ["pack.py", "--out", out, "--rater", "bob",
+                                      "--data", "Set A", i1, str(root), "--data", "Set B (resize)", i2, str(root)])
+    pk.main()
+    z = zipfile.ZipFile(out)
+    names = set(z.namelist())
+    assert {"app.py", "README.txt", "requirements.txt", "run.sh", "run.bat", "data/0_set-a/items.json",
+            "data/1_set-b-resize/items_objsize.json", "images/0/test/images/a.png", "images/0/test/images/b.png"} == names
+    assert z.getinfo("images/0/test/images/a.png").compress_type == zipfile.ZIP_STORED
+    sh = z.read("run.sh").decode()
+    assert '--data "Set A" data/0_set-a/items.json images/0' in sh and "--rater bob" in sh
+    dst = tmp_path / "unzipped"
+    z.extractall(dst)
+    spec = importlib.util.spec_from_file_location("standalone_app", dst / "app.py")   # app.py đứng một mình, không qua package
+    app = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(app)
+    s = app.Session(str(dst / "data/1_set-b-resize/items_objsize.json"), str(dst / "images/0"), cache_dir=str(tmp_path / "c"),
+                    name="Set B (resize)", rater="bob")
+    s.html(True)
+    s.save()
+    assert os.path.exists(dst / "data/1_set-b-resize/ratings_objsize_bob.jsonl")
+    assert not os.path.exists(out + ".tmp")
