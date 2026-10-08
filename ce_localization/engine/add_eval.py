@@ -22,6 +22,7 @@ Không cần GT (cả ảnh gốc không lỗ):
                  khoảng cách chia sqrt(nw·nh). Hai chế độ: `n1` = mọi box (một mẫu ngẫu nhiên — chất lượng mô hình),
                  `sel` = box có q lớn nhất trong K (bộ chọn của paper; paper chọn theo box CountGD + SAM, ở đây theo
                  cùng `all_bboxes` — ghi rõ khi báo cáo). Ảnh có < CNLL_MIN_OBJ vật đang có thì bỏ (n_cnll).
+Hậu xử lý `resize_to_objects` (`eval.py --obj-size`): giữ tâm box, đặt w / h = TB w / h của box vật cùng lớp (`objects`) của ảnh.
 """
 
 import time
@@ -34,7 +35,7 @@ from ce_localization.models.box_policy import norm_whwh, unit_to_boxes
 from ce_localization.utils.box_ops_np import box_iou
 from ce_localization.utils.log import fmt_time
 
-__all__ = ["CNLL_MIN_OBJ", "predict_add", "prior_unit_boxes", "prior_records", "clip_boxes", "cnll", "add_metrics"]
+__all__ = ["CNLL_MIN_OBJ", "predict_add", "prior_unit_boxes", "prior_records", "resize_to_objects", "clip_boxes", "cnll", "add_metrics"]
 
 HIT = 0.5
 CNLL_MIN_OBJ = 5                 # Gaussian 4-D cần >= 5 điểm để hiệp phương sai có hạng đủ
@@ -112,6 +113,21 @@ def prior_records(records, prior_unit, n_samples=30, seed=0):
         c = prior_unit[rng.integers(0, len(prior_unit), size=n_samples)] * np.tile(r["wh"], 2)
         out.append({**r, "boxes": np.stack([c[:, 0] - c[:, 2] / 2, c[:, 1] - c[:, 3] / 2,
                                             c[:, 0] + c[:, 2] / 2, c[:, 1] + c[:, 3] / 2], 1)})
+    return out
+
+
+def resize_to_objects(records):
+    """Giữ tâm mỗi box, đặt w = TB w và h = TB h của `objects` (vật cùng lớp) trong ảnh, không kẹp vào ảnh. Ảnh 0 vật: giữ nguyên."""
+    out = []
+    for r in records:
+        obj = r["objects"].reshape(-1, 4)
+        if not len(obj):
+            out.append(r)
+            continue
+        b = np.asarray(r["boxes"], dtype=np.float64).reshape(-1, 4)
+        cx, cy = (b[:, 0] + b[:, 2]) / 2, (b[:, 1] + b[:, 3]) / 2
+        w, h = (obj[:, 2] - obj[:, 0]).mean(), (obj[:, 3] - obj[:, 1]).mean()
+        out.append({**r, "boxes": np.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], 1)})
     return out
 
 

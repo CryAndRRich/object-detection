@@ -84,6 +84,16 @@ def test_add_metrics_objects_all_and_no_latest():
     assert res["cnll_F1_n1_median"] == base["cnll_F1_n1_median"]             # C-NLL vẫn trên vật cùng lớp
 
 
+def test_resize_to_objects():
+    from ce_localization.engine.add_eval import resize_to_objects
+    objs = np.array([[0, 0, 10, 20], [50, 50, 70, 60]], float)                 # TB w 15, TB h 15
+    rec = {"image_id": "x", "t": 0, "wh": np.array([100.0, 100.0]), "boxes": np.array([[10, 10, 30, 50], [0, 0, 1, 1]], float),
+           "objects": objs, "objects_all": np.concatenate([objs, [[0, 0, 99, 99]]])}
+    out = resize_to_objects([rec, dict(rec, objects=np.zeros((0, 4)))])
+    assert np.allclose(out[0]["boxes"], [[12.5, 22.5, 27.5, 37.5], [-7, -7, 8, 8]])  # giữ tâm, không kẹp, chỉ vật cùng lớp
+    assert out[1]["boxes"] is rec["boxes"] and rec["boxes"][0, 2] == 30          # 0 vật: giữ nguyên; record gốc không đổi
+
+
 def test_gt_cnll_tool(tmp_path, monkeypatch):
     from ce_localization.tools import gt_cnll as g
     from tests.ce_localization.helpers import _fake_turn_index
@@ -140,11 +150,13 @@ def test_eval_cocount_full_flow(tmp_path, monkeypatch, kind):
                  ["--add-samplers", "ddpm"])                                  # config thu nhỏ T = 20: mock 100 bước không chạy
     out, dump = str(tmp_path / "res.json"), str(tmp_path / "boxes.json")
     monkeypatch.setattr(sys, "argv", ["eval.py", "--ckpt", ck, "--dataset", "cocount", "--cocount-root", root, "--n-samples", "3",
-                                      "--num-workers", "0", "--out", out, "--dump-boxes", dump, "--device", "cpu"] + extra)
+                                      "--num-workers", "0", "--out", out, "--dump-boxes", dump, "--device", "cpu", "--obj-size"]
+                        + extra)
     ea.main()
     with open(out) as f:
         res = json.load(f)
     want = {"paper": {"cocount"}, "obj": {"cocount", "cocount_noobj"}, "pr": {"cocount_ce", "cocount_t5"}}[kind]
+    want |= {k + "_objsize" for k in want}
     assert set(res["results"]) == want and res["dataset"] == "cocount" and res["density"] == {"cocount": "empty"}
     for k, r in res["results"].items():
         assert r["n"] == 4 and 0 <= r["best_iou@3_any"] <= 1 and 0 <= r["on_object"] <= 1 and r["n_cnll"] == 4
@@ -152,3 +164,12 @@ def test_eval_cocount_full_flow(tmp_path, monkeypatch, kind):
     with open(dump) as f:
         dd = json.load(f)
     assert set(dd["results"]) == want and all(np.asarray(x["boxes"]).shape == (3, 4) for x in dd["results"][sorted(want)[0]])
+    from ce_localization.data.cocount import read_cocount
+    for k in want - {k for k in want if k.endswith("_objsize")}:            # cùng box: giữ tâm, cỡ = TB box vật cùng lớp
+        for x, y in zip(dd["results"][k], dd["results"][k + "_objsize"]):
+            b, c = np.asarray(x["boxes"]), np.asarray(y["boxes"])
+            with Image.open(os.path.join(root, "Image", x["image_id"] + ".jpg")) as im:
+                o = read_cocount(root, x["image_id"])["objects"] * (x["wh"][0] / im.size[0])   # pixel gốc -> canvas
+            assert np.allclose(b[:, :2] + b[:, 2:], c[:, :2] + c[:, 2:], atol=0.02)
+            assert np.allclose(c[:, 2] - c[:, 0], (o[:, 2] - o[:, 0]).mean(), atol=0.02)
+            assert np.allclose(c[:, 3] - c[:, 1], (o[:, 3] - o[:, 1]).mean(), atol=0.02)
