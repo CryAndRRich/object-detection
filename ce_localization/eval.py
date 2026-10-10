@@ -14,6 +14,11 @@ GAMMA2 (`model.arch: propose_refine`): CE-Loc sinh `--n-samples` box MỘT lần
 GAMMA3 (`model.geo`): thêm `<ảnh>_t<t*>_nogeo`, `<ảnh>_noise_nogeo` = cùng biến thể nhưng TẮT nhánh geo.
 GAMMA3.1 (`model.relation`): thêm `_nogeo` (bỏ attention tới vật) và `_norel` (giữ attention, bỏ Rel hình học).
 GAMMA4 (`model.obj_attn`, CE-Loc + cross-attn tới box vật): thêm `<ảnh>_noobj` = cùng checkpoint, tắt cross-attn tới box vật.
+`--mock-steps 100 200 500 1000` (mô hình U-Net 1D: GAMMA0 / pha 1 / GAMMA4 / DELTA / bài): vòng mock N bước (t = N − 1 .. 0); N = 100 giữ khoá
+cũ (`inpainted`, `original`, `cocount`), N khác thêm hậu tố `_mock{N}` (`add_variants`). Cùng `--seed` + `--batch-size` ⇒ x_T ban đầu
+trùng nhau từng mẫu giữa các checkpoint (so cặp).
+DELTA (`model.refiner`): thêm `<ảnh>_norefine` (mock 100, bỏ refiner: refined = x_t — ngoài phân bố train) và TB |Δ| của refiner theo
+khoảng t (`refine_delta_by_t`); token chữ CLIP B/16 tính lại từ HF phải khớp vân tay trong checkpoint.
 `--dataset cocount` (CE-CoCount, mục 18): cùng mọi checkpoint add, khoá `cocount<hậu tố>`; lỗ = 10 chỗ trống GT (chỉ số `_any`, không
 `_latest`), density trống, `on_object` trên box cả hai lớp, C-NLL trên box cùng lớp; `prior` = lỗ train CE-130 như cũ.
 `--dump-boxes F.json` (user study, docs/EXPERIMENT_GAMMA.md mục 17): ghi thêm box THÔ của từng mẫu mọi khoá kết quả
@@ -119,6 +124,31 @@ def print_add(tag, res, prior, K):
               f"best_iou_latest {d['best_latest']:.4f}")
 
 
+def add_variants(add_samplers, mock_steps=(100,), obj_attn=False, refiner=False):
+    """Biến thể suy luận của mô hình U-Net 1D -> list (hậu tố khoá, mô tả, kw của `predict_add`). Một sampler: mock 100 bước và ddpm =
+    không hậu tố (khoá cũ), mock N ≠ 100 = `_mock{N}`; nhiều sampler: `_mock` (100) / `_mock{N}` / `_ddpm`. `obj_attn` (GAMMA4): mỗi
+    biến thể thêm `_noobj`; `refiner` (DELTA): biến thể mock 100 thêm `_norefine`. `sample_kw` của biến thể con GỘP với gốc."""
+    one = len(add_samplers) == 1
+    base = []
+    for sm in add_samplers:
+        if sm == "mock":
+            for n in mock_steps:
+                sfx = ("" if one else "_mock") if n == 100 else f"_mock{n}"
+                base.append((sfx, f"mock {n} bước" + (" (vòng của bài)" if n == 100 else ""),
+                             {"sampler": "mock", "sample_kw": {"mock_steps": n}}))
+        else:
+            base.append(("" if one else "_ddpm", "DDPM 1000 bước", {"sampler": "ddpm", "sample_kw": {}}))
+    out = list(base)
+    if obj_attn:
+        out += [(s_ + "_noobj", d_ + ", TẮT box vật", {**v_, "sample_kw": {**v_["sample_kw"], "use_objects": False}})
+                for s_, d_, v_ in base]
+    if refiner:
+        out += [(s_ + "_norefine", d_ + ", BỎ refiner (refined = x_t)",
+                 {**v_, "sample_kw": {**v_["sample_kw"], "use_refiner": False}})
+                for s_, d_, v_ in base if v_["sample_kw"].get("mock_steps") == 100]
+    return out
+
+
 def paper_train_mask(index, rec):
     """Record nào là mẫu `samples/train` — tập checkpoint CE-Loc gốc của bài ĐÃ TRAIN (gồm 182 / 779 ảnh gốc test CE-130;
     samples/train và samples/test không chung ảnh gốc) -> list bool."""
@@ -160,14 +190,11 @@ def main_add(a, cfg, ck, dev, t0):
     prior_unit = prior_unit_boxes(index, "train", src)
     if cfg["model"].get("arch") == "box_refiner" and not paper:
         variants = [(f"_steps{s}", f"DDIM {s} bước", {"steps": s}) for s in a.steps]
-    elif len(a.add_samplers) == 1:                    # GAMMA0 / bài: một sampler -> khoá không hậu tố (sampler ghi ở out)
-        sm = a.add_samplers[0]
-        variants = [("", "mock 100 bước (vòng của bài)" if sm == "mock" else "DDPM 1000 bước", {"sampler": sm})]
-    else:
-        variants = [(f"_{sm}", sm, {"sampler": sm}) for sm in a.add_samplers]
-    if cfg["model"].get("obj_attn") and not paper:     # GAMMA4: mỗi sampler thêm bản TẮT box vật (cùng checkpoint)
-        variants += [(s_ + "_noobj", d_ + ", TẮT box vật", {**v_, "sample_kw": {"use_objects": False}})
-                     for s_, d_, v_ in variants]
+    else:                                             # U-Net 1D (GAMMA0 / pha 1 / GAMMA4 / DELTA / bài): sampler × số bước mock
+        if "mock" in a.add_samplers and isinstance(model, BoxPolicy) and max(a.mock_steps) > model.num_timesteps:
+            sys.exit(f"--mock-steps {max(a.mock_steps)} > T = {model.num_timesteps} của checkpoint")
+        variants = add_variants(a.add_samplers, a.mock_steps, obj_attn=bool(cfg["model"].get("obj_attn")) and not paper,
+                                refiner=getattr(model, "refiner", None) is not None)
     refine_vars = []
     if cfg["model"].get("arch") == "propose_refine" and not paper:
         for v in a.refine_t:
@@ -183,7 +210,7 @@ def main_add(a, cfg, ck, dev, t0):
             refine_vars += [(s_ + "_norel", d_ + ", bỏ Rel", {**v_, "rel_bias": False}) for s_, d_, v_ in base]
     out = {"ckpt": a.ckpt, "iter": it, "split": a.split, "dataset": a.dataset, "n_samples": K, "density": {}, "results": {},
            "prior": {}, "density_weight_ratio": dwr, "add_samplers": a.add_samplers, "proposer_sampler": a.proposer_sampler,
-           "amp": amp}
+           "mock_steps": a.mock_steps, "amp": amp}
     dump = {"ckpt": a.ckpt, "iter": it, "split": a.split, "n_samples": K, "seed": a.seed, "results": {}} if a.dump_boxes else None
     text_table = None
     cocount = a.dataset == "cocount"
@@ -202,6 +229,8 @@ def main_add(a, cfg, ck, dev, t0):
             ds.keys = ds.keys[: a.limit]
         if text_table is None:
             text_table = train_mod.build_text_table(ds.classes(), cfg, dev, **({"state_dict": clip} if paper else {}))
+            if getattr(model, "needs_text_tokens", False):     # DELTA: CLIP text tải lại phải đúng bản lúc train
+                model.check_text_fingerprint(text_table.token_sha)
         loader = DataLoader(ds, batch_size=a.batch_size or cfg["eval"]["batch_size"], shuffle=False,
                             num_workers=a.num_workers, collate_fn=collate_add)
         out["density"][image] = dens
@@ -214,6 +243,8 @@ def main_add(a, cfg, ck, dev, t0):
             res["eval_sec"] = sec
             if hasattr(model, "pop_attn") and post is None:
                 res["attn"] = model.pop_attn() if attn_key is None else model.pop_attn(attn_key)
+            if hasattr(model, "pop_refine_stats") and post is None:   # DELTA: TB |Δ| refiner theo khoảng t
+                res["refine_delta_by_t"] = model.pop_refine_stats()
             pri_rec = prior_records(rec, prior_unit, K, seed=a.seed)
             if post:
                 pri_rec = post(pri_rec)
@@ -231,6 +262,8 @@ def main_add(a, cfg, ck, dev, t0):
                     f"{k.format(K=K)} {ex[k.format(K=K)]:.4f} (prior {pri['excl_paper_train'][k.format(K=K)]:.4f})"
                     for k in ("best_iou@{K}_latest", "hit50@{K}_latest", "mean_iou_latest", "mean_iou_any", "on_object")
                     if k.format(K=K) in ex))
+            if res.get("refine_delta_by_t"):
+                print("  refiner TB |Δ| theo t: " + " | ".join(f"{k_} {v_:.4f}" for k_, v_ in res["refine_delta_by_t"].items()))
             if res.get("attn"):
                 print("  attention query -> [t ; text ; vis] theo tầng: " + " | ".join(
                     "/".join(f"{x[k]:.2f}" for k in ("t", "text", "vis")) for x in res["attn"]))
@@ -306,6 +339,8 @@ def main():
     ap.add_argument("--refine-steps", type=int, default=1, help="GAMMA2: số bước DDIM của refine")
     ap.add_argument("--proposer-sampler", default="mock", choices=["ddpm", "mock"],
                     help="GAMMA2: sampler của CE-Loc — mặc định mock 100 bước như bài")
+    ap.add_argument("--mock-steps", type=int, nargs="+", default=[100],
+                    help="U-Net 1D: số bước vòng mock (mỗi số một lượt; 100 = khoá cũ, khác = hậu tố _mock{N}) — DELTA: 100 200 500 1000")
     ap.add_argument("--add-samplers", nargs="+", default=["mock"], choices=["ddpm", "mock"],
                     help="GAMMA0 / GAMMA2 pha 1 / checkpoint của bài (U-Net 1D): mock (mặc định — vòng 100 bước của bài) và / hoặc "
                          "ddpm (1000 bước đúng công thức)")

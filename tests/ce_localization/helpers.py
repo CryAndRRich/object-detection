@@ -1,7 +1,9 @@
 """Dữ liệu giả + config test dùng chung cho mọi file test của ce_localization. Không tải gì:
 backbone `pretrained_backbone: false`, text thay bằng embedding giả, mọi lượt train ép `--device cpu`.
+DELTA: CLIP ViT của refiner thay bằng CLIP tí hon dựng từ config (`_fake_load_clip`, lưới 14×14 như ViT-B/16), token chữ giả.
 """
 
+import hashlib
 import json
 import os
 import sys
@@ -55,12 +57,43 @@ def _fake_ce130(root, n_train=4, n_val=2, n_test=2):
             k += 1
 
 
+FAKE_TEXT_SHA = hashlib.sha256(b"fake CLIP text").digest()
+
+
+def _fake_tokens(names, dim=512):
+    """Token chữ giả: độ dài 2 + len(tên) % 4 (khác nhau giữa các lớp), tất định theo tên."""
+    out = {}
+    for n in names:
+        g = torch.Generator().manual_seed(7 + sum(map(ord, n)))
+        out[n] = torch.randn(2 + len(n) % 4, dim, generator=g)
+    return out
+
+
 def _fake_text_table(names, cfg, dev, state_dict=None):
+    from ce_localization.models.clip_refiner import needs_text_tokens
     table = {}
     for n in names:
         g = torch.Generator().manual_seed(sum(map(ord, n)))
         table[n] = torch.randn(512, generator=g)
+    if needs_text_tokens(cfg["model"]):
+        return TextTable(table, _fake_tokens(names), FAKE_TEXT_SHA)
     return TextTable(table)
+
+
+def _fake_load_clip(name, seed=0):
+    """Thay `models.clip_refiner.load_clip`: CLIPVisionModel tí hon (hidden 32, 2 tầng) dựng từ config, ảnh 224 / patch 16 ⇒ lưới 14
+    như ViT-B/16; weight tất định theo `seed`, KHÔNG đụng RNG toàn cục. -> (model frozen eval, hidden CLIP text 512)."""
+    from transformers import CLIPVisionConfig, CLIPVisionModel
+    with torch.random.fork_rng():
+        torch.manual_seed(seed)
+        m = CLIPVisionModel(CLIPVisionConfig(hidden_size=32, intermediate_size=64, num_hidden_layers=2, num_attention_heads=2,
+                                             image_size=224, patch_size=16))
+    return m.eval().requires_grad_(False), 512
+
+
+def _patch_clip(monkeypatch, seed=0):
+    import ce_localization.models.clip_refiner as cr
+    monkeypatch.setattr(cr, "load_clip", lambda name: _fake_load_clip(name, seed))
 
 
 def _test_cfg(tmp_path, memory="none", data_root=None, density=None):
@@ -85,6 +118,7 @@ def _test_cfg(tmp_path, memory="none", data_root=None, density=None):
 def _run_train(monkeypatch, argv):
     import ce_localization.train as ta
     monkeypatch.setattr(ta, "build_text_table", _fake_text_table)
+    _patch_clip(monkeypatch)
     monkeypatch.setattr(sys, "argv", ["train.py"] + argv + ["--device", "cpu"])
     ta.main()
 
@@ -166,7 +200,9 @@ CFG_G = {"density": os.path.join(CFG_DIR, "gamma", "gamma0.yaml"), "rgb": os.pat
          "geo": os.path.join(CFG_DIR, "gamma", "gamma3.yaml"),
          "rel": os.path.join(CFG_DIR, "gamma", "gamma3_1.yaml"),
          "obj": os.path.join(CFG_DIR, "gamma", "gamma4.yaml"),
-         "pr_obj": os.path.join(CFG_DIR, "gamma", "gamma4_1.yaml")}
+         "pr_obj": os.path.join(CFG_DIR, "gamma", "gamma4_1.yaml"),
+         "delta1": os.path.join(CFG_DIR, "delta", "delta1.yaml"),
+         "delta1_1": os.path.join(CFG_DIR, "delta", "delta1_1.yaml")}
 
 
 def _fake_ce130_turns(base, seed=0):
@@ -253,14 +289,15 @@ def _gamma_cfg(tmp_path, base, kind="density"):
 
 
 def _gamma2_cfg(tmp_path, base, kind, proposer_ckpt=None):
-    """Config GAMMA2 / 3 thật (`celoc2` | `pr` | `pr_joint` | `geo` | `rel` | `obj` | `pr_obj`) thu nhỏ cho CE-130 giả: canvas 128, T = 20, 4 iter, batch 2."""
+    """Config GAMMA2 / 3 / DELTA thật (`celoc2` | `pr` | `pr_joint` | `geo` | `rel` | `obj` | `pr_obj` | `delta1` | `delta1_1`) thu nhỏ cho
+    CE-130 giả: canvas 128, T = 20, 4 iter, batch 2 (refiner DELTA giữ nguyên kích thước thật, CLIP giả)."""
     with open(CFG_G[kind]) as f:
         cfg = yaml.safe_load(f)
     cfg["data"].update(root=os.path.join(base, "all_phase2_V2"), samples_root=os.path.join(base, "samples"),
                        turn_index=os.path.join(base, "turn_index.json"),
                        density_index=os.path.join(base, "density_index.json"),
                        density_root=os.path.join(base, "samples"), image_size=128, num_workers=0)
-    standalone = kind in ("celoc2", "obj")                                  # CE-Loc đứng một mình (pha 1 / GAMMA4)
+    standalone = kind in ("celoc2", "obj", "delta1", "delta1_1")            # CE-Loc đứng một mình (pha 1 / GAMMA4 / DELTA)
     cfg["model"]["pretrained_backbone"] = not standalone                     # pha 2: True = nạp proposer_ckpt
     cfg["diffusion"].update(num_timesteps=20, noise_per_image=2)
     if "proposer" in cfg["diffusion"]:

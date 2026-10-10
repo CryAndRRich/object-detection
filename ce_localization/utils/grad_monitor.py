@@ -15,7 +15,7 @@ _STAGE = re.compile(r"head\.stages\.(\d+)\.(\w+)")
 
 
 def group_of(name):
-    """Tên tham số của `models.detector.Detector` / `models.box_policy.BoxPolicy` / `models.box_refiner.BoxRefiner` /
+    """Tên tham số của `models.detector.Detector` / `models.box_policy.BoxPolicy` (+ `refiner` DELTA) / `models.box_refiner.BoxRefiner` /
     `models.propose_refine.ProposeRefine` -> nhóm."""
     if name.startswith("proposer.vision.backbone."):              # GAMMA2.1: backbone ResNet18 dùng chung
         return "proposer.resnet18"
@@ -29,6 +29,12 @@ def group_of(name):
         return "resnet18"
     if name.startswith("noise_net."):
         return "unet1d"
+    if name.startswith("refiner.stages."):                         # DELTA: BoxRefiner của tác giả (models/clip_refiner.py)
+        return "refiner.blocks"
+    if name.startswith("refiner.heads."):
+        return "refiner.head"
+    if name.startswith("refiner."):
+        return "refiner.embed"
     if name.startswith(("vis_proj.", "text_proj.")):
         return name.split(".")[0]
     if name.startswith("backbone.fpn."):

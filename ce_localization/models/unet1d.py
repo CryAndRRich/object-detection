@@ -11,6 +11,7 @@ của mỗi tầng (down 64 / 128 / 256, mid 256, up 128 / 64), trước skip / 
 (cùng dạng 4 số với box nhiễu) đi qua CHÍNH các ResBlock đó (chung weight) với cond `[emb(0) ; global_cond]` (box sạch, t = 0),
 lấy feature ở đúng 6 vị trí ⇒ ở mọi tầng token vật cùng số chiều, cùng không gian với feature box nhiễu. `ObjCrossAttn`:
 `h + out_proj(MHA(LN(h) -> LN(token)))`, out_proj khởi tạo 0 (lúc đầu = U-Net không attention), tính fp32.
+`output_dim` (DELTA, bản cập nhật của tác giả `noise_pred_net.py`): số kênh ra khác số kênh vào (vào [x_t ; refined] 8, ra ε 4).
 """
 
 import math
@@ -118,7 +119,8 @@ class ObjCrossAttn(nn.Module):
 
 class ConditionalUnet1D(nn.Module):
     def __init__(self, input_dim, global_cond_dim, diffusion_step_embed_dim=256,
-                 down_dims=(64, 128, 256), kernel_size=3, n_groups=8, obj_attn=False, obj_heads=4, obj_bucket=512):
+                 down_dims=(64, 128, 256), kernel_size=3, n_groups=8, obj_attn=False, obj_heads=4, obj_bucket=512,
+                 output_dim=None):
         super().__init__()
         all_dims = [input_dim] + list(down_dims)
         start_dim = down_dims[0]
@@ -145,7 +147,7 @@ class ConditionalUnet1D(nn.Module):
                 Upsample1d(dim_in) if not is_last else nn.Identity()]))
         self.final_conv = nn.Sequential(
             Conv1dBlock(start_dim, start_dim, kernel_size=kernel_size),
-            nn.Conv1d(start_dim, input_dim, 1),
+            nn.Conv1d(start_dim, input_dim if output_dim is None else output_dim, 1),   # DELTA: vào [x_t ; refined] 8, ra ε 4
         )
         self.diffusion_step_encoder = nn.Sequential(
             SinusoidalPosEmb(dsed), nn.Linear(dsed, dsed * 4), nn.Mish(), nn.Linear(dsed * 4, dsed))

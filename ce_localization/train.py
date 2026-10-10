@@ -28,6 +28,10 @@ mới nhất, `noise_per_image` bộ (t, ε) mỗi ảnh. `model.arch: box_polic
 U-Net 1D, ε-MSE, eval DDPM) | `box_refiner` (GAMMA1: 6 tầng RoI + cross-attn [t ; text ; vis], L1 + GIoU ở mọi tầng,
 eval DDIM `eval.sampling_steps` bước). Eval định kỳ = `eval.n_samples` mẫu / ảnh trên `eval.limit` mẫu val cố định,
 chọn `best.pth` theo `eval.select_metric` (`mean_iou_any`).
+
+DELTA (`model.refiner` / `model.use_condition`, docs/EXPERIMENT_DELTA.md): `box_policy` + BoxRefiner của tác giả gốc
+(`models/clip_refiner.py`) — bảng text thêm token chữ CLIP B/16 (`TextTable.tokens`), loss + aux, log thêm ε / aux / |Δ| / aux_ratio
+và độ lớn gate AdaLN của refiner.
 """
 
 import argparse
@@ -58,8 +62,9 @@ from ce_localization.engine.train_utils import (PthCheckpoints, epoch_batches,  
                                                lr_factor, noise_seed, setup_dist)
 from ce_localization.models.backbone import conv1_of, density_ratio_of  # noqa: E402
 from ce_localization.models.box_policy import boxes_to_unit, norm_whwh  # noqa: E402
+from ce_localization.models.clip_refiner import REFINER_DEFAULTS, needs_text_tokens  # noqa: E402
 from ce_localization.models.detector import build_model  # noqa: E402
-from ce_localization.models.text import TextTable, encode_class_names  # noqa: E402
+from ce_localization.models.text import TextTable, encode_class_names, encode_class_tokens  # noqa: E402
 from ce_localization.utils.grad_monitor import GradMonitor  # noqa: E402
 from ce_localization.utils.log import fmt_time, print_banner, run_env  # noqa: E402
 
@@ -72,6 +77,8 @@ TASKS = ("detect", "add")
 # nhãn số hạng loss trên dòng log (giữ đúng nhãn cũ của ALPHA: ce / l1 / giou / iou)
 LOG_LABEL = {"loss_ce": "ce", "loss_bbox": "l1", "loss_giou": "giou", "iou_matched": "iou",
              "loss_center": "center", "loss_size": "size", "center_px": "center_px"}
+# DELTA: thống kê refiner trên dòng log (TB cửa sổ) và trong history — `BoxPolicy.pop_stats`
+EXTRA_LOG = {"loss_eps": "ε", "loss_aux": "aux", "delta_abs": "|Δ|", "aux_ratio": "aux/x_t"}
 
 
 def config_diff(saved, cfg):
@@ -87,8 +94,13 @@ def config_diff(saved, cfg):
 
 def build_text_table(names, cfg, dev, state_dict=None):
     """Tách ra hàm riêng để test thay bằng embedding giả (không tải CLIP). `state_dict`: CLIP text lưu trong checkpoint CE-Loc
-    gốc của bài (eval.py)."""
-    return TextTable(encode_class_names(names, cfg["model"]["clip_text"], device=str(dev), state_dict=state_dict))
+    gốc của bài (eval.py). DELTA (refiner bật + có điều kiện): thêm token chữ của CLIP text `refiner.clip_model_name` + vân tay."""
+    m = cfg["model"]
+    tokens = sha = None
+    if needs_text_tokens(m):
+        name = (m.get("refiner") or {}).get("clip_model_name", REFINER_DEFAULTS["clip_model_name"])
+        tokens, sha = encode_class_tokens(names, name, device=str(dev))
+    return TextTable(encode_class_names(names, m["clip_text"], device=str(dev), state_dict=state_dict), tokens, sha)
 
 
 def density_setup(cfg):
@@ -231,7 +243,8 @@ def bench(model, net, crit, loader_fn, text_table, cfg, opt, dev, n, log, todev=
 def ddp_find_unused(cfg):
     """DDP `find_unused_parameters`: True khi có tham số train có thể KHÔNG nhận grad ở một iteration (`box_policy` R-50 chỉ
     đọc C5 nên FPN không dùng; ALPHA / BETA / GAMMA1 giữ True như lúc đã chạy). Tắt (DDP khỏi duyệt đồ thị mỗi iter) khi
-    MỌI tham số train luôn có grad — có test: CE-Loc gốc ResNet18 (`box_policy` + `r18_paper`); `propose_refine` (tầng FPN
+    MỌI tham số train luôn có grad — có test: CE-Loc gốc ResNet18 (`box_policy` + `r18_paper`, kể cả DELTA: refiner luôn vào đồ
+    thị, `use_condition: false` đóng băng phần không ai đọc); `propose_refine` (tầng FPN
     không có RoI vẫn góp 0 — `MultiLevelRoIAlign`) khi CE-Loc đóng băng hoặc ε-MSE của nó có trong loss."""
     m = cfg["model"]
     if m.get("arch") == "box_policy" and m.get("vision") == "r18_paper":
@@ -262,8 +275,10 @@ def _step_loss(net, crit, batch, text_table, cfg, model, gen, dev):
             return net(batch["images"], text, batch["valid_hw"], batch["target"], batch["whwh"], k=k, generator=gen, **geo)
         x0 = boxes_to_unit(batch["target"], norm_whwh(model, batch["whwh"], batch["images"].shape[-1]))  # GAMMA0: ε-MSE
         obj = {"objects": batch["objects"]} if cfg["model"].get("obj_attn") else {}      # GAMMA4: box vật đang có
+        if getattr(model, "needs_text_tokens", False):                                   # DELTA: token chữ CLIP cho refiner
+            obj["text_tokens"] = text_table.tokens(batch["text"], dev)
         loss = net(batch["images"], text, batch["valid_hw"], x0, k=k, generator=gen, **obj)
-        return loss, {"loss": loss.detach()}
+        return loss, {"loss": loss.detach(), **(model.pop_stats() if hasattr(model, "pop_stats") else {})}
     boxes, t = prepare_train_boxes(batch["boxes"], batch["whwh"], cfg["diffusion"]["num_proposals"],
                                    model.alphas_cumprod, model.snr_scale, gen)
     text = text_table(batch["text"], dev)
@@ -280,6 +295,8 @@ def main():
     ap.add_argument("--max-iter", type=int, default=None, help="ghi đè training.max_iter (vd. G3)")
     ap.add_argument("--lr", type=float, default=None,
                     help="ghi đè training.lr (vd. G3 kiểm 'code sai hay lr chậm'); ghi vào config của checkpoint")
+    ap.add_argument("--batch-size", type=int, default=None,
+                    help="ghi đè training.batch_size TOÀN CỤC (vd. G4 bench 1 GPU với 32 = tải mỗi GPU của Kaggle T4×2)")
     ap.add_argument("--eval-every", type=int, default=None)
     ap.add_argument("--ckpt-every", type=int, default=None)
     ap.add_argument("--limit", type=int, default=None, help="chỉ lấy N ảnh train đầu (G3 overfit)")
@@ -307,9 +324,12 @@ def main():
     tr = cfg["training"]
     if a.max_iter:
         tr["max_iter"] = a.max_iter
-        tr["steps"] = [s for s in tr["steps"] if s < a.max_iter]
+        if "steps" in tr:                               # lịch cosine (gamma2_celoc, DELTA) không có `steps`
+            tr["steps"] = [s for s in tr["steps"] if s < a.max_iter]
     if a.lr:
         tr["lr"] = a.lr
+    if a.batch_size:
+        tr["batch_size"] = a.batch_size
     if a.eval_every:
         tr["eval_every"] = a.eval_every
     if a.ckpt_every:
@@ -420,6 +440,8 @@ def main():
     # ------------------------------------------------------------------ model
     t = time.time()
     model = build_model(cfg).to(dev)
+    if getattr(model, "needs_text_tokens", False):      # DELTA: vân tay CLIP text vào clip_sha TRƯỚC khi resume (nạp tự kiểm)
+        model.set_text_fingerprint(text_table.token_sha)
     # `training.amp` (GAMMA2, Kaggle T4): autocast fp16 + GradScaler, conv channels_last — tensor core của T4 chỉ chạy fp16.
     # Chỉ trên CUDA (CPU / test: tắt, chạy fp32 như cũ). Head refine kiểu DiffusionDet tự tắt autocast (models/propose_refine.py)
     amp = bool(tr.get("amp")) and dev.type == "cuda"
@@ -502,7 +524,7 @@ def main():
 
     # ------------------------------------------------------------------ vòng train
     t_train, t_last, it = time.time(), time.time(), start
-    win = {"loss": 0.0, "n": 0, "gn": [], "data": 0.0, "skip": 0}
+    win = {"loss": 0.0, "n": 0, "gn": [], "data": 0.0, "skip": 0, "extra": {}}
     slowest_chunk, chunk_t0 = 0.0, time.time()
     model.train()
     done = False
@@ -555,6 +577,9 @@ def main():
             scaler.update()
             advance_lr(sched)
             win["loss"] += float(st["loss"])
+            for k_ in EXTRA_LOG:                        # DELTA: thống kê refiner, TB trên cửa sổ log
+                if k_ in st:
+                    win["extra"][k_] = win["extra"].get(k_, 0.0) + float(st[k_])
             win["n"] += 1
             win["gn"].append(float(gn))
             it += 1
@@ -566,8 +591,10 @@ def main():
                 if crit is None:
                     lps = st.get("loss_per_stage")
                     detail = "" if lps is None else " (tầng " + " ".join(f"{float(x):.3f}" for x in lps) + ")"
-                    if "loss_eps" in st:
+                    if "loss_eps" in st and "loss_aux" not in st:
                         detail += f" | ε-MSE CE-Loc {float(st['loss_eps']):.4f}"
+                    if win["extra"]:                    # DELTA
+                        detail += " | " + " ".join(f"{EXTRA_LOG[k_]} {v / win['n']:.4f}" for k_, v in win["extra"].items())
                 else:
                     lps = " ".join(f"{float(x):.2f}" for x in st["loss_per_stage"])
                     terms = " ".join(f"{LOG_LABEL.get(k, k)} {float(st[k + '_final']):.3f}" for k in crit.log_keys)
@@ -583,11 +610,19 @@ def main():
                     share = GradMonitor.share(gsum)
                     log("          grad theo nhóm: " + ", ".join(
                         f"{g} {v:.2f} ({share[g] * 100:.0f}%)" for g, v in list(gsum.items())[:5]))
-                history.append({"iter": it, "loss": win["loss"] / win["n"],
-                                "loss_per_stage": [float(x) for x in st.get("loss_per_stage", [])],
-                                "lr": sched.get_last_lr()[0], "grad_norm_p50": float(np.median(win["gn"])),
-                                "s_per_iter": spi, "skipped": win["skip"], "elapsed_sec": el})
-                win = {"loss": 0.0, "n": 0, "gn": [], "data": 0.0, "skip": 0}
+                entry = {"iter": it, "loss": win["loss"] / win["n"],
+                         "loss_per_stage": [float(x) for x in st.get("loss_per_stage", [])],
+                         "lr": sched.get_last_lr()[0], "grad_norm_p50": float(np.median(win["gn"])),
+                         "s_per_iter": spi, "skipped": win["skip"], "elapsed_sec": el,
+                         **{k_: v / win["n"] for k_, v in win["extra"].items()}}
+                if getattr(model, "refiner", None) is not None:          # DELTA: refiner có rời identity không
+                    entry["refiner_gates"] = model.refiner.gate_stats()
+                    g_ = entry["refiner_gates"]
+                    log("          refiner |gate| attn/mlp theo block: " + " ".join(
+                        f"{k_} {v[0]:.3f}/{v[1]:.3f}" for k_, v in g_.items() if not k_.startswith("head"))
+                        + " | ‖head cuối‖ " + " ".join(f"{g_[k_]:.3f}" for k_ in g_ if k_.startswith("head")))
+                history.append(entry)
+                win = {"loss": 0.0, "n": 0, "gn": [], "data": 0.0, "skip": 0, "extra": {}}
                 t_last = time.time()
 
             is_eval = it % tr["eval_every"] == 0 or it == tr["max_iter"]

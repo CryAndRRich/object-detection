@@ -60,6 +60,8 @@ class ProposeRefine(nn.Module):
         self.proposer = BoxPolicy(**proposer_kw)
         if self.proposer.vision_kind != "r18_paper":
             raise ValueError("ProposeRefine dùng chung ResNet18 của CE-Loc: proposer cần vision r18_paper")
+        if self.proposer.use_refiner or not self.proposer.use_condition:
+            raise ValueError("ProposeRefine chưa hỗ trợ proposer có refiner / use_condition: false (DELTA)")
         self.fpn = FeaturePyramidNetwork(list(R18_CHANNELS), d_model)
         self.memory = MemoryEncoder("spatial_softmax", d_model, text_dim, feat_channels=R18_CHANNELS[-1], feat_stride=32)
         self.geo, self.relation = bool(geo), bool(relation)

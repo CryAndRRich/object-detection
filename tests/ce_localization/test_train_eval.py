@@ -101,6 +101,9 @@ def _ddp_worker(rank, world, port, argv):
     os.environ.update(RANK=str(rank), LOCAL_RANK=str(rank), WORLD_SIZE=str(world),
                       MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port))
     ta.build_text_table = _fake_text_table
+    import ce_localization.models.clip_refiner as cr                       # DELTA: CLIP giả (không tải)
+    from tests.ce_localization.helpers import _fake_load_clip
+    cr.load_clip = _fake_load_clip
     sys.argv = ["train.py"] + argv + ["--device", "cpu"]
     ta.main()
 

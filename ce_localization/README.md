@@ -37,7 +37,7 @@ L1 + GIoU ở mọi tầng; suy luận DDIM `--steps`.
 | `train.py` / `eval.py` | điểm vào duy nhất (1 GPU hoặc `torchrun`; `--resume`, `--max-hours`, `--bench`, `--nan-debug`) |
 | `config/alpha/`, `config/beta/`, `config/gamma/` | config từng thí nghiệm (bảng dưới) |
 | `data/` | `dataset` (quét CE-130, letterbox, đích box / điểm), `density` (giải mã jet, chỉ mục, chọn bản), `points` (đỉnh density, cỡ giả kNN), `turns` (bài add: chỉ mục (nhánh, lượt) ↔ `samples/`, dataset) |
-| `models/` | `backbone`, `roi`, `memory`, `head`, `detector`, `text` (CLIP ViT-B/32 frozen); bài add: `box_policy` + `unet1d` (GAMMA0), `box_refiner` (GAMMA1) |
+| `models/` | `backbone`, `roi`, `memory`, `head`, `detector`, `text` (CLIP ViT-B/32 frozen; DELTA: + token chữ CLIP B/16); bài add: `box_policy` + `unet1d` (GAMMA0), `box_refiner` (GAMMA1), `clip_refiner` (DELTA: BoxRefiner của tác giả gốc, port từ `refs/CE-Loc-update/`) |
 | `engine/` | `diffusion`, `criterion` (SimOTA + loss, chế độ box / điểm), `evaluate` (suy luận + chỉ số), `add_eval` (bài add: K mẫu, IoU với lỗ, C-NLL, on_object), `train_utils`, `nan_debug` |
 | `utils/` | hình học box (torch / numpy), toán khuếch tán, chấm điểm numpy, checkpoint ghi nguyên tử, grad theo nhóm, log |
 | `tools/` | `build_density_index`, `build_density_points`, `build_turn_index` (bài add, cửa G0), `visualize_data` (xem đầu vào bằng mắt), `check_data_facts`, `plot_denoise_trajectory` (bài add: box qua từng bước khử nhiễu, checkpoint của bài hoặc GAMMA0), `plot_refiner_steps` (GAMMA1: 4 bước DDIM × 6 tầng + SpatialSoftmax, ảnh inpaint / gốc × density của ảnh / trống) |
@@ -71,6 +71,8 @@ Code soi SpatialSoftmax (`celoc_paper/`, `tools/inspect_*spatial_softmax.py`, TN
 | `gamma/gamma3_1.yaml` | như `gamma2` + `model.relation`: attention kiểu Relation-DETR từ box tới feature RoI các vật gần nhất, điểm cộng Rel hình học (`models/relation.py`) | 〃 mục 15 |
 | `gamma/gamma4.yaml` | như `gamma2_celoc` (CE-Loc đứng một mình, train từ đầu) + `model.obj_attn`: cross-attn box nhiễu → box vật ở mọi tầng U-Net, token vật mã hoá gương (`models/unet1d.py`) | 〃 mục 16 |
 | `gamma/gamma4_1.yaml` | như `gamma2` nhưng CE-Loc đề xuất = `gamma4` (đóng băng, nhận box vật) → refine 6 stage | 〃 mục 16.7 |
+| `delta/delta1.yaml` | như `gamma2_celoc` + `model.refiner` (BoxRefiner của tác giả gốc trong mạng khử nhiễu: CLIP ViT-B/16 + text frozen, RoIAlign 3×3, 4 block RoPE 2D + AdaLN-Zero; U-Net nhận `[x_t ; refined]`; + 0,1·MSE(refined, x0)) | `docs/EXPERIMENT_DELTA.md` |
+| `delta/delta1_1.yaml` | như `delta1`, `model.use_condition: false` (không điều kiện ảnh / text, refiner bỏ qua — mốc học được của prior) | 〃 |
 
 ## Chạy
 
@@ -119,6 +121,10 @@ tự nhận `task: add`: `--image inpainted original`, `--n-samples`, `--add-den
 
 CE-CoCount (tập test phụ của bài, `data/cocount/`): `eval.py --dataset cocount --cocount-root ../data/cocount` (ảnh gốc, 10 chỗ trống GT
 làm lỗ, density trống; `data/cocount.py`); C-NLL của box GT trên CE-130 + CE-CoCount: `tools/gt_cnll.py`; `--obj-size` thêm khoá `_objsize` (giữ tâm, cỡ = TB box vật cùng lớp). Mục 18 của EXPERIMENT_GAMMA.
+
+DELTA (`config/delta/`, `docs/EXPERIMENT_DELTA.md`): `eval.py --mock-steps 100 200 500 1000` (vòng mock N bước; 100 giữ khoá cũ, khác thêm
+`_mock{N}`), `_norefine`; cần `HF_HOME` (CLIP B/16 tải lúc dựng model — không nằm trong checkpoint, vân tay `clip_sha` kiểm khớp). Cửa
+G1-HF (CLIP thật): `CE_HF_TESTS=1 python -m pytest tests/ce_localization/test_delta.py -k hf -s`.
 
 User study (người chấm box đề xuất, `user_study/`): `eval.py --dump-boxes` (server) → `user_study/build.py` (chọn 4 box / model,
 xáo màn) → `user_study/app.py` (web Gradio chấm ở local, `pip install gradio`) → `user_study/score.py`. Lệnh + chỉ số:

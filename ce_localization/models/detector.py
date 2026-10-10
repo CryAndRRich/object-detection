@@ -68,7 +68,8 @@ def _box_policy_kw(m, d, pre):
                 n_groups=m["n_groups"], num_timesteps=d["num_timesteps"], beta_start=d["beta_start"],
                 beta_end=d["beta_end"], ss_source=m.get("ss_source", "c5"), vision=m.get("vision", "r50_fpn"),
                 ss_mask=m.get("ss_mask", False), obj_attn=m.get("obj_attn", False), obj_heads=m.get("obj_heads", 4),
-                obj_max=m.get("obj_max", 300), **_paper_keys(m))
+                obj_max=m.get("obj_max", 300), refiner=m.get("refiner"), use_condition=m.get("use_condition", True),
+                **_paper_keys(m))
 
 
 def load_proposer(model, path):
@@ -98,6 +99,8 @@ def build_model(cfg, pretrained_backbone=None):
             box_token=m.get("box_token", "roi"), **_paper_keys(m))
     if m.get("arch", "detector") == "box_policy":
         from ce_localization.models.box_policy import BoxPolicy
+        if (m.get("refiner") or {}).get("enabled") and cfg.get("data", {}).get("input_style", "ours") != "paper":
+            raise ValueError("model.refiner (CLIP nhận RGB [0, 1] như tác giả) cần data.input_style: paper")
         return BoxPolicy(**_box_policy_kw(m, d, pre))
     if m.get("arch") == "propose_refine":
         from ce_localization.models.propose_refine import ProposeRefine

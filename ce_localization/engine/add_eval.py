@@ -55,7 +55,8 @@ def predict_add(model, loader, text_table, n_samples=30, seed=0, log_every=0, lo
     `steps`: số bước DDIM của `BoxRefiner` (GAMMA1; None = mặc định của model); `sampler`: ddpm | mock của `BoxPolicy`. BoxRefiner còn cộng dồn attention lên
     [t ; text ; vis] — lấy bằng `model.pop_attn()` sau khi gọi. `sample_kw`: tham số thêm cho `model.sample`; `variants`
     (ProposeRefine): list biến thể refine -> list record của TỪNG biến thể, cùng box CE-Loc. `amp`: autocast fp16 (chỉ CUDA)
-    như lúc train model `training.amp` (head refine tự giữ fp32)."""
+    như lúc train model `training.amp` (head refine tự giữ fp32). DELTA (`needs_text_tokens`): truyền token chữ CLIP; TB |Δ| của
+    refiner theo khoảng t lấy bằng `model.pop_refine_stats()` sau khi gọi."""
     model.eval()
     kw = {"steps": steps} if steps else {}
     if sampler:                                       # BoxPolicy (GAMMA0 / checkpoint của bài): ddpm | mock
@@ -64,6 +65,8 @@ def predict_add(model, loader, text_table, n_samples=30, seed=0, log_every=0, lo
     multi = variants is not None                      # ProposeRefine: nhiều biến thể refine trên CÙNG box CE-Loc
     if hasattr(model, "track_attn"):
         model.track_attn = True
+    if hasattr(model, "track_refine"):
+        model.track_refine = True
     dev = next(model.parameters()).device
     gen = torch.Generator(device=dev.type).manual_seed(seed)
     records, t0, n = ([[] for _ in variants] if multi else []), time.time(), len(loader.dataset)
@@ -71,6 +74,8 @@ def predict_add(model, loader, text_table, n_samples=30, seed=0, log_every=0, lo
         batch = to_device_add(batch, dev)
         text = text_table(batch["text"], dev)
         geo = {"objects": batch["objects"]} if getattr(model, "needs_objects", False) else {}   # GAMMA3 / 3.1: box vật
+        if getattr(model, "needs_text_tokens", False):                                       # DELTA: token chữ CLIP
+            geo["text_tokens"] = text_table.tokens(batch["text"], dev)
         with torch.autocast(device_type=dev.type, dtype=torch.float16, enabled=amp and dev.type == "cuda"):
             if multi:
                 us = model.sample_variants(batch["images"], text, batch["valid_hw"], n_samples, generator=gen,
@@ -94,6 +99,8 @@ def predict_add(model, loader, text_table, n_samples=30, seed=0, log_every=0, lo
                 f"còn ~{fmt_time(el / done * (n - done))}")
     if hasattr(model, "track_attn"):
         model.track_attn = False
+    if hasattr(model, "track_refine"):
+        model.track_refine = False
     return records
 
 
