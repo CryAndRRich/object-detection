@@ -382,3 +382,69 @@ def test_pack_zip_runs_standalone(tmp_path, monkeypatch):
     s.save()
     assert os.path.exists(dst / "data/1_set-b-resize/ratings_objsize_bob.jsonl")
     assert not os.path.exists(out + ".tmp")
+
+
+def test_analyze_dedupe_other_keeps_lower_index():
+    """Other = box trùng: giữ box số nhỏ hơn dù Other tích ở box nào; nhãn giữ = hợp lý do khác Other của nhóm; Other không chạm box
+    nào thì giữ riêng; phân bố số box tách biệt + lỗi theo hạng tách biệt."""
+    from ce_localization.user_study.analyze import analyze, dedupe
+    A, A2, B, C = [0, 0, 10, 10], [0, 0, 10, 11], [50, 50, 60, 60], [80, 0, 90, 10]
+    kept, u = dedupe([A, B, A2, C], [["other"], ["on_object"], ["wrong_size"], []])        # Other ở box 1, trùng box 3
+    assert [k[0] for k in kept] == [0, 1, 3] and kept[0][1] == {"wrong_size"} and not kept[0][2] and u == 0
+    kept, _ = dedupe([A, B, A2, C], [[], [], ["other"], []])                                # Other ở box 3 -> bỏ box 3
+    assert [k[0] for k in kept] == [0, 1, 3] and kept[0][1] == set() and not kept[0][2]
+    kept, _ = dedupe([A, B, A2, C], [["other"], [], ["other"], []])                         # cả cặp tích Other: không rõ
+    assert [k[0] for k in kept] == [0, 1, 3] and kept[0][1] == set() and kept[0][2]
+    kept, _ = dedupe([A, A2, [0, 0, 10, 12], C], [["other"], ["other"], ["other", "implausible"], []])   # 3 box trùng một nhóm
+    assert [k[0] for k in kept] == [0, 3] and kept[0][1] == {"implausible"} and not kept[0][2]
+    kept, u = dedupe([A, B, C, [20, 20, 30, 30]], [[], [], [], ["other"]])                 # không chạm box nào
+    assert len(kept) == 4 and u == 1 and kept[3][1] == {"other"} and not kept[3][2]
+    kept, _ = dedupe([[0, 0, 40, 40], [5, 5, 10, 10], B, C], [[], ["other"], [], []])       # IoU nhỏ nhưng nằm lọt: vẫn ghép
+    assert [k[0] for k in kept] == [0, 2, 3]
+    items = {"items": {"x": {"models": {"m": {"boxes": [A, B, A2, C]}}}, "y": {"models": {"m": {"boxes": [A, B, C, A2]}}}}}
+    ratings = {"m|x": {"model": "m", "image_id": "x", "repeat_of": None, "labels": [[], ["on_object", "wrong_size"], ["other"], []]},
+               "m|y": {"model": "m", "image_id": "y", "repeat_of": None, "labels": [["implausible"], [], [], []]},
+               "m|y|repeat": {"model": "m", "image_id": "y", "repeat_of": "m|y", "labels": [["other"]] * 4}}
+    r = analyze(items, ratings, "m")
+    assert r["n_screens"] == 2 and r["n_distinct"]["3"]["n"] == 1 and r["n_distinct"]["4"]["n"] == 1 and r["mean_distinct"] == 3.5
+    assert r["by_rank"]["1"]["error"] == 0.5 and r["by_rank"]["1"]["implausible"] == 0.5
+    assert r["by_rank"]["2"]["error"] == 0.5 and r["by_rank"]["2"]["multi"] == 0.5
+    assert r["by_rank"]["3"]["n"] == 2 and r["by_rank"]["4"]["n"] == 1 and r["by_orig_index"]["3"]["n"] == 1
+    assert r["by_rank"]["1"]["n_ambiguous"] == 0 and r["by_rank"]["1"]["error_excl_ambiguous"] == 0.5
+
+
+def test_plot_analysis_smoke(tmp_path, monkeypatch):
+    """plot_analysis.py chạy trọn trên 2 bộ giả (có box trùng tích Other) -> các hình PNG (không PDF)."""
+    pytest.importorskip("seaborn")
+    from ce_localization.user_study import plot_analysis as pa
+    rng = np.random.default_rng(0)
+    sets = []
+    for si in range(2):
+        root = tmp_path / f"img{si}"
+        (root / "im").mkdir(parents=True)
+        items, rat, dump = {"k": 4, "models": {"m": {"key": "k"}}, "screens": [], "items": {}}, [], {"results": {"k": []}}
+        for j in range(30):
+            iid = f"s{si}_{j}"
+            Image.fromarray(rng.integers(0, 255, (60, 80, 3), dtype=np.uint8)).save(root / "im" / f"{iid}.png")
+            objs = [[5 + 7 * q, 5, 11 + 7 * q, 11] for q in range(10)]
+            boxes = [[10, 20, 22, 32], [40, 30, 52, 42], [10, 20, 22, 33], [60, 40, 72, 52]]
+            items["items"][iid] = {"t": 0, "class": "x", "image": f"im/{iid}.png", "wh": [80, 60], "objects": objs,
+                                   "holes": [], "models": {"m": {"boxes": boxes, "nms": [0.3, 0.3, 1.0, 0.3], "idx": [0, 1, 2, 3]}}}
+            dump["results"]["k"].append({"image_id": iid, "t": 0, "wh": [80, 60], "boxes": boxes * 7 + [[0, 0, 10, 10]] * 2})
+            labs = [[], ["on_object"], ["other"] if j % 2 else [], ["implausible"] if j % 3 else ["wrong_size", "implausible"]]
+            rat.append({"id": f"m|{iid}", "image_id": iid, "model": "m", "repeat_of": None, "labels": labs})
+        ip, rp = tmp_path / f"items{si}.json", tmp_path / f"r{si}.jsonl"
+        ip.write_text(json.dumps(items))
+        rp.write_text("\n".join(json.dumps(r) for r in rat) + "\n")
+        dp = tmp_path / f"dump{si}.json"
+        dp.write_text(json.dumps(dump))
+        sets += ["--set", f"Set {si}", str(ip), str(rp), str(root), "--boxes", f"Set {si}", str(dp)]
+    out = tmp_path / "fig"
+    monkeypatch.setattr(sys, "argv", ["plot_analysis.py", "--model", "m", "--out", str(out)] + sets)
+    pa.main()
+    names = {f"fig{i}_{n}.png" for i, n in ((1, "distinct_boxes"), (2, "error_by_rank"), (3, "boxes_by_threshold"),
+                                          (4, "ok_by_iou"), (5, "success_at_k"))}
+    assert names <= set(os.listdir(out)) and not any(f.endswith(".pdf") for f in os.listdir(out))
+    monkeypatch.setattr(sys, "argv", ["plot_analysis.py", "--model", "m", "--out", str(out / "c"), "--candidates", "ce130:d"] + sets)
+    pa.main()                                                                 # bảng ứng viên: chỉ vẽ bảng rồi dừng
+    assert os.listdir(out / "c") == ["_candidates_ce130_d.png"]

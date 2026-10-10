@@ -18,11 +18,11 @@ cùng lúc ở cột phải). Bấm vào box hoặc phím 1..K để đổi ổn
 Save ⇒ tắt mở lại vẫn tiếp từ màn chưa lưu đầu tiên; thêm model vào items.json (`build.py --add-to`) không ảnh hưởng nhãn cũ.
 
   cd object-detection/ce_localization
-  python user_study/app.py --items ../../output/gamma/user_study/items.json --samples-root ../data/samples [--models gamma4]
+  python user_study/app.py --items ../../output/add/user_study/ce130/items.json --samples-root ../data/samples [--models gamma4]
   python user_study/app.py \\
-      --data "CE-130" ../../output/gamma/user_study/items.json ../data/samples \\
-      --data "CE-CoCount" ../../output/gamma/user_study_cocount/items.json ../data/cocount \\
-      --data "CE-CoCount (box resize)" ../../output/gamma/user_study_cocount/items_objsize.json ../data/cocount
+      --data "CE-130" ../../output/add/user_study/ce130/items.json ../data/samples \\
+      --data "CE-CoCount" ../../output/add/user_study/cocount/items.json ../data/cocount \\
+      --data "CE-CoCount (box resize)" ../../output/add/user_study/cocount_resize/items_objsize.json ../data/cocount
 Người khác chấm qua link (chạy trên server, docs/EXPERIMENT_GAMMA.md mục 17): thêm `--share` (in link *.gradio.live) và
 `--rater <tên>` (hoặc `--ratings .../ratings_<tên>.jsonl` khi chỉ một bộ) để file nhãn của họ không trùng tên với người chấm ở local.
 

@@ -11,10 +11,10 @@
 
 Chạy (từ object-detection/baseline/, `export OBJDET_DATA_ROOT=../data`), ~5–15 phút mỗi lượt ⇒ nền:
 
-  LOG=/mnt/disk1/aiotlab/haitn/log/baselines/baseline0_predict_$(date +%m%d_%H%M).log
+  LOG=/mnt/disk1/aiotlab/haitn/log/detection/baseline0/baseline0_predict_$(date +%m%d_%H%M).log
   nohup python ../tools/run_on_free_gpu.py -- predict.py --config-file configs/baseline0_diffusiondet.yaml \\
       --weights ../weights/detection/baseline0/best.pth --split test --num-proposals 200 300 --steps 1 4 \\
-      --out-dir /mnt/disk1/aiotlab/haitn/output/baselines --where "A30 server" --train-time 1h10m > $LOG 2>&1 &
+      --out-dir /mnt/disk1/aiotlab/haitn/output/detection --where "A30 server" --train-time 1h10m > $LOG 2>&1 &
   echo "PID $! -> $LOG"
 """
 
@@ -84,7 +84,7 @@ def main():
                     help="DiffusionDet: số box lúc suy luận (mặc định 200 = N của SCORE.md)")
     ap.add_argument("--steps", type=int, nargs="+", default=[1], help="DiffusionDet: số bước DDIM")
     ap.add_argument("--budgets", nargs="+", default=["200", "all"])
-    ap.add_argument("--out-dir", required=True, help="thư mục kết quả (/mnt/disk1/aiotlab/haitn/output/baselines)")
+    ap.add_argument("--out-dir", required=True, help="thư mục kết quả (/mnt/disk1/aiotlab/haitn/output/detection)")
     ap.add_argument("--data-root", default=None, help="all_phase2_V2/ để chấm (mặc định theo OBJDET_DATA_ROOT)")
     ap.add_argument("--limit", type=int, default=None, help="chỉ chạy N ảnh đầu (kiểm nhanh)")
     ap.add_argument("--seed", type=int, default=0)

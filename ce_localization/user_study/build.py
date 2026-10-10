@@ -11,7 +11,7 @@ còn thử nghiệm khác). `--repeat` phần mẫu mỗi model được chấm 
 Không nạp model, không GPU (đọc JSON, vài chục giây).
 
   cd /mnt/disk1/aiotlab/haitn/object-detection/ce_localization
-  O=/mnt/disk1/aiotlab/haitn/output/gamma/user_study
+  O=/mnt/disk1/aiotlab/haitn/output/add/user_study/ce130
   python user_study/build.py --turn-index ../data/turn_index.json --out $O/items.json \\
       --model paper        $O/boxes_paper.json        inpainted      "CE-Loc (paper)" \\
       --model gamma2_celoc $O/boxes_gamma2_celoc.json inpainted      "CE-Loc (masked SpatialSoftmax)" \\
@@ -26,7 +26,7 @@ Thêm model vào items.json đã có (cùng tập mẫu, màn cũ giữ nguyên)
 CE-CoCount (`--cocount-root`, dump của `eval.py --dataset cocount`; mục 17 + 18): mẫu = file `Anno/<tên>.json` (ảnh gốc
 `Image/<tên>.jpg`, t = 0), box vật hiện = vật CÙNG lớp (`objects`) + vật lớp kia của cùng frame (`objects_other`, web vẽ nét đứt), lỗ GT
 = 10 `loc_bbox` (không hiện). Khoá `cocount_objsize` (`--obj-size`) = bộ "box resize" — dựng thành items.json RIÊNG:
-  O=../../output/gamma/user_study_cocount
+  O=../../output/add/cocount/raw_objsize
   python user_study/build.py --cocount-root ../data/cocount --out $O/items.json \\
       --model paper $O/boxes_paper.json cocount "CE-Loc (paper)" ...
   python user_study/build.py --cocount-root ../data/cocount --out $O/items_objsize.json \\

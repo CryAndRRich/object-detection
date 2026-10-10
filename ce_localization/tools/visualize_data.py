@@ -6,23 +6,23 @@ Mỗi hình: canvas 512 (đã bỏ chuẩn hoá để xem), box GT xanh lá, v�
 lưới xám = ô P5 (32 px) — ALPHA2 lấy mỗi ô thật làm một token.
 
   cd object-detection/ce_localization
-  python tools/visualize_data.py --split train --n 12 --out ../../output/alpha/data_viz/train
-  python tools/visualize_data.py --split test  --n 12 --out ../../output/alpha/data_viz/test
+  python tools/visualize_data.py --split train --n 12 --out ../../output/detection/data_viz/train
+  python tools/visualize_data.py --split test  --n 12 --out ../../output/detection/data_viz/test
 
 ALPHA3 (`--density full|partial|empty|mix`): density đúng như kênh 4 model nhận, tô ĐỎ chồng lên ảnh
 (đậm = mật độ cao) — blob phải nằm trên vật, trong box GT. `mix` rút theo `--epoch`.
   python tools/visualize_data.py --split train --n 12 --image-size 1024 --density mix \
-      --out ../../output/alpha/data_viz/alpha3_train_mix
+      --out ../../output/detection/data_viz/alpha3_train_mix
 
 BETA (`--config config/beta/beta0.yaml`: đích điểm, lấy `data.points` + `data.pseudo_size` từ config): vẽ
 thêm ĐỈNH density (chấm đỏ) + BOX GIẢ (xanh dương) mà model học, cạnh box GT (xanh lá, chỉ để chấm).
   python tools/visualize_data.py --config config/beta/beta0.yaml --split train --n 12 --image-size 1024 \
-      --out /mnt/disk1/aiotlab/haitn/output/beta/data_viz/train
+      --out /mnt/disk1/aiotlab/haitn/output/detection/beta0/data_viz/train
 
 GAMMA (`--config config/gamma/gamma0.yaml`, bài add): ảnh inpaint lượt t đúng như model nhận (canvas + density của
 config), lỗ MỚI NHẤT (đích train) đỏ, lỗ cũ cam, vật đang có xanh lá; `--image original` vẽ ảnh gốc của cùng nhánh.
   python tools/visualize_data.py --config config/gamma/gamma0.yaml --split train --n 12 \
-      --out /mnt/disk1/aiotlab/haitn/output/gamma/data_viz/train
+      --out /mnt/disk1/aiotlab/haitn/output/add/data_viz/train
 """
 
 import argparse

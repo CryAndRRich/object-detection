@@ -7,10 +7,10 @@ thì dùng chung một bản), `run.sh` / `run.bat` (lệnh mở web đủ mọi
 Không kèm nhãn của người đóng gói (người chấm mới bắt đầu từ đầu). Ảnh lưu nguyên (ZIP_STORED — PNG / JPG nén thêm không được gì).
 
   cd /mnt/disk1/aiotlab/haitn/object-detection/ce_localization
-  python user_study/pack.py --out /mnt/disk1/aiotlab/haitn/output/gamma/user_study_pkg/user_study_<tên>.zip --rater <tên> \\
-      --data "CE-130" ../../output/gamma/user_study/items.json ../data/samples \\
-      --data "CE-CoCount" ../../output/gamma/user_study_cocount/items.json ../data/cocount \\
-      --data "CE-CoCount (box resize)" ../../output/gamma/user_study_cocount/items_objsize.json ../data/cocount
+  python user_study/pack.py --out /mnt/disk1/aiotlab/haitn/output/add/user_study/pkg/user_study_<tên>.zip --rater <tên> \\
+      --data "CE-130" ../../output/add/user_study/ce130/items.json ../data/samples \\
+      --data "CE-CoCount" ../../output/add/user_study/cocount/items.json ../data/cocount \\
+      --data "CE-CoCount (box resize)" ../../output/add/user_study/cocount_resize/items_objsize.json ../data/cocount
 """
 
 import argparse
@@ -98,7 +98,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", nargs=3, action="append", required=True, metavar=("NAME", "ITEMS", "IMAGE_ROOT"),
                     help="như app.py: tên hiện trên web, items*.json của build.py, thư mục ảnh")
-    ap.add_argument("--out", required=True, help="file .zip (vd /mnt/disk1/aiotlab/haitn/output/gamma/user_study_pkg/...)")
+    ap.add_argument("--out", required=True, help="file .zip (vd /mnt/disk1/aiotlab/haitn/output/add/user_study/pkg/...)")
     ap.add_argument("--rater", default=None, help="tên người chấm: nhãn ghi ra ratings*_<tên>.jsonl (gộp về không trùng file)")
     a = ap.parse_args()
     if len({n for n, _, _ in a.data}) != len(a.data):

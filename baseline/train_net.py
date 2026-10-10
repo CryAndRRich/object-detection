@@ -30,7 +30,7 @@ Chạy (từ object-detection/baseline/, `export OBJDET_DATA_ROOT=../data`):
     python train_net.py --num-gpus 2 --config-file ... OUTPUT_DIR /kaggle/working/ckpt --max-hours 9.5
     # eval COCO + oracle_recall trên một dataset đã đăng ký (số báo cáo: predict.py)
     python train_net.py --config-file ... --eval-only MODEL.WEIGHTS ../weights/detection/baseline0/best.pth \\
-        DATASETS.TEST '("ce130_agnostic_test",)' --dump-results /mnt/disk1/aiotlab/haitn/output/baselines/x.json
+        DATASETS.TEST '("ce130_agnostic_test",)' --dump-results /mnt/disk1/aiotlab/haitn/output/detection/x.json
 """
 
 import itertools

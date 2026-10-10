@@ -30,7 +30,7 @@ Ra (`--out`): `<sampler>_<ca>.png` (chữ trên hình bằng tiếng Anh) + `tra
   cd /mnt/disk1/aiotlab/haitn/object-detection/ce_localization
   export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache
   python ../tools/run_on_free_gpu.py -- tools/plot_denoise_trajectory.py --ckpt ../weights/add/paper/best_model.pth \\
-      --out /mnt/disk1/aiotlab/haitn/output/gamma/viz
+      --out /mnt/disk1/aiotlab/haitn/output/add/viz
 """
 
 import argparse

@@ -34,15 +34,15 @@ kèm mốc `prior` (lỗ train ngẫu nhiên, không nhìn ảnh). GAMMA1 in th�
   --image inpainted original : ảnh inpaint (có lỗ) và ảnh gốc không lỗ (phép thử lối tắt; chỉ chỉ số không cần GT)
   --add-density M            : model 4 kênh — sample (density của chính mẫu, mặc định cho ảnh inpaint) / full (bản
                                đầy đủ nhất của ảnh gốc, mặc định cho ảnh gốc) / empty
-  LOG=/mnt/disk1/aiotlab/haitn/log/gamma/gamma0_eval_$(date +%m%d_%H%M).log
+  LOG=/mnt/disk1/aiotlab/haitn/log/add/gamma0/gamma0_eval_$(date +%m%d_%H%M).log
   nohup python ../tools/run_on_free_gpu.py -- eval.py --ckpt ../weights/add/gamma0/best.pth --split test \
-      --image inpainted original --out /mnt/disk1/aiotlab/haitn/output/gamma/gamma0_test.json > $LOG 2>&1 &
+      --image inpainted original --out /mnt/disk1/aiotlab/haitn/output/add/gamma0/gamma0_test.json > $LOG 2>&1 &
 
   cd object-detection/ce_localization
-  LOG=/mnt/disk1/aiotlab/haitn/log/alpha/alpha0_eval_$(date +%m%d_%H%M).log
+  LOG=/mnt/disk1/aiotlab/haitn/log/detection/alpha0/alpha0_eval_$(date +%m%d_%H%M).log
   nohup python ../tools/run_on_free_gpu.py -- eval.py --ckpt ../weights/detection/alpha0/best.pth \\
       --split test --num-proposals 200 --top-k 100 --nms --oracle-score --steps 1 4 --attn-diag 20 \\
-      --out /mnt/disk1/aiotlab/haitn/output/alpha/alpha0_test_N200.json > $LOG 2>&1 &
+      --out /mnt/disk1/aiotlab/haitn/output/detection/alpha0/alpha0_test_N200.json > $LOG 2>&1 &
   echo "PID $! -> $LOG"
 """
 

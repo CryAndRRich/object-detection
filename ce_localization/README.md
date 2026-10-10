@@ -113,7 +113,7 @@ python tools/build_density_index.py --samples ../data/samples --ce130 ../data/al
 ## Bài add (GAMMA)
 
 Chỉ mục (nhánh, lượt) ↔ `samples/` dựng một lần: `tools/build_turn_index.py` (lệnh trong docstring). Train /
-eval như mọi config (`--save-dir ../weights/add/<tên>`, log `log/gamma/`, kết quả `output/gamma/`); `eval.py`
+eval như mọi config (`--save-dir ../weights/add/<tên>`, log `log/add/`, kết quả `output/add/`); `eval.py`
 tự nhận `task: add`: `--image inpainted original`, `--n-samples`, `--add-density`, `--steps` (GAMMA1). Lệnh đầy đủ:
 `docs/EXPERIMENT_GAMMA.md`.
 

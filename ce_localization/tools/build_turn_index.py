@@ -8,7 +8,7 @@ thì KHÔNG ghi chỉ mục, thoát mã 1 (thêm `--allow-mismatch` để vẫn 
 
 Giải mã ~52k PNG (26k inpaint + 26k samples) trên đĩa dùng chung, 8 worker: ước 15–40 phút ⇒ chạy nền:
   cd /mnt/disk1/aiotlab/haitn/object-detection/ce_localization
-  LOG=/mnt/disk1/aiotlab/haitn/log/gamma/turn_index_$(date +%m%d_%H%M).log
+  LOG=/mnt/disk1/aiotlab/haitn/log/add/data/turn_index_$(date +%m%d_%H%M).log
   mkdir -p $(dirname $LOG)
   nohup python tools/build_turn_index.py --out ../data/turn_index.json --workers 8 > $LOG 2>&1 &
   echo "PID $! -> $LOG"

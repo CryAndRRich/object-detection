@@ -10,7 +10,7 @@ Chọn checkpoint sau khi train: `gdino/predict.py --split val --weights <các c
 Server (không có nvcc -> op PyTorch thuần, chậm; bench trước), từ object-detection/baseline/:
 
   export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache
-  LOG=/mnt/disk1/aiotlab/haitn/log/baselines/baseline3_2_$(date +%m%d_%H%M).log
+  LOG=/mnt/disk1/aiotlab/haitn/log/detection/baseline3_2/baseline3_2_$(date +%m%d_%H%M).log
   nohup python ../tools/run_on_free_gpu.py -- gdino/train.py --config configs/baseline3_2_gdino_finetune.yaml \\
       > $LOG 2>&1 &
   echo "PID $! -> $LOG"

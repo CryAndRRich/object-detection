@@ -11,7 +11,7 @@ Báo trung vị (như bảng của eval: trung bình bị vài box cực xấu k
 
   cd /mnt/disk1/aiotlab/haitn/object-detection/ce_localization
   python tools/gt_cnll.py --turn-index ../data/turn_index.json --cocount-root ../data/cocount \\
-      --out /mnt/disk1/aiotlab/haitn/output/gamma/gt_cnll.json
+      --out /mnt/disk1/aiotlab/haitn/output/add/cocount/raw/gt_cnll.json
 """
 
 import argparse

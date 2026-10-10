@@ -8,9 +8,9 @@ cao nhất (200 box) — cách chọn checkpoint của BASELINE3.2 (cạm bẫy 
 
 Từ object-detection/baseline/, `export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache` (BERT), ~10–30 phút ⇒ nền:
 
-  LOG=/mnt/disk1/aiotlab/haitn/log/baselines/baseline3_1_predict_$(date +%m%d_%H%M).log
+  LOG=/mnt/disk1/aiotlab/haitn/log/detection/baseline3_1/baseline3_1_predict_$(date +%m%d_%H%M).log
   nohup python ../tools/run_on_free_gpu.py -- gdino/predict.py --config configs/baseline3_1_gdino_zeroshot.yaml \\
-      --split test --out-dir /mnt/disk1/aiotlab/haitn/output/baselines --where "zero-shot" > $LOG 2>&1 &
+      --split test --out-dir /mnt/disk1/aiotlab/haitn/output/detection --where "zero-shot" > $LOG 2>&1 &
   echo "PID $! -> $LOG"
 """
 

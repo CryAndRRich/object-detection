@@ -25,7 +25,7 @@ CE-Loc kiểu bài (`model.arch: box_policy`, `vision: r18_paper` — GAMMA2-pha
 ra); x̂0 = box suy từ ε̂ theo ᾱ_t; box chuẩn hoá theo canvas; SpatialSoftmax C5 512 kênh của ResNet18, CÓ mask phần đệm nếu
 checkpoint `ss_mask` (đúng phép tính model dùng); cỡ chấm ∝ ‖W projection‖. Không có `--mode stages`.
   python tools/plot_refiner_steps.py --ckpt ../weights/add/gamma2_celoc/best.pth --quota 5 5 10 \
-      --files test/images/3342_3.png ... --out ../../output/gamma/viz/gamma2_celoc/4_step
+      --files test/images/3342_3.png ... --out ../../output/add/viz/gamma2_celoc/4_step
 
 `--mode stages`: thay 4 cột quỹ đạo bằng 6 cột = box ra của 6 tầng trong MỘT lượt khử nhiễu ở t = `--stage-t`: trạng
 thái 0 = box nhiễu đã kẹp mà tầng 1 nhận (mặc định t = T − 1 = 999), rồi tầng 1..6 (box tầng k là đầu vào RoI của tầng k + 1); hình 4 × 8 cột.
@@ -40,7 +40,7 @@ Chọn ca:
 Text = tên lớp thật. Chữ trên hình tiếng Anh. Ra `--out`: `<split>_<nhánh>_t<lượt>.png` + `refiner_steps.json`.
 Chỉ nạp model + CLIP + vài trăm ảnh để chọn, ~3–8 phút, CPU được:
   python tools/plot_refiner_steps.py --ckpt ../weights/add/gamma1/best.pth --quota 5 5 10 \\
-      --files test/images/3342_3.png ... --out ../../output/gamma/viz/gamma1/4_step
+      --files test/images/3342_3.png ... --out ../../output/add/viz/gamma1/4_step
 """
 
 import argparse

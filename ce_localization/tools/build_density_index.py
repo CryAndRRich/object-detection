@@ -6,7 +6,7 @@ thuộc bảng jet, kích thước density == ảnh gốc.
 
 ~26k PNG: vài phút với 8 worker (tính cả đọc đĩa) -> chạy nền trên server:
   cd object-detection/ce_localization
-  LOG=/mnt/disk1/aiotlab/haitn/log/alpha/density_index_$(date +%m%d_%H%M).log
+  LOG=/mnt/disk1/aiotlab/haitn/log/detection/density_index_$(date +%m%d_%H%M).log
   nohup python tools/build_density_index.py --samples ../data/samples --ce130 ../data/all_phase2_V2 \\
       --out ../data/density_index.json --workers 8 > $LOG 2>&1 &
   echo "PID $! -> $LOG"

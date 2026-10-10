@@ -18,7 +18,7 @@ nhiễu refine mới sửa), `celoc_helps` (t* ≫ noise: thiếu CE-Loc thì re
 `scan.json` (mọi ca đã quét).
 Chọn ca như `tools/plot_refiner_steps.py` (`--files` / `--cases` / `--quota`). Chữ trên hình tiếng Anh; `--name` = tên hiển thị.
   python tools/plot_refine_stages.py --ckpt ../weights/add/gamma2/best.pth --name "CE-Loc (frozen) + Refiner" \\
-      --cases test/3342_b1:3 --quota 0 0 0 --out ../../output/gamma/viz/gamma2/stages
+      --cases test/3342_b1:3 --quota 0 0 0 --out ../../output/add/viz/gamma2/stages
 """
 
 import argparse

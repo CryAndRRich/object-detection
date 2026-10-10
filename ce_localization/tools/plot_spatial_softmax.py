@@ -15,7 +15,7 @@ ALPHA3); `--image inpainted`: ảnh của `samples/` + density của chính mẫ
 
 Chỉ nạp ResNet18 + vài ảnh, < 1 phút, CPU được (không cần CLIP):
   python tools/plot_spatial_softmax.py --ckpt ../weights/add/paper/best_model.pth \\
-      --files test/images/6246_11.png:apple --out ../../output/gamma/viz/spatial_softmax_original
+      --files test/images/6246_11.png:apple --out ../../output/add/viz/spatial_softmax_original
 """
 
 import argparse

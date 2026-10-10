@@ -18,7 +18,7 @@ Khớp người <-> chỉ số tự động (mọi box đã chấm): AUC phân b
 C-NLL F1 / F2 (thấp = tốt; ảnh >= 5 vật). Cặp model: hiệu box_ok trên CÙNG ảnh đã chấm cả hai (bootstrap cặp).
 Nhất quán: tỉ lệ box cùng nhãn ổn / không ổn giữa lần chấm gốc và chấm lại.
 
-  python user_study/score.py --items ../../output/gamma/user_study/items.json
+  python user_study/score.py --items ../../output/add/user_study/ce130/items.json
 """
 
 import argparse
