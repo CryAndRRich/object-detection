@@ -1,6 +1,7 @@
 """Dữ liệu giả + config test dùng chung cho mọi file test của ce_localization. Không tải gì:
 backbone `pretrained_backbone: false`, text thay bằng embedding giả, mọi lượt train ép `--device cpu`.
-DELTA: CLIP ViT của refiner thay bằng CLIP tí hon dựng từ config (`_fake_load_clip`, lưới 14×14 như ViT-B/16), token chữ giả.
+DELTA: CLIP ViT của refiner thay bằng CLIP tí hon dựng từ config (`_fake_load_clip`, lưới theo tên ViT: B/16 14×14, B/32 7×7,
+L/14 16×16, L/14-336 24×24), token chữ giả.
 """
 
 import hashlib
@@ -80,20 +81,26 @@ def _fake_text_table(names, cfg, dev, state_dict=None):
     return TextTable(table)
 
 
-def _fake_load_clip(name, seed=0):
-    """Thay `models.clip_refiner.load_clip`: CLIPVisionModel tí hon (hidden 32, 2 tầng) dựng từ config, ảnh 224 / patch 16 ⇒ lưới 14
-    như ViT-B/16; weight tất định theo `seed`, KHÔNG đụng RNG toàn cục. -> (model frozen eval, hidden CLIP text 512)."""
+# ViT thật -> (ảnh, patch, hidden giả): cùng lưới g = ảnh / patch như bản thật; hidden khác nhau để thử `image_proj`
+FAKE_VIT = {"openai/clip-vit-base-patch16": (224, 16, 32), "openai/clip-vit-base-patch32": (224, 32, 32),
+            "openai/clip-vit-large-patch14": (224, 14, 48), "openai/clip-vit-large-patch14-336": (336, 14, 48)}
+
+
+def _fake_load_clip(name, text_name=None, *, seed=0):
+    """Thay `models.clip_refiner.load_clip`: CLIPVisionModel tí hon (2 tầng) dựng từ config, lưới như ViT `name` (`FAKE_VIT`); weight
+    tất định theo `seed`, KHÔNG đụng RNG toàn cục. -> (model frozen eval, hidden CLIP text 512 — B/16 / B/32)."""
     from transformers import CLIPVisionConfig, CLIPVisionModel
+    size, patch, hid = FAKE_VIT[name]
     with torch.random.fork_rng():
         torch.manual_seed(seed)
-        m = CLIPVisionModel(CLIPVisionConfig(hidden_size=32, intermediate_size=64, num_hidden_layers=2, num_attention_heads=2,
-                                             image_size=224, patch_size=16))
+        m = CLIPVisionModel(CLIPVisionConfig(hidden_size=hid, intermediate_size=2 * hid, num_hidden_layers=2,
+                                             num_attention_heads=2, image_size=size, patch_size=patch))
     return m.eval().requires_grad_(False), 512
 
 
 def _patch_clip(monkeypatch, seed=0):
     import ce_localization.models.clip_refiner as cr
-    monkeypatch.setattr(cr, "load_clip", lambda name: _fake_load_clip(name, seed))
+    monkeypatch.setattr(cr, "load_clip", lambda name, text_name: _fake_load_clip(name, text_name, seed=seed))
 
 
 def _test_cfg(tmp_path, memory="none", data_root=None, density=None):
@@ -200,9 +207,11 @@ CFG_G = {"density": os.path.join(CFG_DIR, "gamma", "gamma0.yaml"), "rgb": os.pat
          "geo": os.path.join(CFG_DIR, "gamma", "gamma3.yaml"),
          "rel": os.path.join(CFG_DIR, "gamma", "gamma3_1.yaml"),
          "obj": os.path.join(CFG_DIR, "gamma", "gamma4.yaml"),
+         "obj_near": os.path.join(CFG_DIR, "gamma", "gamma4_0_1.yaml"),          # GAMMA4.0.1: 3 vật gần x_t nhất
+         "obj_rand": os.path.join(CFG_DIR, "gamma", "gamma4_0_2.yaml"),          # GAMMA4.0.2: 3 vật ngẫu nhiên
          "pr_obj": os.path.join(CFG_DIR, "gamma", "gamma4_1.yaml"),
-         "delta1": os.path.join(CFG_DIR, "delta", "delta1.yaml"),
-         "delta1_1": os.path.join(CFG_DIR, "delta", "delta1_1.yaml")}
+         **{k: os.path.join(CFG_DIR, "delta", f"{k}.yaml") for k in ("delta1", "delta1_1", "delta2_1", "delta2_2", "delta2_3",
+                                                                     "delta3")}}
 
 
 def _fake_ce130_turns(base, seed=0):
@@ -289,17 +298,19 @@ def _gamma_cfg(tmp_path, base, kind="density"):
 
 
 def _gamma2_cfg(tmp_path, base, kind, proposer_ckpt=None):
-    """Config GAMMA2 / 3 / DELTA thật (`celoc2` | `pr` | `pr_joint` | `geo` | `rel` | `obj` | `pr_obj` | `delta1` | `delta1_1`) thu nhỏ cho
-    CE-130 giả: canvas 128, T = 20, 4 iter, batch 2 (refiner DELTA giữ nguyên kích thước thật, CLIP giả)."""
+    """Config GAMMA2 / 3 / 4 / DELTA thật (`celoc2` | `pr` | `pr_joint` | `geo` | `rel` | `obj` | `obj_near` | `obj_rand` | `pr_obj` |
+    `delta*`) thu nhỏ cho CE-130 giả:
+    canvas 128, T = 20 (DELTA: 100 — vòng mock 100 bước của eval), 4 iter, batch 2 (refiner DELTA giữ nguyên kích thước thật, CLIP giả)."""
     with open(CFG_G[kind]) as f:
         cfg = yaml.safe_load(f)
     cfg["data"].update(root=os.path.join(base, "all_phase2_V2"), samples_root=os.path.join(base, "samples"),
                        turn_index=os.path.join(base, "turn_index.json"),
                        density_index=os.path.join(base, "density_index.json"),
                        density_root=os.path.join(base, "samples"), image_size=128, num_workers=0)
-    standalone = kind in ("celoc2", "obj", "delta1", "delta1_1")            # CE-Loc đứng một mình (pha 1 / GAMMA4 / DELTA)
-    cfg["model"]["pretrained_backbone"] = not standalone                     # pha 2: True = nạp proposer_ckpt
-    cfg["diffusion"].update(num_timesteps=20, noise_per_image=2)
+    standalone = kind == "celoc2" or kind.startswith(("obj", "delta"))       # CE-Loc đứng một mình (pha 1 / GAMMA4 / 4.0.x / DELTA)
+    if "pretrained_backbone" in cfg["model"] or not standalone:              # DELTA3: không backbone ảnh
+        cfg["model"]["pretrained_backbone"] = not standalone                 # pha 2: True = nạp proposer_ckpt
+    cfg["diffusion"].update(num_timesteps=100 if kind.startswith("delta") else 20, noise_per_image=2)
     if "proposer" in cfg["diffusion"]:
         cfg["diffusion"]["proposer"]["num_timesteps"] = 20
     if proposer_ckpt:

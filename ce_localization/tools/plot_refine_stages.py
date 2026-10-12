@@ -36,7 +36,7 @@ from ce_localization.data.turns import image_inputs  # noqa: E402
 from ce_localization.engine.diffusion import diffusion_from_boxes  # noqa: E402
 from ce_localization.models.box_policy import unit_to_boxes  # noqa: E402
 from ce_localization.models.detector import build_model  # noqa: E402
-from ce_localization.models.propose_refine import refine_noisy_boxes  # noqa: E402
+from ce_localization.models.box_refiner import noisy_to_boxes  # noqa: E402
 from ce_localization.models.text import TextTable, encode_class_names  # noqa: E402
 from ce_localization.tools.plot_refiner_steps import center, pick_cases, rect  # noqa: E402
 from ce_localization.tools.plot_spatial_softmax import SHARP, effective_cells, keypoint_pixels  # noqa: E402
@@ -74,7 +74,7 @@ def run_one(model, x, vhw, text, refine_t, generator, objects=None, use_objects=
         ab = model.alphas_cumprod[t]
         xt = ab.sqrt() * diffusion_from_boxes(box_ce, whwh, model.snr) + (1 - ab).sqrt() * torch.randn(
             (1, 4), device=x.device, generator=generator)
-    noisy = refine_noisy_boxes(xt, whwh, model.snr)
+    noisy = noisy_to_boxes(xt, whwh, model.snr)
     tb = torch.full((1,), t, device=x.device, dtype=torch.long)
     preds, attn = model.refine(feats, model.vis_token(kp), text, tb, noisy.view(1, 1, 4), True,
                                geo=model._geo(objects, 1, x.device) if model.geo and use_objects else None,
@@ -164,7 +164,7 @@ def main():
         cls = cs["class"]
         if cls not in texts:
             texts[cls] = TextTable(encode_class_names([cls], cfg["model"]["clip_text"], device=str(dev)))([cls], dev)
-        x, scale, nw, nh = image_inputs(cs["imgs"]["inpainted"], cs["own"]["inpainted"], T, "paper")
+        x, scale, nw, nh = image_inputs(cs["imgs"]["inpainted"], cs["own"]["inpainted"], T)
         xb, vhw = x[None].to(dev), torch.tensor([[nh, nw]], device=dev)
         objects = None
         if tindex is not None:                                                   # vật đang có ở lượt t: như CE130AddDataset

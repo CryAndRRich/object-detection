@@ -10,15 +10,16 @@ cxcywh). Thứ tự j không theo nhánh / lượt và split của `samples/` l�
 `data/turn_index.json` (`tools/build_turn_index.py`, cửa G0) khớp (nhánh, lượt) <-> file samples bằng hash pixel,
 còn split lấy theo thư mục `all_phase2_V2` (lớp 3 split rời nhau).
 
-Dataset đọc ảnh + density từ `samples/` (Kaggle chỉ cần zip samples + annotation CE-130), letterbox góc trên-trái
-+ chuẩn hoá ImageNet như ALPHA (`data/dataset.py`), density giải mã jet như ALPHA3 (`data/density.py`).
+Dataset đọc ảnh + density từ `samples/` (Kaggle chỉ cần zip samples + annotation CE-130), letterbox góc trên-trái, đầu vào KIỂU BÀI
+(CE-Loc gốc): `to_tensor` (/255) + density `.convert("L")` (độ sáng PNG jet; `empty` = PNG jet trống (0, 0, 127) -> 14/255 trên vùng
+thật) — như `image_inputs` / `ObjectPlacementDataset.resize_and_pad` của bài.
 `image="original"` thay ảnh vào bằng `ground_truth.jpg` của nhánh (không lỗ) — phép thử lối tắt "tìm vết inpaint".
 
 `split_source` (GAMMA2): `ce130` = split theo thư mục `all_phase2_V2` (mặc định); `samples` = split NHƯ CE-Loc GỐC TRAIN:
 train = mọi mẫu `samples/train` (gồm cả ảnh gốc val / test CE-130 bài đã dùng), val / test = mẫu `samples/test` có ảnh gốc
 thuộc val / test CE-130 (`samples/` train và test không chung ảnh gốc ⇒ chưa model nào train trên val / test này).
 `AddCache` (GAMMA2, Kaggle): ảnh inpaint + density của mẫu đã letterbox, uint8 [T,T,4] trong MỘT file (zlib hoặc memmap thô) —
-`/255` ra đúng từng bit đầu vào kiểu bài (có test); bỏ nghẽn giải mã PNG. Style `paper` trả ảnh uint8 (cả khi không cache):
+`/255` ra đúng từng bit đầu vào kiểu bài (có test); bỏ nghẽn giải mã PNG. Dataset trả ảnh uint8 HWC (cả khi không cache):
 `to_device_add` mới `/255` trên thiết bị (`paper_to_float`) — worker nhẹ hơn, PCIe chở 1/4 số byte.
 """
 
@@ -35,11 +36,11 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from ce_localization.data.dataset import _read_annotation, letterbox, normalize, scale_boxes
-from ce_localization.data.density import decode_jet, letterbox_density, load_density_levels
+from ce_localization.data.dataset import _read_annotation, letterbox, scale_boxes
+from ce_localization.data.density import letterbox_density
 from ce_localization.utils.box_ops_np import box_iou, filter_degenerate
 
-__all__ = ["SPLITS", "IMAGE_KINDS", "ADD_DENSITY", "INPUT_STYLES", "SPLIT_SOURCES", "pixel_hash", "assign_removed",
+__all__ = ["SPLITS", "IMAGE_KINDS", "ADD_DENSITY", "SPLIT_SOURCES", "pixel_hash", "assign_removed",
            "build_turn_index", "TurnIndex", "AddCache", "build_add_cache", "convert_add_cache", "CE130AddDataset", "collate_add", "to_device_add",
            "paper_to_float", "image_inputs"]
 
@@ -47,23 +48,18 @@ SPLITS = ("train", "val", "test")
 IMAGE_KINDS = ("inpainted", "original")
 ADD_DENSITY = ("sample", "full", "empty")       # density của chính mẫu | bản `full` của ảnh gốc (ALPHA3) | trống
 TARGET_TOL_PX = 1.0                             # target_bbox (cxcywh, làm tròn) vs inpainted_bboxes (xyxy)
-INPUT_STYLES = ("ours", "paper")
 SPLIT_SOURCES = ("ce130", "samples")
 
 
-def image_inputs(img_rgb, density_path=None, target=512, style="ours"):
-    """Một ảnh PIL RGB (+ PNG density: đường dẫn hoặc ảnh PIL) -> (tensor [3|4,T,T], scale, nw, nh), letterbox góc trên-trái.
-      ours : chuẩn hoá ImageNet + density giải mã jet (như `CE130AddDataset`, ALPHA3)
-      paper: CE-Loc gốc — chỉ `to_tensor` (/255) + density `.convert("L")` (độ sáng của PNG jet, nền 14/255), resize
-             NEAREST + độn 0: đúng `ObjectPlacementDataset.resize_and_pad` (có test so với công thức gốc)."""
-    if style not in INPUT_STYLES:
-        raise ValueError(f"style {style!r} không thuộc {INPUT_STYLES}")
+def image_inputs(img_rgb, density_path=None, target=512):
+    """Một ảnh PIL RGB (+ PNG density: đường dẫn hoặc ảnh PIL) -> (tensor [3|4,T,T], scale, nw, nh), letterbox góc trên-trái, kiểu bài:
+    `to_tensor` (/255) + density `.convert("L")` (độ sáng của PNG jet, nền 14/255), resize NEAREST + độn 0 — đúng
+    `ObjectPlacementDataset.resize_and_pad` (có test so với công thức gốc)."""
     canvas, scale, nw, nh = letterbox(img_rgb, target)
-    x = normalize(canvas) if style == "ours" else canvas.astype(np.float32).transpose(2, 0, 1) / 255.0
+    x = canvas.astype(np.float32).transpose(2, 0, 1) / 255.0
     if density_path is not None:
         den = Image.open(density_path) if isinstance(density_path, str) else density_path
-        lv = (decode_jet(np.asarray(den.convert("RGB")))[0] if style == "ours" else
-              np.asarray(den.convert("L"), dtype=np.uint8))
+        lv = np.asarray(den.convert("L"), dtype=np.uint8)
         x = np.concatenate([x, letterbox_density(lv, nw, nh, target)[None]], axis=0)
     return torch.from_numpy(np.ascontiguousarray(x)), scale, nw, nh
 
@@ -354,16 +350,12 @@ def convert_add_cache(src_dir, out_dir, workers=4, log=print):
 
 
 class CE130AddDataset(Dataset):
-    """Một phần tử = một (nhánh, lượt). Box ra là xyxy PIXEL CANVAS như ALPHA.
-    `style`: `ours` = chuẩn hoá ImageNet + density giải mã jet (ALPHA3); `paper` = CE-Loc gốc: `to_tensor` (/255) + density
-    `.convert("L")` (density `empty` = PNG jet trống (0, 0, 127) -> độ sáng 14/255 trên vùng thật), như `image_inputs`."""
+    """Một phần tử = một (nhánh, lượt). Box ra là xyxy PIXEL CANVAS như ALPHA. Ảnh uint8 [C,T,T] kiểu bài (docstring module)."""
 
     def __init__(self, index, ce130_root, samples_root, split, image_size=512, density=None, density_index=None,
-                 image="inpainted", style="ours", split_source="ce130", cache=None):
+                 image="inpainted", split_source="ce130", cache=None):
         if image not in IMAGE_KINDS:
             raise ValueError(f"image {image!r} không thuộc {IMAGE_KINDS}")
-        if style not in INPUT_STYLES:
-            raise ValueError(f"style {style!r} không thuộc {INPUT_STYLES}")
         if density is not None and density not in ADD_DENSITY:
             raise ValueError(f"density {density!r} không thuộc {ADD_DENSITY}")
         if density == "full" and density_index is None:
@@ -371,9 +363,8 @@ class CE130AddDataset(Dataset):
         self.index, self.ce130_root, self.samples_root = index, ce130_root, samples_root
         self.keys = index.keys(split, split_source)
         self.image_size, self.density, self.density_index, self.image = image_size, density, density_index, image
-        self.style = style
-        # cache chỉ dùng được khi đầu vào đúng thứ đã cache: ảnh inpaint kiểu bài + density của mẫu (hoặc không density)
-        usable = cache is not None and image == "inpainted" and style == "paper" and density in (None, "sample")
+        # cache chỉ dùng được khi đầu vào đúng thứ đã cache: ảnh inpaint + density của mẫu (hoặc không density)
+        usable = cache is not None and image == "inpainted" and density in (None, "sample")
         if cache is not None and cache.size != image_size:
             raise ValueError(f"cache image_size {cache.size} != {image_size}")
         self.cache = cache if usable else None
@@ -392,8 +383,6 @@ class CE130AddDataset(Dataset):
         key = self.keys[i]
         e, b = self.entry(i)
         t = e["t"]
-        paper = self.style == "paper"
-        ch = -1 if paper else 0                          # kiểu bài: uint8 HWC (không chép sang CHW trong worker)
         if self.cache is not None and key in self.cache:
             arr, scale, nw, nh = self.cache.get(key)
             x = arr if self.density is not None else arr[..., :3]
@@ -401,24 +390,17 @@ class CE130AddDataset(Dataset):
             path = (os.path.join(self.samples_root, e["sample"]) if self.image == "inpainted" else
                     os.path.join(self.ce130_root, e["branch"], "ground_truth.jpg"))
             img = Image.open(path).convert("RGB")
-            canvas, scale, nw, nh = letterbox(img, self.image_size)
-            x = canvas if paper else normalize(canvas)
-        if self.density is not None and x.shape[ch] == 3:
-            if self.density == "empty" and paper:
+            x, scale, nw, nh = letterbox(img, self.image_size)            # uint8 HWC (không chép sang CHW trong worker)
+        if self.density is not None and x.shape[-1] == 3:
+            if self.density == "empty":
                 den = _letterbox_l_u8(np.asarray(Image.new("RGB", img.size, (0, 0, 127)).convert("L")), nw, nh,
                                       self.image_size)
-            elif self.density == "empty":
-                den = np.zeros((self.image_size, self.image_size), dtype=np.float32)
             else:
                 iid = e["branch"].split("/")[1].split("_b")[0]
                 path_d = (os.path.join(self.samples_root, e["density"]) if self.density == "sample" else
                           self.density_index.path(self.density_index.pick(iid, "full")[0]))
-                if paper:
-                    den = _letterbox_l_u8(np.asarray(Image.open(path_d).convert("L"), dtype=np.uint8), nw, nh,
-                                          self.image_size)
-                else:
-                    den = letterbox_density(load_density_levels(path_d), nw, nh, self.image_size)
-            x = np.concatenate([x, np.expand_dims(den, ch)], axis=ch)
+                den = _letterbox_l_u8(np.asarray(Image.open(path_d).convert("L"), dtype=np.uint8), nw, nh, self.image_size)
+            x = np.concatenate([x, den[..., None]], axis=-1)
         holes = scale_boxes(b["holes"][:t], scale, nw, nh)
         if len(holes) != t:
             raise ValueError(f"{key}: lỗ rơi ra ngoài vùng ảnh thật sau letterbox")
@@ -427,9 +409,8 @@ class CE130AddDataset(Dataset):
         if self.image == "inpainted":                    # vật còn trong ảnh lượt t: chưa bị xoá tới lượt t
             objs = objs[(removed == 0) | (removed > t)]
         return {
-            # kiểu bài: [C,T,T] uint8 là VIEW permute của mảng HWC liền (= bố cục channels_last), `collate_add` gom HWC
-            "image": (torch.from_numpy(np.ascontiguousarray(x, dtype=np.uint8)).permute(2, 0, 1) if paper else
-                      torch.from_numpy(np.ascontiguousarray(x, dtype=np.float32))),
+            # [C,T,T] uint8 là VIEW permute của mảng HWC liền (= bố cục channels_last), `collate_add` gom HWC
+            "image": torch.from_numpy(np.ascontiguousarray(x, dtype=np.uint8)).permute(2, 0, 1),
             "target": torch.from_numpy(holes[-1]).float(),               # lỗ MỚI NHẤT = đích train
             "holes": torch.from_numpy(holes).float(),                    # mọi lỗ tới lượt t (chấm)
             "objects": torch.from_numpy(scale_boxes(objs, scale, nw, nh)).float(),   # vật đang có (chấm)
@@ -441,14 +422,12 @@ class CE130AddDataset(Dataset):
 
 
 def collate_add(batch):
-    """Ảnh float (kiểu ours) -> `images` [B,C,T,T]. Ảnh uint8 (kiểu bài) -> `images` [B,T,T,C] liền (NHWC: gom = memcpy, không
-    hoán trục trên CPU) + `images_nhwc` True; `to_device_add` permute thành NCHW channels_last SAU khi lên thiết bị."""
+    """Ảnh uint8 -> `images` [B,T,T,C] liền (NHWC: gom = memcpy, không hoán trục trên CPU); `to_device_add` permute thành NCHW
+    channels_last SAU khi lên thiết bị."""
     nh = torch.tensor([b["valid_hw"][0] for b in batch], dtype=torch.float32)
     nw = torch.tensor([b["valid_hw"][1] for b in batch], dtype=torch.float32)
-    nhwc = batch[0]["image"].dtype == torch.uint8
     return {
-        "images": torch.stack([b["image"].permute(1, 2, 0) if nhwc else b["image"] for b in batch]),
-        "images_nhwc": nhwc,
+        "images": torch.stack([b["image"].permute(1, 2, 0) for b in batch]),
         "target": torch.stack([b["target"] for b in batch]),
         "holes": [b["holes"] for b in batch],
         "objects": [b["objects"] for b in batch],
@@ -470,13 +449,11 @@ def paper_to_float(images_u8):
 
 
 def to_device_add(batch, dev):
-    """Đưa batch lên `dev`. Ảnh kiểu bài đi qua PCIe dạng uint8 (nhẹ 4×) rồi mới `/255` trên thiết bị."""
+    """Đưa batch lên `dev`. Ảnh đi qua PCIe dạng uint8 NHWC (nhẹ 4×), permute thành NCHW (view, bố cục channels_last) rồi mới
+    `/255` trên thiết bị."""
     nb = dev.type == "cuda"
     out = dict(batch)
     for k in ("images", "target", "whwh", "valid_hw"):
         out[k] = batch[k].to(dev, non_blocking=nb)
-    if out.pop("images_nhwc", False):                   # NHWC -> NCHW: view, bố cục channels_last
-        out["images"] = out["images"].permute(0, 3, 1, 2)
-    if out["images"].dtype == torch.uint8:
-        out["images"] = paper_to_float(out["images"])
+    out["images"] = paper_to_float(out["images"].permute(0, 3, 1, 2))
     return out

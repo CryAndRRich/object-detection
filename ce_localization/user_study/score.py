@@ -32,8 +32,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from ce_localization.user_study.app import REASONS, as_reasons  # noqa: E402
-from ce_localization.user_study.selection import ioa  # noqa: E402
-from ce_localization.utils.box_ops_np import box_iou  # noqa: E402
+from ce_localization.utils.box_ops_np import box_iou, ioa  # noqa: E402
 
 __all__ = ["OBJ_BINS", "load_ratings", "box_table", "auc", "score"]
 

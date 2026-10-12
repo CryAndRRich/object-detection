@@ -35,7 +35,7 @@ import torch
 
 from ce_localization.data.turns import to_device_add
 from ce_localization.models.box_policy import norm_whwh, unit_to_boxes
-from ce_localization.utils.box_ops_np import box_iou
+from ce_localization.utils.box_ops_np import box_iou, ioa
 from ce_localization.utils.log import fmt_time
 
 __all__ = ["CNLL_MIN_OBJ", "SIZE_STATS", "predict_add", "prior_unit_boxes", "prior_records", "object_size", "resize_to_objects",
@@ -172,16 +172,6 @@ def clip_boxes(boxes):
     return b, deg
 
 
-def _ioa(boxes, objects):
-    """[K,4], [M,4] -> [K,M] giao / diện tích box (box diện tích 0 -> 0)."""
-    lt = np.maximum(boxes[:, None, :2], objects[None, :, :2])
-    rb = np.minimum(boxes[:, None, 2:], objects[None, :, 2:])
-    inter = np.clip(rb - lt, 0, None).prod(-1)
-    area = ((boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1]))[:, None]
-    with np.errstate(divide="ignore", invalid="ignore"):
-        return np.where(area > 0, inter / area, 0.0)
-
-
 def _knn_mean(centers, ref, k, exclude_self=False):
     d = np.linalg.norm(centers[:, None] - ref[None], axis=-1)
     if exclude_self:
@@ -239,7 +229,7 @@ def add_metrics(records, with_holes=True, latest=True):
         acc["in_image"].append(((b[:, 0] >= 0) & (b[:, 1] >= 0) & (b[:, 2] <= nw) & (b[:, 3] <= nh) & ~deg).mean())
         obj = r["objects"].reshape(-1, 4)
         obj_on = r["objects_all"].reshape(-1, 4) if "objects_all" in r else obj
-        acc["on_object"].append((_ioa(b, obj_on).max(1) >= HIT).mean() if len(obj_on) else 0.0)
+        acc["on_object"].append((ioa(b, obj_on).max(1) >= HIT).mean() if len(obj_on) else 0.0)
         if with_holes:
             iou = box_iou(b, r["holes"])[0]                                  # [K, t]
             any_, lat = iou.max(1), iou[:, -1]

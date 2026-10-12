@@ -31,6 +31,7 @@ import os
 import sys
 
 import numpy as np
+import torch
 import yaml
 from PIL import Image, ImageDraw
 
@@ -43,9 +44,14 @@ from ce_localization.data.turns import IMAGE_KINDS, CE130AddDataset, TurnIndex  
 
 
 def to_uint8(img_chw):
-    x = img_chw[:3].numpy().transpose(1, 2, 0) * IMAGENET_STD + IMAGENET_MEAN
-    if img_chw.shape[0] == 4:                       # density: trộn về đỏ theo mật độ
-        d = img_chw[3].numpy()[..., None]
+    """[C,T,T] ảnh float chuẩn hoá ImageNet (bài detect) hoặc uint8 kiểu bài (bài add) -> RGB uint8, density trộn đỏ."""
+    paper = img_chw.dtype == torch.uint8
+    img = img_chw.float() / 255.0 if paper else img_chw
+    x = img[:3].numpy().transpose(1, 2, 0)
+    if not paper:
+        x = x * IMAGENET_STD + IMAGENET_MEAN
+    if img.shape[0] == 4:                           # density: trộn về đỏ theo mật độ
+        d = img[3].numpy()[..., None]
         x = x * (1 - 0.6 * d) + np.array([1.0, 0.0, 0.0]) * 0.6 * d
     return (x.clip(0, 1) * 255).round().astype(np.uint8)
 

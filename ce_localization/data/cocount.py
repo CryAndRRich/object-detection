@@ -26,8 +26,8 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from ce_localization.data.dataset import letterbox, normalize, scale_boxes
-from ce_localization.data.turns import INPUT_STYLES, _letterbox_l_u8
+from ce_localization.data.dataset import letterbox, scale_boxes
+from ce_localization.data.turns import _letterbox_l_u8
 
 __all__ = ["clean_class", "twin_name", "filter_objects", "read_cocount", "CoCountAddDataset"]
 
@@ -77,15 +77,13 @@ def read_cocount(root, name, max_obj_ratio=None):
 
 
 class CoCountAddDataset(Dataset):
-    """`style` như `CE130AddDataset`: paper = uint8 HWC (+ density trống `.convert("L")` của PNG jet trống = 14/255 trên vùng thật);
-    ours = chuẩn hoá ImageNet (+ density 0). `density` None (model 3 kênh) hoặc "empty"."""
+    """Đầu vào kiểu bài như `CE130AddDataset`: uint8 HWC (+ density trống `.convert("L")` của PNG jet trống = 14/255 trên vùng thật).
+    `density` None (model 3 kênh) hoặc "empty"."""
 
-    def __init__(self, root, image_size=512, style="paper", density="empty", limit=None, max_obj_ratio=None):
-        if style not in INPUT_STYLES:
-            raise ValueError(f"style {style!r} không thuộc {INPUT_STYLES}")
+    def __init__(self, root, image_size=512, density="empty", limit=None, max_obj_ratio=None):
         if density not in (None, "empty"):
             raise ValueError(f"CE-CoCount không có density map: density phải là None hoặc 'empty', không phải {density!r}")
-        self.root, self.image_size, self.style, self.density = root, image_size, style, density
+        self.root, self.image_size, self.density = root, image_size, density
         self.max_obj_ratio = max_obj_ratio
         self.keys = sorted(f[:-5] for f in os.listdir(os.path.join(root, "Anno")) if f.endswith(".json"))
         if limit:
@@ -106,18 +104,13 @@ class CoCountAddDataset(Dataset):
         key = self.keys[i]
         r = read_cocount(self.root, key, self.max_obj_ratio)
         img = Image.open(os.path.join(self.root, "Image", key + ".jpg")).convert("RGB")
-        canvas, scale, nw, nh = letterbox(img, self.image_size)
-        paper = self.style == "paper"
-        x = canvas if paper else normalize(canvas)
-        ch = -1 if paper else 0
+        x, scale, nw, nh = letterbox(img, self.image_size)
         if self.density == "empty":
-            den = (_letterbox_l_u8(np.asarray(Image.new("RGB", img.size, (0, 0, 127)).convert("L")), nw, nh, self.image_size)
-                   if paper else np.zeros((self.image_size, self.image_size), dtype=np.float32))
-            x = np.concatenate([x, np.expand_dims(den, ch)], axis=ch)
+            den = _letterbox_l_u8(np.asarray(Image.new("RGB", img.size, (0, 0, 127)).convert("L")), nw, nh, self.image_size)
+            x = np.concatenate([x, den[..., None]], axis=-1)
         holes = scale_boxes(r["loc"], scale, nw, nh)
         return {
-            "image": (torch.from_numpy(np.ascontiguousarray(x, dtype=np.uint8)).permute(2, 0, 1) if paper else
-                      torch.from_numpy(np.ascontiguousarray(x, dtype=np.float32))),
+            "image": torch.from_numpy(np.ascontiguousarray(x, dtype=np.uint8)).permute(2, 0, 1),
             "target": torch.from_numpy(holes[0] if len(holes) else np.zeros(4)).float(),
             "holes": torch.from_numpy(holes).float(),
             "objects": torch.from_numpy(scale_boxes(r["objects"], scale, nw, nh)).float(),

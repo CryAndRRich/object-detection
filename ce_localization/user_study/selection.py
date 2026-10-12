@@ -12,7 +12,7 @@ import numpy as np
 
 from ce_localization.utils.box_ops_np import box_iou
 
-__all__ = ["K", "VOTE_IOU", "NMS_LEVELS", "MIN_SIDE", "clip_to_image", "select_boxes", "ioa"]
+__all__ = ["K", "VOTE_IOU", "NMS_LEVELS", "MIN_SIDE", "clip_to_image", "select_boxes"]
 
 K = 4
 VOTE_IOU = 0.5
@@ -63,15 +63,3 @@ def select_boxes(boxes, wh, k=K, vote_iou=VOTE_IOU, nms_levels=NMS_LEVELS, min_s
     out.update(idx=[int(valid[p]) for p in picked], boxes=[bv[p].round(2).tolist() for p in picked],
                vote=[int(vote[p]) for p in picked], nms=level)
     return out
-
-
-def ioa(boxes, objects):
-    """[K,4], [M,4] -> [K,M] giao / diện tích box (box diện tích 0 -> 0); như `on_object` của eval."""
-    b = np.asarray(boxes, dtype=np.float64).reshape(-1, 4)
-    o = np.asarray(objects, dtype=np.float64).reshape(-1, 4)
-    lt = np.maximum(b[:, None, :2], o[None, :, :2])
-    rb = np.minimum(b[:, None, 2:], o[None, :, 2:])
-    inter = np.clip(rb - lt, 0, None).prod(-1)
-    area = ((b[:, 2] - b[:, 0]) * (b[:, 3] - b[:, 1]))[:, None]
-    with np.errstate(divide="ignore", invalid="ignore"):
-        return np.where(area > 0, inter / area, 0.0)

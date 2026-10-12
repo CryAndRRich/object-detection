@@ -23,8 +23,7 @@ import torchvision
 from torchvision.ops import FeaturePyramidNetwork
 from torchvision.ops.misc import FrozenBatchNorm2d
 
-__all__ = ["ResNet50FPN", "STRIDES", "LEVELS", "NORMS", "DENSITY_INITS", "density_weight_ratio", "conv1_of",
-           "density_ratio_of"]
+__all__ = ["ResNet50FPN", "STRIDES", "LEVELS", "NORMS", "DENSITY_INITS", "conv1_of", "density_ratio_of"]
 
 LEVELS = ("p2", "p3", "p4", "p5")
 NORMS = ("frozen", "bn")
@@ -72,33 +71,20 @@ class ResNet50FPN(nn.Module):
         """C5 = đầu ra layer4 (2048 kênh, stride 32) — weight ImageNet, không qua FPN (GAMMA0: SpatialSoftmax như bài)."""
         return self.layer4(self.layer3(self.layer2(self.layer1(self.stem(x)))))
 
-    def forward_p5(self, x):
-        """Chỉ P5 (GAMMA0: SpatialSoftmax trên P5) — bỏ nhánh top-down xuống P2..P4. P5 của FPN chỉ phụ
-        thuộc C5: `layer_block[-1](inner_block[-1](C5))` (`FeaturePyramidNetwork.forward`), có test so với
-        `forward()["p5"]`."""
-        c5 = self.layer4(self.layer3(self.layer2(self.layer1(self.stem(x)))))
-        return self.fpn.get_result_from_layer_blocks(self.fpn.get_result_from_inner_blocks(c5, -1), -1)
-
 
 def conv1_of(model):
     """conv1 của backbone ảnh trong mọi kiến trúc: Detector / BoxPolicy R-50 / BoxRefiner (`backbone.stem[0]`),
-    BoxPolicy ResNet18 của bài (`vision.backbone[0]`), ProposeRefine (của `proposer`)."""
+    BoxPolicy ResNet18 của bài (`vision.backbone[0]`), ProposeRefine (của `proposer`); None nếu model không có backbone
+    ảnh (DELTA3: chỉ refiner, ảnh vào qua CLIP frozen)."""
     m = getattr(model, "proposer", model)
     if hasattr(m, "backbone"):
         return m.backbone.stem[0]
-    return m.vision.backbone[0]
+    return m.vision.backbone[0] if hasattr(m, "vision") else None
 
 
 def density_ratio_of(model):
-    """‖W_conv1[:, density]‖ / ‖W_conv1[:, RGB]‖ của backbone ảnh trong `model`, None nếu 3 kênh."""
-    w = conv1_of(model).weight.detach()
-    return None if w.shape[1] != 4 else float(w[:, 3:].norm() / w[:, :3].norm().clamp_min(1e-12))
-
-
-def density_weight_ratio(backbone):
-    """‖W_conv1[:, density]‖ / ‖W_conv1[:, RGB]‖ — kênh density có học không (khởi tạo 0).
-    None nếu backbone 3 kênh."""
-    if backbone.in_channels != 4:
-        return None
-    w = backbone.stem[0].weight.detach()
-    return float(w[:, 3:].norm() / w[:, :3].norm().clamp_min(1e-12))
+    """‖W_conv1[:, density]‖ / ‖W_conv1[:, RGB]‖ của backbone ảnh trong `model` (kênh density có học không), None nếu 3 kênh
+    hoặc không có backbone ảnh."""
+    c = conv1_of(model)
+    w = None if c is None else c.weight.detach()
+    return None if w is None or w.shape[1] != 4 else float(w[:, 3:].norm() / w[:, :3].norm().clamp_min(1e-12))

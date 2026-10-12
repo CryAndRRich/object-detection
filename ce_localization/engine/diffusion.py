@@ -16,10 +16,9 @@ cuối, tính lại ε từ x0 đã kẹp, cập nhật DDIM với eta = 1.
 import torch
 
 from ce_localization.utils.box_ops import cxcywh_to_xyxy, xyxy_to_cxcywh
-from ce_localization.utils.diffusion_math import (cosine_alphas_cumprod, ddim_time_pairs,
-                                                  predict_noise_from_start, q_sample)
+from ce_localization.utils.diffusion_math import ddim_step, ddim_time_pairs, predict_noise_from_start, q_sample
 
-__all__ = ["cosine_alphas_cumprod", "boxes_from_diffusion", "diffusion_from_boxes",
+__all__ = ["boxes_from_diffusion", "diffusion_from_boxes",
            "prepare_train_boxes", "ddim_sample"]
 
 
@@ -74,20 +73,20 @@ def prepare_train_boxes(gt_list, whwh, num_proposals, alphas_cumprod, snr=2.0, g
 
 
 @torch.no_grad()
-def ddim_sample(head_fn, B, num_proposals, whwh, alphas_cumprod, snr=2.0, steps=1, eta=1.0,
-                renewal=True, generator=None):
+def ddim_sample(head_fn, B, num_proposals, whwh, alphas_cumprod, snr=2.0, steps=1, generator=None):
     """head_fn(boxes_abs [B,N,4], t [B]) -> (logits [S,B,N,1], boxes [S,B,N,4]).
 
     -> dict:
       boxes [B,K,4] xyxy tuyệt đối, scores [B,K]  — 1 bước: K = N (đầu ra stage cuối);
                                                      nhiều bước: gộp ensemble mọi bước
       stage_boxes [S,B,N,4]                        — các stage ở bước CUỐI (đo recall/stage)
-    Nhiều bước + renewal chỉ chạy với B = 1, như bản gốc (số box giữ lại khác nhau mỗi ảnh).
+    DDIM eta = 1 như DiffusionDet. Nhiều bước (luôn có box renewal) chỉ chạy với B = 1, như bản gốc (số box giữ lại khác nhau
+    mỗi ảnh).
     """
     dev = whwh.device
     ac = alphas_cumprod.to(dev)
     pairs = ddim_time_pairs(ac.shape[0], steps)
-    if steps > 1 and renewal and B != 1:
+    if steps > 1 and B != 1:
         raise ValueError("ddim_sample nhiều bước có renewal cần batch 1 (như DiffusionDet)")
     img = torch.randn(B, num_proposals, 4, device=dev, generator=generator)
     ens_boxes, ens_scores = [], []
@@ -103,15 +102,12 @@ def ddim_sample(head_fn, B, num_proposals, whwh, alphas_cumprod, snr=2.0, steps=
             ens_scores.append(score)
         if t_next < 0:
             break
-        if renewal and steps > 1:
+        if steps > 1:
             keep = score[0] > 0.5
             pred_noise, x_start, img = pred_noise[:, keep], x_start[:, keep], img[:, keep]
-        a, a_next = ac[t], ac[t_next]
-        sigma = eta * ((1 - a / a_next) * (1 - a_next) / (1 - a)).sqrt()
-        c = (1 - a_next - sigma ** 2).sqrt()
-        noise = torch.randn(img.shape, device=dev, generator=generator)
-        img = (x_start * a_next.sqrt() + c * pred_noise + sigma * noise).float()
-        if renewal and steps > 1:
+        img = ddim_step(x_start, pred_noise, ac[t], ac[t_next], 1.0,
+                        torch.randn(img.shape, device=dev, generator=generator)).float()
+        if steps > 1:
             refill = torch.randn(1, num_proposals - img.shape[1], 4, device=dev, generator=generator)
             img = torch.cat([img, refill], dim=1)
     if steps > 1:

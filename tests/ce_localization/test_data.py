@@ -351,12 +351,11 @@ def test_add_dataset_item(tmp_path, image):
     assert torch.equal(s["target"], s["holes"][-1])
     n_obj = 7 if image == "original" else 5                  # lượt 2 đã xoá vật 2, 3
     assert len(s["objects"]) == n_obj and s["image"][3].max() > 0
-    if image == "original":
+    if image == "original":                                  # kiểu bài: uint8 letterbox của ảnh gốc
         canvas, _, _, _ = letterbox(Image.open(os.path.join(root, "train/1001_b1/ground_truth.jpg")).convert("RGB"), 128)
-        exp = (canvas.astype(np.float32) / 255.0 - [0.485, 0.456, 0.406]) / [0.229, 0.224, 0.225]
-        assert np.allclose(s["image"][:3].numpy(), exp.transpose(2, 0, 1), atol=1e-5)
+        assert s["image"].dtype == torch.uint8 and np.array_equal(s["image"][:3].numpy(), canvas.transpose(2, 0, 1))
     bt = collate_add([s, ds[0]])
-    assert bt["images"].shape == (2, 4, 128, 128) and bt["target"].shape == (2, 4)
+    assert bt["images"].shape == (2, 128, 128, 4) and bt["target"].shape == (2, 4)
     assert bt["whwh"][0].tolist() == [128, 96, 128, 96] and len(bt["holes"]) == 2
     rgb = CE130AddDataset(index, root, samples, "test", 128)
     assert rgb[0]["image"].shape == (3, 128, 128) and rgb.classes() == ["cup"]
@@ -379,62 +378,51 @@ def test_visualize_gamma_draws(tmp_path, monkeypatch, image):
 
 
 def test_image_inputs_paper_style_matches_original_preprocessing(tmp_path):
-    """style 'paper' = `resize_and_pad` + `to_tensor` của CE-Loc gốc, density `.convert("L")`."""
+    """`image_inputs` = `resize_and_pad` + `to_tensor` của CE-Loc gốc, density `.convert("L")`."""
     from ce_localization.data.turns import image_inputs
     rng = np.random.default_rng(0)
     img = Image.fromarray(rng.integers(0, 255, (150, 200, 3), dtype=np.uint8))
     den = Image.fromarray(JET[rng.integers(0, 256, (150, 200)).astype(np.uint8)])
     dp = str(tmp_path / "d.png")
     den.save(dp)
-    x, scale, nw, nh = image_inputs(img, dp, 128, "paper")
+    x, scale, nw, nh = image_inputs(img, dp, 128)
     ri, rd, rs = resize_and_pad(img, Image.open(dp).convert("L"), 128)
     assert x.shape == (4, 128, 128) and scale == rs and (nw, nh) == (128, 96)
     assert np.allclose(x[:3].numpy(), np.asarray(ri, dtype=np.float32).transpose(2, 0, 1) / 255.0)
     assert np.array_equal(x[3].numpy(), np.asarray(rd, dtype=np.float32) / 255.0)
-    xo, _, _, _ = image_inputs(img, None, 128, "ours")
-    assert xo.shape == (3, 128, 128) and xo.min() < 0                    # chuẩn hoá ImageNet
+    assert image_inputs(img, None, 128)[0].shape == (3, 128, 128)
 
 
 def test_image_inputs_blank_density_is_jet_background():
-    """Density trống đúng kiểu dữ liệu (PNG toàn nền jet (0,0,127)): đầu vào của bài -> 14/255 trong vùng ảnh, 0 ở đệm;
-    đầu vào 'ours' (giải mã jet) -> 0."""
+    """Density trống đúng kiểu dữ liệu (PNG toàn nền jet (0,0,127)): đầu vào của bài -> 14/255 trong vùng ảnh, 0 ở đệm."""
     from ce_localization.data.turns import image_inputs
     img = Image.new("RGB", (200, 150), (90, 90, 90))
-    x, _, nw, nh = image_inputs(img, Image.new("RGB", (200, 150), (0, 0, 127)), 128, "paper")
+    x, _, nw, nh = image_inputs(img, Image.new("RGB", (200, 150), (0, 0, 127)), 128)
     assert np.allclose(x[3, :nh, :nw].numpy(), 14 / 255.0) and x[3, nh:].abs().max() == 0
-    xo, _, _, _ = image_inputs(img, Image.new("RGB", (200, 150), (0, 0, 127)), 128, "ours")
-    assert xo[3].abs().max() == 0
 
 
 def test_add_dataset_paper_style_matches_image_inputs(tmp_path):
-    """`style="paper"` (GAMMA "CE-Loc gốc + R-50") == `image_inputs(..., "paper")` (đã kiểm với `resize_and_pad` của bài):
-    ảnh `to_tensor`, density `.convert("L")`; box / lỗ không đổi theo style; density `empty` = PNG jet trống -> 14/255.
-    Dataset trả uint8, `/255` làm sau `to_device_add` (`paper_to_float`) — TRÙNG TỪNG BIT với bản float."""
+    """Dataset bài add == `image_inputs` (đã kiểm với `resize_and_pad` của bài): ảnh `to_tensor`, density `.convert("L")`; density
+    `empty` = PNG jet trống -> 14/255. Dataset trả uint8, `/255` làm sau `to_device_add` (`paper_to_float`) — TRÙNG TỪNG BIT với bản float."""
     from ce_localization.data.turns import CE130AddDataset, collate_add, image_inputs, paper_to_float, to_device_add
     from tests.ce_localization.helpers import _fake_turn_index
     root, samples, _, index, _ = _fake_turn_index(str(tmp_path))
-    ours = CE130AddDataset(index, root, samples, "train", 128, density="sample")
-    pap = CE130AddDataset(index, root, samples, "train", 128, density="sample", style="paper")
-    a, b = ours[0], pap[0]
+    pap = CE130AddDataset(index, root, samples, "train", 128, density="sample")
+    b = pap[0]
     e, _ = pap.entry(0)
     ref = image_inputs(Image.open(os.path.join(samples, e["sample"])).convert("RGB"),
-                       os.path.join(samples, e["density"]), 128, "paper")[0]
+                       os.path.join(samples, e["density"]), 128)[0]
     assert b["image"].dtype == torch.uint8 and torch.equal(paper_to_float(b["image"]), ref)
-    raw = collate_add([b, pap[1]])                       # kiểu bài: gom NHWC liền (memcpy), không hoán trục trên CPU
-    assert raw["images_nhwc"] and raw["images"].shape == (2, 128, 128, 4) and raw["images"].is_contiguous()
+    raw = collate_add([b, pap[1]])                       # gom NHWC liền (memcpy), không hoán trục trên CPU
+    assert raw["images"].shape == (2, 128, 128, 4) and raw["images"].is_contiguous()
     bt = to_device_add(raw, torch.device("cpu"))
-    assert bt["images"].dtype == torch.float32 and bt["images"].shape == (2, 4, 128, 128) and "images_nhwc" not in bt
+    assert bt["images"].dtype == torch.float32 and bt["images"].shape == (2, 4, 128, 128)
     assert torch.equal(bt["images"][0], ref) and bt["images"].is_contiguous(memory_format=torch.channels_last)
     assert torch.equal(paper_to_float(torch.arange(256, dtype=torch.uint8)),
                        torch.from_numpy(np.arange(256, dtype=np.uint8).astype(np.float32) / 255.0))
-    assert a["image"].dtype == torch.float32                                      # style ours giữ float
-    for k in ("target", "holes", "objects"):
-        assert torch.equal(a[k], b[k]), k
-    emp = CE130AddDataset(index, root, samples, "train", 128, density="empty", style="paper")[0]["image"][3]
+    emp = CE130AddDataset(index, root, samples, "train", 128, density="empty")[0]["image"][3]
     nh, nw = b["valid_hw"]
     assert bool((emp[:nh, :nw] == 14).all()) and int(emp[nh:].sum()) == 0
-    with pytest.raises(ValueError):
-        CE130AddDataset(index, root, samples, "train", 128, style="x")
 
 
 def test_samples_split_source_and_uint8_cache(tmp_path):
@@ -451,13 +439,13 @@ def test_samples_split_source_and_uint8_cache(tmp_path):
     assert set(tr) == {k for k in index.turns if index.turns[k]["sample"].startswith("train/")}
     with pytest.raises(ValueError):
         index.keys("train", "x")
-    plain = CE130AddDataset(index, root, samples, "train", 128, density="sample", style="paper", split_source="samples")
+    plain = CE130AddDataset(index, root, samples, "train", 128, density="sample", split_source="samples")
     for fmt in ("zlib", "raw"):
         cdir = str(tmp_path / f"cache_{fmt}")
         assert build_add_cache(index, samples, tr, cdir, 128, workers=0, log=lambda *a: None, fmt=fmt) == len(tr)
         cache = AddCache(cdir)
         assert cache.format == fmt
-        cached = CE130AddDataset(index, root, samples, "train", 128, density="sample", style="paper",
+        cached = CE130AddDataset(index, root, samples, "train", 128, density="sample",
                                  split_source="samples", cache=cache)
         assert cached.cache is not None and len(plain) == len(cached) == len(tr)
         for i in range(len(plain)):
@@ -472,12 +460,12 @@ def test_samples_split_source_and_uint8_cache(tmp_path):
     assert unz.format == "raw" and set(unz.rows) == set(AddCache(zdir).rows)
     with pytest.raises(ValueError):
         convert_add_cache(rdir, str(tmp_path / "x"), workers=0)
-    fast = CE130AddDataset(index, root, samples, "train", 128, density="sample", style="paper", split_source="samples",
+    fast = CE130AddDataset(index, root, samples, "train", 128, density="sample", split_source="samples",
                            cache=unz)
     for i in range(len(plain)):
         assert torch.equal(plain[i]["image"], fast[i]["image"]), i
-    rgb = CE130AddDataset(index, root, samples, "train", 128, style="paper", split_source="samples", cache=cache)
+    rgb = CE130AddDataset(index, root, samples, "train", 128, split_source="samples", cache=cache)
     assert rgb[0]["image"].shape[0] == 3 and torch.equal(rgb[0]["image"], plain[0]["image"][:3])
-    orig = CE130AddDataset(index, root, samples, "train", 128, style="paper", split_source="samples", cache=cache,
+    orig = CE130AddDataset(index, root, samples, "train", 128, split_source="samples", cache=cache,
                            image="original")
     assert orig.cache is None                                             # ảnh gốc không có trong cache

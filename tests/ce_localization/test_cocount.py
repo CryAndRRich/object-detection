@@ -69,7 +69,7 @@ def test_cocount_dataset_fields_and_density(tmp_path):
     from ce_localization.data.cocount import CoCountAddDataset, read_cocount
     from ce_localization.data.turns import collate_add, to_device_add
     root = _fake_cocount(str(tmp_path / "cc"))
-    ds = CoCountAddDataset(root, 128, style="paper", density="empty")
+    ds = CoCountAddDataset(root, 128, density="empty")
     assert len(ds) == 4 and ds.classes() == ["baby tomato", "normal tomato"]
     it = ds[ds.keys.index(NAMES[0] + "_positive")]
     r = read_cocount(root, NAMES[0] + "_positive")
@@ -84,8 +84,6 @@ def test_cocount_dataset_fields_and_density(tmp_path):
     assert img.shape == (4, 128, 128) and int(img[3, :nh, :nw].unique().item()) == 14 and int(img[3, nh:, :].max()) == 0
     b = to_device_add(collate_add([ds[0], ds[1]]), torch.device("cpu"))
     assert len(b["objects_all"]) == 2 and len(b["exemplars"]) == 2 and b["images"].shape == (2, 4, 128, 128)
-    ours = CoCountAddDataset(root, 128, style="ours", density="empty")[0]["image"]
-    assert ours.dtype == torch.float32 and ours.shape == (4, 128, 128) and float(ours[3].abs().max()) == 0
     assert CoCountAddDataset(root, 128, density=None)[0]["image"].shape[0] == 3
     with pytest.raises(ValueError):
         CoCountAddDataset(root, 128, density="sample")
@@ -158,7 +156,7 @@ def test_gt_cnll_tool(tmp_path, monkeypatch):
     assert set(res) == {"ce130", "cocount"} and res["cocount"]["n_cnll"] == 4 and res["cocount"]["obj_filter"] == 3
 
 
-@pytest.mark.parametrize("kind", ["paper", "obj", "pr"])
+@pytest.mark.parametrize("kind", ["paper", "obj", "obj_rand", "pr"])
 def test_eval_cocount_full_flow(tmp_path, monkeypatch, kind):
     """eval.py --dataset cocount: khoá `cocount*`, đủ mẫu, không chỉ số `_latest`, on_object trên cả hai lớp, dump box chạy được."""
     import ce_localization.eval as ea
@@ -190,10 +188,12 @@ def test_eval_cocount_full_flow(tmp_path, monkeypatch, kind):
     ea.main()
     with open(out) as f:
         res = json.load(f)
-    want = {"paper": {"cocount"}, "obj": {"cocount", "cocount_noobj"}, "pr": {"cocount_ce", "cocount_t5"}}[kind]
+    want = {"paper": {"cocount"}, "obj": {"cocount", "cocount_noobj"}, "obj_rand": {"cocount", "cocount_noobj"},
+            "pr": {"cocount_ce", "cocount_t5"}}[kind]
     want |= {k + sfx for k in want for sfx in ("_objsize", "_objsize_exemplar")}
     assert set(res["results"]) == want and res["dataset"] == "cocount" and res["density"] == {"cocount": "empty"}
-    assert res["cocount_obj_filter"] == (3 if kind == "obj" else None)
+    assert res["cocount_obj_filter"] == (3 if kind.startswith("obj") else None)
+    assert res.get("obj_k") == (3 if kind == "obj_rand" else None)
     for k, r in res["results"].items():
         assert r["n"] == 4 and 0 <= r["best_iou@3_any"] <= 1 and 0 <= r["on_object"] <= 1 and r["n_cnll"] == 4
         assert not any("latest" in kk for kk in r) and r["n_paper_train"] == 0

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ALPHA3: dựng chỉ mục density MỘT lần — mỗi ảnh gốc (iid) -> các bản density trong
 `samples/{train,test}/density/{iid}_{k}.png`, sắp theo diện tích blob giảm dần (bản đầu = `full`).
-Giải mã jet + đếm pixel mức > 0 (`alpha/density.py`). Kiểm luôn: phủ đủ 3 split detect, mọi màu
+Giải mã jet + đếm pixel mức > 0 (`data/density.py`). Kiểm luôn: phủ đủ 3 split detect, mọi màu
 thuộc bảng jet, kích thước density == ảnh gốc.
 
 ~26k PNG: vài phút với 8 worker (tính cả đọc đĩa) -> chạy nền trên server:

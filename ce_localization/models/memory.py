@@ -8,7 +8,7 @@
 Ba biến thể (docs/EXPERIMENT_ALPHA.md mục 3), chọn bằng `model.memory`:
     none            [t ; text]                                   ALPHA0
     spatial_softmax [t ; text ; 1 token SpatialSoftmax(P5)]      ALPHA1
-    grid            [t ; text ; mỗi ô P5 thật là 1 token + PE2D] ALPHA2
+    grid            [t ; text ; G² token lưới + PE2D]            ALPHA2
                     `grid_size=G`: cắt ĐÚNG vùng ảnh thật trên P5 rồi adaptive_avg_pool về G×G
                     -> luôn G² token, không cần mask (canvas 1024: P5 32×32 -> 16×16)
 
@@ -21,25 +21,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-__all__ = ["MEMORY_KINDS", "SinusoidalTimeEmbedding", "valid_cells_mask", "masked_spatial_softmax", "sine_pos_2d",
+from ce_localization.models.unet1d import SinusoidalPosEmb
+
+__all__ = ["MEMORY_KINDS", "valid_cells_mask", "masked_spatial_softmax", "sine_pos_2d",
            "MemoryEncoder"]
 
 MEMORY_KINDS = ("none", "spatial_softmax", "grid")
-
-
-class SinusoidalTimeEmbedding(nn.Module):
-    """Time embedding DDPM chuẩn = `SinusoidalPosEmb` của Diffusion Policy."""
-
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
-
-    def forward(self, t):
-        half = self.dim // 2
-        f = math.log(10000) / (half - 1)
-        f = torch.exp(torch.arange(half, device=t.device, dtype=torch.float32) * -f)
-        a = t.float()[:, None] * f[None]
-        return torch.cat([a.sin(), a.cos()], dim=-1)
 
 
 def valid_cells_mask(valid_hw, H, W, stride):
@@ -101,9 +88,11 @@ class MemoryEncoder(nn.Module):
         super().__init__()
         if kind not in MEMORY_KINDS:
             raise ValueError(f"model.memory={kind!r}, phải là một trong {MEMORY_KINDS}")
+        if kind == "grid" and not grid_size:
+            raise ValueError("model.memory=grid cần grid_size (pool vùng thật của P5 về G×G)")
         self.kind, self.d_model, self.stride = kind, d_model, feat_stride
         self.grid_size = grid_size
-        self.time_emb = SinusoidalTimeEmbedding(d_model)          # thô, như DP: không MLP riêng
+        self.time_emb = SinusoidalPosEmb(d_model)                 # thô, như DP: không MLP riêng
         self.text_proj = nn.Linear(text_dim, d_model)
         n_fixed = 3 if kind == "spatial_softmax" else 2            # [t ; text (; ss)]
         self.cond_pos_emb = nn.Parameter(torch.zeros(1, n_fixed, d_model))
@@ -135,35 +124,27 @@ class MemoryEncoder(nn.Module):
             xy = masked_spatial_softmax(p5, valid, valid_hw, self.stride)          # [B,C,2]
             tok = self.ss_proj(xy.flatten(1))[:, None] + self.cond_pos_emb[:, 2:3]
             return tok, None
-        if self.grid_size:
-            G = self.grid_size
-            rows, cols = valid.any(2).sum(1), valid.any(1).sum(1)                  # số hàng / cột thật
-            p5 = torch.cat([F.adaptive_avg_pool2d(p5[b:b + 1, :, :int(rows[b]), :int(cols[b])], G)
-                            for b in range(B)])                                     # [B,C,G,G]
-            valid = torch.ones(B, G, G, dtype=torch.bool, device=p5.device)
-        pos = sine_pos_2d(valid, self.d_model // 2)                                # [B,d,H,W]
+        G = self.grid_size
+        rows, cols = valid.any(2).sum(1), valid.any(1).sum(1)                      # số hàng / cột thật
+        p5 = torch.cat([F.adaptive_avg_pool2d(p5[b:b + 1, :, :int(rows[b]), :int(cols[b])], G)
+                        for b in range(B)])                                         # [B,C,G,G]
+        valid = torch.ones(B, G, G, dtype=torch.bool, device=p5.device)
+        pos = sine_pos_2d(valid, self.d_model // 2)                                # [B,d,G,G]
         tok = self.grid_proj(p5.flatten(2).transpose(1, 2)) + pos.flatten(2).transpose(1, 2)
-        return tok, (None if self.grid_size else ~valid.flatten(1))
+        return tok, None
 
-    def grid_geometry(self, valid_hw, H, W):
-        """Tâm (pixel canvas) + mask thật của từng token lưới -> (cx [B,K], cy [B,K], valid [B,K]).
-        Dùng cho chẩn đoán attention; khớp cách `image_tokens` dựng lưới (có / không pool)."""
+    def grid_geometry(self, valid_hw):
+        """Tâm (pixel canvas) + mask thật của từng token lưới G×G (vùng thật pool về G×G như `image_tokens`)
+        -> (cx [B,K], cy [B,K], valid [B,K]). Dùng cho chẩn đoán attention."""
         dev = valid_hw.device
-        if self.grid_size:
-            G = self.grid_size
-            f = (torch.arange(G, device=dev, dtype=torch.float32) + 0.5) / G
-            nh, nw = valid_hw[:, 0].float(), valid_hw[:, 1].float()
-            rows = torch.ceil(nh / self.stride) * self.stride                      # vùng pool phủ
-            cols = torch.ceil(nw / self.stride) * self.stride
-            cy = (f[None, :, None] * rows[:, None, None]).expand(-1, G, G)
-            cx = (f[None, None, :] * cols[:, None, None]).expand(-1, G, G)
-            return cx.flatten(1), cy.flatten(1), torch.ones(len(nh), G * G, dtype=torch.bool, device=dev)
-        c_y = (torch.arange(H, device=dev) + 0.5) * self.stride
-        c_x = (torch.arange(W, device=dev) + 0.5) * self.stride
-        cy, cx = torch.meshgrid(c_y, c_x, indexing="ij")
-        B = valid_hw.shape[0]
-        valid = valid_cells_mask(valid_hw, H, W, self.stride).flatten(1)
-        return cx.flatten()[None].expand(B, -1), cy.flatten()[None].expand(B, -1), valid
+        G = self.grid_size
+        f = (torch.arange(G, device=dev, dtype=torch.float32) + 0.5) / G
+        nh, nw = valid_hw[:, 0].float(), valid_hw[:, 1].float()
+        rows = torch.ceil(nh / self.stride) * self.stride                          # vùng pool phủ
+        cols = torch.ceil(nw / self.stride) * self.stride
+        cy = (f[None, :, None] * rows[:, None, None]).expand(-1, G, G)
+        cx = (f[None, None, :] * cols[:, None, None]).expand(-1, G, G)
+        return cx.flatten(1), cy.flatten(1), torch.ones(len(nh), G * G, dtype=torch.bool, device=dev)
 
     def forward(self, t, text_raw, img_tok=None, img_mask=None):
         """t [B] long, text_raw [B,512] -> (memory [B,M,d], key_padding_mask [B,M] | None)."""

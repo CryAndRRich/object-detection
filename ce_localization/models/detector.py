@@ -10,9 +10,11 @@ import torch
 import torch.nn as nn
 
 from ce_localization.models.backbone import ResNet50FPN
-from ce_localization.engine.diffusion import cosine_alphas_cumprod, ddim_sample
+from ce_localization.models.clip_refiner import refiner_config
+from ce_localization.engine.diffusion import ddim_sample
 from ce_localization.models.head import DecoderHead
 from ce_localization.models.memory import MemoryEncoder
+from ce_localization.utils.diffusion_math import cosine_alphas_cumprod
 
 __all__ = ["Detector", "build_model"]
 
@@ -20,7 +22,7 @@ __all__ = ["Detector", "build_model"]
 class Detector(nn.Module):
     def __init__(self, memory="none", d_model=256, n_stage=6, n_head=4, dim_feedforward=1024,
                  dropout=0.3, text_dim=512, prior_prob=0.01, pretrained_backbone=True,
-                 num_timesteps=1000, snr_scale=2.0, grid_size=None, in_channels=3):
+                 num_timesteps=1000, snr_scale=2.0, grid_size=16, in_channels=3):
         super().__init__()
         self.backbone = ResNet50FPN(d_model, pretrained=pretrained_backbone, in_channels=in_channels)
         self.memory = MemoryEncoder(memory, d_model, text_dim, feat_channels=d_model, feat_stride=32,
@@ -46,30 +48,25 @@ class Detector(nn.Module):
         return self.denoise(feats, img_tok, img_mask, text_raw, boxes, t)
 
     @torch.no_grad()
-    def sample(self, images, text_raw, valid_hw, whwh, num_proposals, steps=1, renewal=True,
-               generator=None):
+    def sample(self, images, text_raw, valid_hw, whwh, num_proposals, steps=1, generator=None):
         feats, img_tok, img_mask = self.encode_image(images, valid_hw)
         fn = lambda boxes, t: self.denoise(feats, img_tok, img_mask, text_raw, boxes, t)  # noqa: E731
         return ddim_sample(fn, images.shape[0], num_proposals, whwh, self.alphas_cumprod,
-                           self.snr_scale, steps, eta=1.0, renewal=renewal, generator=generator)
-
-
-def _paper_keys(m):
-    """Khoá bài add chọn giữa bản ALPHA (mặc định) và "CE-Loc gốc + R-50" (GAMMA, `models/box_policy.py`)."""
-    return {"backbone_norm": m.get("backbone_norm", "frozen"), "density_init": m.get("density_init", "zero"),
-            "ss_kind": m.get("ss_kind", "masked"), "box_norm": m.get("box_norm", "valid")}
+                           self.snr_scale, steps, generator=generator)
 
 
 def _box_policy_kw(m, d, pre):
-    """Tham số `BoxPolicy` từ nhánh config model / diffusion (dùng cho `box_policy` và proposer của `propose_refine`)."""
-    return dict(in_channels=m.get("in_channels", 3), pretrained_backbone=pre, fpn_dim=m.get("d_model", 256),
-                vis_dim=m["vis_dim"], text_in=m.get("text_dim", 512), text_dim=m["text_proj_dim"],
-                step_embed_dim=m["step_embed_dim"], down_dims=m["down_dims"], kernel_size=m["kernel_size"],
-                n_groups=m["n_groups"], num_timesteps=d["num_timesteps"], beta_start=d["beta_start"],
-                beta_end=d["beta_end"], ss_source=m.get("ss_source", "c5"), vision=m.get("vision", "r50_fpn"),
+    """Tham số `BoxPolicy` từ nhánh config model / diffusion (dùng cho `box_policy` và proposer của `propose_refine`).
+    DELTA3 (`refiner.unet_input: none`): không backbone / FiLM / U-Net ⇒ config không mang khoá của chúng."""
+    kw = dict(in_channels=m.get("in_channels", 3), num_timesteps=d["num_timesteps"], beta_start=d["beta_start"],
+              beta_end=d["beta_end"], refiner=m.get("refiner"), use_condition=m.get("use_condition", True))
+    if (refiner_config(m.get("refiner")) or {}).get("unet_input") == "none":
+        return kw
+    return dict(kw, pretrained_backbone=pre, fpn_dim=m.get("d_model", 256), vis_dim=m["vis_dim"], text_in=m.get("text_dim", 512),
+                text_dim=m["text_proj_dim"], step_embed_dim=m["step_embed_dim"], down_dims=m["down_dims"],
+                kernel_size=m["kernel_size"], n_groups=m["n_groups"], vision=m.get("vision", "r50_fpn"),
                 ss_mask=m.get("ss_mask", False), obj_attn=m.get("obj_attn", False), obj_heads=m.get("obj_heads", 4),
-                obj_max=m.get("obj_max", 300), refiner=m.get("refiner"), use_condition=m.get("use_condition", True),
-                **_paper_keys(m))
+                obj_max=m.get("obj_max", 300), obj_k=m.get("obj_k"), obj_select=m.get("obj_select", "nearest"))
 
 
 def load_proposer(model, path):
@@ -96,11 +93,9 @@ def build_model(cfg, pretrained_backbone=None):
             n_head=m["n_head"], dim_feedforward=m["dim_feedforward"], dropout=m["dropout"],
             text_dim=m.get("text_dim", 512), num_timesteps=d["num_timesteps"], beta_start=d["beta_start"],
             beta_end=d["beta_end"], l1_weight=cfg["loss"]["l1_weight"], giou_weight=cfg["loss"]["giou_weight"],
-            box_token=m.get("box_token", "roi"), **_paper_keys(m))
+            box_token=m.get("box_token", "roi"))
     if m.get("arch", "detector") == "box_policy":
         from ce_localization.models.box_policy import BoxPolicy
-        if (m.get("refiner") or {}).get("enabled") and cfg.get("data", {}).get("input_style", "ours") != "paper":
-            raise ValueError("model.refiner (CLIP nhận RGB [0, 1] như tác giả) cần data.input_style: paper")
         return BoxPolicy(**_box_policy_kw(m, d, pre))
     if m.get("arch") == "propose_refine":
         from ce_localization.models.propose_refine import ProposeRefine
@@ -122,5 +117,5 @@ def build_model(cfg, pretrained_backbone=None):
         memory=m["memory"], d_model=m["d_model"], n_stage=m["n_stage"], n_head=m["n_head"],
         dim_feedforward=m["dim_feedforward"], dropout=m["dropout"], text_dim=m.get("text_dim", 512),
         prior_prob=cfg["loss"]["prior_prob"], pretrained_backbone=pre,
-        num_timesteps=d["num_timesteps"], snr_scale=d["snr_scale"], grid_size=m.get("grid_size"),
+        num_timesteps=d["num_timesteps"], snr_scale=d["snr_scale"], grid_size=m.get("grid_size", 16),
         in_channels=m.get("in_channels", 3))

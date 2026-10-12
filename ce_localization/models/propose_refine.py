@@ -32,23 +32,16 @@ from torchvision.ops import FeaturePyramidNetwork
 
 from ce_localization.engine.diffusion import diffusion_from_boxes
 from ce_localization.models.box_policy import BoxPolicy, boxes_to_unit, unit_to_boxes
-from ce_localization.models.box_refiner import MIN_WH, paired_giou
+from ce_localization.models.box_refiner import noisy_to_boxes, paired_giou
 from ce_localization.models.dynamic_head import DynamicRefineHead
 from ce_localization.models.geo import pad_objects
 from ce_localization.models.memory import MemoryEncoder
-from ce_localization.utils.box_ops import cxcywh_to_xyxy
-from ce_localization.utils.diffusion_math import cosine_alphas_cumprod, ddim_time_pairs, predict_noise_from_start
+from ce_localization.utils.diffusion_math import (cosine_alphas_cumprod, ddim_step, ddim_time_pairs, predict_noise_from_start,
+                                                  q_sample)
 
-__all__ = ["ProposeRefine", "refine_noisy_boxes", "R18_CHANNELS"]
+__all__ = ["ProposeRefine", "R18_CHANNELS"]
 
 R18_CHANNELS = (64, 128, 256, 512)
-
-
-def refine_noisy_boxes(x, whwh, snr):
-    """x [...,4] không gian khuếch tán của refine -> xyxy pixel: kẹp [−snr, snr], w, h >= MIN_WH (tỉ lệ vùng thật)."""
-    b = (x.clamp(-snr, snr) / snr + 1) / 2
-    b = torch.cat([b[..., :2], b[..., 2:].clamp(min=MIN_WH)], dim=-1)
-    return cxcywh_to_xyxy(b) * whwh
 
 
 class ProposeRefine(nn.Module):
@@ -103,11 +96,11 @@ class ProposeRefine(nn.Module):
         """Train / suy luận cần `objects` (box các vật đang có) — GAMMA3 / 3.1 (refine), GAMMA4.1 (CE-Loc `obj_attn`)."""
         return self.geo or self.relation or self.proposer.obj_attn
 
-    def proposer_obj(self, objects, valid_hw, canvas, cond, generator=None, cap=False):
+    def proposer_obj(self, objects, canvas, cond, generator=None, cap=False):
         """Token box vật cho CE-Loc đề xuất (GAMMA4.1: proposer `obj_attn`, như `BoxPolicy.sample`) | None."""
         if not self.proposer.obj_attn:
             return None
-        return self.proposer.object_tokens(objects, valid_hw, canvas, cond, generator, cap)
+        return self.proposer.object_tokens(objects, canvas, cond, generator, cap)
 
     def refine(self, feats, vis, text_raw, t, boxes, need_weights=False, geo=None, rel=None):
         """boxes [B,K,4] xyxy pixel, t [B·K], geo (vật [B·K,M,4], mask) | None, rel (`_rel`) | None
@@ -155,15 +148,13 @@ class ProposeRefine(nn.Module):
             canvas = torch.full_like(whwh, float(images.shape[-1]))
             cond = self.proposer.cond_from_keypoints(kp, text_raw)
             loss_eps = self.proposer.eps_loss(cond, boxes_to_unit(target, canvas), 1, generator,
-                                              self.proposer_obj(objects, valid_hw, images.shape[-1], cond, generator, cap=True))
+                                              self.proposer_obj(objects, images.shape[-1], cond, generator, cap=True))
         wk = whwh.repeat_interleave(k, 0)
         gt = target.repeat_interleave(k, 0)
         x0 = diffusion_from_boxes(gt, wk, self.snr)
         t = torch.randint(0, self.num_timesteps, (B * k,), device=dev, generator=generator)
-        noise = torch.randn(x0.shape, device=dev, generator=generator)
-        ab = self.alphas_cumprod[t].unsqueeze(-1)
-        xt = ab.sqrt() * x0 + (1 - ab).sqrt() * noise
-        preds, _ = self.refine(feats, self.vis_token(kp), text_raw, t, refine_noisy_boxes(xt, wk, self.snr).view(B, k, 4),
+        xt = q_sample(x0, t, torch.randn(x0.shape, device=dev, generator=generator), self.alphas_cumprod)
+        preds, _ = self.refine(feats, self.vis_token(kp), text_raw, t, noisy_to_boxes(xt, wk, self.snr).view(B, k, 4),
                                geo=self._geo(objects, k, dev), rel=self._rel(objects, k, whwh, dev))
         per = torch.stack([self.l1_weight * ((p - gt) / wk).abs().sum(-1).mean()
                            + self.giou_weight * (1 - paired_giou(p, gt)).mean() for p in preds])
@@ -175,14 +166,14 @@ class ProposeRefine(nn.Module):
 
     # ------------------------------------------------------------------ suy luận
     @torch.no_grad()
-    def _refine_from(self, feats, vis, text_raw, x, wk, B, K, t_start, steps, eta, generator, geo=None, rel=None):
+    def _refine_from(self, feats, vis, text_raw, x, wk, B, K, t_start, steps, generator, geo=None, rel=None):
         """DDIM của refine từ x (không gian khuếch tán, [B·K,4]) ở t_start -> box xyxy pixel [B·K,4]."""
         ac = self.alphas_cumprod
         dev = x.device
         out = None
         for t, t_next in ddim_time_pairs(t_start + 1, min(steps, t_start + 1)):   # t* nhỏ: không lặp lại cùng một t
             tb = torch.full((B * K,), t, device=dev, dtype=torch.long)
-            preds, attn = self.refine(feats, vis, text_raw, tb, refine_noisy_boxes(x, wk, self.snr).view(B, K, 4),
+            preds, attn = self.refine(feats, vis, text_raw, tb, noisy_to_boxes(x, wk, self.snr).view(B, K, 4),
                                       self.track_attn, geo, rel)
             if attn is not None:
                 s, n = self._attn.get(self._attn_key, (0.0, 0))
@@ -191,16 +182,13 @@ class ProposeRefine(nn.Module):
             if t_next < 0:
                 break
             x0 = diffusion_from_boxes(out, wk, self.snr)
-            eps = predict_noise_from_start(x, t, x0, ac)
-            a, a_next = ac[t], ac[t_next]
-            sigma = eta * ((1 - a / a_next) * (1 - a_next) / (1 - a)).sqrt()
-            c = (1 - a_next - sigma ** 2).sqrt()
-            x = x0 * a_next.sqrt() + c * eps + sigma * torch.randn(x.shape, device=dev, generator=generator)
+            x = ddim_step(x0, predict_noise_from_start(x, t, x0, ac), ac[t], ac[t_next], 1.0,
+                          torch.randn(x.shape, device=dev, generator=generator))
         return out
 
     @torch.no_grad()
     def sample_variants(self, images, text_raw, valid_hw, n_samples, generator=None, variants=({"refine_t": None},),
-                        proposer_sampler="ddpm", eta=1.0, objects=None):
+                        proposer_sampler="ddpm", objects=None):
         """CE-Loc sinh n_samples box MỘT lần, mỗi biến thể refine dùng lại -> list [B, n, 4] chuẩn hoá theo vùng thật.
         Biến thể: {"refine_t": None | int t* | "noise", "refine_steps": S (mặc định 1), "geo": True | False (tắt nhánh geo /
         relation), "rel_bias": True | False (relation: bỏ Rel hình học)}."""
@@ -211,7 +199,7 @@ class ProposeRefine(nn.Module):
         canvas = torch.full((4,), float(images.shape[-1]), device=dev)
         cond = self.proposer.cond_from_keypoints(kp, text_raw)
         u_ce = self.proposer.sample_from_cond(cond, K, generator, proposer_sampler,
-                                              obj=self.proposer_obj(objects, valid_hw, images.shape[-1], cond))
+                                              obj=self.proposer_obj(objects, images.shape[-1], cond))
         box_ce = unit_to_boxes(u_ce.reshape(-1, 4), canvas)                 # [B·K,4] xyxy pixel canvas
         vis = self.vis_token(kp)
         geo_all = self._geo(objects, K, dev)
@@ -227,22 +215,20 @@ class ProposeRefine(nn.Module):
                 box = box_ce
             elif rt == "noise":
                 x = torch.randn((B * K, 4), device=dev, generator=generator)
-                box = self._refine_from(feats, vis, text_raw, x, wk, B, K, self.num_timesteps - 1, S, eta, generator, geo, rel)
+                box = self._refine_from(feats, vis, text_raw, x, wk, B, K, self.num_timesteps - 1, S, generator, geo, rel)
             else:
                 rt = int(rt)
-                ab = self.alphas_cumprod[rt]
                 x0 = diffusion_from_boxes(box_ce, wk, self.snr)
-                x = ab.sqrt() * x0 + (1 - ab).sqrt() * torch.randn(x0.shape, device=dev, generator=generator)
-                box = self._refine_from(feats, vis, text_raw, x, wk, B, K, rt, S, eta, generator, geo, rel)
+                x = q_sample(x0, rt, torch.randn(x0.shape, device=dev, generator=generator), self.alphas_cumprod)
+                box = self._refine_from(feats, vis, text_raw, x, wk, B, K, rt, S, generator, geo, rel)
             outs.append(boxes_to_unit(box, wk).view(B, K, 4))
         return outs
 
     @torch.no_grad()
     def sample(self, images, text_raw, valid_hw, n_samples, generator=None, refine_t=None, refine_steps=1,
-               proposer_sampler="ddpm", eta=1.0, objects=None):
+               proposer_sampler="ddpm", objects=None):
         return self.sample_variants(images, text_raw, valid_hw, n_samples, generator,
-                                    [{"refine_t": refine_t, "refine_steps": refine_steps}], proposer_sampler, eta,
-                                    objects)[0]
+                                    [{"refine_t": refine_t, "refine_steps": refine_steps}], proposer_sampler, objects)[0]
 
     def pop_attn(self, key=0):
         """-> attention TB lên [t ; text ; vis] mỗi stage của biến thể `key` (None nếu biến thể đó không chạy refine)."""

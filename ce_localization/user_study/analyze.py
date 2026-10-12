@@ -32,8 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from ce_localization.user_study.app import as_reasons  # noqa: E402
 from ce_localization.user_study.score import load_ratings  # noqa: E402
-from ce_localization.user_study.selection import ioa  # noqa: E402
-from ce_localization.utils.box_ops_np import box_iou  # noqa: E402
+from ce_localization.utils.box_ops_np import box_iou, ioa  # noqa: E402
 
 __all__ = ["ERRORS", "dedupe", "analyze"]
 

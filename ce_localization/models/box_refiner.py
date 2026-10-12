@@ -4,16 +4,15 @@ kiểu ALPHA; mỗi tầng ra một box, loss ở MỌI tầng (deep supervision
 
     ảnh [B,3|4,T,T] -> R-50 + FPN (`models/backbone.py`, MỘT lượt) -> P2..P5 (RoIAlign) + C5 (layer4, 2048 kênh)
     memory [t ; text ; vis] = `MemoryEncoder(kind="spatial_softmax")` của ALPHA1 đặt trên C5:
-        vis = SpatialSoftmax có mask vùng thật trên C5 -> Linear(4096, d)            (như GAMMA0)
+        vis = SpatialSoftmax kiểu bài trên C5 -> Linear(4096, d)                      (như GAMMA0)
     1 mẫu = 1 box nhiễu x_t -> b_1 ; tầng k = 1..6 (weight riêng), MỘT query, KHÔNG self-attention:
         r_k = Linear(RoIAlign(P2..P5, b_k))   ;   q_k = r_1 | LN(q_{k-1} + r_k)
         q_k = q_k + CrossAttn(LN(q_k), memory)   ;   q_k = q_k + FFN(LN(q_k))         (pre-norm như DP)
         b_{k+1} = apply_deltas(reg(q_k), b_k), detach trước tầng sau (như DiffusionDet)
     Các mẫu (cùng ảnh hay khác ảnh) không thấy nhau: K mẫu / ảnh = K hàng độc lập.
 
-Ảnh / `vis` / chuẩn hoá box DÙNG CHUNG khoá với GAMMA0 (`backbone_norm`, `density_init`, `ss_kind`, `box_norm` — xem
-`models/box_policy.py`): config GAMMA1 đặt y GAMMA0 ("CE-Loc gốc + R-50": BN train, SpatialSoftmax không mask cả canvas, box
-chia canvas). `box_token: coords` (GAMMA1.1): bỏ RoI — token mỗi tầng = Linear(4 toạ độ box chuẩn hoá) thay Linear(RoIAlign), không tính FPN;
+Ảnh / `vis` / chuẩn hoá box như GAMMA0 ("CE-Loc gốc + R-50", `models/box_policy.py`): R-50 BN train, kênh density = TB weight RGB,
+SpatialSoftmax kiểu bài (không mask, cả canvas), box chia canvas. `box_token: coords` (GAMMA1.1): bỏ RoI — token mỗi tầng = Linear(4 toạ độ box chuẩn hoá) thay Linear(RoIAlign), không tính FPN;
 ảnh chỉ vào qua `vis`; mọi thứ khác y GAMMA1 (tách đóng góp của RoI).
 Khuếch tán như GAMMA0: lịch β tuyến tính 1e-4..0,02, T = 1000; box cxcywh / whwh chuẩn hoá · 2 − 1 (= hàm
 của DiffusionDet với snr = 1). Khác GAMMA0: dự đoán x0 (box), không ε. Loss = Σ_k [5·L1(b / whwh) + 2·(1 − GIoU)] với lỗ mới nhất
@@ -30,12 +29,13 @@ import torch.nn as nn
 
 from ce_localization.engine.diffusion import diffusion_from_boxes
 from ce_localization.models.backbone import ResNet50FPN
-from ce_localization.models.box_policy import BOX_NORMS, SS_KINDS, boxes_to_unit, norm_whwh, spatial_keypoints
+from ce_localization.models.box_policy import boxes_to_unit, norm_whwh, paper_spatial_softmax
 from ce_localization.models.head import _tower, apply_deltas
 from ce_localization.models.memory import MemoryEncoder
 from ce_localization.models.roi import MultiLevelRoIAlign
 from ce_localization.utils.box_ops import cxcywh_to_xyxy
-from ce_localization.utils.diffusion_math import ddim_time_pairs, linear_alphas_cumprod, predict_noise_from_start
+from ce_localization.utils.diffusion_math import (ddim_step, ddim_time_pairs, linear_alphas_cumprod, predict_noise_from_start,
+                                                  q_sample)
 
 __all__ = ["BoxRefiner", "RefineStage", "RefineHead", "noisy_to_boxes", "paired_giou", "MIN_WH", "MEM_TOKENS", "BOX_TOKENS"]
 
@@ -46,9 +46,10 @@ MEM_TOKENS = ("t", "text", "vis")
 BOX_TOKENS = ("roi", "coords")
 
 
-def noisy_to_boxes(x, whwh):
-    """x [...,4] không gian khuếch tán (snr 1) -> xyxy pixel: kẹp [−1, 1], w, h >= MIN_WH."""
-    b = (x.clamp(-1, 1) + 1) / 2
+def noisy_to_boxes(x, whwh, snr=1.0):
+    """x [...,4] không gian khuếch tán -> xyxy pixel: kẹp [−snr, snr], w, h >= MIN_WH (tỉ lệ của whwh). snr 1 = GAMMA1,
+    snr 2 = refine kiểu DiffusionDet của ProposeRefine."""
+    b = (x.clamp(-snr, snr) / snr + 1) / 2
     b = torch.cat([b[..., :2], b[..., 2:].clamp(min=MIN_WH)], dim=-1)
     return cxcywh_to_xyxy(b) * whwh
 
@@ -148,14 +149,11 @@ class RefineHead(nn.Module):
 class BoxRefiner(nn.Module):
     def __init__(self, in_channels=3, pretrained_backbone=True, d_model=256, n_stage=6, n_head=4, dim_feedforward=1024,
                  dropout=0.3, text_dim=512, num_timesteps=1000, beta_start=1e-4, beta_end=0.02, l1_weight=5.0,
-                 giou_weight=2.0, backbone_norm="frozen", density_init="zero", ss_kind="masked", box_norm="valid",
-                 box_token="roi"):
+                 giou_weight=2.0, box_token="roi"):
         super().__init__()
-        if ss_kind not in SS_KINDS or box_norm not in BOX_NORMS:
-            raise ValueError(f"ss_kind {ss_kind!r} / box_norm {box_norm!r} không thuộc {SS_KINDS} / {BOX_NORMS}")
-        self.ss_kind, self.box_norm = ss_kind, box_norm
-        self.backbone = ResNet50FPN(d_model, pretrained=pretrained_backbone, in_channels=in_channels, norm=backbone_norm,
-                                    density_init=density_init)
+        self.box_norm = "canvas"
+        self.backbone = ResNet50FPN(d_model, pretrained=pretrained_backbone, in_channels=in_channels, norm="bn",
+                                    density_init="rgb_mean")
         self.memory = MemoryEncoder("spatial_softmax", d_model, text_dim, feat_channels=C5_CHANNELS,
                                     feat_stride=C5_STRIDE)
         self.box_token = box_token
@@ -174,7 +172,7 @@ class BoxRefiner(nn.Module):
         else:
             f, c5 = self.backbone.forward_with_c5(images)
             feats = [f["p2"], f["p3"], f["p4"], f["p5"]]
-        vis = self.memory.ss_proj(spatial_keypoints(c5, valid_hw, self.ss_kind))[:, None] + self.memory.cond_pos_emb[:, 2:3]
+        vis = self.memory.ss_proj(paper_spatial_softmax(c5))[:, None] + self.memory.cond_pos_emb[:, 2:3]
         return feats, vis
 
     def refine(self, feats, vis, text_raw, t, boxes, need_weights=False, norm=None):
@@ -196,9 +194,7 @@ class BoxRefiner(nn.Module):
         gt = target.repeat_interleave(k, 0)
         x0 = diffusion_from_boxes(gt, wk, 1.0)
         t = torch.randint(0, self.num_timesteps, (B * k,), device=dev, generator=generator)
-        noise = torch.randn(x0.shape, device=dev, generator=generator)
-        ab = self.alphas_cumprod[t].unsqueeze(-1)
-        xt = ab.sqrt() * x0 + (1 - ab).sqrt() * noise
+        xt = q_sample(x0, t, torch.randn(x0.shape, device=dev, generator=generator), self.alphas_cumprod)
         preds, _ = self.refine(feats, vis, text_raw, t, noisy_to_boxes(xt, wk).view(B, k, 4), norm=wk)
         per = torch.stack([self.l1_weight * ((p - gt) / wk).abs().sum(-1).mean()
                            + self.giou_weight * (1 - paired_giou(p, gt)).mean() for p in preds])
@@ -247,11 +243,8 @@ class BoxRefiner(nn.Module):
             if t_next < 0:                       # đầu ra = box tầng cuối, không kẹp (như DiffusionDet)
                 x = boxes_to_unit(preds[-1], wk)
                 break
-            eps = predict_noise_from_start(x, t, x0, ac)
-            a, a_next = ac[t], ac[t_next]
-            sigma = eta * ((1 - a / a_next) * (1 - a_next) / (1 - a)).sqrt()
-            c = (1 - a_next - sigma ** 2).sqrt()
-            x = x0 * a_next.sqrt() + c * eps + sigma * torch.randn(x.shape, device=dev, generator=generator)
+            x = ddim_step(x0, predict_noise_from_start(x, t, x0, ac), ac[t], ac[t_next], eta,
+                          torch.randn(x.shape, device=dev, generator=generator))
         out = x.view(B, K, 4)
         return (out, stages) if return_stages else out
 

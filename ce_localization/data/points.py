@@ -1,9 +1,9 @@
 """BETA (docs/EXPERIMENT_BETA.md mục 1, 3): nhãn ĐIỂM lấy từ density, cỡ giả kNN, box giả.
 
 Density CountGD = blob Gaussian cùng cỡ đặt tại mỗi điểm vật (không mang thông tin cỡ) ->
-đỉnh cục bộ của mức density (giải mã jet bằng `alpha/density.py`) là điểm vật. Box giả
+đỉnh cục bộ của mức density (giải mã jet bằng `data/density.py`) là điểm vật. Box giả
 `(p, ŝ, ŝ)` chỉ để dựng x_start khuếch tán và phần HÌNH HỌC của matcher (prior, dynamic k);
-loss của BETA đọc tâm = điểm và cỡ = ŝ từ chính box giả (`alpha/criterion.py`, chế độ `point`).
+loss của BETA đọc tâm = điểm và cỡ = ŝ từ chính box giả (`engine/criterion.py`, chế độ `point`).
 
 Quy ước toạ độ: pixel liên tục, pixel (hàng i, cột j) phủ [j, j+1] × [i, i+1] -> tâm pixel là
 (j + 0.5, i + 0.5), cùng hệ với box xyxy pixel của CE-130.

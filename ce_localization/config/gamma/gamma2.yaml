@@ -17,7 +17,6 @@ data:
   cache_dir: null
   image_size: 512
   num_workers: 4
-  input_style: "paper"
   density: "sample"
 
 model:

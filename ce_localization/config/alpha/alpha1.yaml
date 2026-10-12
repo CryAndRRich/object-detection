@@ -56,7 +56,7 @@ training:
   eval_every: 2000
 
 eval:
-  split: "val"                      # eval định kỳ + chọn best.pth; báo cáo trên test (eval_alpha.py)
+  split: "val"                      # eval định kỳ + chọn best.pth; báo cáo trên test (eval.py)
   select_metric: "oracle_recall"
   sampling_steps: 1                 # chính: 1 bước
   batch_size: 2                     # @1024 batch 8 OOM trên GPU dùng chung (2026-09-29); không đổi kết quả

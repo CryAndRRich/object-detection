@@ -46,7 +46,6 @@ from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from ce_localization.data.dataset import IMAGENET_MEAN, IMAGENET_STD  # noqa: E402
 from ce_localization.data.density import DensityIndex  # noqa: E402
 from ce_localization.data.turns import image_inputs  # noqa: E402
 from ce_localization.models.box_policy import BoxPolicy, unit_to_boxes  # noqa: E402
@@ -60,22 +59,19 @@ SNAP_MOCK = (99, 80, 60, 40, 20, 10, 5, 0)
 
 
 def load_model(path, device, clip_name="openai/clip-vit-base-patch32"):
-    """-> (model, style, cần density?, hàm text(names) -> TextTable, mô tả). Nhận checkpoint của bài hoặc của train.py."""
+    """-> (model, cần density?, hàm text(names) -> TextTable, mô tả). Nhận checkpoint của bài hoặc của train.py."""
     ck = torch.load(path, map_location="cpu", weights_only=False)
     if "model_state_dict" in ck:                                          # checkpoint CE-Loc gốc của bài
         model, clip, info = BoxPolicy.load_celoc_paper(ck)
         text = lambda names: TextTable(encode_class_names(names, clip_name, device=str(device), state_dict=clip))  # noqa: E731
-        return model.to(device).eval(), "paper", info["in_channels"] == 4, text, f"CE-Loc gốc của bài {info}"
+        return model.to(device).eval(), info["in_channels"] == 4, text, f"CE-Loc gốc của bài {info}"
     cfg = ck["config"]
     if cfg["model"].get("arch") != "box_policy":
         sys.exit(f"{path}: không phải checkpoint bài add (model.arch {cfg['model'].get('arch')})")
     model = build_model(cfg, pretrained_backbone=False)
     model.load_state_dict(ck["model"])
     text = lambda names: TextTable(encode_class_names(names, cfg["model"]["clip_text"], device=str(device)))  # noqa: E731
-    style = cfg["data"].get("input_style", "ours")          # GAMMA "CE-Loc gốc + R-50": paper (box chia canvas)
-    if (style == "paper") != (model.box_norm == "canvas"):
-        sys.exit(f"{path}: data.input_style {style} lệch model.box_norm {model.box_norm} — tool chưa hỗ trợ tổ hợp này")
-    return (model.to(device).eval(), style, cfg["model"].get("in_channels", 3) == 4, text,
+    return (model.to(device).eval(), cfg["model"].get("in_channels", 3) == 4, text,
             f"{cfg['experiment']} iter {ck.get('iter')}")
 
 
@@ -116,11 +112,8 @@ def pick_cases(ann, cls, rng):
     return cases
 
 
-def canvas_rgb(x, style):
-    img = x[:3].numpy().transpose(1, 2, 0)
-    if style == "ours":
-        img = img * IMAGENET_STD + IMAGENET_MEAN
-    return img.clip(0, 1)
+def canvas_rgb(x):
+    return x[:3].numpy().transpose(1, 2, 0).clip(0, 1)
 
 
 def rect(ax, b, color, lw=1.0, alpha=1.0):
@@ -224,8 +217,8 @@ def main():
     t0 = time.time()
     log = lambda *s: print(f"[{fmt_time(time.time() - t0)}]", *s, flush=True)  # noqa: E731
     dev = torch.device(a.device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    model, style, use_density, text_fn, desc = load_model(a.ckpt, dev)
-    log(f"model: {desc} | đầu vào {style} | density {use_density} | T {model.num_timesteps} | {dev}")
+    model, use_density, text_fn, desc = load_model(a.ckpt, dev)
+    log(f"model: {desc} | density {use_density} | T {model.num_timesteps} | {dev}")
     rng = np.random.default_rng(a.seed)
     if a.files:
         cases = []
@@ -251,7 +244,7 @@ def main():
     os.makedirs(a.out, exist_ok=True)
     T = a.image_size
     key = "x_t" if a.track == "xt" else "x0_hat"
-    out = {"ckpt": a.ckpt, "model": desc, "style": style, "seed": a.seed, "track": a.track, "cases": []}
+    out = {"ckpt": a.ckpt, "model": desc, "seed": a.seed, "track": a.track, "cases": []}
     print(f"\n{'sampler':>7} {'ca':>12} {'text':>14} | IoU cuối | tâm cách lỗ (px) | √(wh) box / lỗ (px)")
     for c in cases:
         stem = os.path.splitext(os.path.basename(c["file"]))[0]
@@ -274,13 +267,13 @@ def main():
             dfull = None
         dpath = (Image.new("RGB", img.size, (0, 0, 127)) if dmode == "blank" else dfull if dmode == "full" else
                  os.path.join(a.samples, split, "density", stem + ".png") if use_density else None)
-        x, scale, nw, nh = image_inputs(img, dpath, T, style)
+        x, scale, nw, nh = image_inputs(img, dpath, T)
         if dmode == "empty":                                              # density cố tình trống rỗng
             x[3] = 0
         cx, cy, w, h = (v * scale for v in ann["target_bbox"])                   # cxcywh pixel ảnh gốc (cạm bẫy 1)
         gt = [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2]
-        whwh = torch.tensor([[T, T, T, T]] if style == "paper" else [[nw, nh, nw, nh]], dtype=torch.float32, device=dev)
-        bg = canvas_rgb(x, style)
+        whwh = torch.tensor([[T, T, T, T]], dtype=torch.float32, device=dev)      # box chia canvas
+        bg = canvas_rgb(x)
         for s in a.samplers:
             snaps = a.snapshots_ddpm if s == "ddpm" else a.snapshots_mock
             gen = torch.Generator(device=dev.type).manual_seed(a.seed)          # cùng nhiễu ban đầu ở mọi ca

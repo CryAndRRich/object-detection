@@ -1,13 +1,13 @@
-"""Hình học box bằng numpy (không torch): đổi xyxy <-> cxcywh, IoU, lọc box suy biến. Dùng cho
-chấm điểm (`utils/metrics_np.py`, `engine/evaluate.py`) và quét dữ liệu (`data/dataset.py`)."""
+"""Hình học box bằng numpy (không torch): đổi xyxy <-> cxcywh, IoU, IoA, lọc box suy biến. Dùng cho chấm điểm
+(`utils/metrics_np.py`, `engine/evaluate.py`, `engine/add_eval.py`), quét dữ liệu (`data/dataset.py`) và `user_study/`."""
 
 import numpy as np
 
-__all__ = ["xyxy_to_cxcywh", "cxcywh_to_xyxy", "box_iou", "filter_degenerate"]
+__all__ = ["xyxy_to_cxcywh", "cxcywh_to_xyxy", "box_iou", "ioa", "filter_degenerate"]
 
 
 # --------------------------------------------------------------------------
-# Steps (1) and (6): change format, NOT scale
+# change format, NOT scale
 # --------------------------------------------------------------------------
 
 def xyxy_to_cxcywh(boxes):
@@ -23,15 +23,6 @@ def cxcywh_to_xyxy(boxes):
     cx, cy, w, h = b[..., 0], b[..., 1], b[..., 2], b[..., 3]
     return np.stack([cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0], axis=-1)
 
-
-# --------------------------------------------------------------------------
-# Steps (2)+(3): original-image pixels -> canonical [0,1]
-# --------------------------------------------------------------------------
-
-
-# --------------------------------------------------------------------------
-# Steps (4) and (5): canonical <-> diffusion space
-# --------------------------------------------------------------------------
 
 
 # --------------------------------------------------------------------------
@@ -62,6 +53,18 @@ def box_iou(boxes1, boxes2):
 # --------------------------------------------------------------------------
 # Augmentation + data hygiene
 # --------------------------------------------------------------------------
+
+
+def ioa(boxes, objects):
+    """[K,4], [M,4] xyxy -> [K,M] giao / diện tích box (box diện tích 0 -> 0) — `on_object` của eval add."""
+    b = np.asarray(boxes, dtype=np.float64).reshape(-1, 4)
+    o = np.asarray(objects, dtype=np.float64).reshape(-1, 4)
+    lt = np.maximum(b[:, None, :2], o[None, :, :2])
+    rb = np.minimum(b[:, None, 2:], o[None, :, 2:])
+    inter = np.clip(rb - lt, 0, None).prod(-1)
+    area = ((b[:, 2] - b[:, 0]) * (b[:, 3] - b[:, 1]))[:, None]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(area > 0, inter / area, 0.0)
 
 
 def filter_degenerate(boxes_xyxy, min_size=0.0):

@@ -1,0 +1,74 @@
+# EXPERIMENT DELTA3 (docs/EXPERIMENT_DELTA.md mục 9.2) = delta1.yaml CHỈ GIỮ BoxRefiner: không U-Net, không ResNet18 + SpatialSoftmax
+# + FiLM. Refiner (CLIP ViT-B/16 + text B/16 frozen, RoIAlign 3×3, 4 block RoPE 2D + AdaLN-Zero) là CẢ mạng khử nhiễu: refined = x_t + Δ
+# ≈ x0, loss = MSE(refined, x0) (`unet_input: none`, `aux_loss_weight: 1.0`); sampler (mock 100 như mọi bản) nhận ε̂ suy từ refined.
+# data / diffusion / training / eval Y HỆT delta1.yaml (có test).
+
+experiment: "delta3"
+description: "chỉ BoxRefiner của tác giả gốc (CLIP ViT-B/16 + text frozen) làm mạng khử nhiễu, không U-Net / ResNet18 / FiLM"
+task: "add"
+
+data:
+  root: "../data/all_phase2_V2"
+  samples_root: "../data/samples"
+  turn_index: "../data/turn_index.json"
+  density_index: "../data/density_index.json"   # eval ảnh gốc với density `full`
+  density_root: "../data/samples"
+  split_source: "samples"           # train = samples/train ; val / test = samples/test theo split CE-130 của ảnh gốc
+  cache_dir: null                   # Kaggle: --cache-dir /kaggle/temp/add_cache (tools/build_add_cache.py)
+  image_size: 512
+  num_workers: 4
+  density: "sample"
+
+model:
+  arch: "box_policy"
+  in_channels: 4                    # RGB + density (refiner: density pool về lưới token ảnh)
+  clip_text: "openai/clip-vit-base-patch32"   # bảng text chung của train / eval (DELTA3 không đọc — không có FiLM)
+  use_condition: true
+  refiner:                          # BoxRefiner của tác giả gốc (refs/CE-Loc-update/config/model_config.yaml) — mặc định NGUYÊN VĂN
+    enabled: true
+    clip_model_name: "openai/clip-vit-base-patch16"   # CLIP ViT + text frozen (lưới 14×14); ViT không vào checkpoint (vân tay clip_sha)
+    vision_layer: -2
+    d_model: 256
+    num_layers: 4
+    num_heads: 8                    # head_dim 32 chia hết cho 4 (RoPE 2D)
+    mlp_ratio: 4.0
+    dropout: 0.0
+    rope_theta: 100.0
+    roi_size: 3
+    num_stages: 1
+    use_density: true               # density pool về lưới 14×14 cộng vào token ảnh
+    unet_input: none                # KHÔNG U-Net: refiner là cả mạng khử nhiễu, ε̂ = (x_t − √ᾱ_t·refined) / √(1 − ᾱ_t)
+    aux_loss_weight: 1.0            # loss = MSE(refined, x0) (không có số hạng ε)
+    attention_flow:                 # nhóm query -> nhóm key (ảnh / text không nhìn box)
+      sample: [sample, image, text]
+      image: [image, text]
+      text: [text, image]
+
+diffusion:
+  num_timesteps: 1000
+  beta_start: 1.0e-4
+  beta_end: 0.02
+  noise_per_image: 1
+
+training:                           # như bài trừ batch (gấp đôi) / số iter (nửa)
+  batch_size: 64                    # TOÀN CỤC: Kaggle 2 GPU -> 32 / GPU
+  sync_bn: false                    # BN thường: thống kê trên 32 ảnh / GPU = đúng batch BN của bài (SyncBN sẽ thành 64, chậm hơn)
+  amp: true                         # Kaggle T4: autocast fp16 + GradScaler + channels_last (tensor core) — người dùng chốt 2026-10-02
+  lr: 5.0e-5
+  weight_decay: 0.01
+  schedule: "cosine"
+  cosine_t_max: 93900               # = 300 epoch × 313 bước (⌈19.998 / 64⌉) — CosineAnnealingLR(T_max=300) của bài theo iter
+  max_iter: 37500
+  grad_clip: null
+  seed: 0
+  log_every: 50
+  ckpt_every: 1000
+  eval_every: 2500
+
+eval:
+  split: "val"
+  limit: 500
+  n_samples: 30
+  batch_size: 16
+  sample_kw: {sampler: "mock"}      # eval định kỳ bằng vòng mock 100 bước của bài (DDPM 1000 bước quá chậm trên T4); test báo cả hai
+  select_metric: "mean_iou_any"

@@ -12,7 +12,7 @@ import numpy as np
 
 from ce_localization.utils.box_ops_np import box_iou, cxcywh_to_xyxy
 
-__all__ = ["nms_class_agnostic", "ap_from_pr", "evaluate", "roc_auc", "quality",
+__all__ = ["nms_class_agnostic", "ap_from_pr", "pr_curve", "evaluate", "roc_auc", "quality",
            "oracle_hits", "summarise", "COCO_THR"]
 
 COCO_THR = [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]
@@ -72,14 +72,18 @@ def evaluate(predictions, iou_thr=0.5):
         return {"AP": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0, "n_pred": 0,
                 "n_gt": total_gt}
 
-    records.sort(key=lambda x: -x[0])
-    tp = np.cumsum([r[1] for r in records])
-    fp = np.cumsum([1 - r[1] for r in records])
-    rec = tp / total_gt
-    prec = tp / np.maximum(tp + fp, 1e-9)
+    rec, prec = pr_curve(records, total_gt)
     p, r = float(prec[-1]), float(rec[-1])
     return {"AP": ap_from_pr(rec, prec), "precision": p, "recall": r,
             "f1": 2 * p * r / max(p + r, 1e-9), "n_pred": len(records), "n_gt": total_gt}
+
+
+def pr_curve(records, n_gt):
+    """records: list (score, trúng 0/1) -> (recall, precision) cộng dồn theo score giảm dần (sắp xếp TẠI CHỖ)."""
+    records.sort(key=lambda x: -x[0])
+    tp = np.cumsum([r[1] for r in records])
+    fp = np.cumsum([1 - r[1] for r in records])
+    return tp / n_gt, tp / np.maximum(tp + fp, 1e-9)
 
 
 def roc_auc(labels, scores):
@@ -109,8 +113,7 @@ def roc_auc(labels, scores):
     return float((ranks[labels == 1].sum() - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg))
 
 
-def quality(pred_cxcywh, scores, gt_cxcywh, size=512, iou_thr=0.5, pred_cls=None,
-            gt_cls=None):
+def quality(pred_cxcywh, scores, gt_cxcywh, iou_thr=0.5):
     """Chỉ số cho MỘT ảnh -> (best_iou mỗi GT, số GT được phủ, n_gt, auc).
 
     `best_iou` lấy trên TẤT CẢ dự đoán, không dùng score và không ghép tham lam: câu hỏi
@@ -119,15 +122,12 @@ def quality(pred_cxcywh, scores, gt_cxcywh, size=512, iou_thr=0.5, pred_cls=None
     """
     if len(gt_cxcywh) == 0:
         return np.zeros(0), 0, 0, float("nan")
-    g = cxcywh_to_xyxy(np.asarray(gt_cxcywh)) * size
+    g = cxcywh_to_xyxy(np.asarray(gt_cxcywh))
     if len(pred_cxcywh) == 0:
         return np.zeros(len(g)), 0, len(g), float("nan")
-    p = cxcywh_to_xyxy(np.asarray(pred_cxcywh)) * size
+    p = cxcywh_to_xyxy(np.asarray(pred_cxcywh))
 
     m = box_iou(p, g)[0]                                   # [P, G]
-    if pred_cls is not None and gt_cls is not None:
-        m = np.where(np.asarray(pred_cls)[:, None] == np.asarray(gt_cls)[None, :],
-                     m, 0.0)
     best = m.max(axis=0)
     hit = int((best >= iou_thr).sum())
     auc = roc_auc((m.max(axis=1) >= iou_thr).astype(int), np.asarray(scores))
@@ -139,8 +139,7 @@ def oracle_hits(pred_cxcywh, gt_cxcywh, iou_thr=0.5):
 
     Một định nghĩa duy nhất cho `oracle_recall` ở cả train lẫn eval.
     """
-    _, hit, n_gt, _ = quality(pred_cxcywh, np.zeros(len(pred_cxcywh)), gt_cxcywh,
-                              size=1, iou_thr=iou_thr)
+    _, hit, n_gt, _ = quality(pred_cxcywh, np.zeros(len(pred_cxcywh)), gt_cxcywh, iou_thr=iou_thr)
     return hit, n_gt
 
 

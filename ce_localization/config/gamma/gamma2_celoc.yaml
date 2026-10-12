@@ -18,7 +18,6 @@ data:
   cache_dir: null                   # Kaggle: --cache-dir /kaggle/temp/add_cache (tools/build_add_cache.py)
   image_size: 512
   num_workers: 4
-  input_style: "paper"              # to_tensor, density .convert("L")
   density: "sample"
 
 model:

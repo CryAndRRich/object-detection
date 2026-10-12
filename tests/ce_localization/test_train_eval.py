@@ -175,7 +175,12 @@ def test_ddp_gamma2_celoc_bucket_view_no_stride_warning(tmp_path):
     run(str(tmp_path / "pr_obj"), None, p_po, ("--proposer-ckpt", os.path.join(str(tmp_path / "obj"), "last.pth")))
     k_po = torch.load(os.path.join(str(tmp_path / "pr_obj"), "last.pth"), weights_only=False)
     assert k_po["iter"] == 3 and all(np.isfinite(h["loss"]) for h in k_po["history"] if "loss" in h)
-    rm("obj"), rm("pr_obj")
+    p_n, c_n = _gamma2_cfg(tmp_path, base, "obj_near")                      # GAMMA4.0.1: chỉ 3 vật gần x_t vào cross-attn
+    assert not __import__("ce_localization.train", fromlist=["x"]).ddp_find_unused(c_n)
+    run(str(tmp_path / "obj_near"), None, p_n)
+    k_n = torch.load(os.path.join(str(tmp_path / "obj_near"), "last.pth"), weights_only=False)
+    assert k_n["iter"] == 3 and all(np.isfinite(h["loss"]) for h in k_n["history"] if "loss" in h)
+    rm("obj"), rm("pr_obj"), rm("obj_near")
     for kind in ("pr", "pr_joint", "geo", "rel"):
         p2, c2 = _gamma2_cfg(tmp_path, base, kind)
         assert not __import__("ce_localization.train", fromlist=["x"]).ddp_find_unused(c2)
@@ -465,7 +470,7 @@ def test_plot_denoise_trajectory_full_flow(tmp_path, monkeypatch):
                      "trajectories.json"}
     with open(os.path.join(out, "trajectories.json")) as f:
         res = json.load(f)
-    assert len(res["cases"]) == 4 and res["style"] == "paper" and res["track"] == "xt"
+    assert len(res["cases"]) == 4 and res["track"] == "xt"
     r = res["cases"][2]                                                   # ddpm, case1: ảnh lớp cup, text apple
     assert r["text"] == "apple" and r["gt_class"] == "cup" and r["steps"] == [99, 50, 0]
     assert len(r["boxes_canvas"]) == 3 and all(0 <= v <= 1 for v in r["iou"]) and len(r["center_dist_px"]) == 3
@@ -845,7 +850,7 @@ def test_gamma3_objects_never_contain_target_hole(tmp_path):
     os.makedirs(base)
     root, samples, _, index, _ = _fake_turn_index(base)
     for split in ("train", "val", "test"):
-        ds = CE130AddDataset(index, root, samples, split, 128, style="paper", split_source="samples")
+        ds = CE130AddDataset(index, root, samples, split, 128, split_source="samples")
         for i in range(len(ds)):
             s = ds[i]
             assert len(s["objects"]) and box_iou(s["holes"].numpy(), s["objects"].numpy())[0].max() < 0.5
@@ -979,6 +984,94 @@ def test_full_flow_gamma4_train_resume_eval(tmp_path, monkeypatch):
         res = json.load(f)
     assert set(res["results"]) == {"inpainted", "inpainted_noobj", "original", "original_noobj"}
     assert res["results"]["inpainted_noobj"]["n"] == res["results"]["inpainted"]["n"] > 0
+
+
+@pytest.mark.parametrize("kind,sel", [("obj_near", "nearest"), ("obj_rand", "random")])
+def test_gamma4_0_x_config_only_adds_obj_k(kind, sel):
+    """gamma4_0_1 / 4_0_2 = gamma4 + `model.obj_k: 3` + `model.obj_select` (+ tên) ⇒ GAMMA4 là đối chứng."""
+    from tests.ce_localization.helpers import CFG_G
+    with open(CFG_G["obj"]) as f:
+        a = yaml.safe_load(f)
+    with open(CFG_G[kind]) as f:
+        b = yaml.safe_load(f)
+    assert (b["model"].pop("obj_k"), b["model"].pop("obj_select")) == (3, sel)
+    assert b["experiment"] == {"nearest": "gamma4_0_1", "random": "gamma4_0_2"}[sel]
+    for k in ("experiment", "description"):
+        a.pop(k), b.pop(k)
+    assert a == b
+
+
+@pytest.mark.parametrize("kind", ["obj_near", "obj_rand"])
+def test_full_flow_gamma4_0_x_train_resume_eval(tmp_path, monkeypatch, kind):
+    """GAMMA4.0.x thu nhỏ: train 2 + --resume tới 4 == train liền 4 (cách chọn vật tất định theo generator của bước); eval có `_noobj`
+    cho cả 2 loại ảnh, JSON ghi obj_k / obj_select."""
+    import ce_localization.eval as ea
+    import ce_localization.train as ta
+    from tests.ce_localization.helpers import _fake_text_table, _fake_turn_index, _gamma2_cfg
+    base = str(tmp_path / "d")
+    os.makedirs(base)
+    _fake_turn_index(base)
+    c_path, cfg = _gamma2_cfg(tmp_path, base, kind)
+    a, b = str(tmp_path / "a"), str(tmp_path / "b")
+    _run_train(monkeypatch, ["--config", c_path, "--save-dir", a, "--max-iter", "2"])
+    _run_train(monkeypatch, ["--config", c_path, "--save-dir", a, "--resume"])
+    _run_train(monkeypatch, ["--config", c_path, "--save-dir", b])
+    ka = torch.load(os.path.join(a, "last.pth"), weights_only=False)
+    kb = torch.load(os.path.join(b, "last.pth"), weights_only=False)
+    assert ka["iter"] == kb["iter"] == 4 and kb["config"]["model"]["obj_k"] == 3
+    for k in kb["model"]:
+        assert torch.allclose(ka["model"][k].float(), kb["model"][k].float(), atol=1e-5), k
+    monkeypatch.setattr(ta, "build_text_table", _fake_text_table)
+    out = str(tmp_path / "res.json")
+    monkeypatch.setattr(sys, "argv", ["eval.py", "--ckpt", os.path.join(b, "best.pth"), "--split", "test", "--n-samples", "3",
+                                      "--add-samplers", "ddpm", "--num-workers", "0", "--out", out, "--device", "cpu"])
+    ea.main()
+    with open(out) as f:
+        res = json.load(f)
+    assert set(res["results"]) == {"inpainted", "inpainted_noobj", "original", "original_noobj"}
+    assert (res["obj_k"], res["obj_select"]) == (3, cfg["model"]["obj_select"])
+
+
+def test_eval_obj_k_override_on_gamma4_checkpoint(tmp_path, monkeypatch):
+    """Mốc eval-only: checkpoint GAMMA4 (mọi vật) + `--obj-k 3 --obj-select nearest|random` ⇒ box khác bản mọi vật, JSON ghi lại;
+    checkpoint không obj_attn ⇒ từ chối."""
+    import ce_localization.eval as ea
+    import ce_localization.train as ta
+    from ce_localization.models.detector import build_model
+    from tests.ce_localization.helpers import _fake_text_table, _fake_turn_index, _gamma2_cfg
+    base = str(tmp_path / "d")
+    os.makedirs(base)
+    _fake_turn_index(base)
+    monkeypatch.setattr(ta, "build_text_table", _fake_text_table)
+    cks = {}
+    for kind in ("obj", "celoc2"):
+        _, cfg = _gamma2_cfg(tmp_path, base, kind)
+        torch.manual_seed(0)
+        model = build_model(cfg, pretrained_backbone=False)
+        for xa in getattr(model.noise_net, "obj_xattn", []):                  # out_proj = 0 lúc khởi tạo: box vật không đổi gì
+            torch.nn.init.normal_(xa.attn.out_proj.weight, std=0.3)
+        cks[kind] = str(tmp_path / f"{kind}.pth")
+        torch.save({"model": model.state_dict(), "config": cfg, "iter": 0}, cks[kind])
+
+    def run(ck, extra, name):
+        out, dump = str(tmp_path / f"{name}.json"), str(tmp_path / f"{name}_boxes.json")
+        monkeypatch.setattr(sys, "argv", ["eval.py", "--ckpt", ck, "--split", "test", "--image", "inpainted", "--n-samples", "3",
+                                          "--add-samplers", "ddpm", "--num-workers", "0", "--out", out, "--dump-boxes", dump,
+                                          "--device", "cpu"] + extra)
+        ea.main()
+        with open(out) as f, open(dump) as g:
+            return json.load(f), json.load(g)["results"]
+    ref, bref = run(cks["obj"], [], "all")
+    assert "obj_k" not in ref                                                  # JSON GAMMA4 như cũ
+    for sel in ("nearest", "random"):
+        res, b = run(cks["obj"], ["--obj-k", "3", "--obj-select", sel], sel)
+        assert (res["obj_k"], res["obj_select"]) == (3, sel)
+        assert not np.allclose([x["boxes"] for x in b["inpainted"]], [x["boxes"] for x in bref["inpainted"]])
+        assert np.allclose([x["boxes"] for x in b["inpainted_noobj"]], [x["boxes"] for x in bref["inpainted_noobj"]])
+    with pytest.raises(SystemExit):
+        run(cks["celoc2"], ["--obj-k", "3"], "bad")
+    with pytest.raises(SystemExit):
+        run(cks["obj"], ["--obj-select", "random"], "bad2")                   # thiếu --obj-k
 
 
 def test_gamma4_1_config_only_swaps_proposer():

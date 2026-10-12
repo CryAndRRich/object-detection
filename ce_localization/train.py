@@ -30,13 +30,12 @@ eval DDIM `eval.sampling_steps` bước). Eval định kỳ = `eval.n_samples` m
 chọn `best.pth` theo `eval.select_metric` (`mean_iou_any`).
 
 DELTA (`model.refiner` / `model.use_condition`, docs/EXPERIMENT_DELTA.md): `box_policy` + BoxRefiner của tác giả gốc
-(`models/clip_refiner.py`) — bảng text thêm token chữ CLIP B/16 (`TextTable.tokens`), loss + aux, log thêm ε / aux / |Δ| / aux_ratio
-và độ lớn gate AdaLN của refiner.
+(`models/clip_refiner.py`) — bảng text thêm token chữ CLIP text (`TextTable.tokens`), loss + aux, log thêm ε / aux / |Δ| / aux_ratio
+và độ lớn gate AdaLN của refiner (DELTA3, không U-Net: loss chỉ có aux).
 """
 
 import argparse
 import json
-import math
 import os
 import sys
 import time
@@ -45,7 +44,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import yaml
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -60,9 +59,9 @@ from ce_localization.engine.diffusion import prepare_train_boxes  # noqa: E402
 from ce_localization.engine.evaluate import predict, score  # noqa: E402
 from ce_localization.engine.train_utils import (PthCheckpoints, epoch_batches,  # noqa: E402
                                                lr_factor, noise_seed, setup_dist)
-from ce_localization.models.backbone import conv1_of, density_ratio_of  # noqa: E402
+from ce_localization.models.backbone import density_ratio_of  # noqa: E402
 from ce_localization.models.box_policy import boxes_to_unit, norm_whwh  # noqa: E402
-from ce_localization.models.clip_refiner import REFINER_DEFAULTS, needs_text_tokens  # noqa: E402
+from ce_localization.models.clip_refiner import needs_text_tokens, refiner_config, text_model_name  # noqa: E402
 from ce_localization.models.detector import build_model  # noqa: E402
 from ce_localization.models.text import TextTable, encode_class_names, encode_class_tokens  # noqa: E402
 from ce_localization.utils.grad_monitor import GradMonitor  # noqa: E402
@@ -94,21 +93,26 @@ def config_diff(saved, cfg):
 
 def build_text_table(names, cfg, dev, state_dict=None):
     """Tách ra hàm riêng để test thay bằng embedding giả (không tải CLIP). `state_dict`: CLIP text lưu trong checkpoint CE-Loc
-    gốc của bài (eval.py). DELTA (refiner bật + có điều kiện): thêm token chữ của CLIP text `refiner.clip_model_name` + vân tay."""
+    gốc của bài (eval.py). DELTA (refiner bật + có điều kiện): thêm token chữ của CLIP text `refiner.text_model_name` (mặc định
+    `clip_model_name`) + vân tay."""
     m = cfg["model"]
     tokens = sha = None
     if needs_text_tokens(m):
-        name = (m.get("refiner") or {}).get("clip_model_name", REFINER_DEFAULTS["clip_model_name"])
-        tokens, sha = encode_class_tokens(names, name, device=str(dev))
+        tokens, sha = encode_class_tokens(names, text_model_name(refiner_config(m["refiner"])), device=str(dev))
     return TextTable(encode_class_names(names, m["clip_text"], device=str(dev), state_dict=state_dict), tokens, sha)
 
 
-def density_setup(cfg):
-    """-> DensityIndex hoặc None. Kiểm `data.density` khớp `model.in_channels` (4 <=> có density)."""
-    mode, ch = cfg["data"].get("density"), cfg["model"].get("in_channels", 3)
+def check_density(cfg):
+    """-> `data.density`; dừng nếu không khớp số kênh ảnh vào (4 <=> có density; GAMMA2: của proposer)."""
+    mode, ch = cfg["data"].get("density"), image_in_channels(cfg)
     if (mode is not None) != (ch == 4):
         sys.exit(f"config mâu thuẫn: data.density={mode} nhưng model.in_channels={ch} (density <=> 4 kênh)")
-    if mode is None:
+    return mode
+
+
+def density_setup(cfg):
+    """Bài detect: -> DensityIndex hoặc None."""
+    if check_density(cfg) is None:
         return None
     try:
         return DensityIndex(cfg["data"]["density_index"], cfg["data"]["density_root"])
@@ -122,15 +126,7 @@ def image_in_channels(cfg):
     return m.get("proposer", m).get("in_channels", 3)
 
 
-def add_density_setup(cfg):
-    """GAMMA: `data.density` (None | sample) phải khớp `model.in_channels` (4 <=> có density); GAMMA2: của proposer."""
-    mode, ch = cfg["data"].get("density"), image_in_channels(cfg)
-    if (mode is not None) != (ch == 4):
-        sys.exit(f"config mâu thuẫn: data.density={mode} nhưng model.in_channels={ch} (density <=> 4 kênh)")
-    return mode
-
-
-def add_datasets(cfg, eval_split, limit=None, eval_limit=None):
+def add_datasets(cfg, eval_split, limit=None):
     """GAMMA: -> (ds_tr, ds_ev, TurnIndex). Eval định kỳ trên `eval.limit` mẫu CỐ ĐỊNH của split (hoán vị seed
     12345, như eval định kỳ của CE-Loc gốc) — chỉ để chọn checkpoint; báo cáo bằng eval.py trên cả split."""
     d = cfg["data"]
@@ -138,11 +134,10 @@ def add_datasets(cfg, eval_split, limit=None, eval_limit=None):
         index = TurnIndex(d["turn_index"])
     except FileNotFoundError as e:
         sys.exit(str(e))
-    dens = add_density_setup(cfg)
+    dens = check_density(cfg)
     cache = AddCache(d["cache_dir"]) if d.get("cache_dir") else None          # GAMMA2 / Kaggle: ảnh train đã letterbox
     mk = lambda split: CE130AddDataset(index, d["root"], d["samples_root"], split, d["image_size"],  # noqa: E731
-                                       density=dens, style=d.get("input_style", "ours"),
-                                       split_source=d.get("split_source", "ce130"), cache=cache)
+                                       density=dens, split_source=d.get("split_source", "ce130"), cache=cache)
     ds_tr = mk("train")
     if limit:
         ds_tr.keys = ds_tr.keys[:limit]
@@ -152,8 +147,6 @@ def add_datasets(cfg, eval_split, limit=None, eval_limit=None):
     elif cfg["eval"].get("limit"):
         perm = np.random.default_rng(12345).permutation(len(ds_ev.keys))[: cfg["eval"]["limit"]]
         ds_ev.keys = [ds_ev.keys[i] for i in sorted(perm.tolist())]
-    if eval_limit:
-        ds_ev.keys = ds_ev.keys[:eval_limit]
     return ds_tr, ds_ev, index
 
 
@@ -244,10 +237,11 @@ def ddp_find_unused(cfg):
     """DDP `find_unused_parameters`: True khi có tham số train có thể KHÔNG nhận grad ở một iteration (`box_policy` R-50 chỉ
     đọc C5 nên FPN không dùng; ALPHA / BETA / GAMMA1 giữ True như lúc đã chạy). Tắt (DDP khỏi duyệt đồ thị mỗi iter) khi
     MỌI tham số train luôn có grad — có test: CE-Loc gốc ResNet18 (`box_policy` + `r18_paper`, kể cả DELTA: refiner luôn vào đồ
-    thị, `use_condition: false` đóng băng phần không ai đọc); `propose_refine` (tầng FPN
+    thị, `use_condition: false` đóng băng phần không ai đọc; DELTA3 chỉ có refiner); `propose_refine` (tầng FPN
     không có RoI vẫn góp 0 — `MultiLevelRoIAlign`) khi CE-Loc đóng băng hoặc ε-MSE của nó có trong loss."""
     m = cfg["model"]
-    if m.get("arch") == "box_policy" and m.get("vision") == "r18_paper":
+    if m.get("arch") == "box_policy" and (m.get("vision") == "r18_paper" or
+                                          (refiner_config(m.get("refiner")) or {}).get("unet_input") == "none"):
         return False
     if m.get("arch") == "propose_refine":
         return not (m.get("freeze_proposer", True) or float(cfg.get("loss", {}).get("proposer_weight", 1.0)) > 0)
@@ -298,10 +292,8 @@ def main():
     ap.add_argument("--batch-size", type=int, default=None,
                     help="ghi đè training.batch_size TOÀN CỤC (vd. G4 bench 1 GPU với 32 = tải mỗi GPU của Kaggle T4×2)")
     ap.add_argument("--eval-every", type=int, default=None)
-    ap.add_argument("--ckpt-every", type=int, default=None)
     ap.add_argument("--limit", type=int, default=None, help="chỉ lấy N ảnh train đầu (G3 overfit)")
     ap.add_argument("--eval-split", default=None, help="mặc định eval.split; 'train' = eval trên chính ảnh train")
-    ap.add_argument("--eval-limit", type=int, default=None, help="chỉ eval N ảnh đầu (chạy thử)")
     ap.add_argument("--num-workers", type=int, default=None)
     ap.add_argument("--data-root", default=None, help="ghi đè data.root (vd. Kaggle)")
     ap.add_argument("--density-root", default=None, help="ALPHA3: ghi đè data.density_root (thư mục samples/)")
@@ -332,8 +324,6 @@ def main():
         tr["batch_size"] = a.batch_size
     if a.eval_every:
         tr["eval_every"] = a.eval_every
-    if a.ckpt_every:
-        tr["ckpt_every"] = a.ckpt_every
     if a.limit:
         cfg["data"]["limit"] = a.limit
     if a.eval_split:
@@ -387,7 +377,7 @@ def main():
     root, size = cfg["data"]["root"], cfg["data"]["image_size"]
     ev_split = cfg["eval"]["split"]
     if task == "add":                                  # GAMMA: (nhánh, lượt), đích = lỗ mới nhất
-        ds_tr, ds_ev, _ = add_datasets(cfg, ev_split, cfg["data"].get("limit"), a.eval_limit)
+        ds_tr, ds_ev, _ = add_datasets(cfg, ev_split, cfg["data"].get("limit"))
         d_tr = d_ev = cfg["data"].get("density")
         targets, ptable, pseudo = "lỗ mới nhất", None, None
     else:
@@ -406,8 +396,6 @@ def main():
             ds_ev.items = ds_tr.items[:]                   # G3: eval trên CHÍNH các ảnh đã train
         else:
             ds_ev = CE130Dataset(root, ev_split, size, density=d_ev, density_index=dindex)
-        if a.eval_limit:
-            ds_ev.items = ds_ev.items[: a.eval_limit]
     ipe = len(ds_tr) // tr["batch_size"]
     if ipe == 0:
         sys.exit(f"train chỉ có {len(ds_tr)} mẫu < batch_size {tr['batch_size']}")
@@ -466,7 +454,7 @@ def main():
     keep_grad = world > 1 and not unused                # zero_grad(set_to_none=not keep_grad)
     n_learn = sum(p.numel() for p in model.parameters() if p.requires_grad)
     log(f"[model] arch={cfg['model'].get('arch', 'detector')} | memory={cfg['model'].get('memory')} | "
-        f"in_channels {conv1_of(model).in_channels} | {n_learn / 1e6:.2f}M tham số train | "
+        f"in_channels {image_in_channels(cfg)} | {n_learn / 1e6:.2f}M tham số train | "
         f"N={cfg['diffusion'].get('num_proposals')} | "
         f"AMP {'fp16 + channels_last' if amp else ('tắt (không CUDA)' if tr.get('amp') else 'tắt')} | "
         f"DDP find_unused {unused if world > 1 else '-'} | SyncBN {world > 1 and tr.get('sync_bn', True)} | "

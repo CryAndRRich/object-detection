@@ -1,4 +1,5 @@
-"""DELTA (docs/EXPERIMENT_DELTA.md): BoxRefiner của tác giả gốc trong CE-Loc (`models/clip_refiner.py`, `models/box_policy.py`).
+"""DELTA (docs/EXPERIMENT_DELTA.md): BoxRefiner của tác giả gốc trong CE-Loc (`models/clip_refiner.py`, `models/box_policy.py`) —
+DELTA1 / 1.1 (mục 4–8), DELTA2.x (đổi CLIP-ViT của refiner, mục 9.1), DELTA3 (refiner không U-Net, mục 9.2).
 
 Tham chiếu: bản sao NGUYÊN VĂN `BoxRefiner.forward` / `_sample_tokens` / `_attn_mask` / `RefinerBlock.forward` / `apply_rope_2d` của
 `refs/CE-Loc-update/models/box_refiner.py` (chép vào đây — không import refs), chạy trên CÙNG tham số của `ClipBoxRefiner`. CLIP ViT thay
@@ -17,7 +18,7 @@ import torch.nn.functional as F
 import yaml
 from torchvision.ops import roi_align
 
-from tests.ce_localization.helpers import (CFG_G, FAKE_TEXT_SHA, _fake_load_clip, _fake_text_table, _fake_turn_index,
+from tests.ce_localization.helpers import (CFG_G, FAKE_TEXT_SHA, FAKE_VIT, _fake_load_clip, _fake_text_table, _fake_turn_index,
                                            _gamma2_cfg, _patch_clip, _run_train)
 
 AUTHOR_REFINER = {"enabled": True, "clip_model_name": "openai/clip-vit-base-patch16", "vision_layer": -2, "d_model": 256,
@@ -135,7 +136,7 @@ def _refiner(cfg=None, seed=0, randomize=True, dtype=torch.float64):
     """ClipBoxRefiner nhỏ (CLIP giả); `randomize`: lớp cuối AdaLN + head khác 0 (khởi tạo của tác giả = 0 ⇒ identity, không kiểm gì)."""
     from ce_localization.models.clip_refiner import ClipBoxRefiner
     torch.manual_seed(seed)
-    vis, th = _fake_load_clip("x")
+    vis, th = _fake_load_clip("openai/clip-vit-base-patch16")
     r = ClipBoxRefiner({"d_model": 32, "num_heads": 2, "num_layers": 3, "num_stages": 2, **(cfg or {})}, vis, th)
     if randomize:
         for blocks in r.stages:
@@ -166,10 +167,10 @@ def _grads(m):
     return {n: p.grad.clone() for n, p in m.named_parameters() if p.grad is not None}
 
 
-def _policy(refiner=AUTHOR_REFINER, use_condition=True, seed=0, **kw):
+def _policy(refiner=AUTHOR_REFINER, use_condition=True, seed=0, num_timesteps=20, **kw):
     from ce_localization.models.box_policy import BoxPolicy
     torch.manual_seed(seed)
-    return BoxPolicy(in_channels=4, pretrained_backbone=False, num_timesteps=20, vision="r18_paper", ss_mask=True,
+    return BoxPolicy(in_channels=4, pretrained_backbone=False, num_timesteps=num_timesteps, vision="r18_paper", ss_mask=True,
                      refiner=refiner, use_condition=use_condition, **kw)
 
 
@@ -183,14 +184,12 @@ def _batch(B=2, seed=0):
 
 # ----------------------------------------------------------------------------- port đúng tác giả
 
-@pytest.mark.parametrize("case", ["per_row", "shared", "flow_no_text", "flow_full"])
+@pytest.mark.parametrize("case", ["per_row", "shared", "flow_no_text"])
 def test_refiner_split_equals_author_forward(monkeypatch, case):
     """Đường tách đôi (luồng ngữ cảnh một lần mỗi (ảnh, t)) == `forward` nguyên văn của tác giả: đầu ra VÀ grad mọi tham số (float64,
-    AdaLN + head khác 0, 2 stage, chữ dài khác nhau). `shared`: 3 mẫu / ảnh cùng t (vòng mock / DDPM); flow ảnh -> box: đường full."""
-    flow = {"flow_no_text": {"sample": ["sample", "image"], "image": ["image", "text"], "text": ["text", "image"]},
-            "flow_full": {"sample": ["sample", "image", "text"], "image": ["image", "text", "sample"], "text": ["text"]}}.get(case)
+    AdaLN + head khác 0, 2 stage, chữ dài khác nhau). `shared`: 3 mẫu / ảnh cùng t (vòng mock / DDPM)."""
+    flow = {"flow_no_text": {"sample": ["sample", "image"], "image": ["image", "text"], "text": ["text", "image"]}}.get(case)
     r = _refiner({"attention_flow": flow} if flow else None)
-    assert r.split_ok == (case != "flow_full")
     ctx = _ctx(r)
     if case == "per_row":
         idx, t = None, torch.tensor([3, 17])
@@ -227,7 +226,7 @@ def test_refiner_split_fp32_close_to_author():
 def test_refiner_state_dict_names_match_author():
     """Tên + shape key = state_dict `BoxRefiner` của tác giả trừ CLIP frozen (`vision_backbone.*`, `text_backbone.*`, không lưu)."""
     from ce_localization.models.clip_refiner import ClipBoxRefiner
-    vis, th = _fake_load_clip("x")
+    vis, th = _fake_load_clip("openai/clip-vit-base-patch16")
     r = ClipBoxRefiner(AUTHOR_REFINER, vis, th)
     want = {"image_proj.0.weight", "image_proj.0.bias", "image_proj.1.weight", "image_proj.1.bias", "text_proj.0.weight",
             "text_proj.0.bias", "text_proj.1.weight", "text_proj.1.bias", "density_proj.weight", "density_proj.bias", "type_emb",
@@ -282,11 +281,11 @@ def test_clip_fingerprint_mismatch_refuses_load(monkeypatch):
     a = _policy()
     a.set_text_fingerprint(FAKE_TEXT_SHA)
     sd = a.state_dict()
-    monkeypatch.setattr(cr, "load_clip", lambda name: _fake_load_clip(name, seed=1))
+    monkeypatch.setattr(cr, "load_clip", lambda name, text_name: _fake_load_clip(name, seed=1))
     b = _policy()
     with pytest.raises(RuntimeError, match="vân tay CLIP ViT"):
         b.load_state_dict(sd)
-    monkeypatch.setattr(cr, "load_clip", lambda name: _fake_load_clip(name, seed=0))
+    monkeypatch.setattr(cr, "load_clip", lambda name, text_name: _fake_load_clip(name, seed=0))
     c = _policy()                                                    # hàng text = 0 -> nhận của checkpoint
     c.load_state_dict(sd)
     assert torch.equal(c.clip_sha, a.clip_sha)
@@ -337,7 +336,7 @@ def test_no_condition_freezes_and_bypasses(monkeypatch):
     """`use_condition: false` (DELTA1.1): không dựng refiner / không nạp CLIP; vision + text_proj đóng băng; mọi tham số train có grad;
     U-Net vào [x_t ; x_t]; box KHÔNG phụ thuộc ảnh / text."""
     import ce_localization.models.clip_refiner as cr
-    monkeypatch.setattr(cr, "load_clip", lambda name: (_ for _ in ()).throw(AssertionError("không được nạp CLIP")))
+    monkeypatch.setattr(cr, "load_clip", lambda *a: (_ for _ in ()).throw(AssertionError("không được nạp CLIP")))
     m = _policy(use_condition=False).train()
     assert m.refiner is None and not m.needs_text_tokens and "clip_sha" not in m.state_dict()
     frozen = {n for n, p in m.named_parameters() if not p.requires_grad}
@@ -347,9 +346,8 @@ def test_no_condition_freezes_and_bypasses(monkeypatch):
     assert [n for n, p in m.named_parameters() if p.requires_grad and p.grad is None] == []
     m.eval()
     with torch.no_grad():
-        a = m.sample(x, text, vhw, 3, generator=torch.Generator().manual_seed(1), sampler="mock", mock_steps=10)
-        b = m.sample(torch.rand_like(x), torch.randn_like(text), vhw, 3, generator=torch.Generator().manual_seed(1), sampler="mock",
-                     mock_steps=10)
+        a = m.sample(x, text, vhw, 3, generator=torch.Generator().manual_seed(1), sampler="ddpm")
+        b = m.sample(torch.rand_like(x), torch.randn_like(text), vhw, 3, generator=torch.Generator().manual_seed(1), sampler="ddpm")
     assert torch.equal(a, b)
 
 
@@ -396,9 +394,9 @@ def test_text_tokens_causal_padding_equivalence():
         TextTable({"a": torch.zeros(512)}).tokens(["a"], "cpu")
 
 
-def test_sample_shared_context_equals_expanded_and_mock_steps():
-    """`sample_from_cond` (ngữ cảnh một lần / ảnh) == ngữ cảnh nhân sẵn cho từng mẫu; `mock_steps` = số lần gọi ε_θ."""
-    m = _policy().eval()
+def test_sample_shared_context_equals_expanded():
+    """`sample_from_cond` (ngữ cảnh một lần / ảnh) == ngữ cảnh nhân sẵn cho từng mẫu; vòng mock gọi ε_θ đúng 100 lần."""
+    m = _policy(num_timesteps=100).eval()
     for blk in m.refiner.stages[0]:
         nn.init.normal_(blk.ada[-1].weight, std=0.05)
     nn.init.normal_(m.refiner.heads[0][-1].weight, std=0.05)
@@ -408,12 +406,12 @@ def test_sample_shared_context_equals_expanded_and_mock_steps():
     with torch.no_grad():
         cond = m.condition(x, text, vhw)
         ctx = m.refiner_context(x, tok)
-        a = m.sample_from_cond(cond, 3, torch.Generator().manual_seed(5), "mock", ctx=ctx, mock_steps=7)
-        assert len(calls) == 7
+        a = m.sample_from_cond(cond, 3, torch.Generator().manual_seed(5), "mock", ctx=ctx)
+        assert len(calls) == 100
         ci = torch.arange(2).repeat_interleave(3)
         ctx_e, cond_e = m.refiner.index_context(ctx, ci), cond.repeat_interleave(3, 0)
         from ce_localization.models.box_policy import mock_sample
-        b = mock_sample(lambda xx, t: m.predict_noise(xx, t, cond_e, ctx_e)[0], 6, m.alphas_cumprod, steps=7,
+        b = mock_sample(lambda xx, t: m.predict_noise(xx, t, cond_e, ctx_e)[0], 6, m.alphas_cumprod,
                         generator=torch.Generator().manual_seed(5))
     h.remove()
     assert torch.allclose(a.view(6, 4), b, atol=1e-5)
@@ -447,19 +445,125 @@ def test_mock_sample_steps():
 
 
 def test_refiner_rejects_bad_combos():
-    from ce_localization.models.detector import build_model
+    from ce_localization.models.box_policy import BoxPolicy
     with pytest.raises(ValueError, match="obj_attn"):
         _policy(obj_attn=True)
-    from ce_localization.models.box_policy import BoxPolicy
     with pytest.raises(ValueError, match="4 kênh"):
         BoxPolicy(in_channels=3, pretrained_backbone=False, num_timesteps=20, vision="r18_paper", refiner=AUTHOR_REFINER)
-    with pytest.raises(ValueError, match="canvas"):
-        BoxPolicy(in_channels=4, pretrained_backbone=False, num_timesteps=20, refiner=AUTHOR_REFINER)
-    cfg = yaml.safe_load(open(CFG_G["delta1"]))
-    cfg["data"]["input_style"] = "ours"
-    cfg["model"]["pretrained_backbone"] = False
-    with pytest.raises(ValueError, match="input_style"):
-        build_model(cfg)
+    with pytest.raises(ValueError, match="unet_input"):
+        _policy(refiner={**AUTHOR_REFINER, "unet_input": "replace"})
+    with pytest.raises(ValueError, match="use_condition"):
+        _policy(refiner={**AUTHOR_REFINER, "unet_input": "none"}, use_condition=False)
+    with pytest.raises(ValueError, match="attention_flow"):                    # ảnh nhìn box: không có đường tách đôi
+        _refiner({"attention_flow": {"sample": ["sample", "image", "text"], "image": ["image", "text", "sample"],
+                                     "text": ["text"]}})
+
+
+# ----------------------------------------------------------------------------- DELTA2.x / DELTA3
+
+VITS = {"delta2_1": "openai/clip-vit-base-patch32", "delta2_2": "openai/clip-vit-large-patch14",
+        "delta2_3": "openai/clip-vit-large-patch14-336"}
+B16 = "openai/clip-vit-base-patch16"
+NO_UNET = ("vision", "ss_mask", "pretrained_backbone", "vis_dim", "text_dim", "text_proj_dim", "step_embed_dim", "down_dims",
+           "kernel_size", "n_groups")
+
+
+@pytest.mark.parametrize("kind", list(VITS))
+def test_delta2_vit_grid_and_text_b16(monkeypatch, kind):
+    """DELTA2.x: ViT của refiner theo `clip_model_name` (lưới 7 / 16 / 24, hidden khác), token chữ vẫn từ CLIP text B/16
+    (`text_model_name`) — `load_clip` nhận đúng hai tên; ngữ cảnh ảnh đủ g² token; mọi tham số train nhận grad."""
+    import ce_localization.models.clip_refiner as cr
+    seen = []
+    monkeypatch.setattr(cr, "load_clip", lambda name, text_name: (seen.append((name, text_name)), _fake_load_clip(name))[1])
+    rcfg = yaml.safe_load(open(CFG_G[kind]))["model"]["refiner"]
+    m = _policy(refiner=rcfg).train()
+    size, patch, hid = FAKE_VIT[VITS[kind]]
+    g = size // patch
+    assert seen == [(VITS[kind], B16)] and m.refiner.grid == g and m.refiner.clip_res == size
+    assert m.refiner.image_proj[1].in_features == hid and cr.text_model_name(cr.refiner_config(rcfg)) == B16
+    x, text, vhw, x0, tok = _batch()
+    assert m.refiner_context(x, tok)["image_tokens"].shape == (2, g * g, 256)
+    m(x, text, vhw, x0, k=2, text_tokens=tok).backward()
+    assert [n for n, p in m.named_parameters() if p.requires_grad and p.grad is None] == []
+
+
+def test_text_model_name_defaults_to_clip_model_name():
+    """Config / checkpoint DELTA1 (không có `text_model_name`): token chữ từ cùng tên `clip_model_name` như tác giả."""
+    from ce_localization.models.clip_refiner import refiner_config, text_model_name
+    assert text_model_name(refiner_config(AUTHOR_REFINER)) == B16
+    assert refiner_config({"enabled": False}) is None and refiner_config(None) is None
+
+
+def _delta3(seed=0, num_timesteps=20):
+    rcfg = yaml.safe_load(open(CFG_G["delta3"]))["model"]["refiner"]
+    from ce_localization.models.box_policy import BoxPolicy
+    torch.manual_seed(seed)
+    m = BoxPolicy(in_channels=4, num_timesteps=num_timesteps, refiner=rcfg)
+    for blk in m.refiner.stages[0]:                                  # khác identity
+        nn.init.normal_(blk.ada[-1].weight, std=0.05)
+    nn.init.normal_(m.refiner.heads[0][-1].weight, std=0.05)
+    return m
+
+
+def test_delta3_refiner_only_structure_and_loss():
+    """DELTA3: chỉ refiner (không U-Net / ResNet / FiLM, cond [B, 0]); loss = 1,0 · MSE(refined, x0), không có ε; mọi tham số train
+    nhận grad (DDP không find_unused)."""
+    m = _delta3().train()
+    assert m.noise_net is None and m.cond_dim == 0 and not hasattr(m, "vision") and not hasattr(m, "text_proj")
+    assert {n.split(".")[0] for n, _ in m.named_parameters()} == {"refiner"}
+    x, text, vhw, x0, tok = _batch()
+    assert m.condition(x, text, vhw).shape == (2, 0)
+    loss = m(x, text, vhw, x0, k=2, generator=torch.Generator().manual_seed(4), text_tokens=tok)
+    st = m.pop_stats()
+    assert set(st) == {"loss_aux", "delta_abs", "aux_ratio"} and torch.allclose(loss, st["loss_aux"], atol=1e-7)
+    loss.backward()
+    assert [n for n, p in m.named_parameters() if p.requires_grad and p.grad is None] == []
+
+
+def test_delta3_eps_from_refined_and_mock_lands_on_refined():
+    """ε̂ = (x_t − √ᾱ_t·refined) / √(1 − ᾱ_t) với t theo hàng; vòng mock: bước cuối (t = 0) rơi đúng √ᾱ₀·refined; bỏ refiner ⇒ lỗi rõ."""
+    m = _delta3(num_timesteps=100).eval()
+    x_img, text, vhw, _, tok = _batch()
+    with torch.no_grad():
+        cond = m.condition(x_img, text, vhw)
+        ctx = m.refiner_context(x_img, tok)
+        x, t = torch.randn(4, 4), torch.tensor([0, 7, 50, 99])
+        ci = torch.tensor([0, 0, 1, 1])
+        eps, refined = m.predict_noise(x, t, cond[ci], ctx, ci)
+        ab = m.alphas_cumprod[t].unsqueeze(-1)
+        assert torch.allclose(eps, (x - ab.sqrt() * refined) / (1 - ab).sqrt(), rtol=1e-4, atol=1e-3)   # t = 0: chia 0,01
+        z = torch.randn(2, 4)
+        e0, r0 = m.predict_noise(z, torch.zeros(2, dtype=torch.long), cond, ctx)
+        assert torch.allclose(z - e0 / 100, m.alphas_cumprod[0].sqrt() * r0, atol=1e-4)
+        with pytest.raises(ValueError, match="none"):
+            m.sample(x_img, text, vhw, 2, sampler="mock", text_tokens=tok, use_refiner=False)
+
+
+def test_delta2_delta3_configs():
+    """delta2_x = delta1 chỉ khác `refiner.clip_model_name` + thêm `text_model_name` B/16; delta3 = delta1 bỏ khoá ResNet / FiLM / U-Net,
+    `unet_input: none`, `aux_loss_weight: 1.0` — data / diffusion / training / eval y hệt."""
+    load = lambda k: yaml.safe_load(open(CFG_G[k]))  # noqa: E731
+    d1 = load("delta1")
+    for kind, vit in VITS.items():
+        d = load(kind)
+        r = d["model"]["refiner"]
+        assert r.pop("clip_model_name") == vit and r.pop("text_model_name") == B16
+        ref = load("delta1")
+        ref["model"]["refiner"].pop("clip_model_name")
+        for x in (d, ref):
+            x.pop("experiment"), x.pop("description")
+        assert d == ref
+    d3 = load("delta3")
+    r = d3["model"].pop("refiner")
+    assert r.pop("unet_input") == "none" and r.pop("aux_loss_weight") == 1.0
+    r1 = d1["model"].pop("refiner")
+    r1.pop("unet_input"), r1.pop("aux_loss_weight")
+    assert r == r1
+    for k in NO_UNET:
+        d1["model"].pop(k)
+    for x in (d1, d3):
+        x.pop("experiment"), x.pop("description")
+    assert d1 == d3
 
 
 # ----------------------------------------------------------------------------- config, eval, train trọn luồng
@@ -479,15 +583,13 @@ def test_delta_configs_only_add_refiner():
 def test_eval_add_variants_naming():
     from ce_localization.eval import add_variants
     keys = lambda v: [s for s, _, _ in v]  # noqa: E731
-    assert keys(add_variants(["mock"])) == [""]
-    v = add_variants(["mock"], [100, 200, 500, 1000], refiner=True)
-    assert keys(v) == ["", "_mock200", "_mock500", "_mock1000", "_norefine"]
-    assert [x["sample_kw"] for _, _, x in v] == [{"mock_steps": n} for n in (100, 200, 500, 1000)] + \
-        [{"mock_steps": 100, "use_refiner": False}]
-    assert keys(add_variants(["mock", "ddpm"], [100, 1000])) == ["_mock", "_mock1000", "_ddpm"]
-    assert keys(add_variants(["ddpm"])) == [""]
-    o = add_variants(["mock"], [100, 500], obj_attn=True)
-    assert keys(o) == ["", "_mock500", "_noobj", "_mock500_noobj"] and o[3][2]["sample_kw"] == {"mock_steps": 500, "use_objects": False}
+    assert keys(add_variants(["mock"])) == [""] and keys(add_variants(["ddpm"])) == [""]
+    v = add_variants(["mock"], norefine=True)
+    assert keys(v) == ["", "_norefine"] and v[1][2] == {"sampler": "mock", "sample_kw": {"use_refiner": False}}
+    assert keys(add_variants(["mock", "ddpm"], norefine=True)) == ["_mock", "_ddpm", "_mock_norefine"]
+    o = add_variants(["mock", "ddpm"], obj_attn=True)
+    assert keys(o) == ["_mock", "_ddpm", "_mock_noobj", "_ddpm_noobj"] and o[3][2] == {"sampler": "ddpm",
+                                                                                         "sample_kw": {"use_objects": False}}
 
 
 def test_grad_groups_refiner():
@@ -510,14 +612,16 @@ def _eval(monkeypatch, ck, out, extra=(), clip_seed=0):
         return json.load(f)
 
 
-def test_full_flow_delta1_train_resume_eval(tmp_path, monkeypatch):
-    """DELTA1 thu nhỏ (refiner kích thước thật, CLIP giả): train 2 + --resume tới 4 == train liền 4 (mọi tensor kể cả `clip_sha`);
-    history có thống kê refiner; eval mock 5 / 10 bước + `_norefine` cho cả 2 loại ảnh; CLIP khác bản lúc train ⇒ eval từ chối."""
+@pytest.mark.parametrize("kind", ["delta1", "delta2_3", "delta3"])
+def test_full_flow_delta_train_resume_eval(tmp_path, monkeypatch, kind):
+    """DELTA1 / 2.3 / 3 thu nhỏ (refiner kích thước thật, CLIP giả, T = 100 cho vòng mock): train 2 + --resume tới 4 == train liền 4
+    (mọi tensor kể cả `clip_sha`); history có thống kê refiner; eval mock 100 cho cả 2 loại ảnh (+ `_norefine` khi có U-Net);
+    CLIP khác bản lúc train ⇒ eval từ chối."""
     base = str(tmp_path / "d")
     os.makedirs(base)
     _fake_turn_index(base)
-    c_path, cfg = _gamma2_cfg(tmp_path, base, "delta1")
-    assert cfg["model"]["refiner"]["d_model"] == 256
+    c_path, cfg = _gamma2_cfg(tmp_path, base, kind)
+    assert cfg["model"]["refiner"]["d_model"] == 256 and cfg["diffusion"]["num_timesteps"] == 100
     a, b = str(tmp_path / "a"), str(tmp_path / "b")
     _run_train(monkeypatch, ["--config", c_path, "--save-dir", a, "--max-iter", "2"])
     _run_train(monkeypatch, ["--config", c_path, "--save-dir", a, "--resume"])
@@ -527,40 +631,21 @@ def test_full_flow_delta1_train_resume_eval(tmp_path, monkeypatch):
     assert ka["iter"] == kb["iter"] == 4 and set(ka["model"]) == set(kb["model"])
     assert "clip_sha" in kb["model"] and not any("vision_backbone" in k for k in kb["model"])
     assert bytes(kb["model"]["clip_sha"][1].tolist()) == FAKE_TEXT_SHA
+    assert (kind == "delta3") == (not any(k.startswith(("noise_net.", "vision.")) for k in kb["model"]))
     for k in kb["model"]:
         assert torch.allclose(ka["model"][k].float(), kb["model"][k].float(), atol=1e-5), k
     assert float(kb["model"]["refiner.heads.0.3.weight"].abs().sum()) > 0       # head rời 0 sau train
     logs = [h for h in kb["history"] if "loss" in h]
-    assert all({"loss_eps", "loss_aux", "delta_abs", "aux_ratio", "refiner_gates"} <= set(h) for h in logs)
+    want_log = {"loss_aux", "delta_abs", "aux_ratio", "refiner_gates"} | ({"loss_eps"} if kind != "delta3" else set())
+    assert all(want_log <= set(h) for h in logs) and (kind != "delta3" or not any("loss_eps" in h for h in logs))
     res = _eval(monkeypatch, os.path.join(b, "best.pth"), str(tmp_path / "res.json"),
-                ["--add-samplers", "mock", "--mock-steps", "5", "10", "--dump-boxes", str(tmp_path / "boxes.json")])
-    want = {i + s for i in ("inpainted", "original") for s in ("_mock5", "_mock10")}    # không mock 100 => không khoá cũ / _norefine
-    assert set(res["results"]) == want and res["mock_steps"] == [5, 10]
-    assert all(r["n"] > 0 and r["refine_delta_by_t"] for r in res["results"].values())
-    with pytest.raises(SystemExit):                                  # mock 100 bước > T = 20 của config thu nhỏ: dừng ngay
-        _eval(monkeypatch, os.path.join(b, "best.pth"), str(tmp_path / "x.json"), ["--add-samplers", "mock"])
+                ["--add-samplers", "mock", "--dump-boxes", str(tmp_path / "boxes.json")])
+    want = {"inpainted", "original"} | (set() if kind == "delta3" else {"inpainted_norefine", "original_norefine"})
+    assert set(res["results"]) == want
+    for key, r in res["results"].items():
+        assert r["n"] > 0 and bool(r["refine_delta_by_t"]) == ("norefine" not in key)
     with pytest.raises(RuntimeError, match="vân tay"):
         _eval(monkeypatch, os.path.join(b, "best.pth"), str(tmp_path / "y.json"), ["--add-samplers", "ddpm"], clip_seed=1)
-
-
-def test_eval_delta1_norefine_variant(tmp_path, monkeypatch):
-    """`_norefine` chỉ có ở mock 100 bước: checkpoint DELTA1 dựng với T = 100 để chạy được mock 100."""
-    from ce_localization.models.detector import build_model
-    base = str(tmp_path / "d")
-    os.makedirs(base)
-    _fake_turn_index(base)
-    _, cfg = _gamma2_cfg(tmp_path, base, "delta1")
-    cfg["diffusion"]["num_timesteps"] = 100
-    _patch_clip(monkeypatch)
-    torch.manual_seed(0)
-    model = build_model(cfg, pretrained_backbone=False)
-    model.set_text_fingerprint(FAKE_TEXT_SHA)
-    ck = str(tmp_path / "ck.pth")
-    torch.save({"model": model.state_dict(), "config": cfg, "iter": 0}, ck)
-    res = _eval(monkeypatch, ck, str(tmp_path / "res.json"), ["--add-samplers", "mock", "--mock-steps", "100", "20",
-                                                              "--image", "inpainted", "--limit", "2"])
-    assert set(res["results"]) == {"inpainted", "inpainted_mock20", "inpainted_norefine"}
-    assert res["results"]["inpainted_norefine"]["refine_delta_by_t"] is None
 
 
 def test_full_flow_delta1_1_train_eval(tmp_path, monkeypatch):
@@ -572,7 +657,7 @@ def test_full_flow_delta1_1_train_eval(tmp_path, monkeypatch):
     c_path, cfg = _gamma2_cfg(tmp_path, base, "delta1_1")
     a = str(tmp_path / "a")
     _run_train(monkeypatch, ["--config", c_path, "--save-dir", a])
-    monkeypatch.setattr(cr, "load_clip", lambda name: (_ for _ in ()).throw(AssertionError("không được nạp CLIP")))
+    monkeypatch.setattr(cr, "load_clip", lambda *x: (_ for _ in ()).throw(AssertionError("không được nạp CLIP")))
     k = torch.load(os.path.join(a, "last.pth"), weights_only=False)
     assert k["iter"] == 4 and "clip_sha" not in k["model"] and not any(n.startswith("refiner.") for n in k["model"])
     from ce_localization.models.detector import build_model
@@ -587,24 +672,25 @@ def test_full_flow_delta1_1_train_eval(tmp_path, monkeypatch):
     out, dump = str(tmp_path / "res.json"), str(tmp_path / "boxes.json")
     monkeypatch.setattr(sys, "argv", ["eval.py", "--ckpt", os.path.join(a, "best.pth"), "--split", "test", "--n-samples", "3",
                                       "--num-workers", "0", "--out", out, "--device", "cpu", "--add-samplers", "mock",
-                                      "--mock-steps", "10", "--dump-boxes", dump])
+                                      "--dump-boxes", dump])
     ea.main()
     with open(dump) as f:
         d = json.load(f)
-    assert set(d["results"]) == {"inpainted_mock10", "original_mock10"}
-    for x, y in zip(d["results"]["inpainted_mock10"], d["results"]["original_mock10"]):
+    assert set(d["results"]) == {"inpainted", "original"}
+    for x, y in zip(d["results"]["inpainted"], d["results"]["original"]):
         assert x["image_id"] == y["image_id"] and x["boxes"] == y["boxes"]
 
 
-def test_eval_cocount_delta1(tmp_path, monkeypatch):
-    """CE-CoCount + --obj-size + --dump-boxes chạy với checkpoint DELTA1 (density trống, token chữ của lớp CoCount)."""
+@pytest.mark.parametrize("kind", ["delta1", "delta3"])
+def test_eval_cocount_delta(tmp_path, monkeypatch, kind):
+    """CE-CoCount + --obj-size + --dump-boxes chạy với checkpoint DELTA (density trống, token chữ của lớp CoCount)."""
     from ce_localization.models.detector import build_model
     from tests.ce_localization.test_cocount import _fake_cocount
     base = str(tmp_path / "d")
     os.makedirs(base)
     _fake_turn_index(base)
     root = _fake_cocount(str(tmp_path / "cc"))
-    _, cfg = _gamma2_cfg(tmp_path, base, "delta1")
+    _, cfg = _gamma2_cfg(tmp_path, base, kind)
     _patch_clip(monkeypatch)
     torch.manual_seed(0)
     model = build_model(cfg, pretrained_backbone=False)
@@ -612,9 +698,10 @@ def test_eval_cocount_delta1(tmp_path, monkeypatch):
     ck = str(tmp_path / "ck.pth")
     torch.save({"model": model.state_dict(), "config": cfg, "iter": 0}, ck)
     res = _eval(monkeypatch, ck, str(tmp_path / "res.json"),
-                ["--dataset", "cocount", "--cocount-root", root, "--add-samplers", "mock", "--mock-steps", "10",
-                 "--cocount-obj-filter", "3", "--obj-size", "mean", "--dump-boxes", str(tmp_path / "b.json")])
-    assert set(res["results"]) == {"cocount_mock10", "cocount_mock10_objsize"} and res["results"]["cocount_mock10"]["n"] == 4
+                ["--dataset", "cocount", "--cocount-root", root, "--add-samplers", "mock", "--cocount-obj-filter", "3",
+                 "--obj-size", "mean", "--dump-boxes", str(tmp_path / "b.json")])
+    want = {"cocount", "cocount_objsize"} | ({"cocount_norefine", "cocount_norefine_objsize"} if kind == "delta1" else set())
+    assert set(res["results"]) == want and res["results"]["cocount"]["n"] == 4
 
 
 def test_train_max_iter_without_steps_and_batch_override(tmp_path, monkeypatch):
@@ -639,10 +726,10 @@ def _ddp_worker_delta(rank, world, port, argv):
     _ddp_worker_strict(rank, world, port, argv, None)
 
 
-@pytest.mark.parametrize("kind", ["delta1", "delta1_1"])
+@pytest.mark.parametrize("kind", ["delta1", "delta1_1", "delta2_3", "delta3"])
 def test_ddp_delta_no_find_unused(tmp_path, kind):
-    """DELTA1 / 1.1 trên 2 tiến trình gloo, DDP KHÔNG find_unused + gradient_as_bucket_view: tham số nào thiếu grad hay lệch stride
-    thì lỗi ngay; loss hữu hạn, đủ iter."""
+    """DELTA trên 2 tiến trình gloo, DDP KHÔNG find_unused + gradient_as_bucket_view: tham số nào thiếu grad hay lệch stride thì lỗi
+    ngay; loss hữu hạn, đủ iter."""
     import socket
     import torch.multiprocessing as tmp
     from ce_localization.train import ddp_find_unused
@@ -661,34 +748,36 @@ def test_ddp_delta_no_find_unused(tmp_path, kind):
     assert ck["iter"] == 3 and all(np.isfinite(h["loss"]) and h["skipped"] == 0 for h in ck["history"] if "loss" in h)
 
 
-@pytest.mark.skipif(os.environ.get("CE_HF_TESTS") != "1", reason="cửa G1-HF: CLIP B/16 thật từ HF — chạy trên server với CE_HF_TESTS=1")
-def test_hf_clip_b16_real(monkeypatch):
-    """G1-HF (server): CLIP ViT-B/16 thật — lưới 14, hidden 768; `encode_context` dùng đúng `hidden_states[-2][:, 1:]`; bảng token
-    chữ = tokenize theo batch của tác giả; in vân tay (ghi vào docs)."""
+@pytest.mark.skipif(os.environ.get("CE_HF_TESTS") != "1", reason="cửa G1-HF: CLIP thật từ HF — chạy trên server / Kaggle với CE_HF_TESTS=1")
+def test_hf_clip_real(monkeypatch):
+    """G1-HF: CLIP ViT thật của run (`CE_HF_CLIP`, mặc định B/16) — lưới = ảnh / patch, `encode_context` dùng đúng
+    `hidden_states[-2][:, 1:]` ở độ phân giải của ViT; token chữ CLIP text B/16 = tokenize theo batch của tác giả; in vân tay."""
     import importlib
     import ce_localization.models.clip_refiner as cr
     importlib.reload(cr)                                             # bỏ CLIP giả của fixture
     from transformers import CLIPTextModel, CLIPTokenizer
     from ce_localization.models.text import encode_class_tokens
-    name = AUTHOR_REFINER["clip_model_name"]
-    vis, th = cr.load_clip(name)
-    assert th == 512 and vis.config.hidden_size == 768 and vis.config.image_size // vis.config.patch_size == 14
-    r = cr.ClipBoxRefiner(AUTHOR_REFINER, vis, th).eval()
+    name, text_name = os.environ.get("CE_HF_CLIP", B16), B16
+    vis, th = cr.load_clip(name, text_name)
+    res, g = vis.config.image_size, vis.config.image_size // vis.config.patch_size
+    assert th == 512
+    r = cr.ClipBoxRefiner({**AUTHOR_REFINER, "clip_model_name": name, "text_model_name": text_name}, vis, th).eval()
+    assert r.grid == g and r.clip_res == res
     rgb = torch.rand(2, 3, 512, 512)
     with torch.no_grad():
         ctx = r.encode_context(rgb, torch.zeros(2, 1, 512, 512), torch.zeros(2, 3, 512), torch.ones(2, 3, dtype=torch.bool))
-        px = F.interpolate(rgb, size=(224, 224), mode="bicubic", align_corners=False, antialias=True)
+        px = F.interpolate(rgb, size=(res, res), mode="bicubic", align_corners=False, antialias=True)
         px = (px.clamp(0, 1) - r.clip_mean) / r.clip_std
         hid = vis(pixel_values=px, output_hidden_states=True).hidden_states[-2][:, 1:]
-        assert ctx["image_tokens"].shape == (2, 196, 256)
-        assert torch.allclose(ctx["image_tokens"], r.image_proj(hid) + r.density_proj(torch.zeros(2, 196, 1)), atol=1e-5)
+        assert ctx["image_tokens"].shape == (2, g * g, 256)
+        assert torch.allclose(ctx["image_tokens"], r.image_proj(hid) + r.density_proj(torch.zeros(2, g * g, 1)), atol=1e-5)
     names = ["apple", "hot air balloon", "candy piece", "sea shell"]
-    table, sha = encode_class_tokens(names, name)
-    tok, model = CLIPTokenizer.from_pretrained(name), CLIPTextModel.from_pretrained(name).eval()
+    table, sha = encode_class_tokens(names, text_name)
+    tok, model = CLIPTokenizer.from_pretrained(text_name), CLIPTextModel.from_pretrained(text_name).eval()
     inp = tok(names, padding=True, truncation=True, return_tensors="pt")
     with torch.no_grad():
         ref = model(**inp).last_hidden_state
     for i, n in enumerate(names):
         m = inp["attention_mask"][i].bool()
         assert torch.allclose(table[n], ref[i][m], atol=1e-5), n
-    print(f"\n[G1-HF] vân tay CLIP ViT {cr.weights_sha256(vis).hex()} | CLIP text {sha.hex()}")
+    print(f"\n[G1-HF] {name}: lưới {g}×{g}, ảnh {res} | vân tay CLIP ViT {cr.weights_sha256(vis).hex()} | CLIP text B/16 {sha.hex()}")

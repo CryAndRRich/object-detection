@@ -8,7 +8,8 @@ import pytest
 import torch
 
 from ce_localization.engine import criterion as C
-from ce_localization.engine.diffusion import cosine_alphas_cumprod, ddim_sample, prepare_train_boxes
+from ce_localization.engine.diffusion import ddim_sample, prepare_train_boxes
+from ce_localization.utils.diffusion_math import cosine_alphas_cumprod
 from ce_localization.engine.evaluate import point_metrics
 from ce_localization.engine.train_utils import epoch_batches, warmup_multistep
 from ce_localization.models.head import apply_deltas

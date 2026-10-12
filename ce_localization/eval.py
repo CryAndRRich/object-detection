@@ -14,11 +14,12 @@ GAMMA2 (`model.arch: propose_refine`): CE-Loc sinh `--n-samples` box MỘT lần
 GAMMA3 (`model.geo`): thêm `<ảnh>_t<t*>_nogeo`, `<ảnh>_noise_nogeo` = cùng biến thể nhưng TẮT nhánh geo.
 GAMMA3.1 (`model.relation`): thêm `_nogeo` (bỏ attention tới vật) và `_norel` (giữ attention, bỏ Rel hình học).
 GAMMA4 (`model.obj_attn`, CE-Loc + cross-attn tới box vật): thêm `<ảnh>_noobj` = cùng checkpoint, tắt cross-attn tới box vật.
-`--mock-steps 100 200 500 1000` (mô hình U-Net 1D: GAMMA0 / pha 1 / GAMMA4 / DELTA / bài): vòng mock N bước (t = N − 1 .. 0); N = 100 giữ khoá
-cũ (`inpainted`, `original`, `cocount`), N khác thêm hậu tố `_mock{N}` (`add_variants`). Cùng `--seed` + `--batch-size` ⇒ x_T ban đầu
-trùng nhau từng mẫu giữa các checkpoint (so cặp).
-DELTA (`model.refiner`): thêm `<ảnh>_norefine` (mock 100, bỏ refiner: refined = x_t — ngoài phân bố train) và TB |Δ| của refiner theo
-khoảng t (`refine_delta_by_t`); token chữ CLIP B/16 tính lại từ HF phải khớp vân tay trong checkpoint.
+GAMMA4.0.x (`model.obj_k`): chỉ `obj_k` vật vào cross-attn (`obj_select` nearest | random); JSON ghi `obj_k` / `obj_select`.
+`--obj-k K [--obj-select S]` đặt lại hai khoá đó trên checkpoint `obj_attn` bất kỳ (mốc eval-only: GAMMA4 train mọi vật, eval 3 vật —
+ngoài phân bố train); tên khoá kết quả không đổi ⇒ phân biệt bằng `--out`.
+Cùng `--seed` + `--batch-size` ⇒ x_T ban đầu trùng nhau từng mẫu giữa các checkpoint (so cặp).
+DELTA (`model.refiner`): thêm `<ảnh>_norefine` (mock, bỏ refiner: refined = x_t — ngoài phân bố train; không có ở DELTA3 vì không có
+U-Net) và TB |Δ| của refiner theo khoảng t (`refine_delta_by_t`); token chữ CLIP text tính lại từ HF phải khớp vân tay trong checkpoint.
 `--dataset cocount` (CE-CoCount, mục 18): cùng mọi checkpoint add, khoá `cocount<hậu tố>`; lỗ = 10 chỗ trống GT (chỉ số `_any`, không
 `_latest`), density trống, `on_object` trên box cả hai lớp, C-NLL trên box cùng lớp; `prior` = lỗ train CE-130 như cũ.
 `--dump-boxes F.json` (user study, docs/EXPERIMENT_GAMMA.md mục 17): ghi thêm box THÔ của từng mẫu mọi khoá kết quả
@@ -71,7 +72,7 @@ from ce_localization.engine.add_eval import (SIZE_STATS, add_metrics, predict_ad
                                              prior_unit_boxes, resize_to_objects)
 from ce_localization.engine.evaluate import attention_diagnostics, predict, score  # noqa: E402
 from ce_localization.models.backbone import density_ratio_of  # noqa: E402
-from ce_localization.models.box_policy import BoxPolicy  # noqa: E402
+from ce_localization.models.box_policy import OBJ_SELECTS, BoxPolicy  # noqa: E402
 from ce_localization.models.detector import build_model  # noqa: E402
 from ce_localization.utils.log import fmt_time  # noqa: E402
 import ce_localization.train as train_mod  # noqa: E402
@@ -124,28 +125,21 @@ def print_add(tag, res, prior, K):
               f"best_iou_latest {d['best_latest']:.4f}")
 
 
-def add_variants(add_samplers, mock_steps=(100,), obj_attn=False, refiner=False):
-    """Biến thể suy luận của mô hình U-Net 1D -> list (hậu tố khoá, mô tả, kw của `predict_add`). Một sampler: mock 100 bước và ddpm =
-    không hậu tố (khoá cũ), mock N ≠ 100 = `_mock{N}`; nhiều sampler: `_mock` (100) / `_mock{N}` / `_ddpm`. `obj_attn` (GAMMA4): mỗi
-    biến thể thêm `_noobj`; `refiner` (DELTA): biến thể mock 100 thêm `_norefine`. `sample_kw` của biến thể con GỘP với gốc."""
+def add_variants(add_samplers, obj_attn=False, norefine=False):
+    """Biến thể suy luận của mô hình U-Net 1D -> list (hậu tố khoá, mô tả, kw của `predict_add`). Một sampler: không hậu tố (khoá cũ);
+    nhiều sampler: `_mock` (vòng 100 bước của bài) / `_ddpm`. `obj_attn` (GAMMA4): mỗi biến thể thêm `_noobj`; `norefine` (DELTA có
+    U-Net): biến thể mock thêm `_norefine`. `sample_kw` của biến thể con GỘP với gốc."""
     one = len(add_samplers) == 1
-    base = []
-    for sm in add_samplers:
-        if sm == "mock":
-            for n in mock_steps:
-                sfx = ("" if one else "_mock") if n == 100 else f"_mock{n}"
-                base.append((sfx, f"mock {n} bước" + (" (vòng của bài)" if n == 100 else ""),
-                             {"sampler": "mock", "sample_kw": {"mock_steps": n}}))
-        else:
-            base.append(("" if one else "_ddpm", "DDPM 1000 bước", {"sampler": "ddpm", "sample_kw": {}}))
+    base = [("" if one else "_mock", "mock 100 bước (vòng của bài)", {"sampler": "mock", "sample_kw": {}}) if sm == "mock" else
+            ("" if one else "_ddpm", "DDPM 1000 bước", {"sampler": "ddpm", "sample_kw": {}}) for sm in add_samplers]
     out = list(base)
     if obj_attn:
         out += [(s_ + "_noobj", d_ + ", TẮT box vật", {**v_, "sample_kw": {**v_["sample_kw"], "use_objects": False}})
                 for s_, d_, v_ in base]
-    if refiner:
+    if norefine:
         out += [(s_ + "_norefine", d_ + ", BỎ refiner (refined = x_t)",
                  {**v_, "sample_kw": {**v_["sample_kw"], "use_refiner": False}})
-                for s_, d_, v_ in base if v_["sample_kw"].get("mock_steps") == 100]
+                for s_, d_, v_ in base if v_["sampler"] == "mock"]
     return out
 
 
@@ -175,7 +169,6 @@ def main_add(a, cfg, ck, dev, t0):
     if paper:                                         # CE-Loc gốc của bài: ResNet18, đầu vào kiểu bài, box chia canvas
         model, clip, info = BoxPolicy.load_celoc_paper(ck)
         four = info["in_channels"] == 4
-        d["input_style"] = "paper"
         it, dwr = f"epoch {info['epoch']}", None
         print(f"[eval] checkpoint CE-Loc gốc của bài: {info}", flush=True)
     else:
@@ -183,6 +176,13 @@ def main_add(a, cfg, ck, dev, t0):
         model = build_model(cfg, pretrained_backbone=False)
         model.load_state_dict(ck["model"])
         it, dwr = ck.get("iter"), density_ratio_of(model)
+    if a.obj_k is not None or a.obj_select is not None:     # GAMMA4.0.x: số / cách chọn vật vào cross-attn, đặt lại lúc eval
+        if not (isinstance(model, BoxPolicy) and model.obj_attn):
+            sys.exit("--obj-k / --obj-select chỉ dùng cho CE-Loc có obj_attn (GAMMA4 / 4.0.x)")
+        model.obj_k = a.obj_k if a.obj_k is not None else model.obj_k
+        model.obj_select = a.obj_select or model.obj_select
+        if model.obj_k is None:
+            sys.exit("--obj-select cần --obj-k (checkpoint không có obj_k)")
     model = model.to(dev).eval()
     # model train AMP -> eval cùng autocast fp16; checkpoint của bài (fp32) luôn fp32 dù --config có training.amp
     amp = bool(cfg.get("training", {}).get("amp")) and dev.type == "cuda" and not paper
@@ -190,11 +190,11 @@ def main_add(a, cfg, ck, dev, t0):
     prior_unit = prior_unit_boxes(index, "train", src)
     if cfg["model"].get("arch") == "box_refiner" and not paper:
         variants = [(f"_steps{s}", f"DDIM {s} bước", {"steps": s}) for s in a.steps]
-    else:                                             # U-Net 1D (GAMMA0 / pha 1 / GAMMA4 / DELTA / bài): sampler × số bước mock
-        if "mock" in a.add_samplers and isinstance(model, BoxPolicy) and max(a.mock_steps) > model.num_timesteps:
-            sys.exit(f"--mock-steps {max(a.mock_steps)} > T = {model.num_timesteps} của checkpoint")
-        variants = add_variants(a.add_samplers, a.mock_steps, obj_attn=bool(cfg["model"].get("obj_attn")) and not paper,
-                                refiner=getattr(model, "refiner", None) is not None)
+    else:                                             # U-Net 1D (GAMMA0 / pha 1 / GAMMA4 / DELTA / bài): mock 100 bước và / hoặc DDPM
+        if "mock" in a.add_samplers and isinstance(model, BoxPolicy) and model.num_timesteps < 100:
+            sys.exit(f"vòng mock 100 bước > T = {model.num_timesteps} của checkpoint")
+        variants = add_variants(a.add_samplers, obj_attn=bool(cfg["model"].get("obj_attn")) and not paper,
+                                norefine=getattr(model, "refiner", None) is not None and model.noise_net is not None)
     refine_vars = []
     if cfg["model"].get("arch") == "propose_refine" and not paper:
         for v in a.refine_t:
@@ -210,21 +210,22 @@ def main_add(a, cfg, ck, dev, t0):
             refine_vars += [(s_ + "_norel", d_ + ", bỏ Rel", {**v_, "rel_bias": False}) for s_, d_, v_ in base]
     out = {"ckpt": a.ckpt, "iter": it, "split": a.split, "dataset": a.dataset, "n_samples": K, "density": {}, "results": {},
            "prior": {}, "density_weight_ratio": dwr, "add_samplers": a.add_samplers, "proposer_sampler": a.proposer_sampler,
-           "mock_steps": a.mock_steps, "amp": amp}
-    dump = {"ckpt": a.ckpt, "iter": it, "split": a.split, "n_samples": K, "seed": a.seed, "results": {}} if a.dump_boxes else None
+           "amp": amp}
+    if getattr(model, "obj_k", None) is not None:
+        out.update(obj_k=model.obj_k, obj_select=model.obj_select)
+    dump ={"ckpt": a.ckpt, "iter": it, "split": a.split, "n_samples": K, "seed": a.seed, "results": {}} if a.dump_boxes else None
     text_table = None
     cocount = a.dataset == "cocount"
     for image in (["cocount"] if cocount else a.image):
         if cocount:                                   # CE-CoCount (mục 18): ảnh gốc + 10 chỗ trống GT, KHÔNG density map -> trống
             dens = "empty" if four else None
-            ds = CoCountAddDataset(a.cocount_root, d["image_size"], style=d.get("input_style", "ours"), density=dens,
-                                   max_obj_ratio=a.cocount_obj_filter)
+            ds = CoCountAddDataset(a.cocount_root, d["image_size"], density=dens, max_obj_ratio=a.cocount_obj_filter)
             out["cocount_obj_filter"] = a.cocount_obj_filter
         else:
             dens = (a.add_density or ("sample" if image == "inpainted" else "full")) if four else None
             dindex = DensityIndex(d["density_index"], d["density_root"]) if dens == "full" else None
             ds = CE130AddDataset(index, d["root"], d["samples_root"], a.split, d["image_size"], density=dens,
-                                 density_index=dindex, image=image, style=d.get("input_style", "ours"), split_source=src)
+                                 density_index=dindex, image=image, split_source=src)
         if a.limit:
             ds.keys = ds.keys[: a.limit]
         if text_table is None:
@@ -317,11 +318,9 @@ def main():
     ap.add_argument("--density-index", default=None, help="ghi đè data.density_index")
     ap.add_argument("--num-proposals", type=int, default=None)
     ap.add_argument("--top-k", type=int, default=None)
-    ap.add_argument("--nms", action="store_true")
-    ap.add_argument("--nms-thr", type=float, default=0.5)
+    ap.add_argument("--nms", action="store_true", help="NMS IoU 0,5 (giao thức chung)")
     ap.add_argument("--oracle-score", action="store_true")
     ap.add_argument("--steps", type=int, nargs="+", default=[1], help="số bước DDIM (detect; add: chỉ GAMMA1 box_refiner)")
-    ap.add_argument("--no-renewal", action="store_true", help="tắt box renewal khi nhiều bước")
     ap.add_argument("--attn-diag", type=int, default=0, help="số batch cho chẩn đoán attention; 0 = tắt")
     ap.add_argument("--batch-size", type=int, default=None,
                     help="detect: chỉ cho 1 bước (nhiều bước luôn batch 1), mặc định 2 (@1024 batch 8 OOM trên GPU "
@@ -339,8 +338,6 @@ def main():
     ap.add_argument("--refine-steps", type=int, default=1, help="GAMMA2: số bước DDIM của refine")
     ap.add_argument("--proposer-sampler", default="mock", choices=["ddpm", "mock"],
                     help="GAMMA2: sampler của CE-Loc — mặc định mock 100 bước như bài")
-    ap.add_argument("--mock-steps", type=int, nargs="+", default=[100],
-                    help="U-Net 1D: số bước vòng mock (mỗi số một lượt; 100 = khoá cũ, khác = hậu tố _mock{N}) — DELTA: 100 200 500 1000")
     ap.add_argument("--add-samplers", nargs="+", default=["mock"], choices=["ddpm", "mock"],
                     help="GAMMA0 / GAMMA2 pha 1 / checkpoint của bài (U-Net 1D): mock (mặc định — vòng 100 bước của bài) và / hoặc "
                          "ddpm (1000 bước đúng công thức)")
@@ -354,6 +351,10 @@ def main():
                     help="GAMMA: thêm khoá `<khoá>_objsize[_STAT]` = cùng box, giữ tâm, (w, h) theo box vật cùng lớp của ảnh; STAT "
                          "mean (mặc định khi không ghi) | median | trim (bỏ outlier IQR) | small (TB nửa nhỏ) | exemplar (3 box mẫu gán "
                          "tay, chỉ CE-CoCount)")
+    ap.add_argument("--obj-k", type=int, default=None,
+                    help="GAMMA4 / 4.0.x: chỉ K vật vào cross-attn (ghi đè model.obj_k của checkpoint; mốc eval-only)")
+    ap.add_argument("--obj-select", default=None, choices=OBJ_SELECTS,
+                    help="GAMMA4 / 4.0.x: cách chọn K vật — nearest (gần tâm x_t mỗi bước) | random (một bộ mỗi ảnh)")
     ap.add_argument("--cocount-obj-filter", type=float, default=None,
                     help="GAMMA, CE-CoCount: bỏ box vật có cạnh > K × cạnh TB 3 exemplar gán tay (mặc định giữ hết; đề xuất 3)")
     ap.add_argument("--dump-boxes", default=None, help="GAMMA: file .json ghi box thô từng mẫu (user study, user_study/build.py)")
@@ -392,7 +393,7 @@ def main():
     density = (a.density or "full") if dindex is not None else None
     n_prop = a.num_proposals or cfg["diffusion"]["num_proposals"]
     top_k = a.top_k or cfg["eval"]["top_k"]
-    nms_thr = a.nms_thr if a.nms else None
+    nms_thr = 0.5 if a.nms else None
 
     ds = CE130Dataset(cfg["data"]["root"], a.split, cfg["data"]["image_size"], density=density,
                     density_index=dindex)
@@ -423,7 +424,7 @@ def main():
                             collate_fn=collate)
         t = time.time()
         rec, stage = predict(model, loader, text_table, n_prop, steps=steps, top_k=top_k,
-                             nms_thr=nms_thr, renewal=not a.no_renewal, seed=a.seed,
+                             nms_thr=nms_thr, seed=a.seed,
                              log_every=max(len(loader) // 10, 1))
         el = time.time() - t
         # có NMS thì báo CẢ HAI thứ tự hậu xử lý (người dùng chốt 2026-09-29): khoá cũ `steps{k}` =

@@ -99,13 +99,6 @@ def headline(fig, title, sub, y=0.985):
     fig.text(0.01, y - 0.075, sub, fontsize=11, ha="left", va="top", color=INK2)
 
 
-def ci_bar(ax, x, p, lo, hi, label_pad, w, color, fs=11.5):
-    ax.bar(x, p, width=w, color=color, zorder=3)
-    ax.errorbar(x, p, yerr=[[p - lo], [hi - p]], fmt="none", ecolor=INK2, elinewidth=1.1, capsize=4, capthick=1.1, zorder=4)
-    ax.text(x, hi + label_pad, pct(p, 0 if p >= 0.1 or p == 0 else 1), ha="center", va="bottom", fontsize=fs,
-            fontweight="bold", color=INK)
-
-
 def stack_bar(ax, x, segs, bw=0.56, fit=0.035, gap=0.021, fs=8.5, y_min=0.0):
     """Một cột chồng: segs = list (giá trị, màu, màu chữ). Đoạn >= fit ghi % giữa đoạn; đoạn nhỏ hơn ghi % cạnh phải cột (đường dẫn
     mảnh, nhãn gần nhau tự giãn theo thứ tự từ dưới lên). -> đỉnh cột và đỉnh nhãn bên cạnh cao nhất."""

@@ -26,7 +26,7 @@ from ce_localization.utils.box_ops_np import box_iou as box_iou_np
 from ce_localization.utils.box_ops_np import cxcywh_to_xyxy as c2x_np
 from ce_localization.utils.box_ops_np import xyxy_to_cxcywh as x2c_np
 from ce_localization.utils.log import fmt_time
-from ce_localization.utils.metrics_np import (COCO_THR, ap_from_pr, evaluate, nms_class_agnostic, oracle_hits,
+from ce_localization.utils.metrics_np import (COCO_THR, ap_from_pr, evaluate, nms_class_agnostic, oracle_hits, pr_curve,
                                               quality, roc_auc, summarise)
 
 __all__ = ["SIZE_BINS", "DENSITY_BINS", "POSTPROCESS", "postprocess", "postprocess_nms_first", "score_records", "predict", "score",
@@ -43,7 +43,7 @@ def _norm_cxcywh(boxes_abs, whwh):
 
 @torch.no_grad()
 def predict(model, loader, text_table, num_proposals, steps=1, top_k=100, nms_thr=0.5,
-            renewal=True, seed=0, log_every=0, log=print):
+            seed=0, log_every=0, log=print):
     """-> (records, oracle_recall theo stage). Record: box cxcywh chuẩn hoá (TOÀN BỘ), score,
     keep sau top-k/NMS, gt cxcywh chuẩn hoá, gt cỡ pixel."""
     model.eval()
@@ -55,7 +55,7 @@ def predict(model, loader, text_table, num_proposals, steps=1, top_k=100, nms_th
         batch = to_device(batch, dev)
         text = text_table(batch["text"], dev)
         out = model.sample(batch["images"], text, batch["valid_hw"], batch["whwh"],
-                           num_proposals, steps=steps, renewal=renewal, generator=gen)
+                           num_proposals, steps=steps, generator=gen)
         whwh = batch["whwh"].cpu().numpy()
         boxes = out["boxes"].float().cpu().numpy()
         scores = out["scores"].float().cpu().numpy()
@@ -102,7 +102,7 @@ def score_records(records):
     at50 = evaluate(preds, 0.5)
     best_all, hits, n_gt, aucs = [], 0, 0, []
     for r in records:
-        best, hit, ng, auc = quality(r["boxes"], r["scores"], r["gt"], size=1)
+        best, hit, ng, auc = quality(r["boxes"], r["scores"], r["gt"])
         best_all.append(best)
         hits, n_gt = hits + hit, n_gt + ng
         aucs.append(auc)
@@ -244,10 +244,7 @@ def point_metrics(records):
     a = np.array([x for x in aucs if not np.isnan(x)])
     out["score_AUC_pt"] = float(a.mean()) if len(a) else float("nan")
     if recs and n_gt:
-        recs.sort(key=lambda x: -x[0])
-        tp = np.cumsum([x[1] for x in recs])
-        fp = np.cumsum([1 - x[1] for x in recs])
-        rec, prec = tp / n_gt, tp / np.maximum(tp + fp, 1e-9)
+        rec, prec = pr_curve(recs, n_gt)
         out.update(AP_pt=ap_from_pr(rec, prec), recall_pt=float(rec[-1]), precision_pt=float(prec[-1]))
     else:
         out.update(AP_pt=0.0, recall_pt=0.0, precision_pt=0.0)
@@ -329,8 +326,7 @@ def attention_diagnostics(model, loader, text_table, num_proposals, ts=(99, 499,
                 model(batch["images"], text, batch["valid_hw"], boxes, tb)
                 gin = None
                 if kind == "grid":
-                    H = W = batch["images"].shape[-1] // 32
-                    cxs, cys, valid = model.memory.grid_geometry(batch["valid_hw"], H, W)  # [B,K]
+                    cxs, cys, valid = model.memory.grid_geometry(batch["valid_hw"])            # [B,K]
                     gin = []
                     for gt, cx, cy in zip(batch["gt_boxes"], cxs, cys):
                         inside = ((cx[None] > gt[:, :1]) & (cx[None] < gt[:, 2:3])

@@ -59,7 +59,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from ce_localization.data.dataset import _read_annotation  # noqa: E402
 from ce_localization.data.density import DensityIndex  # noqa: E402
 from ce_localization.data.turns import image_inputs, pixel_hash  # noqa: E402
-from ce_localization.models.box_policy import _paper_spatial_softmax, norm_whwh, unit_to_boxes  # noqa: E402
+from ce_localization.models.box_policy import paper_spatial_softmax, norm_whwh, unit_to_boxes  # noqa: E402
 from ce_localization.models.detector import build_model  # noqa: E402
 from ce_localization.models.text import TextTable, encode_class_names  # noqa: E402
 from ce_localization.tools.plot_spatial_softmax import SHARP, effective_cells, keypoint_pixels  # noqa: E402
@@ -76,7 +76,7 @@ def row_label(kind, dens, turn):
     return f"Original (nothing removed)\ndensity: {'own (original image)' if dens == 'own' else 'blank'}"
 
 
-PAPER_CFG = {"data": {"image_size": 512, "input_style": "paper"},
+PAPER_CFG = {"data": {"image_size": 512},
              "model": {"arch": "box_policy", "vision": "r18_paper", "clip_text": "openai/clip-vit-base-patch32"}}
 
 
@@ -92,14 +92,8 @@ def load_model(path, device):
     arch = cfg["model"].get("arch")
     if arch not in ("box_refiner", "box_policy") or (arch == "box_policy" and cfg["model"].get("vision") != "r18_paper"):
         sys.exit(f"{path}: chỉ nhận box_refiner (GAMMA1) hoặc box_policy r18_paper (GAMMA2-pha 1) — model.arch {arch}")
-    if cfg["data"].get("input_style", "ours") != "paper":
-        sys.exit("tool chỉ vẽ đầu vào kiểu bài (`data.input_style: paper`)")
     model = build_model(cfg, pretrained_backbone=False)
     model.load_state_dict(ck["model"])
-    if arch == "box_policy":
-        return model.to(device).eval(), cfg, ck.get("iter"), None
-    if model.ss_kind != "paper":
-        sys.exit("tool chỉ vẽ SpatialSoftmax kiểu bài (`model.ss_kind: paper`)")
     return model.to(device).eval(), cfg, ck.get("iter"), None
 
 
@@ -143,7 +137,7 @@ def load_case(a, split, br, turn, dindex, T):
            "original": dindex.path(dindex.pick(iid, "full")[0])}
     den, scale = {}, None
     for kind in imgs:
-        x, scale, _, _ = image_inputs(imgs[kind], own[kind], T, "paper")
+        x, scale, _, _ = image_inputs(imgs[kind], own[kind], T)
         den[kind] = x[3].numpy()
     holes = np.asarray(ann["inpainted_bboxes"][:turn], dtype=np.float64).reshape(-1, 4) * scale
     x1, y1, x2, y2 = [int(round(v)) for v in holes[-1]]
@@ -223,7 +217,7 @@ def spatial_softmax(model, x, valid_hw=None):
     c5 = model.backbone.forward_c5(x)
     N, C, H, W = c5.shape
     att = F.softmax(c5.reshape(N, C, -1), dim=-1).reshape(N, C, H, W)
-    return _paper_spatial_softmax(c5).reshape(N, C, 2)[0].cpu(), att[0].cpu()
+    return paper_spatial_softmax(c5).reshape(N, C, 2)[0].cpu(), att[0].cpu()
 
 
 def is_policy(model):
@@ -304,7 +298,7 @@ def main():
         for r, (kind, dens) in enumerate(ROWS):
             img = cs["imgs"][kind]
             dsrc = cs["own"][kind] if dens == "own" else Image.new("RGB", img.size, (0, 0, 127))
-            x, _, nw, nh = image_inputs(img, dsrc, T, "paper")
+            x, _, nw, nh = image_inputs(img, dsrc, T)
             xb, vhw = x[None].to(dev), torch.tensor([[nh, nw]], device=dev)
             g = torch.Generator(device=dev.type).manual_seed(a.seed)
             canvas = norm_whwh(model, torch.tensor([[nw, nh, nw, nh]], dtype=torch.float32), T)[0] if policy else \

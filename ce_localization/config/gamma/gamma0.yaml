@@ -17,20 +17,13 @@ data:
   density_root: "../data/samples"
   image_size: 512                   # letterbox góc trên-trái như CE-Loc gốc (người dùng chốt 2026-10-01)
   num_workers: 4
-  input_style: "paper"              # như bài: to_tensor (/255), density .convert("L"); ours = chuẩn hoá ImageNet + giải mã jet
   density: "sample"                 # density CountGD của CHÍNH ảnh inpaint đó; null = RGB
 
 model:
   arch: "box_policy"                # detector (ALPHA / BETA) | box_policy (GAMMA0)
   in_channels: 4                    # RGB + density
   pretrained_backbone: true         # R-50 ImageNet (bài: ResNet18 ImageNet); mọi lớp train
-  ss_source: "c5"                   # SpatialSoftmax trên C5 (layer4 R-50 pretrain, 2048 kênh) như bài; p5 = bản đầu, G3 hỏng
-  # "CE-Loc gốc + R-50" (2026-10-01; bản ALPHA — FrozenBN / chuẩn hoá ImageNet / mask / box chia vùng thật — hỏng, mục 12.2):
-  backbone_norm: "bn"               # BatchNorm TRAIN (thống kê theo batch) như ResNet18 của bài; frozen = bản ALPHA
-  density_init: "rgb_mean"          # kênh density conv1 = TB weight RGB như bài (bỏ qua khi in_channels 3)
-  ss_kind: "paper"                  # SpatialSoftmax KHÔNG mask, cả canvas, toạ độ [−1,1] như bài; masked = bản ALPHA
-  box_norm: "canvas"                # box chia canvas 512 như bài; valid = chia vùng ảnh thật
-  d_model: 256                      # kênh FPN (chỉ dùng khi ss_source: p5)
+  d_model: 256                      # kênh FPN (dựng nhưng không dùng — giữ key checkpoint)
   vis_dim: 128                      # như CE-Loc gốc: Linear(2·2048, 128)
   text_dim: 512                     # CLIP ViT-B/32 pooler (frozen, tính sẵn)
   text_proj_dim: 128                # như CE-Loc gốc: Linear(512, 128) -> Mish

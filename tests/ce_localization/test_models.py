@@ -2,6 +2,7 @@
 memory (SpatialSoftmax có mask, PE 2D, lưới), detector (grad mọi tham số, bias focal, sample).
 """
 
+import copy
 import math
 
 import pytest
@@ -31,14 +32,16 @@ def test_backbone_frozen_bn_all_convs_trainable():
 
 
 def test_backbone_4ch_density_weight_zero_and_equals_3ch():
-    from ce_localization.models.backbone import density_weight_ratio
+    from types import SimpleNamespace
+    from ce_localization.models.backbone import density_ratio_of
     torch.manual_seed(0)
     m3 = ResNet50FPN(pretrained=False).eval()
     torch.manual_seed(0)
     m4 = ResNet50FPN(pretrained=False, in_channels=4).eval()
     w = m4.stem[0].weight
     assert w.shape == (64, 4, 7, 7) and w.requires_grad and w[:, 3].abs().max() == 0
-    assert density_weight_ratio(m4) == 0.0 and density_weight_ratio(m3) is None
+    assert density_ratio_of(SimpleNamespace(backbone=m4)) == 0.0 and density_ratio_of(SimpleNamespace(backbone=m3)) is None
+    assert density_ratio_of(SimpleNamespace()) is None                    # không backbone ảnh (DELTA3)
     assert [n for n, _ in m3.named_parameters()] == [n for n, _ in m4.named_parameters()]  # thứ tự cũ
     x = torch.randn(1, 3, 64, 64)
     with torch.no_grad():
@@ -110,17 +113,14 @@ def test_memory_encoder_kinds():
     p5 = torch.randn(2, 256, 4, 4)
     vh = torch.tensor([[96, 128], [128, 128]])
     for kind, M in (("none", 2), ("spatial_softmax", 3), ("grid", 18)):
-        enc = MemoryEncoder(kind)
+        enc = MemoryEncoder(kind, grid_size=4 if kind == "grid" else None)
         assert hasattr(enc, "ss_proj") == (kind == "spatial_softmax")
         assert hasattr(enc, "grid_proj") == (kind == "grid")
         tok, msk = enc.image_tokens(p5, vh)
         mem, mask = enc(t, text, tok, msk)
-        assert mem.shape == (2, M, 256)
-        if kind == "grid":
-            assert mask.shape == (2, 18) and not mask[:, :2].any()
-            assert mask[0].sum() == 4 and mask[1].sum() == 0          # ảnh 0: 1 hàng đệm = 4 ô
-        else:
-            assert mask is None
+        assert mem.shape == (2, M, 256) and mask is None
+    with pytest.raises(ValueError, match="grid_size"):
+        MemoryEncoder("grid")
 
 
 def test_grid_pooling_uses_only_real_region_and_fixed_tokens():
@@ -140,7 +140,7 @@ def test_grid_pooling_uses_only_real_region_and_fixed_tokens():
     pos = sine_pos_2d(torch.ones(1, 4, 4, dtype=torch.bool), 128)
     want = enc.grid_proj(ref.flatten(2).transpose(1, 2)) + pos.flatten(2).transpose(1, 2)
     assert torch.allclose(tok[0:1], want, atol=1e-5)
-    cx, cy, valid = enc.grid_geometry(vh, 8, 8)
+    cx, cy, valid = enc.grid_geometry(vh)
     assert cx.shape == (2, 16) and valid.all() and cy[0].max() < 5 * 32 and cx[0].max() < 256
 
 
@@ -183,13 +183,6 @@ def test_model_sample_one_and_multi_step():
 
 # ----------------------------------------------------------------------------- GAMMA (bài add)
 
-def test_forward_p5_equals_fpn_p5():
-    m = ResNet50FPN(pretrained=False).eval()
-    x = torch.randn(1, 3, 128, 96)
-    with torch.no_grad():
-        assert torch.allclose(m.forward_p5(x), m(x)["p5"], atol=1e-6)
-
-
 def test_unet1d_horizon_one_shape():
     from ce_localization.models.unet1d import ConditionalUnet1D
     net = ConditionalUnet1D(4, global_cond_dim=256)
@@ -206,14 +199,17 @@ def test_box_unit_roundtrip():
     assert torch.allclose(unit_to_boxes(u, whwh), b, atol=1e-5)
 
 
-@pytest.mark.parametrize("in_ch,src", [(3, "c5"), (4, "c5"), (4, "p5")])
-def test_box_policy_loss_trains_backbone_cond_and_unet(in_ch, src):
+@pytest.mark.parametrize("in_ch", [3, 4])
+def test_box_policy_loss_trains_backbone_cond_and_unet(in_ch):
+    """"CE-Loc gốc + R-50" (GAMMA0): SpatialSoftmax kiểu bài trên C5 -> Linear(4096, ·), BN train, kênh density = TB weight RGB."""
     from ce_localization.models.box_policy import BoxPolicy
     torch.manual_seed(0)
-    m = BoxPolicy(in_channels=in_ch, pretrained_backbone=False, num_timesteps=20, ss_source=src)
-    assert m.vis_proj.in_features == (4096 if src == "c5" else 512)
+    m = BoxPolicy(in_channels=in_ch, pretrained_backbone=False, num_timesteps=20)
+    assert m.vis_proj.in_features == 4096 and m.box_norm == "canvas"
+    assert any(isinstance(x, nn.BatchNorm2d) for x in m.modules()) and not any(isinstance(x, FrozenBatchNorm2d) for x in m.modules())
     if in_ch == 4:
-        assert m.backbone.stem[0].weight[:, 3].abs().max() == 0          # kênh density khởi tạo 0 (như ALPHA3)
+        w = m.backbone.stem[0].weight
+        assert torch.allclose(w[:, 3:], w[:, :3].mean(dim=1, keepdim=True))
     x = torch.randn(2, in_ch, 128, 128)
     loss = m(x, torch.randn(2, 512), torch.tensor([[96, 128], [128, 128]]), torch.rand(2, 4) * 2 - 1, k=3)
     loss.backward()
@@ -221,9 +217,7 @@ def test_box_policy_loss_trains_backbone_cond_and_unet(in_ch, src):
     for n in ("backbone.layer4.2.conv3.weight", "backbone.stem.0.weight", "vis_proj.weight",
               "text_proj.0.weight", "noise_net.final_conv.1.weight", "noise_net.diffusion_step_encoder.1.weight"):
         assert g[n] is not None and g[n].abs().sum() > 0, n
-    assert g["backbone.fpn.layer_blocks.0.0.weight"] is None             # P2..P4 không dùng
-    fpn_used = g["backbone.fpn.layer_blocks.3.0.weight"] is not None
-    assert fpn_used == (src == "p5")                                     # C5: không qua FPN
+    assert g["backbone.fpn.layer_blocks.0.0.weight"] is None and g["backbone.fpn.layer_blocks.3.0.weight"] is None   # C5: không qua FPN
     assert m.alphas_cumprod.shape == (20,)
     with torch.no_grad():
         s = m.sample(x, torch.randn(2, 512), torch.tensor([[96, 128], [128, 128]]), 4)
@@ -235,14 +229,16 @@ def test_paper_spatial_softmax_matches_original_code():
     """`SpatialSoftmax` của refs/repos/Count-Editing/CE-LocModel/models/spatial_softmax.py chép nguyên (meshgrid mặc
     định = 'ij')."""
     import torch.nn.functional as F
-    from ce_localization.models.box_policy import _paper_spatial_softmax
+    from ce_localization.models.box_policy import paper_spatial_softmax
     fm = torch.randn(2, 5, 4, 6)
     N, C, H, W = fm.shape
     pos_x, pos_y = torch.meshgrid(torch.linspace(-1, 1, H), torch.linspace(-1, 1, W), indexing="ij")
     att = F.softmax(fm.reshape(N, C, -1), dim=-1)
     ex = torch.sum(pos_x.reshape(H * W) * att, dim=-1, keepdim=True)
     ey = torch.sum(pos_y.reshape(H * W) * att, dim=-1, keepdim=True)
-    assert torch.equal(_paper_spatial_softmax(fm), torch.cat([ex, ey], dim=-1).reshape(N, -1))
+    assert torch.equal(paper_spatial_softmax(fm), torch.cat([ex, ey], dim=-1).reshape(N, -1))
+    kp, a = paper_spatial_softmax(fm, return_att=True)
+    assert torch.equal(kp, paper_spatial_softmax(fm)) and torch.equal(a, att)
 
 
 def test_load_celoc_paper_renames_and_checks(tmp_path):
@@ -373,7 +369,7 @@ def test_box_refiner_sample_steps_and_attention():
         assert u.shape == (2, 5, 4) and torch.isfinite(u).all()
         assert len(stages) == steps and stages[0]["stages"].shape == (6, 2, 5, 4) and stages[0]["noisy"].shape == (2, 5, 4)
         assert stages[0]["t"] == 19
-        b = unit_to_boxes(u, torch.tensor([[128.0, 96.0, 128.0, 96.0], [128.0, 128.0, 128.0, 128.0]])[:, None])
+        b = unit_to_boxes(u, torch.full((4,), 128.0))                                  # box chia canvas
         assert torch.allclose(b, stages[-1]["stages"][-1], rtol=1e-4, atol=1e-2)   # bước cuối: box tầng cuối, KHÔNG kẹp
     g = torch.Generator().manual_seed(1)
     u, st = m.sample(x, torch.randn(2, 512), vhw, 3, generator=g, steps=4, t_start=9, return_stages=True)
@@ -402,12 +398,8 @@ def test_backbone_bn_train_and_rgb_mean_density_init():
         ResNet50FPN(pretrained=False, norm="gn")
 
 
-def test_paper_keypoints_and_canvas_norm():
-    from ce_localization.models.box_policy import _paper_spatial_softmax, norm_whwh, spatial_keypoints
-    f = torch.randn(2, 6, 4, 4)
-    vhw = torch.tensor([[96, 128], [128, 128]])
-    assert torch.equal(spatial_keypoints(f, vhw, "paper"), _paper_spatial_softmax(f))      # không mask: bỏ qua valid_hw
-    assert spatial_keypoints(f, vhw, "masked").shape == (2, 12)
+def test_norm_whwh_canvas_or_valid():
+    from ce_localization.models.box_policy import norm_whwh
     whwh = torch.tensor([[128.0, 96.0, 128.0, 96.0]])
     assert torch.equal(norm_whwh(nn.Module(), whwh, 128), whwh)
     m = nn.Module()
@@ -446,7 +438,7 @@ def test_gamma_paper_keys_build_train_sample(arch):
 # ----------------------------------------------------------------------------- GAMMA2: CE-Loc ResNet18 + refine DiffusionDet
 
 def test_paper_encoder_masked_spatial_softmax_ignores_padding():
-    from ce_localization.models.box_policy import PaperVisionEncoder, _paper_spatial_softmax
+    from ce_localization.models.box_policy import PaperVisionEncoder, paper_spatial_softmax
     torch.manual_seed(0)
     enc = PaperVisionEncoder(128, 4, pretrained=False, ss_mask=True).eval()
     x = torch.rand(2, 4, 128, 128)
@@ -457,9 +449,9 @@ def test_paper_encoder_masked_spatial_softmax_ignores_padding():
     with torch.no_grad():
         xy, att = enc.keypoints(x, vhw)
         assert float(att[0, :, 2:].abs().sum()) == 0 and torch.allclose(att[1].sum((1, 2)), torch.ones(512))
-        assert torch.equal(enc.keypoints_flat(c[-1], vhw)[1], _paper_spatial_softmax(c[-1])[1])   # không đệm: như bài
+        assert torch.equal(enc.keypoints_flat(c[-1], vhw)[1], paper_spatial_softmax(c[-1])[1])    # không đệm: như bài
     enc.ss_mask = False
-    assert torch.equal(enc.keypoints_flat(c[-1], vhw), _paper_spatial_softmax(c[-1]))
+    assert torch.equal(enc.keypoints_flat(c[-1], vhw), paper_spatial_softmax(c[-1]))
 
 
 def test_box_policy_r18_trainable_with_mask():
@@ -489,7 +481,7 @@ def test_ddp_find_unused_only_off_for_paper_r18():
     import yaml
     from ce_localization.train import ddp_find_unused
     from tests.ce_localization.helpers import CFG_G
-    on = {k: ddp_find_unused(yaml.safe_load(open(p))) for k, p in CFG_G.items()}
+    on = {k: ddp_find_unused(yaml.safe_load(open(p))) for k, p in CFG_G.items()}       # gồm mọi DELTA (r18_paper / chỉ refiner)
     assert on == {k: k in ("density", "rgb", "refiner", "refiner_coords") for k in CFG_G}, on
     joint = yaml.safe_load(open(CFG_G["pr_joint"]))
     joint["loss"]["proposer_weight"] = 0.0
@@ -858,14 +850,125 @@ def test_box_policy_obj_attn_loss_sample_and_cap():
     loss.backward()
     assert m.noise_net.obj_xattn[0].attn.out_proj.weight.grad.abs().sum() > 0
     cond = m.condition(x, text, vhw)
-    _, mask = m.object_tokens(objects, vhw, 128, cond, torch.Generator().manual_seed(0), cap=True)
+    _, mask, _ = m.object_tokens(objects, 128, cond, torch.Generator().manual_seed(0), cap=True)
     assert mask.sum(1).tolist() == [2, 3]                                      # 7 vật > obj_max 3 -> cắt khi train
-    _, mask = m.object_tokens(objects, vhw, 128, cond)
+    _, mask, _ = m.object_tokens(objects, 128, cond)
     assert mask.sum(1).tolist() == [2, 7]                                      # eval giữ hết
     m.eval()
     a = m.sample(x, text, vhw, 3, torch.Generator().manual_seed(0), objects=objects)
     b = m.sample(x, text, vhw, 3, torch.Generator().manual_seed(0), objects=objects, use_objects=False)
     assert a.shape == (2, 3, 4) and torch.allclose(a, b, atol=1e-5)           # out_proj = 0: tắt box vật = y hệt
+
+
+# ----------------------------------------------------------------------------- GAMMA4.0.x: chỉ obj_k vật vào cross-attn
+
+def _obj_policy(**kw):
+    """BoxPolicy GAMMA4 thu nhỏ, out_proj cross-attn có weight (khởi tạo 0 thì box vật không đổi gì) + 2 ảnh có 2 / 7 vật."""
+    from ce_localization.models.box_policy import BoxPolicy
+    torch.manual_seed(0)
+    m = BoxPolicy(in_channels=4, pretrained_backbone=False, num_timesteps=20, vision="r18_paper", ss_mask=True, obj_attn=True, **kw)
+    for xa in m.noise_net.obj_xattn:
+        torch.nn.init.normal_(xa.attn.out_proj.weight, std=0.3)
+    g = torch.Generator().manual_seed(3)
+    x, vhw, text = torch.rand(2, 4, 128, 128, generator=g), torch.tensor([[96, 128], [128, 128]]), torch.randn(2, 512, generator=g)
+    objects = [torch.tensor([[5.0, 5.0, 30.0, 40.0], [60.0, 50.0, 90.0, 90.0]]),
+               torch.tensor([[8.0 + 15 * i, 10.0 + 9 * i, 20.0 + 15 * i, 30.0 + 9 * i] for i in range(7)])]
+    return m, x, vhw, text, objects
+
+
+def test_obj_k_validation_and_config_keys():
+    from ce_localization.models.box_policy import BoxPolicy
+    kw = dict(in_channels=4, pretrained_backbone=False, num_timesteps=20, vision="r18_paper")
+    with pytest.raises(ValueError, match="obj_k"):
+        BoxPolicy(**kw, obj_k=3)                                               # cần obj_attn
+    with pytest.raises(ValueError, match="obj_k"):
+        BoxPolicy(**kw, obj_attn=True, obj_k=0)
+    with pytest.raises(ValueError, match="obj_select"):
+        BoxPolicy(**kw, obj_attn=True, obj_k=3, obj_select="far")
+    m = BoxPolicy(**kw, obj_attn=True)
+    assert m.obj_k is None and m.obj_select == "nearest"
+    assert not any("obj_k" in k or "obj_select" in k for k in m.state_dict())   # không vào state_dict: đặt lại được lúc eval
+
+
+def test_nearest_mask_matches_brute_force():
+    from ce_localization.models.box_policy import nearest_mask
+    g = torch.Generator().manual_seed(0)
+    R, M = 6, 9
+    x, units = torch.rand(R, 4, generator=g) * 2 - 1, torch.rand(R, M, 4, generator=g) * 2 - 1
+    mask = torch.rand(R, M, generator=g) > 0.3
+    mask[4] = False
+    mask[4, :2] = True                                                         # < k vật: giữ hết
+    mask[5] = False                                                            # 0 vật
+    out = nearest_mask(x, units, mask, 3)
+    for r in range(R):
+        ids = [j for j in range(M) if mask[r, j]]
+        d = {j: float(((units[r, j, :2] - x[r, :2]) ** 2).sum()) for j in ids}
+        want = set(sorted(ids, key=d.get)[:3])
+        assert set(out[r].nonzero().flatten().tolist()) == want, r
+    assert out[4].sum() == 2 and out[5].sum() == 0 and not (out & ~mask).any()
+    assert torch.equal(nearest_mask(x.half(), units, mask, 3), out)            # autocast fp16: so khoảng cách ở fp32
+
+
+def test_obj_k_at_least_n_objects_equals_all_objects():
+    """obj_k ≥ số vật (nearest lẫn random) ⇒ loss train + mẫu eval trùng GAMMA4 (mọi vật) — chọn vật không đụng gì khác."""
+    m, x, vhw, text, objects = _obj_policy()
+    x0 = torch.rand(2, 4, generator=torch.Generator().manual_seed(1)) * 2 - 1
+
+    def run():
+        mt = copy.deepcopy(m).train()                                          # BN train cập nhật running stats: chạy trên bản sao
+        loss = mt(x, text, vhw, x0, k=2, objects=objects, generator=torch.Generator().manual_seed(0))
+        return loss.detach(), m.eval().sample(x, text, vhw, 3, torch.Generator().manual_seed(0), objects=objects)
+    ref = run()
+    for sel in ("nearest", "random"):
+        m.obj_k, m.obj_select = 7, sel
+        got = run()
+        assert torch.equal(got[0], ref[0]) and torch.equal(got[1], ref[1]), sel
+    m.obj_k, m.obj_select = 3, "nearest"
+    assert not torch.allclose(run()[1], ref[1], atol=1e-5)                     # 3 / 7 vật: khác
+
+
+def test_obj_k_nearest_equals_encoding_only_those_objects():
+    """nearest: ε̂ với mọi vật mã hoá + mask 3 vật gần x == U-Net khi CHỈ đưa 3 vật đó (mỗi vật mã hoá độc lập); x khác ⇒ tập khác."""
+    from ce_localization.models.box_policy import boxes_to_unit
+    m, x, vhw, text, objects = _obj_policy(obj_k=3, obj_select="nearest")
+    m.eval()
+    with torch.no_grad():
+        cond = m.condition(x, text, vhw)[1:]
+        obj = m.object_tokens(objects[1:], 128, cond)
+        units = boxes_to_unit(objects[1], torch.full((4,), 128.0))
+        t = torch.tensor([7])
+        sets = []
+        for xb in (units[0:1] + 0.01, units[6:7] - 0.02):                       # đặt x cạnh vật 0 rồi cạnh vật 6
+            near = ((units[:, :2] - xb[:, :2]) ** 2).sum(-1).argsort()[:3]
+            sets.append(set(near.tolist()))
+            eps = m.predict_noise(xb, t, cond, obj=obj)[0]
+            m.obj_k = None
+            only = m.object_tokens([objects[1][near]], 128, cond)
+            eps3 = m.predict_noise(xb, t, cond, obj=only)[0]
+            eps_all = m.predict_noise(xb, t, cond, obj=obj)[0]
+            m.obj_k = 3
+            assert torch.allclose(eps, eps3, atol=1e-5) and not torch.allclose(eps, eps_all, atol=1e-4)
+        assert sets[0] != sets[1]
+
+
+def test_obj_k_random_fixed_per_image_at_eval_redrawn_in_train():
+    """random: eval một bộ 3 vật mỗi ảnh — cùng qua mọi lần gọi, thứ tự batch, generator (mọi mẫu / bước dùng chung token);
+    train (`cap`) rút theo generator; ảnh < 3 vật giữ hết."""
+    m, x, vhw, text, objects = _obj_policy(obj_k=3, obj_select="random")
+    cond = m.condition(x, text, vhw).detach()
+
+    def picked(objs, gen=None, cap=False, c=cond):
+        _, mask, units = m.object_tokens(objs, 128, c, gen, cap)
+        return [{tuple(round(v, 5) for v in u.tolist()) for u, k in zip(units[i], mask[i]) if k} for i in range(len(objs))]
+    a = picked(objects)
+    assert [len(s) for s in a] == [2, 3]
+    assert picked(objects, torch.Generator().manual_seed(9)) == a
+    assert picked(objects[::-1], c=cond.flip(0)) == a[::-1]                    # không phụ thuộc vị trí trong batch
+    tr = [picked(objects, torch.Generator().manual_seed(s), cap=True)[1] for s in range(6)]
+    assert all(len(s) == 3 for s in tr) and len({frozenset(s) for s in tr}) > 1
+    with torch.no_grad():                                                      # 3 mẫu / ảnh dùng chung bộ: nhân hàng, không rút lại
+        ob = m._repeat_obj(m.object_tokens(objects, 128, cond), 3)
+    assert torch.equal(ob[1][3], ob[1][5]) and torch.equal(ob[2][3], ob[2][5])
 
 
 def test_propose_refine_proposer_obj_attn_uses_objects():
@@ -888,7 +991,7 @@ def test_propose_refine_proposer_obj_attn_uses_objects():
         _, kp = m.encode(x, vhw)
         cond = m.proposer.cond_from_keypoints(kp, text)
         g = torch.Generator().manual_seed(0)
-        u = m.proposer.sample_from_cond(cond, 3, g, "ddpm", obj=m.proposer.object_tokens(objects, vhw, 128, cond))
+        u = m.proposer.sample_from_cond(cond, 3, g, "ddpm", obj=m.proposer.object_tokens(objects, 128, cond))
         u0 = m.proposer.sample_from_cond(cond, 3, torch.Generator().manual_seed(0), "ddpm")
     whwh = torch.tensor([[128.0, 96.0, 128.0, 96.0], [128.0, 128.0, 128.0, 128.0]])[:, None]
     canvas = torch.full((4,), 128.0)

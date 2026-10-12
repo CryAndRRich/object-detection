@@ -61,7 +61,7 @@ training:
   eval_every: 2000
 
 eval:
-  split: "val"                      # eval định kỳ + chọn best.pth; báo cáo trên test (eval_alpha.py)
+  split: "val"                      # eval định kỳ + chọn best.pth; báo cáo trên test (eval.py)
   select_metric: "oracle_recall"
   density: "full"                   # eval định kỳ (chọn best.pth) với density đầy đủ; test: full / partial / empty
   sampling_steps: 1                 # chính: 1 bước

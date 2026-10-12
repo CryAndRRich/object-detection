@@ -3,27 +3,28 @@ không import — viết lại ĐÚNG công thức, GIỮ tên module / tham s�
 (docs/EXPERIMENT_DELTA.md): khối nằm TRONG mạng khử nhiễu của CE-Loc, gọi ở MỌI bước khử nhiễu, trước U-Net 1D.
 
     một lần mỗi ảnh (`encode_context`):
-      rgb [0,1] canvas (letterbox, cả phần đệm) -> bicubic 224 -> chuẩn hoá CLIP -> CLIP ViT-B/16 FROZEN -> hidden_states[-2] bỏ CLS
-          -> LN + Linear(768, d) (+ Linear(1, d)(density pool về lưới 14×14))              = token ảnh, map ảnh [d,14,14]
-      token chữ CLIP text B/16 FROZEN (`last_hidden_state`, tính sẵn ở `models/text.encode_class_tokens`) -> LN + Linear(512, d)
+      rgb [0,1] canvas (letterbox, cả phần đệm) -> bicubic về độ phân giải của ViT (224 / 336) -> chuẩn hoá CLIP -> CLIP ViT FROZEN
+          (`clip_model_name`: B/16 = DELTA1, B/32 / L/14 / L/14-336 = DELTA2.x) -> hidden_states[-2] bỏ CLS
+          -> LN + Linear(hidden ViT, d) (+ Linear(1, d)(density pool về lưới g×g))       = token ảnh, map ảnh [d, g, g]
+      token chữ CLIP text FROZEN (`text_model_name`, mặc định = `clip_model_name`; DELTA2.x giữ B/16; `last_hidden_state`, tính sẵn ở
+          `models/text.encode_class_tokens`) -> LN + Linear(hidden text, d)
     mỗi lần gọi, x_t [R,4] cxcywh / canvas · 2 − 1:
       9 token box = RoIAlign(map ảnh, x_t) 3×3 + BoxFourierEmb(x_t) + type emb ; RoPE 2D liên tục (đơn vị ô lưới)
       `num_layers` RefinerBlock (pre-norm, AdaLN-Zero theo t) trên [text | image | sample], mask nhóm `attention_flow`
       head trên 9 token box -> Δ ;  refined = x_t + Δ   (`num_stages` > 1: lặp, RoIAlign lại quanh box mới, box detach)
 
 Khác bản tác giả ĐÚNG ở cách tính, không ở toán (có test so với bản sao nguyên văn `forward` của tác giả):
-- **Luồng ngữ cảnh tính MỘT lần mỗi (ảnh, t)** (`forward`, khi `split_ok`): với flow mà token ảnh / chữ KHÔNG nhìn token box (mặc định),
-  luồng [text | image] qua các block không phụ thuộc box; mọi hàng cùng ảnh và cùng t (vòng mock / DDPM: một t cho mọi hàng) cho đúng
-  cùng luồng đó ⇒ tính trên C hàng ngữ cảnh, 9 token box của R hàng attend K / V ngữ cảnh đã cache (đã quay RoPE, cùng thứ tự khoá
-  [text | image | sample]) + K / V của chính nó. Block cuối bỏ attention / MLP của ngữ cảnh (head chỉ đọc token box). Bản tác giả chạy
-  lại cả chuỗi ~215 token cho từng mẫu ở từng bước (30 mẫu × 1000 bước ⇒ eval không khả thi). Flow cho phép ảnh / chữ nhìn box ⇒
-  `forward_full` (đường của tác giả, ngữ cảnh nhân theo `ctx_index`). dropout > 0: hai đường cùng phân bố, không trùng từng bit.
+- **Luồng ngữ cảnh tính MỘT lần mỗi (ảnh, t)** (`forward`): token ảnh / chữ KHÔNG nhìn token box (flow mặc định của tác giả — flow cho
+  ảnh / chữ nhìn box bị từ chối lúc dựng) ⇒ luồng [text | image] qua các block không phụ thuộc box; mọi hàng cùng ảnh và cùng t (vòng
+  mock / DDPM: một t cho mọi hàng) cho đúng cùng luồng đó ⇒ tính trên C hàng ngữ cảnh, 9 token box của R hàng attend K / V ngữ cảnh đã
+  cache (đã quay RoPE, cùng thứ tự khoá [text | image | sample]) + K / V của chính nó. Block cuối bỏ attention / MLP của ngữ cảnh (head
+  chỉ đọc token box). Bản tác giả chạy lại cả chuỗi ~215 token cho từng mẫu ở từng bước (30 mẫu × 1000 bước ⇒ eval không khả thi).
 - RoIAlign lấy chỉ số ảnh theo `ctx_index` trên map C ảnh (không nhân bản map như `expand_context` của tác giả) — cùng kết quả.
 - Token chữ tính sẵn mỗi tên lớp (bản tác giả tokenize theo batch, `padding=True`): CLIP text causal + đệm phải ⇒ token thật không thấy
   phần đệm; phần đệm bị mask ⇒ cùng kết quả.
 - CLIP ViT KHÔNG đăng ký làm module con (giữ bằng `object.__setattr__`, `_apply` kéo theo khi `.to()`): không vào `state_dict`,
   `parameters()`, DDP, optimizer — checkpoint nhẹ ~350 MB; `BoxPolicy.clip_sha` (vân tay weight) kiểm khớp khi nạp. Nạp qua
-  `load_clip(name)` (hàm cấp module — test thay bằng CLIP tí hon).
+  `load_clip(vision_name, text_name)` (hàm cấp module — test thay bằng CLIP tí hon).
 - Số học: CLIP chạy dưới autocast ngoài (fp16 khi train AMP, no_grad); mọi phần train được của refiner tắt autocast, fp32.
 """
 
@@ -38,7 +39,8 @@ from torchvision.ops import roi_align
 from ce_localization.models.unet1d import SinusoidalPosEmb
 
 __all__ = ["GROUPS", "CLIP_MEAN", "CLIP_STD", "DEFAULT_ATTENTION_FLOW", "REFINER_DEFAULTS", "apply_rope_2d", "BoxFourierEmb",
-           "RefinerBlock", "ClipBoxRefiner", "load_clip", "weights_sha256", "refiner_enabled", "needs_text_tokens"]
+           "RefinerBlock", "ClipBoxRefiner", "load_clip", "weights_sha256", "refiner_config", "text_model_name",
+           "needs_text_tokens"]
 
 GROUPS = ('text', 'image', 'sample')
 CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
@@ -51,22 +53,28 @@ DEFAULT_ATTENTION_FLOW = {
     'text': ['text', 'image'],
 }
 
-# Mặc định trong CODE của tác giả (`BoxRefiner.__init__` + `ObjectPlacementPolicy`); config DELTA ghi tường minh mọi khoá
+# Mặc định trong CODE của tác giả (`BoxRefiner.__init__` + `ObjectPlacementPolicy`); config DELTA ghi tường minh mọi khoá.
+# `text_model_name` (thêm ở đây, DELTA2.x): CLIP text cho token chữ; None = cùng tên `clip_model_name` như tác giả.
 REFINER_DEFAULTS = {
-    'clip_model_name': 'openai/clip-vit-base-patch16', 'vision_layer': -2, 'd_model': 256, 'num_layers': 4, 'num_heads': 8,
-    'mlp_ratio': 4.0, 'dropout': 0.0, 'rope_theta': 100.0, 'roi_size': 3, 'num_stages': 1, 'use_density': True,
-    'unet_input': 'concat', 'aux_loss_weight': 0.0, 'attention_flow': DEFAULT_ATTENTION_FLOW,
+    'clip_model_name': 'openai/clip-vit-base-patch16', 'text_model_name': None, 'vision_layer': -2, 'd_model': 256,
+    'num_layers': 4, 'num_heads': 8, 'mlp_ratio': 4.0, 'dropout': 0.0, 'rope_theta': 100.0, 'roi_size': 3, 'num_stages': 1,
+    'use_density': True, 'unet_input': 'concat', 'aux_loss_weight': 0.0, 'attention_flow': DEFAULT_ATTENTION_FLOW,
 }
 
 
-def refiner_enabled(model_cfg):
-    """Nhánh config `model` có bật refiner không."""
-    return bool((model_cfg.get('refiner') or {}).get('enabled', False))
+def refiner_config(refiner):
+    """Khối config `model.refiner` -> dict đủ khoá (mặc định của tác giả) nếu bật, None nếu không."""
+    return {**REFINER_DEFAULTS, **refiner} if refiner and refiner.get('enabled') else None
+
+
+def text_model_name(rcfg):
+    """Tên CLIP text sinh token chữ của refiner."""
+    return rcfg.get('text_model_name') or rcfg['clip_model_name']
 
 
 def needs_text_tokens(model_cfg):
     """Cần bảng token chữ CLIP (refiner bật VÀ có điều kiện — `use_condition: false` bỏ qua refiner như tác giả)."""
-    return refiner_enabled(model_cfg) and model_cfg.get('use_condition', True)
+    return refiner_config(model_cfg.get('refiner')) is not None and model_cfg.get('use_condition', True)
 
 
 def weights_sha256(module):
@@ -81,12 +89,12 @@ def weights_sha256(module):
     return h.digest()
 
 
-def load_clip(name):
-    """-> (CLIPVisionModel FROZEN ở eval mode, hidden size của CLIP text cùng tên). Test thay hàm này (không tải gì)."""
+def load_clip(vision_name, text_name):
+    """-> (CLIPVisionModel `vision_name` FROZEN ở eval mode, hidden size của CLIP text `text_name`). Test thay hàm này (không tải gì)."""
     from transformers import CLIPTextConfig, CLIPVisionModel
-    vision = CLIPVisionModel.from_pretrained(name)
+    vision = CLIPVisionModel.from_pretrained(vision_name)
     vision.eval().requires_grad_(False)
-    return vision, CLIPTextConfig.from_pretrained(name).hidden_size
+    return vision, CLIPTextConfig.from_pretrained(text_name).hidden_size
 
 
 def apply_rope_2d(x, pos, theta):
@@ -145,23 +153,7 @@ class RefinerBlock(nn.Module):
         nn.init.zeros_(self.ada[-1].weight)
         nn.init.zeros_(self.ada[-1].bias)
 
-    def forward(self, x, pos, attn_mask, t_emb):
-        """Đường của tác giả, nguyên văn (cả chuỗi một lượt) — `ClipBoxRefiner.forward_full`."""
-        shift1, scale1, gate1, shift2, scale2, gate2 = self.ada(t_emb)[:, None].chunk(6, dim=-1)
-
-        B, N, D = x.shape
-        h = self.norm1(x) * (1 + scale1) + shift1
-        q, k, v = self.qkv(h).view(B, N, 3, self.num_heads, D // self.num_heads).permute(2, 0, 3, 1, 4)
-        q = apply_rope_2d(q, pos, self.rope_theta)
-        k = apply_rope_2d(k, pos, self.rope_theta)
-        h = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=attn_mask, dropout_p=self.dropout if self.training else 0.0)
-        x = x + gate1 * self.proj(h.transpose(1, 2).reshape(B, N, D))
-
-        h = self.norm2(x) * (1 + scale2) + shift2
-        return x + gate2 * self.mlp(h)
-
-    # ------------------------------------------------------------ các mảnh của `forward` cho đường tách đôi (cùng phép tính)
+    # ---------- `forward` của tác giả tách thành các mảnh cho đường tách đôi (cùng phép tính; test so với bản nguyên văn)
     def modulation(self, t_emb):
         """-> (shift1, scale1, gate1, shift2, scale2, gate2), mỗi cái [B, 1, D]."""
         return self.ada(t_emb)[:, None].chunk(6, dim=-1)
@@ -178,7 +170,7 @@ class RefinerBlock(nn.Module):
                                               dropout_p=self.dropout if self.training else 0.0)
 
     def finish(self, x, h, gate1, shift2, scale2, gate2):
-        """Phần sau attention của `forward`: x [B, N, D], h [B, heads, N, Dh]."""
+        """Phần sau attention: x [B, N, D], h [B, heads, N, Dh]."""
         B, N, D = x.shape
         x = x + gate1 * self.proj(h.transpose(1, 2).reshape(B, N, D))
         h = self.norm2(x) * (1 + scale2) + shift2
@@ -257,7 +249,7 @@ class ClipBoxRefiner(nn.Module):
         return self
 
     def set_attention_flow(self, flow):
-        """flow: {query_group: [key_groups]}. Can be changed at inference (not saved in state_dict)."""
+        """flow: {query_group: [key_groups]} (not saved in state_dict)."""
         allow = torch.zeros(len(GROUPS), len(GROUPS), dtype=torch.bool)
         for q, keys in flow.items():
             if q not in GROUPS or any(k not in GROUPS for k in keys):
@@ -268,10 +260,12 @@ class ClipBoxRefiner(nn.Module):
             if not allow[i].any():
                 raise ValueError(f"attention_flow: group '{g}' must attend to at least one group")
         device = self.type_emb.device
-        self.register_buffer('group_allow', allow.to(device), persistent=False)
-        # token ảnh / chữ không nhìn token box ⇒ luồng ngữ cảnh không phụ thuộc box ⇒ tính một lần mỗi (ảnh, t)
+        # token ảnh / chữ không nhìn token box ⇒ luồng ngữ cảnh không phụ thuộc box ⇒ tính một lần mỗi (ảnh, t) (đường duy nhất)
         s = GROUPS.index('sample')
-        self.split_ok = not bool(allow[GROUPS.index('text'), s] or allow[GROUPS.index('image'), s])
+        if allow[GROUPS.index('text'), s] or allow[GROUPS.index('image'), s]:
+            raise ValueError("attention_flow: token ảnh / chữ nhìn token box chưa hỗ trợ (đường tách đôi cần luồng ngữ cảnh "
+                             "không phụ thuộc box)")
+        self.register_buffer('group_allow', allow.to(device), persistent=False)
 
     def encode_context(self, rgb, density, text_tokens, text_mask):
         """Timestep-independent context, compute once per image. rgb [B,3,T,T] / density [B,1,T,T] in [0, 1];
@@ -357,10 +351,7 @@ class ClipBoxRefiner(nn.Module):
         (None = mẫu i ↔ ngữ cảnh i). Mọi mẫu cùng hàng ngữ cảnh PHẢI cùng t (vòng mock / DDPM: đúng; train k nhiễu / ảnh: nhân
         ngữ cảnh bằng `index_context` rồi gọi với ctx_index None). Returns [R, 4]. Tắt autocast (fp32)."""
         with torch.autocast(device_type=sample.device.type, enabled=False):
-            sample = sample.to(self.type_emb.dtype)
-            if not self.split_ok:
-                return self.forward_full(sample, timestep, ctx if ctx_index is None else self.index_context(ctx, ctx_index))
-            return self._forward_split(sample, timestep, ctx, ctx_index)
+            return self._forward_split(sample.to(self.type_emb.dtype), timestep, ctx, ctx_index)
 
     def _forward_split(self, sample, timestep, ctx, ctx_index):
         R = sample.shape[0]
@@ -399,38 +390,6 @@ class ClipBoxRefiner(nn.Module):
 
             # Keep only the refined sample tokens and map back to box space
             box = box + head(xs.flatten(1))
-        return box
-
-    def forward_full(self, sample, timestep, ctx):
-        """Đường của tác giả nguyên văn (`BoxRefiner.forward`): cả chuỗi [text | image | sample] mỗi mẫu; ctx đã một hàng / mẫu."""
-        B, g = sample.shape[0], self.grid
-        t_emb = self.time_emb(timestep)
-
-        text_tok = ctx['text_tokens'] + self.type_emb[0]
-        img_tok = ctx['image_tokens'] + self.type_emb[1]
-        L, n_img, n_samp = text_tok.shape[1], img_tok.shape[1], self.roi_size ** 2
-
-        # Image patch centers in grid units; text has no location, so place it at the canvas center
-        coords = torch.arange(g, device=sample.device, dtype=sample.dtype) + 0.5
-        yy, xx = torch.meshgrid(coords, coords, indexing='ij')
-        img_pos = torch.stack([xx, yy], dim=-1).reshape(1, n_img, 2).expand(B, -1, -1)
-        text_pos = torch.full((B, L, 2), g / 2, device=sample.device, dtype=sample.dtype)
-        attn_mask = self._attn_mask(ctx['text_mask'], n_img, n_samp)
-
-        box = sample
-        for blocks, head in zip(self.stages, self.heads):
-            # Detach the box used to build tokens (DETR-style iterative refinement)
-            box_in = box.detach()
-            samp_tok, samp_pos = self._sample_tokens(box_in, ctx['image_map'])
-            samp_tok = samp_tok + self.box_emb(box_in)[:, None] + self.type_emb[2]
-
-            x = torch.cat([text_tok, img_tok, samp_tok], dim=1)
-            pos = torch.cat([text_pos, img_pos, samp_pos], dim=1)
-            for blk in blocks:
-                x = blk(x, pos, attn_mask, t_emb)
-
-            # Keep only the refined sample tokens and map back to box space
-            box = box + head(x[:, -n_samp:].flatten(1))
         return box
 
     @torch.no_grad()

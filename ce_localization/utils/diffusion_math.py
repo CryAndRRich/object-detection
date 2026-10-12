@@ -1,12 +1,12 @@
-"""Toán khuếch tán dùng chung (torch): lịch cosine (DiffusionDet) / tuyến tính (CE-Loc gốc), q_sample,
-suy ε từ x0, cặp bước DDIM. Phần ghép box / DDIM / DDPM trên box ở `engine/diffusion.py`."""
+"""Toán khuếch tán dùng chung (torch): lịch cosine (DiffusionDet) / tuyến tính (CE-Loc gốc), q_sample, suy ε từ x0, cặp bước và
+một bước cập nhật DDIM. Phần ghép box / DDIM / DDPM trên box ở `engine/diffusion.py`."""
 
 import math
 
 import torch
 
 __all__ = ["cosine_alphas_cumprod", "linear_alphas_cumprod", "q_sample", "predict_noise_from_start",
-           "ddim_time_pairs"]
+           "ddim_time_pairs", "ddim_step"]
 
 
 def cosine_alphas_cumprod(num_timesteps=1000, s=0.008, dtype=torch.float64):
@@ -29,15 +29,21 @@ def linear_alphas_cumprod(num_timesteps=1000, beta_start=1e-4, beta_end=0.02, dt
     return torch.cumprod(1.0 - betas, dim=0)
 
 
+def _ab(alphas_cumprod, t, x):
+    """ᾱ_t theo dtype của x: `t` vô hướng (một t cho cả tensor) hoặc [R] (một t mỗi hàng của x [R, ...])."""
+    ab = alphas_cumprod[t].to(x.dtype)
+    return ab.view(-1, *([1] * (x.dim() - 1))) if ab.dim() else ab
+
+
 def q_sample(x_start, t, noise, alphas_cumprod):
-    """x_t = sqrt(ab_t) x_0 + sqrt(1-ab_t) eps. `t` is ONE scalar for the whole image."""
-    ab = alphas_cumprod[t].to(x_start.dtype)
+    """x_t = sqrt(ab_t) x_0 + sqrt(1-ab_t) eps."""
+    ab = _ab(alphas_cumprod, t, x_start)
     return ab.sqrt() * x_start + (1 - ab).sqrt() * noise
 
 
 def predict_noise_from_start(x_t, t, x_start, alphas_cumprod):
     """Recover eps from (x_t, x_0) — the analytic inverse of q_sample."""
-    ab = alphas_cumprod[t].to(x_t.dtype)
+    ab = _ab(alphas_cumprod, t, x_t)
     return ((1.0 / ab).sqrt() * x_t - x_start) / (1.0 / ab - 1).sqrt()
 
 
@@ -45,3 +51,10 @@ def ddim_time_pairs(num_timesteps=1000, sampling_steps=4):
     times = torch.linspace(-1, num_timesteps - 1, sampling_steps + 1)
     times = list(reversed(times.int().tolist()))
     return list(zip(times[:-1], times[1:]))
+
+
+def ddim_step(x_start, eps, a, a_next, eta, noise):
+    """Một bước DDIM (DiffusionDet `ddim_sample`): ᾱ_t = a -> ᾱ_t' = a_next, phương sai theo `eta` (1 = như DiffusionDet)."""
+    sigma = eta * ((1 - a / a_next) * (1 - a_next) / (1 - a)).sqrt()
+    c = (1 - a_next - sigma ** 2).sqrt()
+    return x_start * a_next.sqrt() + c * eps + sigma * noise

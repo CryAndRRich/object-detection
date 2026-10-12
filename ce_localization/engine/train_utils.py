@@ -5,11 +5,10 @@ import math
 import datetime
 import inspect
 import os
+import shutil
 
 import torch
 import torch.distributed as dist
-
-from ce_localization.utils.checkpoint import CheckpointManager
 
 __all__ = ["setup_dist", "PthCheckpoints", "warmup_multistep", "lr_factor", "epoch_batches",
            "noise_seed"]
@@ -43,17 +42,41 @@ def setup_dist(device=None):
     return dist.get_rank(), world, dev
 
 
-class PthCheckpoints(CheckpointManager):
-    """last.pth / best.pth (quy tắc Kaggle), pickle KHÔNG zip, ghi nguyên tử."""
+class PthCheckpoints:
+    """`last.pth` / `best.pth` (quy tắc Kaggle), pickle KHÔNG zip, GHI NGUYÊN TỬ: ghi ra `*.tmp`, fsync, rồi `os.replace` sang tên thật —
+    job bị giết đúng lúc đang ghi (ssh rớt, `kill`, OOM trên GPU dùng chung) thì file cũ vẫn nguyên. `last` = trạng thái mới nhất (đủ
+    để `--resume`), `best` = bản chép của `last` khi chỉ số chọn cải thiện."""
     LAST, BEST = "last.pth", "best.pth"
 
-    @staticmethod
-    def _atomic_save(obj, path):
-        tmp = path + ".tmp"
-        torch.save(obj, tmp, _use_new_zipfile_serialization=False)
-        with open(tmp, "rb") as f:
+    def __init__(self, save_dir):
+        self.save_dir = save_dir
+        os.makedirs(save_dir, exist_ok=True)
+
+    @property
+    def last_path(self):
+        return os.path.join(self.save_dir, self.LAST)
+
+    @property
+    def best_path(self):
+        return os.path.join(self.save_dir, self.BEST)
+
+    def has_last(self):
+        return os.path.exists(self.last_path)
+
+    def save(self, state, is_best):
+        """Ghi `last.pth`; nếu `is_best` thì CHÉP sang `best.pth` (khỏi serialize ~700 MB hai lần; chép cũng qua `.tmp`)."""
+        tmp = self.last_path + ".tmp"
+        torch.save(state, tmp, _use_new_zipfile_serialization=False)
+        with open(tmp, "rb") as f:          # đẩy xuống đĩa trước khi đổi tên
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        os.replace(tmp, self.last_path)     # nguyên tử trên cùng một filesystem
+        if is_best:
+            tmp = self.best_path + ".tmp"
+            shutil.copyfile(self.last_path, tmp)
+            os.replace(tmp, self.best_path)
+
+    def load_last(self, map_location="cpu"):
+        return torch.load(self.last_path, map_location=map_location, weights_only=False)
 
 
 def warmup_multistep(it, steps, gamma=0.1, warmup_iters=1000, warmup_factor=0.01):

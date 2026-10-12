@@ -17,8 +17,6 @@ Không nhánh class (một lần sinh = một box). Post-norm, dropout 0, d 256,
 định của DiffusionDet (`diffusiondet/config.py`). Khởi tạo: xavier_uniform mọi tham số ≥ 2 chiều (`_reset_parameters`).
 """
 
-import math
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -27,23 +25,9 @@ from ce_localization.models.geo import GEO_DIM, geo_features
 from ce_localization.models.head import apply_deltas
 from ce_localization.models.relation import ObjectRelation, relation_attend
 from ce_localization.models.roi import MultiLevelRoIAlign
+from ce_localization.models.unet1d import SinusoidalPosEmb
 
-__all__ = ["SinusoidalPositionEmbeddings", "DynamicConv", "DynamicStage", "DynamicRefineHead"]
-
-
-class SinusoidalPositionEmbeddings(nn.Module):
-    """`SinusoidalPositionEmbeddings` của DiffusionDet (head.py:28-40)."""
-
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
-
-    def forward(self, time):
-        half = self.dim // 2
-        e = math.log(10000) / (half - 1)
-        e = torch.exp(torch.arange(half, device=time.device) * -e)
-        e = time.float()[:, None] * e[None, :]
-        return torch.cat((e.sin(), e.cos()), dim=-1)
+__all__ = ["DynamicConv", "DynamicStage", "DynamicRefineHead"]
 
 
 class DynamicConv(nn.Module):
@@ -135,7 +119,7 @@ class DynamicRefineHead(nn.Module):
                                                   relation=relation is not None) for _ in range(n_stage)])
         # relation: dict(k_near, rel_embed_dim) -> phần dùng chung 6 stage (Rel + PE, như decoder Relation-DETR)
         self.relation = ObjectRelation(d_model, nhead, **relation) if relation is not None else None
-        self.time_mlp = nn.Sequential(SinusoidalPositionEmbeddings(d_model), nn.Linear(d_model, d_model * 4), nn.GELU(),
+        self.time_mlp = nn.Sequential(SinusoidalPosEmb(d_model), nn.Linear(d_model, d_model * 4), nn.GELU(),
                                       nn.Linear(d_model * 4, d_model * 4))
         self.geo_films = (nn.ModuleList([nn.Sequential(nn.Linear(GEO_DIM, geo_hidden), nn.SiLU(),
                                                        nn.Linear(geo_hidden, 2 * d_model)) for _ in range(n_stage)])

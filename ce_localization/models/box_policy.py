@@ -1,44 +1,37 @@
-"""BoxPolicy — bộ sinh MỘT box kiểu CE-Loc gốc / Diffusion Policy cho bài ADD (docs/EXPERIMENT_GAMMA.md).
+"""BoxPolicy — bộ sinh MỘT box kiểu CE-Loc gốc / Diffusion Policy cho bài ADD (docs/EXPERIMENT_GAMMA.md, EXPERIMENT_DELTA.md).
 
-    ảnh [B,3|4,T,T] -> R-50 của ALPHA (`models/backbone.py`) -> C5 = layer4 [B,2048,T/32,T/32] (`ss_source: c5`,
-        như bài: SpatialSoftmax trên đầu ra layer cuối của ResNet ĐÃ PRETRAIN)
-        -> SpatialSoftmax có mask vùng thật (`models/memory.masked_spatial_softmax`)
-        -> 2048 điểm (x, y) -> Linear(4096, vis_dim)                                  ┐
-    text: CLIP pooler 512 (bảng `models/text.TextTable`) -> Linear(512, text_dim) -> Mish ┤ cond [B, vis+text]
-    box nhiễu v_t [B,1,4] + t -> U-Net 1D (`models/unet1d.py`), FiLM cộng bias theo cond -> ε̂
+    ảnh [B,3|4,T,T] (kiểu bài: `to_tensor` /255 + density `.convert("L")`) -> backbone ảnh -> SpatialSoftmax kiểu bài
+        (`paper_spatial_softmax`: meshgrid 'ij', toạ độ [−1, 1] trên cả canvas) -> Linear(2C, vis_dim)          ┐
+    text: CLIP pooler 512 (bảng `models/text.TextTable`) -> Linear(512, text_dim) -> Mish                       ┤ cond
+    box nhiễu v_t [B,1,4] + t -> U-Net 1D (`models/unet1d.py`), FiLM theo [emb t ; cond] -> ε̂
 
-Khác CE-Loc gốc ĐÚNG ở phần ảnh (người dùng chốt 2026-10-01): ResNet18 (BN train, `to_tensor`, SpatialSoftmax 512 kênh
-C5, không mask) -> R-50 của ALPHA (FrozenBN, chuẩn hoá ImageNet, SpatialSoftmax 2048 kênh C5 có mask vùng thật — vì box
-chuẩn hoá theo vùng thật, density kênh 4 khởi tạo 0). Text, U-Net 1D, lịch β tuyến tính 1e-4..0,02, ε-MSE giữ như bài.
-`ss_source: p5` (P5 của FPN, 256 kênh) là bản đầu — G3 2026-10-01 HỎNG: FPN khởi tạo ngẫu nhiên ⇒ softmax phẳng, nhánh ảnh
-gần như không có gradient; giữ khoá chỉ để tái lập.
+Box trong không gian khuếch tán: cxcywh chia CANVAS như bài, `·2 − 1` -> [−1, 1] (`norm_whwh`). Lịch β tuyến tính 1e-4..0,02,
+ε-MSE như bài. Train: mỗi ảnh rút `noise_per_image` bộ (t, ε) độc lập — backbone chỉ tính MỘT lần mỗi ảnh, U-Net rất rẻ.
 
-Box trong không gian khuếch tán: cxcywh chia (nw, nh) của VÙNG ẢNH THẬT (`box_norm: valid`, quy ước `whwh` của ALPHA) hoặc
-chia CANVAS như bài (`box_norm: canvas`) rồi `·2 − 1` -> [−1, 1] (`norm_whwh`).
+Backbone (`vision`):
+- `r18_paper` (CE-Loc gốc — nạp checkpoint của bài qua `load_celoc_paper`, hoặc train lại: GAMMA2 pha 1 / GAMMA4 / DELTA): ResNet18
+  4 kênh như `refs/repos/Count-Editing/CE-LocModel/models/{vision_encoder,spatial_softmax}.py`, SpatialSoftmax 512 kênh trên C5,
+  Linear(1024, 128); `ss_mask: true` = ô đệm −inf trước softmax (lưới toạ độ giữ hệ canvas của bài).
+- `r50_fpn` ("CE-Loc gốc + R-50", GAMMA0 / 0.1, người dùng chốt 2026-10-01): R-50 BN train, kênh density = TB weight RGB như bài,
+  SpatialSoftmax 2048 kênh trên C5 (layer4) -> Linear(4096, vis_dim). FPN vẫn dựng (không dùng) để giữ key checkpoint GAMMA0.
 
-"CE-Loc gốc + R-50" (người dùng chốt 2026-10-01, sau khi GAMMA0 bản ALPHA hỏng — EXPERIMENT_GAMMA mục 12.2): config đặt
-`backbone_norm: bn` (BN train như bài), `density_init: rgb_mean`, `ss_kind: paper` (SpatialSoftmax KHÔNG mask trên cả
-canvas, meshgrid 'ij', toạ độ [−1, 1] — đúng `_paper_spatial_softmax`), `box_norm: canvas`, cùng `data.input_style: paper`
-(`to_tensor`, density `.convert("L")`). Mặc định của constructor giữ bản cũ (FrozenBN / mask / vùng thật) để tái lập.
-Train: mỗi ảnh rút `noise_per_image` bộ (t, ε) độc lập — backbone chỉ tính MỘT lần mỗi ảnh, U-Net rất rẻ.
-
-`vision="r18_paper"` (NẠP checkpoint của bài qua `BoxPolicy.load_celoc_paper`, hoặc TRAIN lại CE-Loc gốc — GAMMA2 pha 1,
-`ss_mask: true` = SpatialSoftmax mask phần đệm: ô đệm −inf trước softmax, lưới toạ độ giữ hệ canvas của bài): phần ảnh đúng CE-Loc gốc
-(`refs/repos/Count-Editing/CE-LocModel/models/{vision_encoder,spatial_softmax}.py`) — ResNet18 4 kênh, SpatialSoftmax
-KHÔNG mask trên cả canvas (meshgrid 'ij': toạ độ đầu là DỌC), Linear(1024, 128); đầu vào `data.turns.paper_inputs`
-(`to_tensor`, density `.convert("L")`), box chuẩn hoá theo CANVAS (whwh = T).
-
-DELTA (docs/EXPERIMENT_DELTA.md) — bản CE-Loc cập nhật của tác giả gốc (`refs/CE-Loc-update/models/diffusion_module.py`):
+DELTA — bản CE-Loc cập nhật của tác giả gốc (`refs/CE-Loc-update/models/diffusion_module.py`):
 - `refiner` (dict config, `enabled`): `ClipBoxRefiner` (`models/clip_refiner.py`) TRONG mạng khử nhiễu — mỗi lần gọi ε_θ:
-  x_t -> refiner -> refined = x_t + Δ ; U-Net nhận `[x_t ; refined]` (`unet_input: concat`, 8 kênh, ra ε 4 kênh) hoặc chỉ refined
-  (`replace`); loss = ε-MSE + `aux_loss_weight` · MSE(refined, x0). Cần token chữ CLIP B/16 (`text_tokens`, `models/text.TextTable`).
-  CLIP ViT frozen nạp từ HF lúc dựng (không vào state_dict); buffer `clip_sha` = vân tay (vision, text) kiểm khớp khi nạp.
-- `use_condition: false`: điều kiện ảnh + text = 0 (embedding t giữ), refiner bỏ qua (refined = x_t), aux tắt — như tác giả. Ở đây
-  refiner không được dựng và `vision` / `text_proj` đóng băng (không ai đọc) ⇒ mọi tham số train vẫn có grad (DDP không find_unused).
-- Sampler vòng mock nhận `mock_steps` (mặc định 100 như bài; 1000 = chạy đủ dải t).
+  x_t -> refiner -> refined = x_t + Δ. `unet_input: concat` (DELTA1 / 2.x): U-Net nhận `[x_t ; refined]` (8 kênh, ra ε 4 kênh),
+  loss = ε-MSE + `aux_loss_weight` · MSE(refined, x0). `unet_input: none` (DELTA3): KHÔNG U-Net / backbone / FiLM — refiner là cả mạng
+  khử nhiễu, ε̂ suy từ refined (= x̂0) cho sampler, loss = `aux_loss_weight` · MSE(refined, x0). Cần token chữ CLIP text
+  (`text_tokens`, `models/text.TextTable`). CLIP ViT frozen nạp từ HF lúc dựng (không vào state_dict); buffer `clip_sha` = vân tay
+  (vision, text) kiểm khớp khi nạp.
+- `use_condition: false` (DELTA1.1): điều kiện ảnh + text = 0 (embedding t giữ), refiner bỏ qua (refined = x_t), aux tắt — như tác giả.
+  Ở đây refiner không được dựng và `vision` / `text_proj` đóng băng (không ai đọc) ⇒ mọi tham số train vẫn có grad (DDP không find_unused).
+
+GAMMA4 (`obj_attn`): box nhiễu cross-attend tới box các vật đang có ở 6 vị trí U-Net (`models/unet1d.py`). GAMMA4.0.1 / 4.0.2
+(`obj_k`, docs/EXPERIMENT_GAMMA.md mục 16.8): chỉ `obj_k` vật vào attention — `obj_select: nearest` = `obj_k` vật có tâm gần tâm x_t
+nhất, chọn lại ở MỖI lần gọi U-Net (mỗi bước, mỗi mẫu; mọi vật mã hoá một lần, chọn bằng mask `nearest_mask`); `random` = `obj_k` vật
+ngẫu nhiên chọn TRƯỚC khi mã hoá — train rút lại mỗi lần, eval một bộ mỗi ảnh (seed = crc32 box vật) dùng chung cho mọi mẫu / bước.
 """
 
-from functools import partial
+import zlib
 
 import torch
 import torch.nn as nn
@@ -48,24 +41,24 @@ import torchvision
 import ce_localization.models.clip_refiner as clip_refiner
 from ce_localization.models.backbone import ResNet50FPN
 from ce_localization.models.geo import pad_objects
-from ce_localization.models.memory import masked_spatial_softmax, valid_cells_mask
+from ce_localization.models.memory import valid_cells_mask
 from ce_localization.models.unet1d import ConditionalUnet1D
-from ce_localization.utils.diffusion_math import linear_alphas_cumprod
+from ce_localization.utils.diffusion_math import linear_alphas_cumprod, predict_noise_from_start, q_sample
 
 __all__ = ["BoxPolicy", "PaperVisionEncoder", "boxes_to_unit", "unit_to_boxes", "norm_whwh", "ddpm_sample", "mock_sample",
-           "VISIONS", "SS_KINDS", "BOX_NORMS"]
+           "paper_spatial_softmax", "nearest_mask", "VISIONS", "UNET_INPUTS", "OBJ_SELECTS"]
 
 VISIONS = ("r50_fpn", "r18_paper")
+UNET_INPUTS = ("concat", "none")             # DELTA: U-Net nhận [x_t ; refined] | không có U-Net (refiner là cả mạng khử nhiễu)
+OBJ_SELECTS = ("nearest", "random")          # GAMMA4.0.x: cách chọn `obj_k` vật vào cross-attn
 
-P5_STRIDE = 32
+C5_STRIDE = 32
 C5_CHANNELS = 2048
-SS_SOURCES = ("c5", "p5")
-SS_KINDS = ("masked", "paper")
-BOX_NORMS = ("valid", "canvas")
 
 
 def norm_whwh(model, whwh, canvas):
-    """whwh vùng thật [B,4] -> whwh dùng để chuẩn hoá box của `model` (`box_norm`): giữ nguyên, hoặc canvas T."""
+    """whwh vùng thật [B,4] -> whwh chuẩn hoá box của `model` (`box_norm`): canvas T (CE-Loc: BoxPolicy / BoxRefiner) hoặc
+    giữ vùng thật (refine kiểu DiffusionDet của ProposeRefine)."""
     return torch.full_like(whwh, float(canvas)) if getattr(model, "box_norm", "valid") == "canvas" else whwh
 
 
@@ -84,6 +77,14 @@ def unit_to_boxes(u, whwh):
     xyxy = torch.stack([c[..., 0] - c[..., 2] / 2, c[..., 1] - c[..., 3] / 2,
                         c[..., 0] + c[..., 2] / 2, c[..., 1] + c[..., 3] / 2], dim=-1)
     return xyxy * whwh
+
+
+def nearest_mask(x, units, mask, k):
+    """x [R,4] box nhiễu, units [R,M,4] box vật (cùng hệ cxcywh·2 − 1), mask [R,M] -> mask [R,M] chỉ giữ k vật có tâm gần tâm x nhất
+    (khoảng cách Euclid, như `relation.gather` của GAMMA3.1; không chia (w, h) của x — ở t lớn vô nghĩa). < k vật: giữ hết."""
+    d = ((units[..., :2].float() - x[:, None, :2].float()) ** 2).sum(-1).masked_fill(~mask, float("inf"))
+    idx = d.topk(min(k, d.shape[1]), dim=1, largest=False).indices
+    return torch.zeros_like(mask).scatter(1, idx, True) & mask
 
 
 def _snap(traj, record, t, x, eps, ab_t):
@@ -134,9 +135,10 @@ def mock_sample(eps_fn, n_rows, alphas_cumprod, steps=100, generator=None, devic
     return x if traj is None else (x, traj)
 
 
-def _paper_spatial_softmax(feat, valid=None):
+def paper_spatial_softmax(feat, valid=None, return_att=False):
     """`SpatialSoftmax` của CE-Loc gốc, y từng phép tính: meshgrid 'ij' -> toạ độ đầu là DỌC; xen kẽ (x_c, y_c).
-    `valid` [N,H,W] bool (GAMMA2): ô False (phần đệm) nhận −inf trước softmax — cùng lưới toạ độ canvas của bài."""
+    `valid` [N,H,W] bool (GAMMA2): ô False (phần đệm) nhận −inf trước softmax — cùng lưới toạ độ canvas của bài.
+    -> [N, 2C] (+ attention softmax [N, C, H·W] nếu `return_att`)."""
     N, C, H, W = feat.shape
     pos_x, pos_y = torch.meshgrid(torch.linspace(-1, 1, H, device=feat.device),
                                   torch.linspace(-1, 1, W, device=feat.device), indexing="ij")
@@ -146,16 +148,8 @@ def _paper_spatial_softmax(feat, valid=None):
     att = F.softmax(logits, dim=-1)
     ex = torch.sum(pos_x.reshape(H * W) * att, dim=-1, keepdim=True)
     ey = torch.sum(pos_y.reshape(H * W) * att, dim=-1, keepdim=True)
-    return torch.cat([ex, ey], dim=-1).reshape(N, -1)
-
-
-def spatial_keypoints(feat, valid_hw, kind):
-    """feat [B,C,H,W] (stride 32) -> [B, 2C] toạ độ SpatialSoftmax. `paper`: y bài (không mask, cả canvas, (dọc, ngang)
-    trong [−1, 1]); `masked`: che ô đệm, (x, y) chia vùng thật (`models/memory.masked_spatial_softmax`)."""
-    if kind == "paper":
-        return _paper_spatial_softmax(feat)
-    valid = valid_cells_mask(valid_hw, feat.shape[2], feat.shape[3], P5_STRIDE)
-    return masked_spatial_softmax(feat, valid, valid_hw, P5_STRIDE).flatten(1)
+    kp = torch.cat([ex, ey], dim=-1).reshape(N, -1)
+    return (kp, att) if return_att else kp
 
 
 class PaperVisionEncoder(nn.Module):
@@ -188,11 +182,11 @@ class PaperVisionEncoder(nn.Module):
 
     def valid(self, c5, valid_hw):
         """Ô C5 thuộc vùng ảnh thật [N,H,W] nếu `ss_mask`, không thì None (bài: cả canvas)."""
-        return valid_cells_mask(valid_hw, c5.shape[2], c5.shape[3], P5_STRIDE) if self.ss_mask else None
+        return valid_cells_mask(valid_hw, c5.shape[2], c5.shape[3], C5_STRIDE) if self.ss_mask else None
 
     def keypoints_flat(self, c5, valid_hw=None):
         """C5 -> [N, 2C] toạ độ SpatialSoftmax (có mask nếu `ss_mask`)."""
-        return _paper_spatial_softmax(c5, self.valid(c5, valid_hw))
+        return paper_spatial_softmax(c5, self.valid(c5, valid_hw))
 
     def forward(self, x, valid_hw=None):
         return self.projection(self.keypoints_flat(self.backbone(x), valid_hw))
@@ -203,61 +197,63 @@ class PaperVisionEncoder(nn.Module):
         attention softmax [B,C,H,W]). Toạ độ −1 / +1 = TÂM ô đầu / ô cuối của lưới H×W."""
         feat = self.backbone(x)
         N, C, H, W = feat.shape
-        logits = feat.reshape(N, C, -1)
-        valid = self.valid(feat, valid_hw)
-        if valid is not None:
-            logits = logits.masked_fill(~valid.reshape(N, 1, -1), float("-inf"))
-        att = F.softmax(logits, dim=-1)
-        return _paper_spatial_softmax(feat, valid).reshape(N, C, 2), att.reshape(N, C, H, W)
+        kp, att = paper_spatial_softmax(feat, self.valid(feat, valid_hw), return_att=True)
+        return kp.reshape(N, C, 2), att.reshape(N, C, H, W)
 
 
 class BoxPolicy(nn.Module):
     def __init__(self, in_channels=3, pretrained_backbone=True, fpn_dim=256, vis_dim=128, text_in=512,
                  text_dim=128, step_embed_dim=256, down_dims=(64, 128, 256), kernel_size=3, n_groups=8,
-                 num_timesteps=1000, beta_start=1e-4, beta_end=0.02, vision="r50_fpn", ss_source="c5",
-                 backbone_norm="frozen", density_init="zero", ss_kind="masked", box_norm="valid", ss_mask=False,
-                 obj_attn=False, obj_heads=4, obj_max=300, refiner=None, use_condition=True):
+                 num_timesteps=1000, beta_start=1e-4, beta_end=0.02, vision="r50_fpn", ss_mask=False,
+                 obj_attn=False, obj_heads=4, obj_max=300, obj_k=None, obj_select="nearest", refiner=None, use_condition=True):
         super().__init__()
-        if vision not in VISIONS:
-            raise ValueError(f"vision {vision!r} không thuộc {VISIONS}")
-        if ss_source not in SS_SOURCES or ss_kind not in SS_KINDS or box_norm not in BOX_NORMS:
-            raise ValueError(f"ss_source {ss_source!r} / ss_kind {ss_kind!r} / box_norm {box_norm!r} không thuộc "
-                             f"{SS_SOURCES} / {SS_KINDS} / {BOX_NORMS}")
-        self.vision_kind, self.ss_source, self.ss_kind = vision, ss_source, ss_kind
-        self.box_norm = "canvas" if vision == "r18_paper" else box_norm
-        if vision == "r18_paper":
-            self.vision = PaperVisionEncoder(vis_dim, in_channels, pretrained_backbone, ss_mask)
-        else:
-            self.backbone = ResNet50FPN(fpn_dim, pretrained=pretrained_backbone, in_channels=in_channels,
-                                        norm=backbone_norm, density_init=density_init)
-            self.vis_proj = nn.Linear(2 * (C5_CHANNELS if ss_source == "c5" else fpn_dim), vis_dim)
-        self.text_proj = nn.Sequential(nn.Linear(text_in, text_dim), nn.Mish())
-        self.cond_dim = vis_dim + text_dim
-        # DELTA: refiner của tác giả (`ObjectPlacementPolicy`): concat => U-Net nhận [x_t ; refined] (8 kênh), vẫn ra ε 4 kênh
-        rcfg = {**clip_refiner.REFINER_DEFAULTS, **(refiner or {})} if refiner and refiner.get("enabled") else None
+        rcfg = clip_refiner.refiner_config(refiner)
         self.use_refiner, self.use_condition = rcfg is not None, bool(use_condition)
-        self.refiner_unet_input = rcfg["unet_input"] if rcfg else None
         self.refiner_aux_weight = float(rcfg["aux_loss_weight"]) if rcfg else 0.0
+        unet_input = rcfg["unet_input"] if rcfg else None
+        self.box_norm = "canvas"
         if rcfg:
-            if self.refiner_unet_input not in ("concat", "replace"):
-                raise ValueError(f"refiner.unet_input {self.refiner_unet_input!r} không thuộc ('concat', 'replace')")
-            if self.box_norm != "canvas":
-                raise ValueError("refiner (RoIAlign trên lưới CLIP của cả canvas) cần box chuẩn hoá theo canvas (vision r18_paper)")
+            if unet_input not in UNET_INPUTS:
+                raise ValueError(f"refiner.unet_input {unet_input!r} không thuộc {UNET_INPUTS}")
             if obj_attn:
                 raise ValueError("refiner + obj_attn chưa hỗ trợ (luồng vật của U-Net nhận box 4 số)")
             if rcfg["use_density"] and in_channels != 4:
                 raise ValueError("refiner.use_density cần ảnh 4 kênh (RGB + density)")
-        unet_in = 8 if self.refiner_unet_input == "concat" else 4
-        self.noise_net = ConditionalUnet1D(unet_in, self.cond_dim, step_embed_dim, tuple(down_dims),
-                                           kernel_size, n_groups, obj_attn=obj_attn, obj_heads=obj_heads, output_dim=4)
+            if unet_input == "none" and not self.use_condition:
+                raise ValueError("refiner.unet_input none (refiner là cả mạng khử nhiễu) cần use_condition: true")
         self.obj_attn, self.obj_max = bool(obj_attn), obj_max
+        if obj_k is not None and (not obj_attn or int(obj_k) < 1):
+            raise ValueError(f"obj_k {obj_k!r} cần obj_attn: true và >= 1")
+        if obj_select not in OBJ_SELECTS:
+            raise ValueError(f"obj_select {obj_select!r} không thuộc {OBJ_SELECTS}")
+        # thuộc tính thường (không vào state_dict) ⇒ eval.py --obj-k / --obj-select đặt lại được trên checkpoint GAMMA4
+        self.obj_k, self.obj_select = (None if obj_k is None else int(obj_k)), obj_select
         self.num_timesteps = num_timesteps
         self.register_buffer("alphas_cumprod", linear_alphas_cumprod(num_timesteps, beta_start, beta_end),
                              persistent=False)
+        self.vision_kind, self.noise_net = None, None
+        if unet_input == "none":                                     # DELTA3: không backbone / FiLM / U-Net
+            self.cond_dim = 0
+        else:
+            if vision not in VISIONS:
+                raise ValueError(f"vision {vision!r} không thuộc {VISIONS}")
+            self.vision_kind = vision
+            if vision == "r18_paper":
+                self.vision = PaperVisionEncoder(vis_dim, in_channels, pretrained_backbone, ss_mask)
+            else:
+                self.backbone = ResNet50FPN(fpn_dim, pretrained=pretrained_backbone, in_channels=in_channels, norm="bn",
+                                            density_init="rgb_mean")
+                self.vis_proj = nn.Linear(2 * C5_CHANNELS, vis_dim)
+            self.text_proj = nn.Sequential(nn.Linear(text_in, text_dim), nn.Mish())
+            self.cond_dim = vis_dim + text_dim
+            # DELTA1 (`ObjectPlacementPolicy` của tác giả, concat): U-Net nhận [x_t ; refined] (8 kênh), vẫn ra ε 4 kênh
+            self.noise_net = ConditionalUnet1D(8 if unet_input == "concat" else 4, self.cond_dim, step_embed_dim,
+                                               tuple(down_dims), kernel_size, n_groups, obj_attn=obj_attn,
+                                               obj_heads=obj_heads, output_dim=4)
         # dựng SAU noise_net: khởi tạo ResNet / U-Net trùng bản không refiner (DELTA1 vs DELTA1.1 so cặp)
         self.refiner = None
         if rcfg and self.use_condition:
-            vision_model, text_hidden = clip_refiner.load_clip(rcfg["clip_model_name"])
+            vision_model, text_hidden = clip_refiner.load_clip(rcfg["clip_model_name"], clip_refiner.text_model_name(rcfg))
             self.refiner = clip_refiner.ClipBoxRefiner(rcfg, vision_model, text_hidden)
             sha = torch.zeros(2, 32, dtype=torch.uint8)
             sha[0] = torch.tensor(list(clip_refiner.weights_sha256(vision_model)), dtype=torch.uint8)
@@ -277,14 +273,13 @@ class BoxPolicy(nn.Module):
 
     def condition(self, images, text_raw, valid_hw, null_text=False):
         """-> cond [B, vis_dim + text_dim]. Phần ảnh không phụ thuộc t: tính MỘT lần mỗi ảnh. `use_condition: false` -> 0, không chạy
-        encoder (như `encode_condition` của tác giả)."""
-        if not self.use_condition:
+        encoder (như `encode_condition` của tác giả); DELTA3 (không U-Net) -> [B, 0] (sampler chỉ đọc B / thiết bị)."""
+        if not self.use_condition or self.noise_net is None:
             return images.new_zeros(images.shape[0], self.cond_dim, dtype=torch.float32)
         if self.vision_kind == "r18_paper":                       # bài: không mask vùng thật; GAMMA2: ss_mask
             return torch.cat([self.vision(images, valid_hw), self.text_emb(text_raw, null_text)], dim=-1)
-        f = self.backbone.forward_c5(images) if self.ss_source == "c5" else self.backbone.forward_p5(images)
-        return torch.cat([self.vis_proj(spatial_keypoints(f, valid_hw, self.ss_kind)), self.text_emb(text_raw, null_text)],
-                         dim=-1)
+        kp = paper_spatial_softmax(self.backbone.forward_c5(images))
+        return torch.cat([self.vis_proj(kp), self.text_emb(text_raw, null_text)], dim=-1)
 
     def cond_from_keypoints(self, kp, text_raw, null_text=False):
         """ResNet18 của bài: toạ độ SpatialSoftmax [B, 2C] -> cond — để GAMMA2 dùng chung backbone với model refine."""
@@ -314,7 +309,8 @@ class BoxPolicy(nn.Module):
         """Sau khi nạp checkpoint (eval): CLIP text vừa tải phải đúng bản lúc train."""
         if self.refiner is not None and self.clip_sha[1].any() and \
                 not torch.equal(self.clip_sha[1].cpu(), self._sha_row(sha)):
-            raise RuntimeError("CLIP text (token chữ của refiner) KHÁC bản lúc train checkpoint — kiểm clip_model_name / HF cache")
+            raise RuntimeError("CLIP text (token chữ của refiner) KHÁC bản lúc train checkpoint — kiểm refiner.text_model_name / "
+                               "HF cache")
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
         """`clip_sha`: hàng (vision / text) đã có giá trị ở model phải TRÙNG checkpoint (CLIP tải từ HF đúng bản đã train); hàng còn
@@ -342,13 +338,25 @@ class BoxPolicy(nn.Module):
         return self.refiner.encode_context(images[:, :3], dens, *text_tokens)
 
     def predict_noise(self, x, t, cond, ctx=None, ctx_index=None, obj=None):
-        """x [R,4] box nhiễu, t [R], cond [R, D], ctx (`refiner_context`, C hàng) + ctx_index [R] | None, obj (token vật, mask) | None
-        -> (ε̂ [R,4], refined [R,4] | None) — `predict_noise` của tác giả. Không refiner: U-Net trên x như bài."""
+        """x [R,4] box nhiễu, t [R], cond [R, D], ctx (`refiner_context`, C hàng) + ctx_index [R] | None, obj (token vật, mask, box vật)
+        của `object_tokens` | None -> (ε̂ [R,4], refined [R,4] | None) — `predict_noise` của tác giả. Không refiner: U-Net trên x như
+        bài. DELTA3 (không U-Net): refined = x̂0 ⇒ ε̂ = (x_t − √ᾱ_t · refined) / √(1 − ᾱ_t) (fp32).
+        GAMMA4.0.1 (`obj_select: nearest`): mask chỉ giữ `obj_k` vật gần x (x_t noisy khi train — không theo đích)."""
+        if obj is not None:
+            tok, mask, units = obj
+            if self.obj_k is not None and self.obj_select == "nearest":
+                mask = nearest_mask(x, units, mask, self.obj_k)
+            obj = (tok, mask)
         unet_in, refined = x, None
         if self.use_refiner:
             refined = self.refiner(x, t, ctx, ctx_index) if ctx is not None else x
-            unet_in = torch.cat([x, refined.to(x.dtype)], dim=-1) if self.refiner_unet_input == "concat" else refined
-        eps = self.noise_net(unet_in.unsqueeze(1), t, cond, *(obj or (None, None))).squeeze(1)
+            unet_in = torch.cat([x, refined.to(x.dtype)], dim=-1)
+        if self.noise_net is not None:
+            eps = self.noise_net(unet_in.unsqueeze(1), t, cond, *(obj or (None, None))).squeeze(1)
+        elif ctx is None:
+            raise ValueError("refiner.unet_input none: refiner là cả mạng khử nhiễu, không chạy được khi bỏ refiner")
+        else:
+            eps = predict_noise_from_start(x.float(), t, refined, self.alphas_cumprod)
         if refined is not None and ctx is not None and self.track_refine:
             self._track_delta(t, (refined - x).abs().mean(-1))
         return eps, refined
@@ -373,41 +381,47 @@ class BoxPolicy(nn.Module):
         st, self._stats = self._stats, {}
         return st
 
-    def object_tokens(self, objects, valid_hw, canvas, cond, generator=None, cap=False):
-        """objects: list B tensor [Mᵢ,4] xyxy pixel canvas -> (token 6 tầng, mask) cho `noise_net` (mã hoá gương, t = 0).
-        Box vật chuẩn hoá GIỐNG đích (`boxes_to_unit` theo `box_norm`). `cap`: > obj_max vật thì lấy ngẫu nhiên obj_max (train)."""
+    def object_tokens(self, objects, canvas, cond, generator=None, cap=False):
+        """objects: list B tensor [Mᵢ,4] xyxy pixel canvas -> (token 6 tầng, mask, box vật [B,M,4] chuẩn hoá) cho `noise_net` (mã hoá
+        gương, t = 0). Box vật chuẩn hoá GIỐNG đích (chia canvas). `cap` (train): > obj_max vật thì lấy ngẫu nhiên obj_max.
+        GAMMA4.0.2 (`obj_k` + `random`): giữ `obj_k` vật ngẫu nhiên — train (`cap`) rút theo `generator`, eval seed = crc32 box vật
+        (cố định theo mẫu, không phụ thuộc batch, không tiêu RNG eval). `nearest`: giữ hết, chọn ở `predict_noise`."""
         if objects is None:
             raise ValueError("model.obj_attn cần `objects` (box các vật đang có) khi train / suy luận")
         dev = cond.device
-        hw = valid_hw.float().cpu()
-        whwh = (torch.full((len(objects), 4), float(canvas)) if self.box_norm == "canvas" else
-                torch.stack([hw[:, 1], hw[:, 0], hw[:, 1], hw[:, 0]], 1))
+        whwh = torch.full((4,), float(canvas))
         units = []
-        for i, o in enumerate(objects):
+
+        def draw():
+            return int(torch.randint(0, 2 ** 31 - 1, (1,), generator=generator, device=generator.device)) if generator \
+                is not None else 0
+        for o in objects:
             o = torch.as_tensor(o, dtype=torch.float32).reshape(-1, 4).cpu()
-            if cap and len(o) > self.obj_max:
-                seed = int(torch.randint(0, 2 ** 31 - 1, (1,), generator=generator, device=generator.device)) if generator \
-                    is not None else 0
-                o = o[torch.randperm(len(o), generator=torch.Generator().manual_seed(seed))[: self.obj_max]]
-            units.append(boxes_to_unit(o, whwh[i]))
+            if self.obj_k is not None and self.obj_select == "random" and len(o) > self.obj_k:
+                seed = draw() if cap else zlib.crc32(o.contiguous().numpy().tobytes())
+                o = o[torch.randperm(len(o), generator=torch.Generator().manual_seed(seed))[: self.obj_k]]
+            elif cap and len(o) > self.obj_max:
+                o = o[torch.randperm(len(o), generator=torch.Generator().manual_seed(draw()))[: self.obj_max]]
+            units.append(boxes_to_unit(o, whwh))
         objs, mask = pad_objects(units, dev, min_m=1)
-        return self.noise_net.encode_objects(objs, mask, cond), mask
+        return self.noise_net.encode_objects(objs, mask, cond), mask, objs
 
     def forward(self, images, text_raw, valid_hw, x0, k=1, generator=None, objects=None, text_tokens=None):
         """ε-MSE như `ObjectPlacementPolicy.compute_loss` của bài, k bộ (t, ε) mỗi ảnh.
         x0 [B,4] trong [−1,1]. `objects` (GAMMA4): list B box vật xyxy pixel canvas. `text_tokens` (DELTA): (token, mask) của
         `TextTable.tokens`. -> loss vô hướng (trung bình trên B·k·4; DELTA + aux)."""
         cond = self.condition(images, text_raw, valid_hw)
-        obj = (self.object_tokens(objects, valid_hw, images.shape[-1], cond, generator, cap=True) if self.obj_attn
+        obj = (self.object_tokens(objects, images.shape[-1], cond, generator, cap=True) if self.obj_attn
                else None)
         return self.eps_loss(cond, x0, k, generator, obj, self.refiner_context(images, text_tokens))
 
     @staticmethod
     def _repeat_obj(obj, n):
-        return None if obj is None else ([t.repeat_interleave(n, 0) for t in obj[0]], obj[1].repeat_interleave(n, 0))
+        return None if obj is None else ([t.repeat_interleave(n, 0) for t in obj[0]], obj[1].repeat_interleave(n, 0),
+                                         obj[2].repeat_interleave(n, 0))
 
     def eps_loss(self, cond, x0, k=1, generator=None, obj=None, ctx=None):
-        """ε-MSE từ cond [B, D] đã tính sẵn; obj = (token, mask) của `object_tokens` | None; ctx (DELTA) = `refiner_context` (B hàng)
+        """ε-MSE từ cond [B, D] đã tính sẵn; obj = (token, mask, box vật) của `object_tokens` | None; ctx (DELTA) = `refiner_context` (B hàng)
         — k bộ (t, ε) / ảnh có t khác nhau nên ngữ cảnh nhân thành B·k hàng (đường tách đôi cần một t mỗi hàng ngữ cảnh).
         DELTA: + `aux_loss_weight` · MSE(refined, x0) như `compute_loss` của tác giả; thống kê đọc qua `pop_stats()`."""
         obj = self._repeat_obj(obj, k)
@@ -419,45 +433,46 @@ class BoxPolicy(nn.Module):
             ctx = self.refiner.index_context(ctx, torch.arange(B, device=dev).repeat_interleave(k))
         t = torch.randint(0, self.num_timesteps, (x0.shape[0],), device=dev, generator=generator)
         noise = torch.randn(x0.shape, device=dev, generator=generator)
-        ab = self.alphas_cumprod[t].unsqueeze(-1)
-        noisy = ab.sqrt() * x0 + (1 - ab).sqrt() * noise
+        noisy = q_sample(x0, t, noise, self.alphas_cumprod)
         pred, refined = self.predict_noise(noisy, t, cond, ctx, None, obj)
-        loss = F.mse_loss(pred, noise)
+        loss = F.mse_loss(pred, noise) if self.noise_net is not None else None      # DELTA3: không có số hạng ε
         if refined is not None and ctx is not None:
             with torch.autocast(device_type=dev.type, enabled=False):          # refined fp32 (refiner tắt autocast)
                 aux = F.mse_loss(refined, x0.to(refined.dtype))
-                self._stats = {"loss_eps": loss.detach().float(), "loss_aux": aux.detach().float(),
+                st = {} if loss is None else {"loss_eps": loss.detach().float()}
+                self._stats = {**st, "loss_aux": aux.detach().float(),
                                "delta_abs": (refined - noisy.to(refined.dtype)).abs().mean().detach().float(),
                                "aux_ratio": (aux / F.mse_loss(noisy.to(refined.dtype), x0.to(refined.dtype)).clamp_min(1e-12))
                                .detach().float()}
-            if self.refiner_aux_weight > 0:
+            if loss is None:
+                loss = self.refiner_aux_weight * aux
+            elif self.refiner_aux_weight > 0:
                 loss = loss + self.refiner_aux_weight * aux
         return loss
 
     @torch.no_grad()
     def sample(self, images, text_raw, valid_hw, n_samples, generator=None, sampler="ddpm", record=None,
-               null_text=False, objects=None, use_objects=True, text_tokens=None, use_refiner=True, mock_steps=100):
+               null_text=False, objects=None, use_objects=True, text_tokens=None, use_refiner=True):
         """n_samples mẫu ĐỘC LẬP mỗi ảnh (ảnh mã hoá một lần, các mẫu khử nhiễu song song).
         -> [B, n_samples, 4] trong [−1,1]; `record` (tập t / "all") -> (box, quỹ đạo: list {t, x_t, x0_hat} [B,n,4]).
-        GAMMA4: `objects` = box vật (token tính MỘT lần mỗi ảnh, dùng cho mọi bước); `use_objects=False` = tắt (`_noobj`).
-        DELTA: `text_tokens` (token chữ CLIP); `use_refiner=False` = bỏ refiner (refined = x_t — `_norefine`, ngoài phân bố train).
-        `mock_steps`: số bước vòng mock (t = mock_steps − 1 .. 0)."""
+        GAMMA4: `objects` = box vật (token tính MỘT lần mỗi ảnh, dùng cho mọi bước; 4.0.1 chọn `obj_k` gần nhất mỗi bước); `use_objects=False`
+        = tắt (`_noobj`).
+        DELTA: `text_tokens` (token chữ CLIP); `use_refiner=False` = bỏ refiner (refined = x_t — `_norefine`, ngoài phân bố train)."""
         cond = self.condition(images, text_raw, valid_hw, null_text)
-        obj = (self.object_tokens(objects, valid_hw, images.shape[-1], cond) if self.obj_attn and use_objects else None)
+        obj = (self.object_tokens(objects, images.shape[-1], cond) if self.obj_attn and use_objects else None)
         ctx = self.refiner_context(images, text_tokens) if self.refiner is not None and use_refiner else None
-        return self.sample_from_cond(cond, n_samples, generator, sampler, record, obj=obj, ctx=ctx, mock_steps=mock_steps)
+        return self.sample_from_cond(cond, n_samples, generator, sampler, record, obj=obj, ctx=ctx)
 
     @torch.no_grad()
-    def sample_from_cond(self, cond, n_samples, generator=None, sampler="ddpm", record=None, obj=None, ctx=None,
-                         mock_steps=100):
+    def sample_from_cond(self, cond, n_samples, generator=None, sampler="ddpm", record=None, obj=None, ctx=None):
         """Như `sample` nhưng từ cond [B, D] đã tính sẵn (+ token vật của `object_tokens`, ngữ cảnh refiner `refiner_context`).
         Mọi hàng cùng t ở mỗi bước (mock / DDPM) ⇒ refiner tính luồng ngữ cảnh một lần mỗi ảnh (`ctx_index`)."""
         B = cond.shape[0]
         cond = cond.repeat_interleave(n_samples, dim=0)
-        ot, om = self._repeat_obj(obj, n_samples) or (None, None)
+        obj = self._repeat_obj(obj, n_samples)
         ci = None if ctx is None else torch.arange(B, device=cond.device).repeat_interleave(n_samples)
-        fn = lambda x, t: self.predict_noise(x, t, cond, ctx, ci, None if ot is None else (ot, om))[0]  # noqa: E731
-        run = ddpm_sample if sampler == "ddpm" else partial(mock_sample, steps=mock_steps)
+        fn = lambda x, t: self.predict_noise(x, t, cond, ctx, ci, obj)[0]  # noqa: E731
+        run = ddpm_sample if sampler == "ddpm" else mock_sample
         out = run(fn, cond.shape[0], self.alphas_cumprod, generator=generator, device=cond.device, record=record)
         if record is None:
             return out.view(B, n_samples, 4)

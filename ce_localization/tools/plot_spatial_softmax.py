@@ -61,7 +61,7 @@ def build_inputs(a, rel, iid, img, dens):
     else:
         split, stem = rel.split("/")[0], os.path.splitext(os.path.basename(rel))[0]
         d = os.path.join(a.samples, split, "density", stem + ".png")
-    return image_inputs(img, d, T, "paper")[0]
+    return image_inputs(img, d, T)[0]
 
 
 def main():

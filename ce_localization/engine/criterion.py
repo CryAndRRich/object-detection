@@ -12,8 +12,7 @@ ghép, mỗi lượt đều +1e5 như nhau nên argmin theo cột không đổi,
 `anchor_matching_gt` cũ cứ gỡ lại đúng GT đó (test tái hiện được). Hết trần thì GT còn lại KHÔNG
 được ghép — không có đích toạ độ, như ảnh nhiều GT hơn query ở Hungarian. Khi bản gốc tự dừng
 (mọi ca có số GT <= số query mà test thử) thì kết quả trùng bản gốc.
-KHÔNG dùng lại `ce_localization/models/criterion.py` / `utils/matcher.py`: khác bản gốc
-(top_k 10, bán kính theo sqrt(wh), không +10000, L1 trên cxcywh).
+Viết lại theo bản gốc (matcher / loss của vòng 1 đã xoá khác ở top_k 10, bán kính theo sqrt(wh), không +10000, L1 trên cxcywh).
 
 BETA (`mode="point"`, docs/EXPERIMENT_BETA.md mục 4): đích là BOX GIẢ (tâm = điểm density, cỡ = ŝ).
 Phần HÌNH HỌC của SimOTA (prior tâm-trong-box, dynamic k theo IoU) giữ nguyên, tính trên box giả.
