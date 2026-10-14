@@ -398,11 +398,24 @@ def main():
                     rect(ax, hole, "lime", lw=1.6)
                     ax.plot(*hc, "+", color="lime", ms=10, mew=2)
                 prev = list(range(0, si, trail))                                 # box các trạng thái trước: viền mảnh, mờ dần
+                fade = lambda n_: 0.08 + 0.4 * (n_ + 1) / max(len(prev), 1)     # noqa: E731
                 for n_, j in enumerate(prev):
-                    rect(ax, boxes[j], "red", lw=0.8, alpha=0.08 + 0.4 * (n_ + 1) / max(len(prev), 1))
+                    rect(ax, boxes[j], "red", lw=0.8, alpha=fade(n_))
+                # box U-Net / refiner của các bước trước (bước j dẫn tới trạng thái j + 1) + đường tâm của chúng, cùng kiểu với box đỏ
+                trails = []
+                if policy and a.mode == "steps" and (a.compact or refiner):
+                    trails.append(("x0", C_UNET))
+                if refiner:
+                    trails.append(("refined", C_REFINER))
+                for key, col in trails:
+                    for n_, j in enumerate(range(0, si - 1, trail)):
+                        rect(ax, steps[j][key], col, lw=0.8, alpha=fade(n_))
+                    pk = center(np.stack([steps[j][key] for j in range(si)]))
+                    ax.plot(pk[:, 0], pk[:, 1], "-", color=col, lw=0.8, alpha=0.9, zorder=5)
+                    ax.plot(*pk[-1], "o", color=col, mec="black", mew=0.5, ms=5, zorder=8)
                 pc = np.stack(cents[: si + 1])                                   # đường tâm box đỏ qua MỌI bước
-                ax.plot(pc[:, 0], pc[:, 1], "-", color="black", lw=1.4, alpha=0.85, zorder=5)
-                for j in [0] + snaps[:k]:
+                ax.plot(pc[:, 0], pc[:, 1], "-", color="black", lw=0.8, alpha=0.85, zorder=5)
+                for j in [0] + snaps[:k]:                                        # mốc t chỉ trên đường tâm box đỏ
                     ax.plot(*cents[j], "o", color="0.7", mec="black", mew=0.6, ms=5, zorder=6)
                     ax.annotate(tlabel[j], cents[j], xytext=(4, 4), textcoords="offset points", fontsize=7,
                                 bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="none", alpha=0.7), zorder=7)
@@ -470,11 +483,11 @@ def main():
                 axes[r, c].set_yticks([])
         if a.compact:
             handles = [Line2D([], [], color="red", lw=2.4, marker="o", label="predicted box x_t (now)"),
-                       Line2D([], [], color="red", lw=0.8, alpha=0.35, label="earlier x_t (fading)"),
-                       Line2D([], [], color="black", marker="o", mfc="0.7", lw=1.4, label="center path of x_t"),
-                       Line2D([], [], color=C_UNET, lw=2.0, label="U-Net box (x0 from eps)")]
+                       Line2D([], [], color="0.4", lw=0.8, alpha=0.6, label="earlier boxes (thin, fading)"),
+                       Line2D([], [], color="black", marker="o", mfc="0.7", lw=0.8, label="center path of x_t"),
+                       Line2D([], [], color=C_UNET, lw=2.0, marker="o", label="U-Net box (x0 from eps) + center path")]
             if refiner:
-                handles.append(Line2D([], [], color=C_REFINER, lw=2.0, label="refiner box (x_t + delta)"))
+                handles.append(Line2D([], [], color=C_REFINER, lw=2.0, marker="o", label="refiner box (x_t + delta) + center path"))
             handles.append(Line2D([], [], color="lime", lw=1.6, marker="+", label="removed object (target)"))
             fig.legend(handles=handles, loc="lower center", ncol=len(handles), fontsize=9, frameon=False)
             fig.suptitle(f"{a.name or os.path.basename(os.path.dirname(os.path.abspath(a.ckpt)))} | {split} {br}, turn {turn} | "
