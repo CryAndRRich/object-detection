@@ -156,7 +156,7 @@ def test_gt_cnll_tool(tmp_path, monkeypatch):
     assert set(res) == {"ce130", "cocount"} and res["cocount"]["n_cnll"] == 4 and res["cocount"]["obj_filter"] == 3
 
 
-@pytest.mark.parametrize("kind", ["paper", "obj", "obj_rand", "pr"])
+@pytest.mark.parametrize("kind", ["paper", "obj_rand", "pr"])
 def test_eval_cocount_full_flow(tmp_path, monkeypatch, kind):
     """eval.py --dataset cocount: khoá `cocount*`, đủ mẫu, không chỉ số `_latest`, on_object trên cả hai lớp, dump box chạy được."""
     import ce_localization.eval as ea

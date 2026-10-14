@@ -35,25 +35,22 @@ from ce_localization.data.density import DensityIndex  # noqa: E402
 from ce_localization.data.turns import image_inputs  # noqa: E402
 from ce_localization.engine.diffusion import diffusion_from_boxes  # noqa: E402
 from ce_localization.models.box_policy import unit_to_boxes  # noqa: E402
-from ce_localization.models.detector import build_model  # noqa: E402
+from ce_localization.models.detector import load_checkpoint_model  # noqa: E402
 from ce_localization.models.box_refiner import noisy_to_boxes  # noqa: E402
 from ce_localization.models.text import TextTable, encode_class_names  # noqa: E402
-from ce_localization.tools.plot_refiner_steps import center, pick_cases, rect  # noqa: E402
-from ce_localization.tools.plot_spatial_softmax import SHARP, effective_cells, keypoint_pixels  # noqa: E402
-from ce_localization.utils.box_ops_np import box_iou  # noqa: E402
+from ce_localization.tools.plot_refiner_steps import pick_cases  # noqa: E402
+from ce_localization.tools.viz_common import SHARP, center, dot_sizes, draw_holes, iou_to, rect, ss_scatter, tidy  # noqa: E402
 
 ROW_LABEL = {"t0": "CE-Loc -> Refiner\n(no noise, t*=0)", "ce": "CE-Loc + noise\n-> Refiner", "noise": "Refiner only\n(from pure noise)"}
 ROW_SPECS = ("t0", "ce", "noise", "t0_nogeo", "ce_nogeo", "noise_nogeo")   # `_nogeo`: TẮT box vật (= biến thể `_nogeo` của eval)
 
 
 def load_model(path, device):
-    ck = torch.load(path, map_location="cpu", weights_only=False)
-    cfg = ck["config"]
-    if cfg["model"].get("arch") != "propose_refine":
-        sys.exit(f"{path}: không phải checkpoint propose_refine (model.arch {cfg['model'].get('arch')})")
-    model = build_model(cfg, pretrained_backbone=False)
-    model.load_state_dict(ck["model"])
-    return model.to(device).eval(), cfg, ck.get("iter")
+    try:
+        model, cfg, info = load_checkpoint_model(path, archs={"propose_refine"})
+    except ValueError as e:
+        sys.exit(f"{path}: không phải checkpoint propose_refine ({e})")
+    return model.to(device).eval(), cfg, info["label"]
 
 
 @torch.no_grad()
@@ -86,7 +83,7 @@ def run_one(model, x, vhw, text, refine_t, generator, objects=None, use_objects=
 
 def iou_holes(b, holes):
     """-> (IoU với lỗ mới nhất, IoU lớn nhất với lỗ bất kỳ)."""
-    iou = box_iou(np.asarray(b)[None].clip(min=0), np.asarray(holes))[0][0]
+    iou = iou_to(b, holes)
     return float(iou[-1]), float(iou.max())
 
 
@@ -138,16 +135,13 @@ def main():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.colors import LogNorm
     from matplotlib.lines import Line2D
-    from matplotlib.ticker import FuncFormatter, NullFormatter
 
     dev = torch.device(a.device)
     model, cfg, it = load_model(a.ckpt, dev)
     T = cfg["data"]["image_size"]
     dindex = DensityIndex(a.density_index, a.samples)
-    w = model.memory.ss_proj.weight.detach().reshape(model.memory.ss_proj.out_features, -1, 2).norm(dim=(0, 2)).cpu().numpy()
-    size = 4 + 60 * w / w.max()
+    size, _ = dot_sizes(model.memory.ss_proj)
     tindex = None
     if model.needs_objects:
         from ce_localization.data.turns import TurnIndex
@@ -224,12 +218,6 @@ def main():
         case.update({"group": cs.get("group"), "refine_t": a.refine_t, "rows": []})
         bg = x[:3].numpy().transpose(1, 2, 0)
 
-        def draw_holes(ax):
-            for hb in holes[:-1]:
-                rect(ax, hb, "lime", lw=1.0, ls="--")
-            rect(ax, hole, "lime", lw=1.6)
-            ax.plot(*hc, "+", color="lime", ms=10, mew=2)
-
         def score(b):
             il, ia = iou_holes(b, holes)
             return f"\nIoU latest {il:.2f} / any {ia:.2f} | center dist {np.linalg.norm(center(b) - hc):.0f} px"
@@ -241,7 +229,7 @@ def main():
             first = 0 if ce else 1
             ax = axes[r, 0]
             ax.imshow(bg)
-            draw_holes(ax)
+            draw_holes(ax, holes)
             if objs_drawn is not None and use_obj:                               # GAMMA3 / 3.1: box vật model được cho
                 for ob in objs_drawn:
                     rect(ax, ob, "deepskyblue", lw=0.7, alpha=0.9)
@@ -251,7 +239,7 @@ def main():
             ax.set_ylabel(ROW_LABEL[mode.split("_")[0]] + ("" if use_obj else "\n[no object boxes]"), fontsize=10)
             ax = axes[r, 1]
             ax.imshow(bg)
-            draw_holes(ax)
+            draw_holes(ax, holes)
             rect(ax, noisy, "orange", lw=1.6, ls="--")
             if ce:
                 rect(ax, box_ce, "red", lw=2.2)
@@ -267,7 +255,7 @@ def main():
             for k in range(6):
                 ax = axes[r, 2 + k]
                 ax.imshow(bg)
-                draw_holes(ax)
+                draw_holes(ax, holes)
                 for j in range(1, k + 2):                                        # đầu vào + stage trước: mờ dần
                     rect(ax, boxes[j], "red", lw=0.8, alpha=0.12 + 0.4 * j / (k + 2))
                 if ce:
@@ -281,28 +269,14 @@ def main():
                              + score(boxes[2 + k]), fontsize=8.5)
                 row["stages"].append({"stage": k + 1, "box": boxes[2 + k].tolist(), "attn": at.tolist(),
                                       "iou_latest_any": iou_holes(boxes[2 + k], holes)})
-            eff = effective_cells(att).numpy()
-            px, py = keypoint_pixels(xy.numpy(), att.shape[1])
             ax = axes[r, 8]
-            ax.imshow(bg)
-            order = np.argsort(-eff)
-            sc = ax.scatter(px[order], py[order], c=eff[order], s=size[order], cmap="plasma_r",
-                            norm=LogNorm(vmin=1, vmax=att.shape[1] * att.shape[2]), edgecolors="black", linewidths=0.3,
-                            alpha=0.9)
-            cb = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.02)
-            cb.ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
-            cb.ax.yaxis.set_minor_formatter(NullFormatter())
-            sharp = float((eff < SHARP).mean())
+            eff, _, _, sharp = ss_scatter(fig, ax, bg, xy, att, size)
             ax.set_title(f"SpatialSoftmax Output ({att.shape[0]} ch)\nsharp (<{SHARP} cells) {sharp * 100:.1f}% | "
                          f"median cells {np.median(eff):.0f}", fontsize=8.5)
             rect(ax, hole, "lime", lw=1.2)
             row["sharp_frac"] = sharp
             case["rows"].append(row)
-            for c in range(9):
-                axes[r, c].set_xlim(0, nw)
-                axes[r, c].set_ylim(nh, 0)
-                axes[r, c].set_xticks([])
-                axes[r, c].set_yticks([])
+            tidy(axes[r], nw, nh)
         handles = [Line2D([], [], color="red", lw=2.2, marker="o", label="box + center (this column)"),
                    Line2D([], [], color="orange", lw=1.4, ls="--", label="stage-1 input"),
                    Line2D([], [], color="red", alpha=0.35, label="earlier stages (fading)"),

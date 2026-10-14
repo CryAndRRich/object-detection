@@ -19,9 +19,13 @@ DELTA — bản CE-Loc cập nhật của tác giả gốc (`refs/CE-Loc-update/
 - `refiner` (dict config, `enabled`): `ClipBoxRefiner` (`models/clip_refiner.py`) TRONG mạng khử nhiễu — mỗi lần gọi ε_θ:
   x_t -> refiner -> refined = x_t + Δ. `unet_input: concat` (DELTA1 / 2.x): U-Net nhận `[x_t ; refined]` (8 kênh, ra ε 4 kênh),
   loss = ε-MSE + `aux_loss_weight` · MSE(refined, x0). `unet_input: none` (DELTA3): KHÔNG U-Net / backbone / FiLM — refiner là cả mạng
-  khử nhiễu, ε̂ suy từ refined (= x̂0) cho sampler, loss = `aux_loss_weight` · MSE(refined, x0). Cần token chữ CLIP text
+  khử nhiễu, ε̂ suy từ refined (= x̂0) cho sampler, loss = `aux_loss_weight` · MSE(refined, x0). `unet_input: post` (DELTA3.1 / 3.2):
+  U-Net TRƯỚC (nhận x_t, 4 kênh) -> ε̂₁ -> x̂0₁ (kẹp [−1, 1], detach) -> refiner nhìn x̂0₁, head đọc là sửa trên ε: ε̂ = ε̂₁ + Δε;
+  loss = MSE(ε̂, ε) + `aux_loss_weight` · MSE(ε̂₁, ε); bỏ refiner (`_norefine`) = ε̂₁. Cần token chữ CLIP text
   (`text_tokens`, `models/text.TextTable`). CLIP ViT frozen nạp từ HF lúc dựng (không vào state_dict); buffer `clip_sha` = vân tay
   (vision, text) kiểm khớp khi nạp.
+- refiner + `obj_attn` (DELTA4 / 3.2): như GAMMA4; U-Net 8 kênh (`concat`) thì box vật mã hoá gương dưới dạng `[o ; o]` (refined của box
+  sạch = chính nó).
 - `use_condition: false` (DELTA1.1): điều kiện ảnh + text = 0 (embedding t giữ), refiner bỏ qua (refined = x_t), aux tắt — như tác giả.
   Ở đây refiner không được dựng và `vision` / `text_proj` đóng băng (không ai đọc) ⇒ mọi tham số train vẫn có grad (DDP không find_unused).
 
@@ -43,13 +47,14 @@ from ce_localization.models.backbone import ResNet50FPN
 from ce_localization.models.geo import pad_objects
 from ce_localization.models.memory import valid_cells_mask
 from ce_localization.models.unet1d import ConditionalUnet1D
-from ce_localization.utils.diffusion_math import linear_alphas_cumprod, predict_noise_from_start, q_sample
+from ce_localization.utils.diffusion_math import (linear_alphas_cumprod, predict_noise_from_start, predict_start_from_noise,
+                                                  q_sample)
 
 __all__ = ["BoxPolicy", "PaperVisionEncoder", "boxes_to_unit", "unit_to_boxes", "norm_whwh", "ddpm_sample", "mock_sample",
            "paper_spatial_softmax", "nearest_mask", "VISIONS", "UNET_INPUTS", "OBJ_SELECTS"]
 
 VISIONS = ("r50_fpn", "r18_paper")
-UNET_INPUTS = ("concat", "none")             # DELTA: U-Net nhận [x_t ; refined] | không có U-Net (refiner là cả mạng khử nhiễu)
+UNET_INPUTS = ("concat", "none", "post")     # DELTA: U-Net nhận [x_t ; refined] | không U-Net | U-Net trước, refiner sửa ε sau
 OBJ_SELECTS = ("nearest", "random")          # GAMMA4.0.x: cách chọn `obj_k` vật vào cross-attn
 
 C5_STRIDE = 32
@@ -167,7 +172,6 @@ class PaperVisionEncoder(nn.Module):
                 conv1.weight[:, :3] = r.conv1.weight
                 conv1.weight[:, 3:] = r.conv1.weight.mean(dim=1, keepdim=True)
             r.conv1 = conv1
-        self.in_channels = in_channels
         self.backbone = nn.Sequential(*list(r.children())[:-2])
         self.projection = nn.Linear(512 * 2, output_dim)
 
@@ -215,12 +219,18 @@ class BoxPolicy(nn.Module):
         if rcfg:
             if unet_input not in UNET_INPUTS:
                 raise ValueError(f"refiner.unet_input {unet_input!r} không thuộc {UNET_INPUTS}")
-            if obj_attn:
-                raise ValueError("refiner + obj_attn chưa hỗ trợ (luồng vật của U-Net nhận box 4 số)")
+            if obj_attn and unet_input == "none":
+                raise ValueError("refiner.unet_input none (không có U-Net) không đi với obj_attn")
             if rcfg["use_density"] and in_channels != 4:
                 raise ValueError("refiner.use_density cần ảnh 4 kênh (RGB + density)")
             if unet_input == "none" and not self.use_condition:
                 raise ValueError("refiner.unet_input none (refiner là cả mạng khử nhiễu) cần use_condition: true")
+            if unet_input == "post" and not self.use_condition:
+                raise ValueError("refiner.unet_input post cần use_condition: true (không thì không có refiner)")
+            if unet_input == "post" and int(rcfg["num_stages"]) != 1:
+                raise ValueError("refiner.unet_input post cần num_stages 1 (stage sau RoIAlign quanh box lẫn đơn vị ε)")
+        self.unet_input = unet_input
+        self.unet_in_dim = 8 if unet_input == "concat" else 4     # DELTA1 / 2.x / 4: U-Net nhận [x_t ; refined]
         self.obj_attn, self.obj_max = bool(obj_attn), obj_max
         if obj_k is not None and (not obj_attn or int(obj_k) < 1):
             raise ValueError(f"obj_k {obj_k!r} cần obj_attn: true và >= 1")
@@ -247,7 +257,7 @@ class BoxPolicy(nn.Module):
             self.text_proj = nn.Sequential(nn.Linear(text_in, text_dim), nn.Mish())
             self.cond_dim = vis_dim + text_dim
             # DELTA1 (`ObjectPlacementPolicy` của tác giả, concat): U-Net nhận [x_t ; refined] (8 kênh), vẫn ra ε 4 kênh
-            self.noise_net = ConditionalUnet1D(8 if unet_input == "concat" else 4, self.cond_dim, step_embed_dim,
+            self.noise_net = ConditionalUnet1D(self.unet_in_dim, self.cond_dim, step_embed_dim,
                                                tuple(down_dims), kernel_size, n_groups, obj_attn=obj_attn,
                                                obj_heads=obj_heads, output_dim=4)
         # dựng SAU noise_net: khởi tạo ResNet / U-Net trùng bản không refiner (DELTA1 vs DELTA1.1 so cặp)
@@ -281,9 +291,9 @@ class BoxPolicy(nn.Module):
         kp = paper_spatial_softmax(self.backbone.forward_c5(images))
         return torch.cat([self.vis_proj(kp), self.text_emb(text_raw, null_text)], dim=-1)
 
-    def cond_from_keypoints(self, kp, text_raw, null_text=False):
+    def cond_from_keypoints(self, kp, text_raw):
         """ResNet18 của bài: toạ độ SpatialSoftmax [B, 2C] -> cond — để GAMMA2 dùng chung backbone với model refine."""
-        return torch.cat([self.vision.projection(kp), self.text_emb(text_raw, null_text)], dim=-1)
+        return torch.cat([self.vision.projection(kp), self.text_emb(text_raw)], dim=-1)
 
     @property
     def needs_objects(self):
@@ -340,13 +350,28 @@ class BoxPolicy(nn.Module):
     def predict_noise(self, x, t, cond, ctx=None, ctx_index=None, obj=None):
         """x [R,4] box nhiễu, t [R], cond [R, D], ctx (`refiner_context`, C hàng) + ctx_index [R] | None, obj (token vật, mask, box vật)
         của `object_tokens` | None -> (ε̂ [R,4], refined [R,4] | None) — `predict_noise` của tác giả. Không refiner: U-Net trên x như
-        bài. DELTA3 (không U-Net): refined = x̂0 ⇒ ε̂ = (x_t − √ᾱ_t · refined) / √(1 − ᾱ_t) (fp32).
+        bài. DELTA3 (không U-Net): refined = x̂0 ⇒ ε̂ = (x_t − √ᾱ_t · refined) / √(1 − ᾱ_t) (fp32). DELTA3.x (`post`): refined None.
         GAMMA4.0.1 (`obj_select: nearest`): mask chỉ giữ `obj_k` vật gần x (x_t noisy khi train — không theo đích)."""
+        return self._denoise(x, t, cond, ctx, ctx_index, obj)[:2]
+
+    def _denoise(self, x, t, cond, ctx=None, ctx_index=None, obj=None):
+        """Lõi của `predict_noise` -> (ε̂, refined | None, ε̂₁ của U-Net trước refiner — chỉ `post` | None)."""
         if obj is not None:
             tok, mask, units = obj
             if self.obj_k is not None and self.obj_select == "nearest":
                 mask = nearest_mask(x, units, mask, self.obj_k)
             obj = (tok, mask)
+        if self.unet_input == "post":                          # DELTA3.x: U-Net trước, refiner nhìn x̂0 của U-Net rồi sửa ε
+            eps1 = self.noise_net(x.unsqueeze(1), t, cond, *(obj or (None, None))).squeeze(1)
+            if ctx is None:                                    # bỏ refiner (`_norefine`): U-Net trần, đúng phân bố train
+                return eps1, None, eps1
+            with torch.autocast(device_type=x.device.type, enabled=False):
+                x0 = predict_start_from_noise(x.float(), t, eps1.float(), self.alphas_cumprod).clamp(-1, 1).detach()
+                delta = self.refiner(x0, t, ctx, ctx_index) - x0          # head của tác giả, đọc là sửa trên ε (khởi tạo 0)
+                eps = eps1.float() + delta
+            if self.track_refine:
+                self._track_delta(t, delta.abs().mean(-1))
+            return eps, None, eps1
         unet_in, refined = x, None
         if self.use_refiner:
             refined = self.refiner(x, t, ctx, ctx_index) if ctx is not None else x
@@ -359,7 +384,7 @@ class BoxPolicy(nn.Module):
             eps = predict_noise_from_start(x.float(), t, refined, self.alphas_cumprod)
         if refined is not None and ctx is not None and self.track_refine:
             self._track_delta(t, (refined - x).abs().mean(-1))
-        return eps, refined
+        return eps, refined, None
 
     def _track_delta(self, t, d):
         """Suy luận (eval): cộng dồn TB |Δ| của refiner theo khoảng t (100 bước / khoảng)."""
@@ -404,7 +429,8 @@ class BoxPolicy(nn.Module):
                 o = o[torch.randperm(len(o), generator=torch.Generator().manual_seed(draw()))[: self.obj_max]]
             units.append(boxes_to_unit(o, whwh))
         objs, mask = pad_objects(units, dev, min_m=1)
-        return self.noise_net.encode_objects(objs, mask, cond), mask, objs
+        enc = torch.cat([objs, objs], -1) if self.unet_in_dim == 8 else objs      # DELTA4: U-Net 8 kênh nhận [o ; o]
+        return self.noise_net.encode_objects(enc, mask, cond), mask, objs
 
     def forward(self, images, text_raw, valid_hw, x0, k=1, generator=None, objects=None, text_tokens=None):
         """ε-MSE như `ObjectPlacementPolicy.compute_loss` của bài, k bộ (t, ε) mỗi ảnh.
@@ -434,7 +460,14 @@ class BoxPolicy(nn.Module):
         t = torch.randint(0, self.num_timesteps, (x0.shape[0],), device=dev, generator=generator)
         noise = torch.randn(x0.shape, device=dev, generator=generator)
         noisy = q_sample(x0, t, noise, self.alphas_cumprod)
-        pred, refined = self.predict_noise(noisy, t, cond, ctx, None, obj)
+        pred, refined, eps1 = self._denoise(noisy, t, cond, ctx, None, obj)
+        if eps1 is not None:                                   # DELTA3.x: ε cuối + ε của U-Net trước refiner
+            with torch.autocast(device_type=dev.type, enabled=False):
+                loss, loss1 = F.mse_loss(pred.float(), noise.float()), F.mse_loss(eps1.float(), noise.float())
+                self._stats = {"loss_eps": loss.detach(), "loss_eps1": loss1.detach(),
+                               "delta_abs": (pred.float() - eps1.float()).abs().mean().detach(),
+                               "eps_ratio": (loss / loss1.clamp_min(1e-12)).detach()}
+            return loss + self.refiner_aux_weight * loss1
         loss = F.mse_loss(pred, noise) if self.noise_net is not None else None      # DELTA3: không có số hạng ε
         if refined is not None and ctx is not None:
             with torch.autocast(device_type=dev.type, enabled=False):          # refined fp32 (refiner tắt autocast)
@@ -460,7 +493,7 @@ class BoxPolicy(nn.Module):
         DELTA: `text_tokens` (token chữ CLIP); `use_refiner=False` = bỏ refiner (refined = x_t — `_norefine`, ngoài phân bố train)."""
         cond = self.condition(images, text_raw, valid_hw, null_text)
         obj = (self.object_tokens(objects, images.shape[-1], cond) if self.obj_attn and use_objects else None)
-        ctx = self.refiner_context(images, text_tokens) if self.refiner is not None and use_refiner else None
+        ctx = self.refiner_context(images, text_tokens) if use_refiner else None
         return self.sample_from_cond(cond, n_samples, generator, sampler, record, obj=obj, ctx=ctx)
 
     @torch.no_grad()
@@ -476,7 +509,7 @@ class BoxPolicy(nn.Module):
 
         def fn(x, t):
             eps, refined = self.predict_noise(x, t, cond, ctx, ci, obj)
-            if refs is not None:
+            if refs is not None and refined is not None:
                 refs[int(t[0])] = refined.detach().float().cpu()
             return eps
         run = ddpm_sample if sampler == "ddpm" else mock_sample
@@ -485,7 +518,7 @@ class BoxPolicy(nn.Module):
             return out.view(B, n_samples, 4)
         x, traj = out
         return x.view(B, n_samples, 4), [{**s, "x_t": s["x_t"].view(B, n_samples, 4), "x0_hat": s["x0_hat"].view(B, n_samples, 4),
-                                          **({} if refs is None else {"refined": refs[s["t"]].view(B, n_samples, 4)})}
+                                          **({"refined": refs[s["t"]].view(B, n_samples, 4)} if refs else {})}
                                          for s in traj]
 
     @classmethod

@@ -19,7 +19,8 @@ GAMMA4.0.x (`model.obj_k`): chỉ `obj_k` vật vào cross-attn (`obj_select` ne
 ngoài phân bố train); tên khoá kết quả không đổi ⇒ phân biệt bằng `--out`.
 Cùng `--seed` + `--batch-size` ⇒ x_T ban đầu trùng nhau từng mẫu giữa các checkpoint (so cặp).
 DELTA (`model.refiner`): thêm `<ảnh>_norefine` (mock, bỏ refiner: refined = x_t — ngoài phân bố train; không có ở DELTA3 vì không có
-U-Net) và TB |Δ| của refiner theo khoảng t (`refine_delta_by_t`); token chữ CLIP text tính lại từ HF phải khớp vân tay trong checkpoint.
+U-Net; DELTA3.x: chỉ U-Net) và TB |Δ| của refiner theo khoảng t (`refine_delta_by_t`; DELTA3.x: |Δε|); token chữ CLIP text tính lại
+từ HF phải khớp vân tay trong checkpoint.
 `--dataset cocount` (CE-CoCount, mục 18): cùng mọi checkpoint add, khoá `cocount<hậu tố>`; lỗ = 10 chỗ trống GT (chỉ số `_any`, không
 `_latest`), density trống, `on_object` trên box cả hai lớp, C-NLL trên box cùng lớp; `prior` = lỗ train CE-130 như cũ.
 `--dump-boxes F.json` (user study, docs/EXPERIMENT_GAMMA.md mục 17): ghi thêm box THÔ của từng mẫu mọi khoá kết quả
@@ -73,7 +74,7 @@ from ce_localization.engine.add_eval import (SIZE_STATS, add_metrics, predict_ad
 from ce_localization.engine.evaluate import attention_diagnostics, predict, score  # noqa: E402
 from ce_localization.models.backbone import density_ratio_of  # noqa: E402
 from ce_localization.models.box_policy import OBJ_SELECTS, BoxPolicy  # noqa: E402
-from ce_localization.models.detector import build_model  # noqa: E402
+from ce_localization.models.detector import load_checkpoint_model  # noqa: E402
 from ce_localization.utils.log import fmt_time  # noqa: E402
 import ce_localization.train as train_mod  # noqa: E402
 
@@ -143,6 +144,13 @@ def add_variants(add_samplers, obj_attn=False, norefine=False):
     return out
 
 
+def write_json(path, obj, compact=False, note=""):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(obj, f) if compact else json.dump(obj, f, indent=2, ensure_ascii=False, default=float)
+    print(f"  -> {note + ' ' if note else ''}{path}")
+
+
 def paper_train_mask(index, rec):
     """Record nào là mẫu `samples/train` — tập checkpoint CE-Loc gốc của bài ĐÃ TRAIN (gồm 182 / 779 ảnh gốc test CE-130;
     samples/train và samples/test không chung ảnh gốc) -> list bool."""
@@ -164,18 +172,14 @@ def main_add(a, cfg, ck, dev, t0):
     except FileNotFoundError as e:
         sys.exit(str(e))
     K = a.n_samples or cfg["eval"]["n_samples"]
-    paper = "model_state_dict" in ck
-    clip = None
-    if paper:                                         # CE-Loc gốc của bài: ResNet18, đầu vào kiểu bài, box chia canvas
-        model, clip, info = BoxPolicy.load_celoc_paper(ck)
-        four = info["in_channels"] == 4
-        it, dwr = f"epoch {info['epoch']}", None
-        print(f"[eval] checkpoint CE-Loc gốc của bài: {info}", flush=True)
+    paper = "model_state_dict" in ck                 # CE-Loc gốc của bài: ResNet18, đầu vào kiểu bài, box chia canvas
+    model, _, info = load_checkpoint_model(ck, cfg)
+    clip, it = info["clip"], info["label"]
+    if paper:
+        four, dwr = info["in_channels"] == 4, None
+        print(f"[eval] checkpoint CE-Loc gốc của bài: { {k: v for k, v in info.items() if k != 'clip'} }", flush=True)
     else:
-        four = train_mod.image_in_channels(cfg) == 4
-        model = build_model(cfg, pretrained_backbone=False)
-        model.load_state_dict(ck["model"])
-        it, dwr = ck.get("iter"), density_ratio_of(model)
+        four, dwr = train_mod.image_in_channels(cfg) == 4, density_ratio_of(model)
     if a.obj_k is not None or a.obj_select is not None:     # GAMMA4.0.x: số / cách chọn vật vào cross-attn, đặt lại lúc eval
         if not (isinstance(model, BoxPolicy) and model.obj_attn):
             sys.exit("--obj-k / --obj-select chỉ dùng cho CE-Loc có obj_attn (GAMMA4 / 4.0.x)")
@@ -264,7 +268,8 @@ def main_add(a, cfg, ck, dev, t0):
                     for k in ("best_iou@{K}_latest", "hit50@{K}_latest", "mean_iou_latest", "mean_iou_any", "on_object")
                     if k.format(K=K) in ex))
             if res.get("refine_delta_by_t"):
-                print("  refiner TB |Δ| theo t: " + " | ".join(f"{k_} {v_:.4f}" for k_, v_ in res["refine_delta_by_t"].items()))
+                unit = "|Δε|" if getattr(model, "unet_input", None) == "post" else "|Δ|"     # DELTA3.x: refiner sửa ε
+                print(f"  refiner TB {unit} theo t: " + " | ".join(f"{k_} {v_:.4f}" for k_, v_ in res["refine_delta_by_t"].items()))
             if res.get("attn"):
                 print("  attention query -> [t ; text ; vis] theo tầng: " + " | ".join(
                     "/".join(f"{x[k]:.2f}" for k in ("t", "text", "vis")) for x in res["attn"]))
@@ -276,10 +281,12 @@ def main_add(a, cfg, ck, dev, t0):
                 report(key + "_objsize" + ("" if st == "mean" else f"_{st}"), desc + f", giữ tâm, cỡ = box vật ({st})", rec, sec,
                        post=lambda r_, st=st: resize_to_objects(r_, st))
 
-        if refine_vars:                               # GAMMA2: CE-Loc chạy MỘT lần / batch, mọi biến thể refine dùng lại
+        def head(desc):
             print(f"[eval] {a.ckpt} ({it}) | ảnh {image} | density {dens} | split {a.split} ({len(ds)} mẫu) | {K} mẫu/ảnh"
-                  f" | CE-Loc {a.proposer_sampler} -> {[d_ for _, d_, _ in refine_vars]} | {fmt_time(time.time() - t0)}",
-                  flush=True)
+                  f" | {desc} | {fmt_time(time.time() - t0)}", flush=True)
+
+        if refine_vars:                               # GAMMA2: CE-Loc chạy MỘT lần / batch, mọi biến thể refine dùng lại
+            head(f"CE-Loc {a.proposer_sampler} -> {[d_ for _, d_, _ in refine_vars]}")
             t = time.time()
             recs = predict_add(model, loader, text_table, K, seed=a.seed, log_every=max(len(loader) // 10, 1),
                                sample_kw={"proposer_sampler": a.proposer_sampler}, variants=[v for _, _, v in refine_vars],
@@ -288,21 +295,14 @@ def main_add(a, cfg, ck, dev, t0):
                 report(image + suffix, desc, rec, time.time() - t, attn_key=vi)
             continue
         for suffix, desc, kw in variants:             # GAMMA1: mỗi số bước DDIM; GAMMA0 / bài: DDPM (+ mock nếu xin)
-            print(f"[eval] {a.ckpt} ({it}) | ảnh {image} | density {dens} | split {a.split} ({len(ds)} mẫu) | {K} mẫu/ảnh"
-                  f" | {desc} | {fmt_time(time.time() - t0)}", flush=True)
+            head(desc)
             t = time.time()
             rec = predict_add(model, loader, text_table, K, seed=a.seed, log_every=max(len(loader) // 10, 1), amp=amp, **kw)
             report(image + suffix, desc, rec, time.time() - t)
     if a.out:
-        os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
-        with open(a.out, "w") as f:
-            json.dump(out, f, indent=2, ensure_ascii=False, default=float)
-        print(f"  -> {a.out}")
+        write_json(a.out, out)
     if dump is not None:
-        os.makedirs(os.path.dirname(os.path.abspath(a.dump_boxes)), exist_ok=True)
-        with open(a.dump_boxes, "w") as f:
-            json.dump(dump, f)
-        print(f"  -> box từng mẫu {a.dump_boxes} ({list(dump['results'])})")
+        write_json(a.dump_boxes, dump, compact=True, note=f"box từng mẫu ({list(dump['results'])})")
     print(f"[eval] xong {fmt_time(time.time() - t0)}", flush=True)
 
 
@@ -365,14 +365,9 @@ def main():
     t0 = time.time()
     dev = torch.device(a.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     ck = torch.load(a.ckpt, map_location="cpu", weights_only=False)
-    if "model_state_dict" in ck:                     # checkpoint CE-Loc gốc của bài: dữ liệu / bộ đo từ --config
-        if not a.config:
-            sys.exit("checkpoint CE-Loc gốc của bài: cần --config (vd config/gamma/gamma0.yaml) để lấy đường dẫn dữ liệu")
-        with open(a.config) as f:
-            cfg = yaml.safe_load(f)
-        if a.data_root:
-            cfg["data"]["root"] = a.data_root
-        return main_add(a, cfg, ck, dev, t0)
+    paper = "model_state_dict" in ck                 # checkpoint CE-Loc gốc của bài: dữ liệu / bộ đo từ --config
+    if paper and not a.config:
+        sys.exit("checkpoint CE-Loc gốc của bài: cần --config (vd config/gamma/gamma0.yaml) để lấy đường dẫn dữ liệu")
     if a.config:
         with open(a.config) as f:
             cfg = yaml.safe_load(f)
@@ -380,7 +375,7 @@ def main():
         cfg = ck["config"]
     if a.data_root:
         cfg["data"]["root"] = a.data_root
-    if cfg.get("task", "detect") == "add":
+    if paper or cfg.get("task", "detect") == "add":
         return main_add(a, cfg, ck, dev, t0)
     a.batch_size = a.batch_size or 2
     if a.density_root:
@@ -400,9 +395,7 @@ def main():
     if a.limit:
         ds.items = ds.items[: a.limit]
     text_table = train_mod.build_text_table(ds.classes(), cfg, dev)
-    model = build_model(cfg, pretrained_backbone=False).to(dev)
-    model.load_state_dict(ck["model"])
-    model.eval()
+    model = load_checkpoint_model(ck, cfg)[0].to(dev).eval()
     kinds = {}
     if density is not None:                          # loại density thực tế (partial -> full khi ảnh chỉ có 1 bản)
         for it in ds.items:
@@ -450,10 +443,7 @@ def main():
         out["attention"] = diag
 
     if a.out:
-        os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
-        with open(a.out, "w") as f:
-            json.dump(out, f, indent=2, ensure_ascii=False, default=float)
-        print(f"  -> {a.out}")
+        write_json(a.out, out)
     print(f"[eval] xong {fmt_time(time.time() - t0)}", flush=True)
 
 

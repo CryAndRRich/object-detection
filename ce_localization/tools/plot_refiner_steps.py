@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Soi checkpoint `model.arch: box_refiner` (GAMMA1) — MỘT hình 4 hàng × 6 cột mỗi ca (nhánh, lượt t):
+"""Soi quỹ đạo khử nhiễu của CE-Loc bài add (GAMMA1 `box_refiner`, CE-Loc kiểu bài `box_policy` r18_paper, DELTA) — mặc định MỘT hình
+4 hàng × 6 cột mỗi ca (nhánh, lượt t):
 
   hàng 1  ảnh inpaint lượt t (đã xoá t vật) + density của CHÍNH ảnh đó (file `samples/` khớp bằng hash pixel)
   hàng 2  ảnh inpaint như hàng 1 + density TRỐNG
@@ -44,9 +45,9 @@ tới** x̂0 = (x_t − √(1−ᾱ_t)·ε̂) / √ᾱ_t (xanh dương; vòng mo
 `per_step` (cả 100 bước). Model train AMP + `--device cuda` ⇒ lấy mẫu dưới autocast fp16 như eval.py. DELTA1.1 (`use_condition:
 false`) bỏ qua refiner như lúc train ⇒ vẽ như CE-Loc thường; DELTA3 (không U-Net, không ResNet18) không nhận.
 
-`--compact` (box_policy): MỘT hàng × 6 cột — ảnh test (ảnh inpaint lượt t + lỗ), SpatialSoftmax, 4 ô quỹ đạo sau bước 25 / 50 / 75 / 100
-(box dự đoán x_t đỏ + x̂0 U-Net xanh + box refiner tím hồng nếu có); density luôn là density của chính ảnh test; tiêu đề ô chỉ ghi số
-bước. Số đo đầy đủ vẫn ở JSON.
+`--compact` (box_policy): ảnh inpaint lượt t + density của chính nó, mỗi hàng 6 cột (ảnh test + lỗ, SpatialSoftmax, 4 ô sau bước 25 / 50 /
+75 / 100); mỗi hàng theo vết MỘT loại box (x_t đỏ / x̂0 U-Net xanh / refiner tím hồng nếu có ⇒ 2 hoặc 3 hàng): vết = box các bước trước
+viền mảnh mờ dần + đường tâm, hai loại kia chỉ box ở bước đó; tiêu đề ô chỉ ghi số bước. Số đo đầy đủ vẫn ở JSON.
   python tools/plot_refiner_steps.py --ckpt ../weights/add/delta1/best.pth --name "CE-Loc Update (DELTA1)" --compact \
       --cases test/3342_b1:3 ... --device cuda --out ../../output/add/viz/delta1/compact
 
@@ -63,7 +64,6 @@ import sys
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -71,12 +71,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from ce_localization.data.dataset import _read_annotation  # noqa: E402
 from ce_localization.data.density import DensityIndex  # noqa: E402
 from ce_localization.data.turns import image_inputs, pixel_hash  # noqa: E402
-from ce_localization.models.box_policy import paper_spatial_softmax, norm_whwh, unit_to_boxes  # noqa: E402
-from ce_localization.models.clip_refiner import needs_text_tokens, refiner_config, text_model_name  # noqa: E402
-from ce_localization.models.detector import build_model  # noqa: E402
+from ce_localization.models.box_policy import paper_spatial_softmax, unit_to_boxes  # noqa: E402
+from ce_localization.models.clip_refiner import refiner_config, text_model_name  # noqa: E402
+from ce_localization.models.detector import load_checkpoint_model  # noqa: E402
 from ce_localization.models.text import TextTable, encode_class_names, encode_class_tokens  # noqa: E402
-from ce_localization.tools.plot_spatial_softmax import SHARP, effective_cells, keypoint_pixels  # noqa: E402
-from ce_localization.utils.box_ops_np import box_iou  # noqa: E402
+from ce_localization.tools.viz_common import (SHARP, center, dot_sizes, draw_holes, effective_cells, iou_to, rect,  # noqa: E402
+                                              sorted_box, ss_scatter, tidy)
 
 SPLITS = ("train", "val", "test")
 C_UNET, C_REFINER = "#1E90FF", "#FF00FF"           # box U-Net (x̂0 suy từ ε̂) xanh dương / box refiner tím hồng — tách rõ khỏi đỏ / xanh lá
@@ -97,19 +97,13 @@ PAPER_CFG = {"data": {"image_size": 512},
 def load_model(path, device):
     """-> (model, cfg, nhãn iter, state CLIP text | None). Checkpoint CE-Loc gốc của bài (`model_state_dict`) nạp bằng
     `BoxPolicy.load_celoc_paper` (canvas 512, đầu vào kiểu bài, SpatialSoftmax KHÔNG mask, text bằng CLIP của chính checkpoint)."""
-    ck = torch.load(path, map_location="cpu", weights_only=False)
-    if "model_state_dict" in ck:
-        from ce_localization.models.box_policy import BoxPolicy
-        model, clip, info = BoxPolicy.load_celoc_paper(ck)
-        return model.to(device).eval(), PAPER_CFG, f"epoch {info['epoch']}", clip
-    cfg = ck["config"]
-    arch = cfg["model"].get("arch")
-    if arch not in ("box_refiner", "box_policy") or (arch == "box_policy" and cfg["model"].get("vision") != "r18_paper"):
-        sys.exit(f"{path}: chỉ nhận box_refiner (GAMMA1) hoặc box_policy r18_paper (GAMMA2-pha 1, DELTA1 / 2.x) — model.arch {arch}, "
-                 f"vision {cfg['model'].get('vision')}")
-    model = build_model(cfg, pretrained_backbone=False)
-    model.load_state_dict(ck["model"])
-    return model.to(device).eval(), cfg, ck.get("iter"), None
+    try:
+        model, cfg, info = load_checkpoint_model(path, archs={"box_refiner", "box_policy"})
+    except ValueError as e:
+        sys.exit(f"{path}: {e}")
+    if cfg is not None and cfg["model"].get("arch") == "box_policy" and cfg["model"].get("vision") != "r18_paper":
+        sys.exit(f"{path}: box_policy chỉ nhận vision r18_paper (GAMMA2-pha 1, DELTA1 / 2.x) — vision {cfg['model'].get('vision')}")
+    return model.to(device).eval(), cfg or PAPER_CFG, info["label"], info["clip"]
 
 
 def match_sample(samples, image_path, iid):
@@ -205,23 +199,6 @@ def pick_cases(a, dindex, T, rng):
     return sorted(cases, key=lambda c: (SPLITS.index(c["split"]), c["size"]))
 
 
-def rect(ax, b, color, lw=1.0, alpha=1.0, ls="-"):
-    import matplotlib.patches as mp
-    ax.add_patch(mp.Rectangle((b[0], b[1]), b[2] - b[0], b[3] - b[1], fill=False, edgecolor=color, linewidth=lw,
-                              alpha=alpha, linestyle=ls))
-
-
-def sorted_box(b):
-    """xyxy có thể w, h âm (box nhiễu không kẹp) -> xyxy (min, max) để vẽ / chấm."""
-    b = np.asarray(b, dtype=np.float64)
-    return np.array([min(b[0], b[2]), min(b[1], b[3]), max(b[0], b[2]), max(b[1], b[3])])
-
-
-def center(b):
-    b = np.asarray(b)
-    return np.stack([(b[..., 0] + b[..., 2]) / 2, (b[..., 1] + b[..., 3]) / 2], -1)
-
-
 @torch.no_grad()
 def spatial_softmax(model, x, valid_hw=None):
     """-> (toạ độ [C,2] (dọc, ngang) trong [−1, 1], attention [C,H,W]) trên C5, đúng phép tính của token `vis` (GAMMA1) /
@@ -231,8 +208,8 @@ def spatial_softmax(model, x, valid_hw=None):
         return xy[0].cpu(), att[0].cpu()
     c5 = model.backbone.forward_c5(x)
     N, C, H, W = c5.shape
-    att = F.softmax(c5.reshape(N, C, -1), dim=-1).reshape(N, C, H, W)
-    return paper_spatial_softmax(c5).reshape(N, C, 2)[0].cpu(), att[0].cpu()
+    kp, att = paper_spatial_softmax(c5, return_att=True)
+    return kp.reshape(N, C, 2)[0].cpu(), att.reshape(N, C, H, W)[0].cpu()
 
 
 def is_policy(model):
@@ -241,7 +218,7 @@ def is_policy(model):
 
 def box_iou_any(a, b):
     """IoU hai box xyxy có thể w, h âm (box nhiễu không kẹp) — kẹp về (min, max) trước, toạ độ âm về 0 như IoU với lỗ."""
-    return float(box_iou(sorted_box(a)[None].clip(min=0), sorted_box(b)[None].clip(min=0))[0][0, 0])
+    return float(iou_to(sorted_box(a), sorted_box(b).clip(min=0))[0])
 
 
 def main():
@@ -271,7 +248,8 @@ def main():
     ap.add_argument("--name", default=None, help="tên hiển thị trên tiêu đề hình (mặc định <thư mục>/<file> của --ckpt), "
                                                  "vd 'CE-Loc (masked SpatialSoftmax)' — docs/EXPERIMENT_GAMMA.md mục 13.0")
     ap.add_argument("--compact", action="store_true",
-                    help="box_policy: 1 hàng (ảnh inpaint + density của nó) × 6 cột: ảnh, SpatialSoftmax, 4 ô quỹ đạo; tiêu đề ngắn")
+                    help="box_policy: ảnh inpaint + density của nó; mỗi hàng 6 cột (ảnh, SpatialSoftmax, 4 ô quỹ đạo) theo vết một loại "
+                         "box (x_t / U-Net / refiner); tiêu đề ngắn")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
@@ -279,8 +257,6 @@ def main():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.colors import LogNorm
-    from matplotlib.ticker import FuncFormatter, NullFormatter
     from matplotlib.lines import Line2D
 
     dev = torch.device(a.device)
@@ -298,7 +274,7 @@ def main():
         sys.exit("--compact: chỉ box_policy (CE-Loc kiểu bài / DELTA)")
     rows = ROWS[:1] if a.compact else ROWS                                        # compact: ảnh inpaint + density của chính nó
     # DELTA: refiner trong mạng khử nhiễu (cần token chữ CLIP; `use_condition: false` thì refiner bị bỏ qua như lúc train)
-    refiner = policy and getattr(model, "refiner", None) is not None and needs_text_tokens(cfg["model"])
+    refiner = policy and getattr(model, "refiner", None) is not None
     amp = dev.type == "cuda" and bool(cfg.get("training", {}).get("amp")) and clip_sd is None     # như eval.py
     T = cfg["data"]["image_size"]
     ab = model.alphas_cumprod.cpu()
@@ -307,9 +283,7 @@ def main():
     if not 0 <= a.stage_t < model.num_timesteps:
         sys.exit(f"--stage-t {a.stage_t} ngoài [0, {model.num_timesteps - 1}]")
     dindex = DensityIndex(a.density_index, a.samples)
-    proj = model.vision.projection if policy else model.memory.ss_proj
-    w = proj.weight.detach().reshape(proj.out_features, -1, 2).norm(dim=(0, 2)).cpu().numpy()
-    size = 4 + 60 * w / w.max()
+    size, _ = dot_sizes(model.vision.projection if policy else model.memory.ss_proj)
     os.makedirs(a.out, exist_ok=True)
     cases = pick_cases(a, dindex, T, np.random.default_rng(a.seed))
     name = {"mock": "mock", "ddpm": "DDPM"}.get(a.sampler, "DDIM")
@@ -339,8 +313,7 @@ def main():
             x, _, nw, nh = image_inputs(img, dsrc, T)
             xb, vhw = x[None].to(dev), torch.tensor([[nh, nw]], device=dev)
             g = torch.Generator(device=dev.type).manual_seed(a.seed)
-            canvas = norm_whwh(model, torch.tensor([[nw, nh, nw, nh]], dtype=torch.float32), T)[0] if policy else \
-                torch.full((4,), float(T))
+            canvas = torch.full((4,), float(T))                                  # box chia canvas (CE-Loc / GAMMA1)
             if policy:                                                           # CE-Loc: mock 100 / DDPM 1000 bước, ghi mọi bước
                 with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=amp):
                     u, traj = model.sample(xb, text, vhw, 1, generator=g, sampler=a.sampler, record="all",
@@ -351,11 +324,6 @@ def main():
                     for st, s in zip(steps, traj):
                         st["refined"] = sorted_box(unit_to_boxes(s["refined"][0, 0], canvas).numpy())
                         st["delta"] = float((s["refined"][0, 0] - s["x_t"][0, 0].float()).abs().mean())
-                boxes = [sorted_box(unit_to_boxes(st["x"][0, 0], canvas).numpy()) for st in steps]
-                boxes.append(sorted_box(unit_to_boxes(u[0, 0].cpu(), canvas).numpy()))
-                tlabel = [f"t={st['t']}" for st in steps] + ["output"]
-                n = len(boxes) - 1
-                snaps = sorted(set(np.linspace(n / 4, n, 4).round().astype(int).tolist()))   # sau bước N/4, N/2, 3N/4, N
             elif a.mode == "stages":                                               # MỘT lượt ở t = --stage-t: 6 tầng
                 _, steps = model.sample(xb, text, vhw, 1, generator=g, steps=1, return_stages=True, t_start=a.stage_t)
                 st0 = steps[0]
@@ -366,18 +334,19 @@ def main():
                 n_run = a.mock_steps if a.sampler == "mock" else a.steps
                 u, steps = model.sample(xb, text, vhw, 1, generator=g, steps=n_run, eta=a.eta, return_stages=True,
                                         sampler=a.sampler, t_start=a.t_start)
-                # trạng thái: x_t trước mỗi bước (t của bước đó) + đầu ra (t = 0); box THẬT, không kẹp
+            if a.mode == "steps":                    # trạng thái: x_t trước mỗi bước (t của bước đó) + đầu ra (t = 0); box THẬT, không kẹp
                 boxes = [sorted_box(unit_to_boxes(st["x"][0, 0], canvas).numpy()) for st in steps]
                 boxes.append(sorted_box(unit_to_boxes(u[0, 0].cpu(), canvas).numpy()))
                 tlabel = [f"t={st['t']}" for st in steps] + ["output"]
-                snaps = sorted(set(np.linspace(1, len(boxes) - 1, 4).round().astype(int).tolist()))
+                n = len(boxes) - 1                   # CE-Loc: sau bước N/4, N/2, 3N/4, N ; GAMMA1: cách đều từ bước 1
+                snaps = sorted(set(np.linspace(n / 4 if policy else 1, n, 4).round().astype(int).tolist()))
             cents = [center(b) for b in boxes]
             trail = max(1, len(boxes) // 20)                                     # box vết: ~20 box trên cả quỹ đạo
             bg = x[:3].numpy().transpose(1, 2, 0)
             den = x[3].numpy()
             inp = kind == "inpainted"
             row = {"image": kind, "density": dens, "states": []}
-            iou_h = lambda b: float(box_iou(b[None].clip(min=0), hole[None])[0][0, 0])  # noqa: E731
+            iou_h = lambda b: float(iou_to(b, hole)[0])  # noqa: E731
             ttls = []
             for k, si in enumerate(snaps):                                       # số đo từng ô (JSON) + tiêu đề bố cục đầy đủ
                 is_out = si == len(boxes) - 1
@@ -411,7 +380,6 @@ def main():
                                         "iou_unet_hole": iou_h(sp["x0"])} if inp else {})} for i, sp in enumerate(steps)]
             xy, att = spatial_softmax(model, xb, vhw)
             eff = effective_cells(att).numpy()
-            px, py = keypoint_pixels(xy.numpy(), att.shape[1])
             sharp = float((eff < SHARP).mean())
             row["sharp_frac"], row["median_cells"] = sharp, float(np.median(eff))
             case["rows"].append(row)
@@ -422,10 +390,7 @@ def main():
                 này. Box U-Net / refiner của trạng thái si = của bước si − 1 (bước dẫn tới nó)."""
                 ax.imshow(bg)
                 if inp:
-                    for hb in holes[:-1]:
-                        rect(ax, hb, "lime", lw=1.0, ls="--")
-                    rect(ax, hole, "lime", lw=1.6)
-                    ax.plot(*hc, "+", color="lime", ms=10, mew=2)
+                    draw_holes(ax, holes)
                 key = tr or "x_t"
                 col = {"x_t": "red", "x0": C_UNET, "refined": C_REFINER}[key]
                 seq = boxes[: si + 1] if key == "x_t" else [steps[j][key] for j in range(si)]
@@ -452,9 +417,7 @@ def main():
                 ax = axes[fr, 0]
                 if a.compact:                                                    # cột 1: ảnh test + lỗ
                     ax.imshow(bg)
-                    for hb in holes[:-1]:
-                        rect(ax, hb, "lime", lw=1.0, ls="--")
-                    rect(ax, hole, "lime", lw=1.6)
+                    draw_holes(ax, holes)
                     ax.set_title(f"Test image ('{cls}')", fontsize=10)
                     ax.set_ylabel({"x_t": "trace: predicted box x_t", "x0": "trace: U-Net box",
                                    "refined": "trace: refiner box"}[tr], fontsize=10,
@@ -471,25 +434,12 @@ def main():
                     draw_traj(ax, k, si, tr)
                     ax.set_title(f"{name} step {si}/{len(steps)}" if a.compact else ttls[k], fontsize=10 if a.compact else 8.5)
                 ax = axes[fr, c_ss]
-                ax.imshow(bg)
-                order = np.argsort(-eff)
-                sc = ax.scatter(px[order], py[order], c=eff[order], s=size[order], cmap="plasma_r",
-                                norm=LogNorm(vmin=1, vmax=att.shape[1] * att.shape[2]), edgecolors="black", linewidths=0.3,
-                                alpha=0.9)
-                cb = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.02)
-                # nhãn trục log dạng số thường ("1", "10", "100"), KHÔNG mathtext "$10^{k}$": matplotlib cũ + pyparsing ≥ 3.3
-                # (Kaggle) cảnh báo PyparsingDeprecationWarning mỗi lần dựng / parse mathtext
-                cb.ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
-                cb.ax.yaxis.set_minor_formatter(NullFormatter())
+                ss_scatter(fig, ax, bg, xy, att, size)
                 ax.set_title("SpatialSoftmax" if a.compact else f"SpatialSoftmax Output ({att.shape[0]} ch)\nsharp (<{SHARP} cells) "
                              f"{sharp * 100:.1f}% | median cells {np.median(eff):.0f}", fontsize=10 if a.compact else 8.5)
                 if inp:
                     rect(ax, hole, "lime", lw=1.2)
-                for c in range(ncol):
-                    axes[fr, c].set_xlim(0, T)
-                    axes[fr, c].set_ylim(T, 0)
-                    axes[fr, c].set_xticks([])
-                    axes[fr, c].set_yticks([])
+                tidy(axes[fr], T, T)
         if a.compact:
             handles = [Line2D([], [], color="red", lw=2.4, label="predicted box x_t"),
                        Line2D([], [], color=C_UNET, lw=2.0, label="U-Net box (x0 from eps)")]

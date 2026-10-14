@@ -16,7 +16,7 @@ from ce_localization.models.head import DecoderHead
 from ce_localization.models.memory import MemoryEncoder
 from ce_localization.utils.diffusion_math import cosine_alphas_cumprod
 
-__all__ = ["Detector", "build_model"]
+__all__ = ["Detector", "build_model", "load_checkpoint_model"]
 
 
 class Detector(nn.Module):
@@ -67,6 +67,30 @@ def _box_policy_kw(m, d, pre):
                 kernel_size=m["kernel_size"], n_groups=m["n_groups"], vision=m.get("vision", "r50_fpn"),
                 ss_mask=m.get("ss_mask", False), obj_attn=m.get("obj_attn", False), obj_heads=m.get("obj_heads", 4),
                 obj_max=m.get("obj_max", 300), obj_k=m.get("obj_k"), obj_select=m.get("obj_select", "nearest"))
+
+
+def load_checkpoint_model(ck, cfg=None, archs=None):
+    """Checkpoint (đường dẫn hoặc dict của `torch.load`) -> (model trên CPU, cfg | None, info).
+    - CE-Loc gốc của bài (`model_state_dict`): `BoxPolicy.load_celoc_paper`; cfg None; info = thông tin của nó + `clip` (state CLIP
+      text trong checkpoint) + `label` "epoch N".
+    - Checkpoint của train.py: `build_model(cfg or ck["config"], pretrained_backbone=False)` + nạp strict; info `clip` None, `label`
+      = iter.
+    `archs`: tập `model.arch` được nhận (checkpoint của bài tính là `box_policy`); khác ⇒ ValueError."""
+    import torch
+    if not isinstance(ck, dict):
+        ck = torch.load(ck, map_location="cpu", weights_only=False)
+    paper = "model_state_dict" in ck
+    cfg = None if paper else (cfg or ck["config"])
+    arch = "box_policy" if paper else cfg["model"].get("arch", "detector")
+    if archs is not None and arch not in archs:
+        raise ValueError(f"model.arch {arch!r} không thuộc {sorted(archs)}")
+    if paper:
+        from ce_localization.models.box_policy import BoxPolicy
+        model, clip, info = BoxPolicy.load_celoc_paper(ck)
+        return model, None, {**info, "clip": clip, "label": f"epoch {info['epoch']}"}
+    model = build_model(cfg, pretrained_backbone=False)
+    model.load_state_dict(ck["model"])
+    return model, cfg, {"clip": None, "label": ck.get("iter")}
 
 
 def load_proposer(model, path):

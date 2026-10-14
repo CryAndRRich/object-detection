@@ -110,7 +110,6 @@ def test_full_flow_dump_build_rate_score(tmp_path, monkeypatch):
     tắt mở lại tiếp đúng màn, quay lại sửa -> score.py."""
     import ce_localization.eval as ea
     import ce_localization.train as ta
-    from ce_localization.data.turns import TurnIndex
     from ce_localization.user_study import build as bu
     from ce_localization.user_study import score as su
     from ce_localization.user_study.app import Session
@@ -189,7 +188,7 @@ def test_full_flow_dump_build_rate_score(tmp_path, monkeypatch):
         assert all(os.path.exists(sess.background(x)) and sess.background(x) in page for x in nxt_imgs)   # tải trước 3 màn sau
         if n:
             sess.toggle(0)                                                     # = bấm box 1 / phím 1
-            assert sess.labels[0] == ["on_object"] and f'stroke="#eb1e1e"' in sess.html(True)
+            assert sess.labels[0] == ["on_object"] and 'stroke="#eb1e1e"' in sess.html(True)
             if n > 1:
                 sess.set_reasons(1, ["implausible", "wrong_size", "on_object"])       # nhiều lý do một box
                 assert sess.labels[1] == ["on_object", "wrong_size", "implausible"]
@@ -313,7 +312,7 @@ def test_cocount_flow_two_datasets(tmp_path, monkeypatch):
                 assert b[2] - b[0] == pytest.approx((o[:, 2] - o[:, 0]).mean(), abs=0.05)
 
     svg = box_svg((100, 100), [[0, 0, 5, 5]], [], [], others=[[10, 10, 20, 20], [30, 30, 40, 40]])
-    assert svg.count("stroke-dasharray") == 2 and svg.count(f'stroke="#1e90ff"') == 3
+    assert svg.count("stroke-dasharray") == 2 and svg.count('stroke="#1e90ff"') == 3
     cache = str(tmp_path / "img")
     s1 = Session(items, root, cache_dir=cache, name="CE-CoCount")
     s2 = Session(items_rs, root, cache_dir=cache, name="CE-CoCount (box resize)")

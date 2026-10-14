@@ -28,8 +28,12 @@ tên lớp -> CLIP text frozen -> Linear -> Mish -> 128 ────────
 box nhiễu [B,1,4] + t -> U-Net 1D (FiLM theo cond) -> ε̂ ; ε-MSE, β tuyến tính ; suy luận vòng mock 100 bước của bài / DDPM, K mẫu độc lập
 ```
 DELTA (`model.refiner`, `models/clip_refiner.py`): BoxRefiner của tác giả gốc TRONG mạng khử nhiễu (CLIP ViT + text frozen, RoIAlign,
-4 block RoPE 2D + AdaLN-Zero): `refined = x_t + Δ`, U-Net nhận `[x_t ; refined]` (`unet_input: concat`) hoặc không có U-Net — refiner là
-cả mạng khử nhiễu (`unet_input: none`, DELTA3).
+4 block RoPE 2D + AdaLN-Zero), `refiner.unet_input`:
+- `concat`: refiner trước U-Net, `refined = x_t + Δ`, U-Net nhận `[x_t ; refined]`;
+- `none`: không có U-Net, refiner là cả mạng khử nhiễu (DELTA3);
+- `post`: U-Net trước, refiner nhìn x̂0 của U-Net rồi sửa ε (DELTA3.1 / 3.2).
+
+Kết hợp được với `obj_attn` (DELTA4): luồng vật vào U-Net 8 kênh dưới dạng `[o ; o]`.
 GAMMA1 (`model.arch: box_refiner`, `models/box_refiner.py`): cùng điều kiện nhưng là memory `[t ; text ; SpatialSoftmax C5]`;
 1 box nhiễu -> 6 tầng (RoIAlign P2..P5 -> token -> cross-attn memory -> FFN -> delta box, KHÔNG self-attn), dự đoán x0,
 L1 + GIoU ở mọi tầng; suy luận DDIM `--steps`.
@@ -44,7 +48,7 @@ L1 + GIoU ở mọi tầng; suy luận DDIM `--steps`.
 | `models/` | `backbone`, `roi`, `memory`, `head`, `detector`, `text` (CLIP ViT-B/32 frozen; DELTA: + token chữ CLIP text); bài add: `box_policy` + `unet1d` (GAMMA0 / pha 1 / GAMMA4 / DELTA), `box_refiner` (GAMMA1), `propose_refine` + `dynamic_head` (GAMMA2 / 3 / 4.1), `clip_refiner` (DELTA: BoxRefiner của tác giả gốc, port từ `refs/CE-Loc-update/`) |
 | `engine/` | `diffusion`, `criterion` (SimOTA + loss, chế độ box / điểm), `evaluate` (suy luận + chỉ số), `add_eval` (bài add: K mẫu, IoU với lỗ, C-NLL, on_object), `train_utils`, `nan_debug` |
 | `utils/` | hình học box (torch / numpy), toán khuếch tán, chấm điểm numpy, checkpoint ghi nguyên tử, grad theo nhóm, log |
-| `tools/` | `build_density_index`, `build_density_points`, `build_turn_index` (bài add, cửa G0), `visualize_data` (xem đầu vào bằng mắt), `check_data_facts`, `plot_denoise_trajectory` (bài add: box qua từng bước khử nhiễu, checkpoint của bài hoặc GAMMA0), `plot_refiner_steps` (GAMMA1: 4 bước DDIM × 6 tầng + SpatialSoftmax, ảnh inpaint / gốc × density của ảnh / trống) |
+| `tools/` | `build_density_index`, `build_density_points`, `build_turn_index` (bài add, cửa G0), `visualize_data` (xem đầu vào bằng mắt), `check_data_facts`, `plot_denoise_trajectory` (bài add: box qua từng bước khử nhiễu, checkpoint của bài hoặc GAMMA0), `plot_refiner_steps` (quỹ đạo khử nhiễu + SpatialSoftmax cho GAMMA1 / CE-Loc kiểu bài / DELTA; DELTA vẽ thêm box refiner + box U-Net mỗi bước; `--compact` = 1 hình mỗi ca, mỗi hàng theo vết một loại box) |
 | `user_study/` | user study bài add: `selection` (chọn 4 box từ 30 mẫu), `build` (gộp dump → `items.json`), `app` (web Gradio chấm), `score` (chỉ số) |
 | `notebooks/` | `train_kaggle.ipynb` (một config trên T4×2: ALPHA / BETA / GAMMA0–1), `add_kaggle.ipynb` (bài add từ GAMMA2: `gamma2_celoc` / `gamma2` / `gamma2_1` / `gamma3` / `gamma3_1` / `gamma4` / `gamma4_0_1` / `gamma4_0_2` / `gamma4_1`, DELTA) — gitignore, chỉ ở local |
 
@@ -81,6 +85,8 @@ Code soi SpatialSoftmax (`celoc_paper/`, `tools/inspect_*spatial_softmax.py`, TN
 | `delta/delta1_1.yaml` | như `delta1`, `model.use_condition: false` (không điều kiện ảnh / text, refiner bỏ qua — mốc học được của prior) | 〃 |
 | `delta/delta2_1.yaml` / `delta2_2.yaml` / `delta2_3.yaml` | như `delta1`, refiner dùng CLIP ViT-B/32 / L/14 / L/14-336 (`refiner.clip_model_name`), token chữ vẫn CLIP text B/16 (`refiner.text_model_name`) | 〃 mục 9.1 |
 | `delta/delta3.yaml` | CHỈ BoxRefiner (`refiner.unet_input: none`, `aux_loss_weight: 1.0`): không ResNet18 / FiLM / U-Net, loss = MSE(refined, x0), sampler nhận ε̂ suy từ refined | 〃 mục 9.2 |
+| `delta/delta4.yaml` | `gamma4` (box attention tới mọi vật) + refiner của `delta2_1` (CLIP ViT-B/32, text B/16) trước U-Net; luồng vật `[o ; o]` | 〃 mục 10.1 |
+| `delta/delta3_1.yaml` / `delta3_2.yaml` | `delta2_1` / `delta4` với `refiner.unet_input: post`: U-Net trước, refiner sửa ε, loss = MSE(ε̂, ε) + 1·MSE(ε̂₁, ε) | 〃 mục 10.2 |
 
 ## Chạy
 
@@ -130,7 +136,8 @@ tự nhận `task: add`: `--image inpainted original`, `--n-samples`, `--add-den
 CE-CoCount (tập test phụ của bài, `data/cocount/`): `eval.py --dataset cocount --cocount-root ../data/cocount` (ảnh gốc, 10 chỗ trống GT
 làm lỗ, density trống; `data/cocount.py`); C-NLL của box GT trên CE-130 + CE-CoCount: `tools/gt_cnll.py`; `--obj-size` thêm khoá `_objsize` (giữ tâm, cỡ = TB box vật cùng lớp). Mục 18 của EXPERIMENT_GAMMA.
 
-DELTA (`config/delta/`, `docs/EXPERIMENT_DELTA.md`): eval như GAMMA (vòng mock 100 bước) + `_norefine` (bỏ refiner, khi có U-Net); cần
+DELTA (`config/delta/`, `docs/EXPERIMENT_DELTA.md`): train trên Kaggle (`add_kaggle.ipynb`, chỉ train), eval trên server (khuôn lệnh mục 7):
+vòng mock 100 bước + `_norefine` (bỏ refiner, khi có U-Net) + `_noobj` (khi có box vật); cần
 `HF_HOME` (CLIP tải lúc dựng model — không nằm trong checkpoint, vân tay `clip_sha` kiểm khớp). Cửa G1-HF (CLIP thật):
 `CE_HF_TESTS=1 [CE_HF_CLIP=<clip_model_name>] python -m pytest tests/ce_localization/test_delta.py -k hf -s`.
 

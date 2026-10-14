@@ -48,8 +48,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from ce_localization.data.density import DensityIndex  # noqa: E402
 from ce_localization.data.turns import image_inputs  # noqa: E402
-from ce_localization.models.box_policy import BoxPolicy, unit_to_boxes  # noqa: E402
-from ce_localization.models.detector import build_model  # noqa: E402
+from ce_localization.models.box_policy import unit_to_boxes  # noqa: E402
+from ce_localization.models.detector import load_checkpoint_model  # noqa: E402
 from ce_localization.models.text import TextTable, encode_class_names  # noqa: E402
 from ce_localization.utils.box_ops_np import box_iou  # noqa: E402
 from ce_localization.utils.log import fmt_time  # noqa: E402
@@ -60,19 +60,16 @@ SNAP_MOCK = (99, 80, 60, 40, 20, 10, 5, 0)
 
 def load_model(path, device, clip_name="openai/clip-vit-base-patch32"):
     """-> (model, cần density?, hàm text(names) -> TextTable, mô tả). Nhận checkpoint của bài hoặc của train.py."""
-    ck = torch.load(path, map_location="cpu", weights_only=False)
-    if "model_state_dict" in ck:                                          # checkpoint CE-Loc gốc của bài
-        model, clip, info = BoxPolicy.load_celoc_paper(ck)
-        text = lambda names: TextTable(encode_class_names(names, clip_name, device=str(device), state_dict=clip))  # noqa: E731
-        return model.to(device).eval(), info["in_channels"] == 4, text, f"CE-Loc gốc của bài {info}"
-    cfg = ck["config"]
-    if cfg["model"].get("arch") != "box_policy":
-        sys.exit(f"{path}: không phải checkpoint bài add (model.arch {cfg['model'].get('arch')})")
-    model = build_model(cfg, pretrained_backbone=False)
-    model.load_state_dict(ck["model"])
+    try:
+        model, cfg, info = load_checkpoint_model(path, archs={"box_policy"})
+    except ValueError as e:
+        sys.exit(f"{path}: không phải checkpoint bài add ({e})")
+    if cfg is None:                                                       # checkpoint CE-Loc gốc của bài
+        text = lambda names: TextTable(encode_class_names(names, clip_name, device=str(device), state_dict=info["clip"]))  # noqa: E731
+        return (model.to(device).eval(), info["in_channels"] == 4, text,
+                f"CE-Loc gốc của bài { {k: v for k, v in info.items() if k not in ('clip', 'label')} }")
     text = lambda names: TextTable(encode_class_names(names, cfg["model"]["clip_text"], device=str(device)))  # noqa: E731
-    return (model.to(device).eval(), cfg["model"].get("in_channels", 3) == 4, text,
-            f"{cfg['experiment']} iter {ck.get('iter')}")
+    return (model.to(device).eval(), cfg["model"].get("in_channels", 3) == 4, text, f"{cfg['experiment']} iter {info['label']}")
 
 
 def scan_samples(root, log):

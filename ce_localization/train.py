@@ -76,8 +76,9 @@ TASKS = ("detect", "add")
 # nhãn số hạng loss trên dòng log (giữ đúng nhãn cũ của ALPHA: ce / l1 / giou / iou)
 LOG_LABEL = {"loss_ce": "ce", "loss_bbox": "l1", "loss_giou": "giou", "iou_matched": "iou",
              "loss_center": "center", "loss_size": "size", "center_px": "center_px"}
-# DELTA: thống kê refiner trên dòng log (TB cửa sổ) và trong history — `BoxPolicy.pop_stats`
-EXTRA_LOG = {"loss_eps": "ε", "loss_aux": "aux", "delta_abs": "|Δ|", "aux_ratio": "aux/x_t"}
+# DELTA: thống kê refiner trên dòng log (TB cửa sổ) và trong history — `BoxPolicy.pop_stats`; DELTA3.x (`unet_input: post`):
+# ε₁ = ε-MSE của U-Net trước refiner, |Δ| = TB |Δε|, ε/ε₁ < 1 ⇒ refiner có ích
+EXTRA_LOG = {"loss_eps": "ε", "loss_eps1": "ε₁", "loss_aux": "aux", "delta_abs": "|Δ|", "aux_ratio": "aux/x_t", "eps_ratio": "ε/ε₁"}
 
 
 def config_diff(saved, cfg):
@@ -579,7 +580,7 @@ def main():
                 if crit is None:
                     lps = st.get("loss_per_stage")
                     detail = "" if lps is None else " (tầng " + " ".join(f"{float(x):.3f}" for x in lps) + ")"
-                    if "loss_eps" in st and "loss_aux" not in st:
+                    if "loss_eps" in st and "loss_aux" not in st and "loss_eps1" not in st:
                         detail += f" | ε-MSE CE-Loc {float(st['loss_eps']):.4f}"
                     if win["extra"]:                    # DELTA
                         detail += " | " + " ".join(f"{EXTRA_LOG[k_]} {v / win['n']:.4f}" for k_, v in win["extra"].items())

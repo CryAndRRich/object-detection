@@ -5,7 +5,7 @@ import math
 
 import torch
 
-__all__ = ["cosine_alphas_cumprod", "linear_alphas_cumprod", "q_sample", "predict_noise_from_start",
+__all__ = ["cosine_alphas_cumprod", "linear_alphas_cumprod", "q_sample", "predict_noise_from_start", "predict_start_from_noise",
            "ddim_time_pairs", "ddim_step"]
 
 
@@ -45,6 +45,12 @@ def predict_noise_from_start(x_t, t, x_start, alphas_cumprod):
     """Recover eps from (x_t, x_0) — the analytic inverse of q_sample."""
     ab = _ab(alphas_cumprod, t, x_t)
     return ((1.0 / ab).sqrt() * x_t - x_start) / (1.0 / ab - 1).sqrt()
+
+
+def predict_start_from_noise(x_t, t, eps, alphas_cumprod):
+    """x̂0 từ (x_t, ε̂) — nghịch đảo của q_sample theo x_0."""
+    ab = _ab(alphas_cumprod, t, x_t)
+    return (x_t - (1 - ab).sqrt() * eps) / ab.sqrt()
 
 
 def ddim_time_pairs(num_timesteps=1000, sampling_steps=4):
