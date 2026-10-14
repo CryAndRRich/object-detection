@@ -417,6 +417,30 @@ def test_sample_shared_context_equals_expanded():
     assert torch.allclose(a.view(6, 4), b, atol=1e-5)
 
 
+def test_sample_record_refined():
+    """`record` (tool soi refiner vs U-Net): quỹ đạo thêm `refined` của từng bước = refiner trên đúng x_t / t của bước đó; box ra
+    TRÙNG TỪNG BIT bản không ghi; không refiner / bỏ refiner thì không có khoá `refined`."""
+    m = _policy(num_timesteps=100).eval()
+    for blk in m.refiner.stages[0]:
+        nn.init.normal_(blk.ada[-1].weight, std=0.05)
+    nn.init.normal_(m.refiner.heads[0][-1].weight, std=0.05)
+    x, text, vhw, _, tok = _batch()
+    with torch.no_grad():
+        cond, ctx = m.condition(x, text, vhw), m.refiner_context(x, tok)
+        plain = m.sample_from_cond(cond, 3, torch.Generator().manual_seed(5), "mock", ctx=ctx)
+        out, traj = m.sample_from_cond(cond, 3, torch.Generator().manual_seed(5), "mock", record="all", ctx=ctx)
+        assert torch.equal(plain, out) and [s["t"] for s in traj] == list(range(99, -1, -1))
+        assert all(s["refined"].shape == (2, 3, 4) for s in traj)
+        ci = torch.arange(2).repeat_interleave(3)
+        for s in (traj[0], traj[50], traj[-1]):
+            tb = torch.full((6,), s["t"], dtype=torch.long)
+            _, ref = m.predict_noise(s["x_t"].view(6, 4), tb, cond.repeat_interleave(3, 0), ctx, ci)
+            assert torch.allclose(s["refined"].view(6, 4), ref, atol=1e-6)
+        assert not torch.allclose(traj[0]["refined"], traj[0]["x0_hat"])        # refiner ≠ x̂0 của U-Net (hai box khác nhau)
+        _, t2 = m.sample_from_cond(cond, 3, torch.Generator().manual_seed(5), "mock", record={99, 0})
+        assert [s["t"] for s in t2] == [99, 0] and all("refined" not in s for s in t2)   # bỏ refiner (ctx None)
+
+
 def test_mock_default_unchanged_without_refiner():
     """Hồi quy: CE-Loc không refiner, vòng mock 100 bước trùng TỪNG BIT cách tính cũ (U-Net gọi thẳng)."""
     from ce_localization.models.box_policy import BoxPolicy, mock_sample

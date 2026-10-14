@@ -466,19 +466,27 @@ class BoxPolicy(nn.Module):
     @torch.no_grad()
     def sample_from_cond(self, cond, n_samples, generator=None, sampler="ddpm", record=None, obj=None, ctx=None):
         """Như `sample` nhưng từ cond [B, D] đã tính sẵn (+ token vật của `object_tokens`, ngữ cảnh refiner `refiner_context`).
-        Mọi hàng cùng t ở mỗi bước (mock / DDPM) ⇒ refiner tính luồng ngữ cảnh một lần mỗi ảnh (`ctx_index`)."""
+        Mọi hàng cùng t ở mỗi bước (mock / DDPM) ⇒ refiner tính luồng ngữ cảnh một lần mỗi ảnh (`ctx_index`).
+        DELTA + `record`: mỗi bước quỹ đạo thêm `refined` [B,n,4] (box refiner đề xuất ở bước đó; `x0_hat` = x̂0 suy từ ε̂ của U-Net)."""
         B = cond.shape[0]
         cond = cond.repeat_interleave(n_samples, dim=0)
         obj = self._repeat_obj(obj, n_samples)
         ci = None if ctx is None else torch.arange(B, device=cond.device).repeat_interleave(n_samples)
-        fn = lambda x, t: self.predict_noise(x, t, cond, ctx, ci, obj)[0]  # noqa: E731
+        refs = {} if record is not None and ctx is not None else None              # t -> refined (chỉ ghi, không đổi phép tính)
+
+        def fn(x, t):
+            eps, refined = self.predict_noise(x, t, cond, ctx, ci, obj)
+            if refs is not None:
+                refs[int(t[0])] = refined.detach().float().cpu()
+            return eps
         run = ddpm_sample if sampler == "ddpm" else mock_sample
         out = run(fn, cond.shape[0], self.alphas_cumprod, generator=generator, device=cond.device, record=record)
         if record is None:
             return out.view(B, n_samples, 4)
         x, traj = out
-        return x.view(B, n_samples, 4), [{**s, "x_t": s["x_t"].view(B, n_samples, 4),
-                                          "x0_hat": s["x0_hat"].view(B, n_samples, 4)} for s in traj]
+        return x.view(B, n_samples, 4), [{**s, "x_t": s["x_t"].view(B, n_samples, 4), "x0_hat": s["x0_hat"].view(B, n_samples, 4),
+                                          **({} if refs is None else {"refined": refs[s["t"]].view(B, n_samples, 4)})}
+                                         for s in traj]
 
     @classmethod
     def load_celoc_paper(cls, path, map_location="cpu"):

@@ -38,6 +38,15 @@ Chọn ca:
              `--pool` nhánh ngẫu nhiên mỗi split: ưu tiên ca density ảnh gốc khác bản inpaint ở lỗ (`gap` = density TB trong
              lỗ của ảnh gốc − của ảnh inpaint ≥ `--min-gap`), rồi lấy cách đều theo cỡ lỗ √(wh)/canvas ⇒ đủ dải kích cỡ vật.
 Text = tên lớp thật. Chữ trên hình tiếng Anh. Ra `--out`: `<split>_<nhánh>_t<lượt>.png` + `refiner_steps.json`.
+DELTA (`box_policy` r18_paper + `model.refiner`, vd `weights/add/delta1/best.pth`; CLIP ViT tải từ HF ⇒ `export HF_HOME`): cùng bố cục,
+mỗi ô quỹ đạo vẽ thêm HAI box của bước dẫn tới trạng thái đó — **box refiner đề xuất** `refined = x_t + Δ` (cam, nét đứt) và **box U-Net
+nhắm tới** x̂0 = (x_t − √(1−ᾱ_t)·ε̂) / √ᾱ_t (xanh, chấm chấm; vòng mock kéo x về phía √ᾱ_t·x̂0) — tiêu đề ô ghi IoU(refined, x̂0) (+ IoU
+mỗi box với lỗ ở ảnh inpaint); thêm cột "Refiner vs U-Net per step" (đường theo 100 bước: IoU với lỗ của x_t / refined / x̂0, IoU(refined,
+x̂0), TB |Δ| trục phải). Model train AMP + `--device cuda` ⇒ lấy mẫu dưới autocast fp16 như eval.py. DELTA1.1 (`use_condition: false`)
+bỏ qua refiner như lúc train ⇒ vẽ như CE-Loc thường; DELTA3 (không U-Net, không ResNet18) không nhận.
+  python tools/plot_refiner_steps.py --ckpt ../weights/add/delta1/best.pth --name "CE-Loc Update (DELTA1)" --quota 0 0 6 \
+      --device cuda --out ../../output/add/viz/delta1/refiner_unet
+
 Chỉ nạp model + CLIP + vài trăm ảnh để chọn, ~3–8 phút, CPU được:
   python tools/plot_refiner_steps.py --ckpt ../weights/add/gamma1/best.pth --quota 5 5 10 \\
       --files test/images/3342_3.png ... --out ../../output/add/viz/gamma1/4_step
@@ -60,8 +69,9 @@ from ce_localization.data.dataset import _read_annotation  # noqa: E402
 from ce_localization.data.density import DensityIndex  # noqa: E402
 from ce_localization.data.turns import image_inputs, pixel_hash  # noqa: E402
 from ce_localization.models.box_policy import paper_spatial_softmax, norm_whwh, unit_to_boxes  # noqa: E402
+from ce_localization.models.clip_refiner import needs_text_tokens, refiner_config, text_model_name  # noqa: E402
 from ce_localization.models.detector import build_model  # noqa: E402
-from ce_localization.models.text import TextTable, encode_class_names  # noqa: E402
+from ce_localization.models.text import TextTable, encode_class_names, encode_class_tokens  # noqa: E402
 from ce_localization.tools.plot_spatial_softmax import SHARP, effective_cells, keypoint_pixels  # noqa: E402
 from ce_localization.utils.box_ops_np import box_iou  # noqa: E402
 
@@ -91,7 +101,8 @@ def load_model(path, device):
     cfg = ck["config"]
     arch = cfg["model"].get("arch")
     if arch not in ("box_refiner", "box_policy") or (arch == "box_policy" and cfg["model"].get("vision") != "r18_paper"):
-        sys.exit(f"{path}: chỉ nhận box_refiner (GAMMA1) hoặc box_policy r18_paper (GAMMA2-pha 1) — model.arch {arch}")
+        sys.exit(f"{path}: chỉ nhận box_refiner (GAMMA1) hoặc box_policy r18_paper (GAMMA2-pha 1, DELTA1 / 2.x) — model.arch {arch}, "
+                 f"vision {cfg['model'].get('vision')}")
     model = build_model(cfg, pretrained_backbone=False)
     model.load_state_dict(ck["model"])
     return model.to(device).eval(), cfg, ck.get("iter"), None
@@ -224,6 +235,11 @@ def is_policy(model):
     return getattr(model, "vision_kind", None) == "r18_paper"
 
 
+def box_iou_any(a, b):
+    """IoU hai box xyxy có thể w, h âm (box nhiễu không kẹp) — kẹp về (min, max) trước, toạ độ âm về 0 như IoU với lỗ."""
+    return float(box_iou(sorted_box(a)[None].clip(min=0), sorted_box(b)[None].clip(min=0))[0][0, 0])
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True, help="checkpoint box_refiner (../weights/add/gamma1/best.pth) hoặc box_policy "
@@ -272,6 +288,9 @@ def main():
         sys.exit("box_refiner: --sampler ddim | mock")
     if policy:
         a.mock_steps = 100                                                        # mock_sample của BoxPolicy: 100 bước như bài
+    # DELTA: refiner trong mạng khử nhiễu (cần token chữ CLIP; `use_condition: false` thì refiner bị bỏ qua như lúc train)
+    refiner = policy and getattr(model, "refiner", None) is not None and needs_text_tokens(cfg["model"])
+    amp = dev.type == "cuda" and bool(cfg.get("training", {}).get("amp")) and clip_sd is None     # như eval.py
     T = cfg["data"]["image_size"]
     ab = model.alphas_cumprod.cpu()
     if a.stage_t is None:
@@ -290,9 +309,14 @@ def main():
         split, br, turn, cls, holes = cs["split"], cs["branch"], cs["turn"], cs["class"], cs["holes"]
         hole = holes[-1]                                                          # lỗ mới nhất = đích
         hc = center(hole)
-        text = TextTable(encode_class_names([cls], cfg["model"]["clip_text"], device=str(dev), state_dict=clip_sd))([cls], dev)
-        ncol = 8 if a.mode == "stages" else 6
-        fig, axes = plt.subplots(4, ncol, figsize=(ncol * 3.3, 4 * 3.5), squeeze=False)
+        tokens, tsha = (encode_class_tokens([cls], text_model_name(refiner_config(cfg["model"]["refiner"])), device=str(dev))
+                        if refiner else (None, None))
+        table = TextTable(encode_class_names([cls], cfg["model"]["clip_text"], device=str(dev), state_dict=clip_sd), tokens, tsha)
+        if refiner:
+            model.check_text_fingerprint(tsha)                                    # CLIP text tải lại phải đúng bản lúc train
+        text = table([cls], dev)
+        ncol = 8 if a.mode == "stages" else 7 if refiner else 6
+        fig, axes = plt.subplots(4, ncol, figsize=(ncol * 3.3, 4 * (4.1 if refiner else 3.5)), squeeze=False)
         case = {k: cs[k] for k in ("split", "branch", "turn", "class", "sample", "size")}
         case.update({"source": cs.get("source"), "density_gap_in_hole": cs["gap"], "rows": []})
         for r, (kind, dens) in enumerate(ROWS):
@@ -304,9 +328,15 @@ def main():
             canvas = norm_whwh(model, torch.tensor([[nw, nh, nw, nh]], dtype=torch.float32), T)[0] if policy else \
                 torch.full((4,), float(T))
             if policy:                                                           # CE-Loc: mock 100 / DDPM 1000 bước, ghi mọi bước
-                u, traj = model.sample(xb, text, vhw, 1, generator=g, sampler=a.sampler, record="all")
+                with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=amp):
+                    u, traj = model.sample(xb, text, vhw, 1, generator=g, sampler=a.sampler, record="all",
+                                           text_tokens=table.tokens([cls], dev) if refiner else None)
                 steps = [{"t": s["t"], "x": s["x_t"],
                           "x0": sorted_box(unit_to_boxes(s["x0_hat"][0, 0], canvas).numpy())} for s in traj]
+                if refiner:                                                      # box refiner đề xuất ở từng bước + TB |Δ| (đơn vị box)
+                    for st, s in zip(steps, traj):
+                        st["refined"] = sorted_box(unit_to_boxes(s["refined"][0, 0], canvas).numpy())
+                        st["delta"] = float((s["refined"][0, 0] - s["x_t"][0, 0].float()).abs().mean())
                 boxes = [sorted_box(unit_to_boxes(st["x"][0, 0], canvas).numpy()) for st in steps]
                 boxes.append(sorted_box(unit_to_boxes(u[0, 0].cpu(), canvas).numpy()))
                 tlabel = [f"t={st['t']}" for st in steps] + ["output"]
@@ -360,9 +390,11 @@ def main():
                     ax.annotate(tlabel[j], cents[j], xytext=(4, 4), textcoords="offset points", fontsize=7,
                                 bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="none", alpha=0.7), zorder=7)
                 ax.plot(*cents[si], "o", color="red", mec="black", mew=0.6, ms=7, zorder=8)
-                if a.show_x0 and a.mode == "steps":
+                if (a.show_x0 or refiner) and a.mode == "steps":
                     rect(ax, steps[si - 1]["x0"] if policy else steps[si - 1]["stages"][-1, 0, 0].numpy(), "deepskyblue",
-                         lw=1.2, ls=":")
+                         lw=1.6 if refiner else 1.2, ls=":")
+                if refiner:
+                    rect(ax, steps[si - 1]["refined"], "orange", lw=1.6, ls="--")
                 is_out = si == len(boxes) - 1
                 if a.mode == "stages":
                     ttl = f"stage {si}/{len(boxes) - 1} output (t = {steps[0]['t']})"
@@ -377,9 +409,40 @@ def main():
                     rec["iou_hole"] = iou_h(boxes[si])
                     rec["center_dist"] = float(np.linalg.norm(cents[si] - hc))
                     ttl += f"\nIoU(box, hole) {rec['iou_hole']:.2f} | center dist {rec['center_dist']:.0f} px"
+                if refiner and a.mode == "steps":                                # bước dẫn tới trạng thái này: refiner vs U-Net
+                    sp = steps[si - 1]
+                    rec.update(step_t=sp["t"], refined=sp["refined"].tolist(), unet_x0=sp["x0"].tolist(),
+                               iou_refined_unet=box_iou_any(sp["refined"], sp["x0"]), delta=sp["delta"])
+                    ttl += f"\nstep t={sp['t']}: IoU(refined, U-Net x0) {rec['iou_refined_unet']:.2f}"
+                    if inp:
+                        rec["iou_refined_hole"], rec["iou_unet_hole"] = iou_h(sp["refined"]), iou_h(sp["x0"])
+                        ttl += f"\nIoU w/ hole: refined {rec['iou_refined_hole']:.2f} | U-Net x0 {rec['iou_unet_hole']:.2f}"
                 ax.set_title(ttl, fontsize=8.5)
                 row["states"].append(rec)
             row["path"] = [[lab, *b.tolist()] for lab, b in zip(tlabel, boxes)]
+            if refiner:                                                          # cột: refiner vs U-Net theo MỌI bước
+                per = [{"t": sp["t"], "iou_refined_unet": box_iou_any(sp["refined"], sp["x0"]), "delta": sp["delta"],
+                        **({"iou_xt_hole": iou_h(boxes[i]), "iou_refined_hole": iou_h(sp["refined"]),
+                            "iou_unet_hole": iou_h(sp["x0"])} if inp else {})} for i, sp in enumerate(steps)]
+                row["per_step"] = per
+                ax = axes[r, ncol - 2]
+                xs = np.arange(1, len(per) + 1)
+                if inp:
+                    ax.plot(xs, [p["iou_xt_hole"] for p in per], color="red", lw=1.2, label="IoU(x_t, hole)")
+                    ax.plot(xs, [p["iou_refined_hole"] for p in per], color="orange", lw=1.4, ls="--", label="IoU(refined, hole)")
+                    ax.plot(xs, [p["iou_unet_hole"] for p in per], color="deepskyblue", lw=1.4, ls=":", label="IoU(U-Net x0, hole)")
+                ax.plot(xs, [p["iou_refined_unet"] for p in per], color="black", lw=1.2, label="IoU(refined, U-Net x0)")
+                for si in snaps:
+                    ax.axvline(si, color="0.8", lw=0.8, zorder=0)
+                ax.set_ylim(0, 1)
+                ax.set_xlabel(f"denoising step (t = {per[0]['t']} -> {per[-1]['t']})", fontsize=8)
+                ax.tick_params(labelsize=7)
+                ax.legend(fontsize=6.5, loc="upper left", frameon=False)
+                tw = ax.twinx()
+                tw.plot(xs, [p["delta"] for p in per], color="0.5", lw=1.0, alpha=0.8)
+                tw.set_ylabel("mean |refined - x_t| (gray)", fontsize=7, color="0.4")
+                tw.tick_params(labelsize=7, colors="0.4")
+                ax.set_title("Refiner vs U-Net per step", fontsize=8.5)
             xy, att = spatial_softmax(model, xb, vhw)
             eff = effective_cells(att).numpy()
             px, py = keypoint_pixels(xy.numpy(), att.shape[1])
@@ -402,6 +465,8 @@ def main():
             row["sharp_frac"], row["median_cells"] = sharp, float(np.median(eff))
             case["rows"].append(row)
             for c in range(ncol):
+                if refiner and c == ncol - 2:                                    # cột đường theo bước: trục riêng
+                    continue
                 axes[r, c].set_xlim(0, T)
                 axes[r, c].set_ylim(T, 0)
                 axes[r, c].set_xticks([])
@@ -413,12 +478,15 @@ def main():
                           else "boxes at earlier states (fading)"),
                    Line2D([], [], color="black", marker="o", mfc="0.7", lw=1.4,
                           label="center path: input -> stage 1..k" if a.mode == "stages" else "center path, every step")]
-        if a.show_x0:
-            handles.append(Line2D([], [], color="deepskyblue", ls=":", label="predicted x0 (from eps) of that step" if policy
+        if a.show_x0 or refiner:
+            handles.append(Line2D([], [], color="deepskyblue", ls=":", label="U-Net x0 (from eps) of the step leading here"
+                                  if refiner else "predicted x0 (from eps) of that step" if policy
                                   else "predicted x0 (stage 6) of that step"))
+        if refiner:
+            handles.append(Line2D([], [], color="orange", ls="--", label="refiner box (x_t + delta) of the step leading here"))
         handles += [Line2D([], [], color="lime", lw=1.6, marker="+", label="latest removed object (target)"),
                     Line2D([], [], color="lime", lw=1.0, ls="--", label="earlier removed objects")]
-        fig.legend(handles=handles, loc="lower center", ncol=6, fontsize=8, frameon=False)
+        fig.legend(handles=handles, loc="lower center", ncol=4 if refiner else 6, fontsize=8, frameon=False)
         seen = "train image, seen class" if split == "train" else "unseen class"
         fig.suptitle(f"{a.name or os.path.basename(os.path.dirname(os.path.abspath(a.ckpt))) + '/' + os.path.basename(a.ckpt)}"
                      f" ({it if isinstance(it, str) else f'iter {it}'}) | "

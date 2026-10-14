@@ -655,6 +655,75 @@ def test_plot_refiner_steps_box_policy(tmp_path, monkeypatch):
     assert seen and all(sd is not None and "text_model.final_layer_norm.weight" in sd for sd in seen)
 
 
+def test_plot_refiner_steps_delta(tmp_path, monkeypatch):
+    """Tool soi nhận DELTA1 (box_policy r18_paper + refiner, config delta1 thật, CLIP giả): mỗi ô quỹ đạo ghi box refiner + x̂0 U-Net
+    của bước dẫn tới nó; thêm cột đường theo 100 bước; token chữ lấy theo `text_model_name`, vân tay CLIP text kiểm khớp checkpoint.
+    DELTA1.1 (`use_condition: false`) vẽ như CE-Loc thường; DELTA3 (không ResNet18) bị từ chối."""
+    import ce_localization.tools.plot_refiner_steps as tool
+    from ce_localization.data.density import build_index
+    from ce_localization.models.detector import build_model
+    from tests.ce_localization.helpers import CFG_G, FAKE_TEXT_SHA, _fake_ce130_turns, _fake_tokens, _patch_clip
+    _patch_clip(monkeypatch)
+    root, samples = _fake_ce130_turns(str(tmp_path / "d"))
+    didx = str(tmp_path / "density_index.json")
+    with open(didx, "w") as f:
+        json.dump(build_index(samples, workers=0, log=lambda *x: None), f)
+    monkeypatch.setattr(tool, "encode_class_names", lambda names, *a, **k: {n: torch.randn(512) for n in names})
+    asked = []
+    monkeypatch.setattr(tool, "encode_class_tokens", lambda names, name, **k: asked.append(name) or (_fake_tokens(names), FAKE_TEXT_SHA))
+
+    def ckpt(kind, text_sha=FAKE_TEXT_SHA):
+        with open(CFG_G[kind]) as f:
+            cfg = yaml.safe_load(f)
+        cfg["data"]["image_size"] = 128
+        cfg["diffusion"]["num_timesteps"] = 100
+        cfg["model"]["pretrained_backbone"] = False
+        torch.manual_seed(0)
+        m = build_model(cfg, pretrained_backbone=False)
+        if kind == "delta1":
+            for blk in m.refiner.stages[0]:                                     # refiner rời identity (AdaLN-Zero khởi tạo 0)
+                torch.nn.init.normal_(blk.ada[-1].weight, std=0.05)
+            torch.nn.init.normal_(m.refiner.heads[0][-1].weight, std=0.05)
+            m.set_text_fingerprint(text_sha)
+        p = str(tmp_path / kind / "best.pth")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        torch.save({"config": cfg, "model": m.state_dict(), "iter": 5}, p)
+        return p
+    base = ["plot_refiner_steps.py", "--ce130", root, "--samples", samples, "--density-index", didx,
+            "--cases", "test/3000_b1:2", "--quota", "0", "0", "0"]
+    out = str(tmp_path / "out")
+    monkeypatch.setattr(sys, "argv", base + ["--ckpt", ckpt("delta1"), "--out", out])
+    tool.main()
+    assert asked and set(asked) == {"openai/clip-vit-base-patch16"}
+    assert set(os.listdir(out)) == {"test_3000_b1_t2.png", "refiner_steps.json"}
+    with open(os.path.join(out, "refiner_steps.json")) as f:
+        rows = json.load(f)[0]["rows"]
+    assert [(r["image"], r["density"]) for r in rows] == list(tool.ROWS)
+    for r in rows:
+        inp = r["image"] == "inpainted"
+        assert [s["after_step"] for s in r["states"]] == [25, 50, 75, 100]
+        assert [s["step_t"] for s in r["states"]] == [75, 50, 25, 0]               # bước dẫn tới trạng thái
+        assert all(0 <= s["iou_refined_unet"] <= 1 and len(s["refined"]) == 4 for s in r["states"])
+        assert all(("iou_refined_hole" in s) == inp for s in r["states"])
+        assert [p["t"] for p in r["per_step"]] == list(range(99, -1, -1))
+        assert all(("iou_unet_hole" in p) == inp and p["delta"] > 0 for p in r["per_step"])
+    assert rows[0]["path"][0][1:] == rows[2]["path"][0][1:]                      # cùng seed ⇒ cùng nhiễu ban đầu
+
+    bad = ckpt("delta1", text_sha=b"\x01" * 32)                                  # CLIP text khác bản lúc train ⇒ dừng
+    monkeypatch.setattr(sys, "argv", base + ["--ckpt", bad, "--out", str(tmp_path / "bad")])
+    with pytest.raises(Exception, match="(?i)clip"):
+        tool.main()
+    out2 = str(tmp_path / "out2")                                                # DELTA1.1: refiner bị bỏ qua -> vẽ như CE-Loc
+    monkeypatch.setattr(sys, "argv", base + ["--ckpt", ckpt("delta1_1"), "--out", out2])
+    tool.main()
+    with open(os.path.join(out2, "refiner_steps.json")) as f:
+        r0 = json.load(f)[0]["rows"][0]
+    assert "per_step" not in r0 and "refined" not in r0["states"][0]
+    monkeypatch.setattr(sys, "argv", base + ["--ckpt", ckpt("delta3"), "--out", str(tmp_path / "bad3")])
+    with pytest.raises(SystemExit):
+        tool.main()
+
+
 def test_plot_refine_stages_full_flow(tmp_path, monkeypatch):
     """Tool soi refine (propose_refine): mỗi ca một PNG 3 hàng (t0 / ce / noise) × 9 cột + JSON 6 stage có attention; model có
     box vật (GAMMA3) nhận hàng `_nogeo`; `--scan` ghi scan.json; hàng `_nogeo` với model không box vật bị từ chối."""
