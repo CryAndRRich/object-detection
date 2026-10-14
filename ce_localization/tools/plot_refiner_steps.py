@@ -38,14 +38,17 @@ Chọn ca:
              `--pool` nhánh ngẫu nhiên mỗi split: ưu tiên ca density ảnh gốc khác bản inpaint ở lỗ (`gap` = density TB trong
              lỗ của ảnh gốc − của ảnh inpaint ≥ `--min-gap`), rồi lấy cách đều theo cỡ lỗ √(wh)/canvas ⇒ đủ dải kích cỡ vật.
 Text = tên lớp thật. Chữ trên hình tiếng Anh. Ra `--out`: `<split>_<nhánh>_t<lượt>.png` + `refiner_steps.json`.
-DELTA (`box_policy` r18_paper + `model.refiner`, vd `weights/add/delta1/best.pth`; CLIP ViT tải từ HF ⇒ `export HF_HOME`): cùng bố cục,
-mỗi ô quỹ đạo vẽ thêm HAI box của bước dẫn tới trạng thái đó — **box refiner đề xuất** `refined = x_t + Δ` (cam, nét đứt) và **box U-Net
-nhắm tới** x̂0 = (x_t − √(1−ᾱ_t)·ε̂) / √ᾱ_t (xanh, chấm chấm; vòng mock kéo x về phía √ᾱ_t·x̂0) — tiêu đề ô ghi IoU(refined, x̂0) (+ IoU
-mỗi box với lỗ ở ảnh inpaint); thêm cột "Refiner vs U-Net per step" (đường theo 100 bước: IoU với lỗ của x_t / refined / x̂0, IoU(refined,
-x̂0), TB |Δ| trục phải). Model train AMP + `--device cuda` ⇒ lấy mẫu dưới autocast fp16 như eval.py. DELTA1.1 (`use_condition: false`)
-bỏ qua refiner như lúc train ⇒ vẽ như CE-Loc thường; DELTA3 (không U-Net, không ResNet18) không nhận.
-  python tools/plot_refiner_steps.py --ckpt ../weights/add/delta1/best.pth --name "CE-Loc Update (DELTA1)" --quota 0 0 6 \
-      --device cuda --out ../../output/add/viz/delta1/refiner_unet
+DELTA (`box_policy` r18_paper + `model.refiner`, vd `weights/add/delta1/best.pth`; CLIP ViT tải từ HF ⇒ `export HF_HOME`): mỗi ô
+quỹ đạo vẽ thêm HAI box của bước dẫn tới trạng thái đó — **box refiner đề xuất** `refined = x_t + Δ` (tím hồng) và **box U-Net nhắm
+tới** x̂0 = (x_t − √(1−ᾱ_t)·ε̂) / √ᾱ_t (xanh dương; vòng mock kéo x về phía √ᾱ_t·x̂0); JSON ghi IoU giữa chúng / với lỗ ở từng ô và
+`per_step` (cả 100 bước). Model train AMP + `--device cuda` ⇒ lấy mẫu dưới autocast fp16 như eval.py. DELTA1.1 (`use_condition:
+false`) bỏ qua refiner như lúc train ⇒ vẽ như CE-Loc thường; DELTA3 (không U-Net, không ResNet18) không nhận.
+
+`--compact` (box_policy): MỘT hàng × 6 cột — ảnh test (ảnh inpaint lượt t + lỗ), SpatialSoftmax, 4 ô quỹ đạo sau bước 25 / 50 / 75 / 100
+(box dự đoán x_t đỏ + x̂0 U-Net xanh + box refiner tím hồng nếu có); density luôn là density của chính ảnh test; tiêu đề ô chỉ ghi số
+bước. Số đo đầy đủ vẫn ở JSON.
+  python tools/plot_refiner_steps.py --ckpt ../weights/add/delta1/best.pth --name "CE-Loc Update (DELTA1)" --compact \
+      --cases test/3342_b1:3 ... --device cuda --out ../../output/add/viz/delta1/compact
 
 Chỉ nạp model + CLIP + vài trăm ảnh để chọn, ~3–8 phút, CPU được:
   python tools/plot_refiner_steps.py --ckpt ../weights/add/gamma1/best.pth --quota 5 5 10 \\
@@ -76,6 +79,7 @@ from ce_localization.tools.plot_spatial_softmax import SHARP, effective_cells, k
 from ce_localization.utils.box_ops_np import box_iou  # noqa: E402
 
 SPLITS = ("train", "val", "test")
+C_UNET, C_REFINER = "#1E90FF", "#FF00FF"           # box U-Net (x̂0 suy từ ε̂) xanh dương / box refiner tím hồng — tách rõ khỏi đỏ / xanh lá
 ROWS = (("inpainted", "own"), ("inpainted", "blank"), ("original", "own"), ("original", "blank"))
 
 
@@ -266,6 +270,8 @@ def main():
     ap.add_argument("--stage-t", type=int, default=None, help="--mode stages: mức nhiễu của lượt (mặc định T − 1, cao nhất)")
     ap.add_argument("--name", default=None, help="tên hiển thị trên tiêu đề hình (mặc định <thư mục>/<file> của --ckpt), "
                                                  "vd 'CE-Loc (masked SpatialSoftmax)' — docs/EXPERIMENT_GAMMA.md mục 13.0")
+    ap.add_argument("--compact", action="store_true",
+                    help="box_policy: 1 hàng (ảnh inpaint + density của nó) × 6 cột: ảnh, SpatialSoftmax, 4 ô quỹ đạo; tiêu đề ngắn")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
@@ -288,6 +294,9 @@ def main():
         sys.exit("box_refiner: --sampler ddim | mock")
     if policy:
         a.mock_steps = 100                                                        # mock_sample của BoxPolicy: 100 bước như bài
+    if a.compact and not policy:
+        sys.exit("--compact: chỉ box_policy (CE-Loc kiểu bài / DELTA)")
+    rows = ROWS[:1] if a.compact else ROWS                                        # compact: ảnh inpaint + density của chính nó
     # DELTA: refiner trong mạng khử nhiễu (cần token chữ CLIP; `use_condition: false` thì refiner bị bỏ qua như lúc train)
     refiner = policy and getattr(model, "refiner", None) is not None and needs_text_tokens(cfg["model"])
     amp = dev.type == "cuda" and bool(cfg.get("training", {}).get("amp")) and clip_sd is None     # như eval.py
@@ -315,11 +324,13 @@ def main():
         if refiner:
             model.check_text_fingerprint(tsha)                                    # CLIP text tải lại phải đúng bản lúc train
         text = table([cls], dev)
-        ncol = 8 if a.mode == "stages" else 7 if refiner else 6
-        fig, axes = plt.subplots(4, ncol, figsize=(ncol * 3.3, 4 * (4.1 if refiner else 3.5)), squeeze=False)
+        ncol = 8 if a.mode == "stages" else 6
+        fig, axes = plt.subplots(len(rows), ncol, figsize=(ncol * 3.3, 4.2 if a.compact else 4 * (3.9 if refiner else 3.5)),
+                                 squeeze=False)
+        c_ss, c_traj = (1, 2) if a.compact else (ncol - 1, 1)                     # cột SpatialSoftmax / ô quỹ đạo đầu tiên
         case = {k: cs[k] for k in ("split", "branch", "turn", "class", "sample", "size")}
         case.update({"source": cs.get("source"), "density_gap_in_hole": cs["gap"], "rows": []})
-        for r, (kind, dens) in enumerate(ROWS):
+        for r, (kind, dens) in enumerate(rows):
             img = cs["imgs"][kind]
             dsrc = cs["own"][kind] if dens == "own" else Image.new("RGB", img.size, (0, 0, 127))
             x, _, nw, nh = image_inputs(img, dsrc, T)
@@ -363,38 +374,48 @@ def main():
             den = x[3].numpy()
             inp = kind == "inpainted"
             ax = axes[r, 0]
-            im = ax.imshow(den, cmap="viridis", vmin=0, vmax=1)
-            rect(ax, hole, "lime", lw=1.2)
-            ax.set_title(f"Density Map ({dens})\nmin {den.min():.3f} max {den.max():.3f} | in hole "
-                         f"{den[int(hole[1]):int(hole[3]), int(hole[0]):int(hole[2])].mean():.3f}", fontsize=8.5)
-            ax.set_ylabel(row_label(kind, dens, turn), fontsize=9.5)
-            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+            if a.compact:                                                        # cột 1: ảnh test + lỗ
+                ax.imshow(bg)
+                for hb in holes[:-1]:
+                    rect(ax, hb, "lime", lw=1.0, ls="--")
+                rect(ax, hole, "lime", lw=1.6)
+                ax.set_title(f"Test image ('{cls}')", fontsize=10)
+            else:
+                im = ax.imshow(den, cmap="viridis", vmin=0, vmax=1)
+                rect(ax, hole, "lime", lw=1.2)
+                ax.set_title(f"Density Map ({dens})\nmin {den.min():.3f} max {den.max():.3f} | in hole "
+                             f"{den[int(hole[1]):int(hole[3]), int(hole[0]):int(hole[2])].mean():.3f}", fontsize=8.5)
+                ax.set_ylabel(row_label(kind, dens, turn), fontsize=9.5)
+                fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
             row = {"image": kind, "density": dens, "states": []}
             iou_h = lambda b: float(box_iou(b[None].clip(min=0), hole[None])[0][0, 0])  # noqa: E731
             for k, si in enumerate(snaps):
-                ax = axes[r, 1 + k]
+                ax = axes[r, c_traj + k]
                 ax.imshow(bg)
                 if inp:
                     for hb in holes[:-1]:
                         rect(ax, hb, "lime", lw=1.0, ls="--")
                     rect(ax, hole, "lime", lw=1.6)
                     ax.plot(*hc, "+", color="lime", ms=10, mew=2)
-                prev = list(range(0, si, trail))                                 # box các trạng thái trước: mờ dần
-                for n_, j in enumerate(prev):
-                    rect(ax, boxes[j], "red", lw=0.8, alpha=0.08 + 0.4 * (n_ + 1) / max(len(prev), 1))
-                rect(ax, boxes[si], "red", lw=2.2)
+                if not a.compact:                                                # box các trạng thái trước: mờ dần
+                    prev = list(range(0, si, trail))
+                    for n_, j in enumerate(prev):
+                        rect(ax, boxes[j], "red", lw=0.8, alpha=0.08 + 0.4 * (n_ + 1) / max(len(prev), 1))
                 pc = np.stack(cents[: si + 1])
-                ax.plot(pc[:, 0], pc[:, 1], "-", color="black", lw=1.4, alpha=0.85, zorder=5)
-                for j in [0] + snaps[:k]:
-                    ax.plot(*cents[j], "o", color="0.7", mec="black", mew=0.6, ms=5, zorder=6)
-                    ax.annotate(tlabel[j], cents[j], xytext=(4, 4), textcoords="offset points", fontsize=7,
-                                bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="none", alpha=0.7), zorder=7)
-                ax.plot(*cents[si], "o", color="red", mec="black", mew=0.6, ms=7, zorder=8)
-                if (a.show_x0 or refiner) and a.mode == "steps":
-                    rect(ax, steps[si - 1]["x0"] if policy else steps[si - 1]["stages"][-1, 0, 0].numpy(), "deepskyblue",
-                         lw=1.6 if refiner else 1.2, ls=":")
+                ax.plot(pc[:, 0], pc[:, 1], "-", color="black", lw=1.0 if a.compact else 1.4, alpha=0.6 if a.compact else 0.85,
+                        zorder=5)
+                if not a.compact:
+                    for j in [0] + snaps[:k]:
+                        ax.plot(*cents[j], "o", color="0.7", mec="black", mew=0.6, ms=5, zorder=6)
+                        ax.annotate(tlabel[j], cents[j], xytext=(4, 4), textcoords="offset points", fontsize=7,
+                                    bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="none", alpha=0.7), zorder=7)
+                if (a.show_x0 or refiner or a.compact) and a.mode == "steps":   # x̂0 U-Net của bước dẫn tới ô này
+                    rect(ax, steps[si - 1]["x0"] if policy else steps[si - 1]["stages"][-1, 0, 0].numpy(), C_UNET,
+                         lw=2.0 if refiner or a.compact else 1.2, ls="-" if refiner or a.compact else ":")
                 if refiner:
-                    rect(ax, steps[si - 1]["refined"], "orange", lw=1.6, ls="--")
+                    rect(ax, steps[si - 1]["refined"], C_REFINER, lw=2.0)
+                rect(ax, boxes[si], "red", lw=2.4)
+                ax.plot(*cents[si], "o", color="red", mec="black", mew=0.6, ms=7, zorder=8)
                 is_out = si == len(boxes) - 1
                 if a.mode == "stages":
                     ttl = f"stage {si}/{len(boxes) - 1} output (t = {steps[0]['t']})"
@@ -417,36 +438,17 @@ def main():
                     if inp:
                         rec["iou_refined_hole"], rec["iou_unet_hole"] = iou_h(sp["refined"]), iou_h(sp["x0"])
                         ttl += f"\nIoU w/ hole: refined {rec['iou_refined_hole']:.2f} | U-Net x0 {rec['iou_unet_hole']:.2f}"
-                ax.set_title(ttl, fontsize=8.5)
+                ax.set_title(f"{name} step {si}/{len(steps)}" if a.compact else ttl, fontsize=10 if a.compact else 8.5)
                 row["states"].append(rec)
             row["path"] = [[lab, *b.tolist()] for lab, b in zip(tlabel, boxes)]
-            if refiner:                                                          # cột: refiner vs U-Net theo MỌI bước
-                per = [{"t": sp["t"], "iou_refined_unet": box_iou_any(sp["refined"], sp["x0"]), "delta": sp["delta"],
-                        **({"iou_xt_hole": iou_h(boxes[i]), "iou_refined_hole": iou_h(sp["refined"]),
-                            "iou_unet_hole": iou_h(sp["x0"])} if inp else {})} for i, sp in enumerate(steps)]
-                row["per_step"] = per
-                ax = axes[r, ncol - 2]
-                xs = np.arange(1, len(per) + 1)
-                if inp:
-                    ax.plot(xs, [p["iou_xt_hole"] for p in per], color="red", lw=1.2, label="IoU(x_t, hole)")
-                    ax.plot(xs, [p["iou_refined_hole"] for p in per], color="orange", lw=1.4, ls="--", label="IoU(refined, hole)")
-                    ax.plot(xs, [p["iou_unet_hole"] for p in per], color="deepskyblue", lw=1.4, ls=":", label="IoU(U-Net x0, hole)")
-                ax.plot(xs, [p["iou_refined_unet"] for p in per], color="black", lw=1.2, label="IoU(refined, U-Net x0)")
-                for si in snaps:
-                    ax.axvline(si, color="0.8", lw=0.8, zorder=0)
-                ax.set_ylim(0, 1)
-                ax.set_xlabel(f"denoising step (t = {per[0]['t']} -> {per[-1]['t']})", fontsize=8)
-                ax.tick_params(labelsize=7)
-                ax.legend(fontsize=6.5, loc="upper left", frameon=False)
-                tw = ax.twinx()
-                tw.plot(xs, [p["delta"] for p in per], color="0.5", lw=1.0, alpha=0.8)
-                tw.set_ylabel("mean |refined - x_t| (gray)", fontsize=7, color="0.4")
-                tw.tick_params(labelsize=7, colors="0.4")
-                ax.set_title("Refiner vs U-Net per step", fontsize=8.5)
+            if refiner:                                                          # JSON: refiner vs U-Net ở MỌI bước
+                row["per_step"] = [{"t": sp["t"], "iou_refined_unet": box_iou_any(sp["refined"], sp["x0"]), "delta": sp["delta"],
+                                    **({"iou_xt_hole": iou_h(boxes[i]), "iou_refined_hole": iou_h(sp["refined"]),
+                                        "iou_unet_hole": iou_h(sp["x0"])} if inp else {})} for i, sp in enumerate(steps)]
             xy, att = spatial_softmax(model, xb, vhw)
             eff = effective_cells(att).numpy()
             px, py = keypoint_pixels(xy.numpy(), att.shape[1])
-            ax = axes[r, ncol - 1]
+            ax = axes[r, c_ss]
             ax.imshow(bg)
             order = np.argsort(-eff)
             sc = ax.scatter(px[order], py[order], c=eff[order], s=size[order], cmap="plasma_r",
@@ -458,47 +460,57 @@ def main():
             cb.ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
             cb.ax.yaxis.set_minor_formatter(NullFormatter())
             sharp = float((eff < SHARP).mean())
-            ax.set_title(f"SpatialSoftmax Output ({att.shape[0]} ch)\nsharp (<{SHARP} cells) {sharp * 100:.1f}% | "
-                         f"median cells {np.median(eff):.0f}", fontsize=8.5)
+            ax.set_title("SpatialSoftmax" if a.compact else f"SpatialSoftmax Output ({att.shape[0]} ch)\nsharp (<{SHARP} cells) "
+                         f"{sharp * 100:.1f}% | median cells {np.median(eff):.0f}", fontsize=10 if a.compact else 8.5)
             if inp:
                 rect(ax, hole, "lime", lw=1.2)
             row["sharp_frac"], row["median_cells"] = sharp, float(np.median(eff))
             case["rows"].append(row)
             for c in range(ncol):
-                if refiner and c == ncol - 2:                                    # cột đường theo bước: trục riêng
-                    continue
                 axes[r, c].set_xlim(0, T)
                 axes[r, c].set_ylim(T, 0)
                 axes[r, c].set_xticks([])
                 axes[r, c].set_yticks([])
-        handles = [Line2D([], [], color="red", lw=2.2, marker="o",
-                          label="box + center of this stage" if a.mode == "stages" else
-                          "box + center at this state (last = output)"),
-                   Line2D([], [], color="red", alpha=0.3, label="earlier stages / input box (fading)" if a.mode == "stages"
-                          else "boxes at earlier states (fading)"),
-                   Line2D([], [], color="black", marker="o", mfc="0.7", lw=1.4,
-                          label="center path: input -> stage 1..k" if a.mode == "stages" else "center path, every step")]
-        if a.show_x0 or refiner:
-            handles.append(Line2D([], [], color="deepskyblue", ls=":", label="U-Net x0 (from eps) of the step leading here"
-                                  if refiner else "predicted x0 (from eps) of that step" if policy
-                                  else "predicted x0 (stage 6) of that step"))
-        if refiner:
-            handles.append(Line2D([], [], color="orange", ls="--", label="refiner box (x_t + delta) of the step leading here"))
-        handles += [Line2D([], [], color="lime", lw=1.6, marker="+", label="latest removed object (target)"),
-                    Line2D([], [], color="lime", lw=1.0, ls="--", label="earlier removed objects")]
-        fig.legend(handles=handles, loc="lower center", ncol=4 if refiner else 6, fontsize=8, frameon=False)
-        seen = "train image, seen class" if split == "train" else "unseen class"
-        fig.suptitle(f"{a.name or os.path.basename(os.path.dirname(os.path.abspath(a.ckpt))) + '/' + os.path.basename(a.ckpt)}"
-                     f" ({it if isinstance(it, str) else f'iter {it}'}) | "
-                     f"{split} {br}, turn {turn} ({seen} '{cls}') | text = '{cls}' | one box per generation, seed {a.seed} | "
-                     + (f"ONE denoising pass at t={a.stage_t}: noisy box (clipped to canvas, as stage 1 sees it) -> 6 stages"
-                        if a.mode == "stages" else
-                        f"mock sampler (paper): pure noise labelled t={a.mock_steps - 1}..0, x -= eps/{a.mock_steps}"
-                        if a.sampler == "mock" else
-                        "DDPM 1000 steps (correct ancestral sampler)" if a.sampler == "ddpm" else
-                        f"DDIM {a.steps} steps, eta {a.eta:g}, from t={model.num_timesteps - 1 if a.t_start is None else a.t_start}"),
-                     fontsize=10)
-        fig.tight_layout(rect=(0, 0.03, 1, 0.97))
+        if a.compact:
+            handles = [Line2D([], [], color="red", lw=2.4, marker="o", label="predicted box x_t"),
+                       Line2D([], [], color=C_UNET, lw=2.0, label="U-Net box (x0 from eps)")]
+            if refiner:
+                handles.append(Line2D([], [], color=C_REFINER, lw=2.0, label="refiner box (x_t + delta)"))
+            handles += [Line2D([], [], color="black", alpha=0.6, label="center path"),
+                        Line2D([], [], color="lime", lw=1.6, label="removed object (target)")]
+            fig.legend(handles=handles, loc="lower center", ncol=len(handles), fontsize=9, frameon=False)
+            fig.suptitle(f"{a.name or os.path.basename(os.path.dirname(os.path.abspath(a.ckpt)))} | {split} {br}, turn {turn} | "
+                         f"'{cls}'", fontsize=11)
+            fig.tight_layout(rect=(0, 0.07, 1, 0.95))
+        else:
+            handles = [Line2D([], [], color="red", lw=2.2, marker="o",
+                              label="box + center of this stage" if a.mode == "stages" else
+                              "box + center at this state (last = output)"),
+                       Line2D([], [], color="red", alpha=0.3, label="earlier stages / input box (fading)" if a.mode == "stages"
+                              else "boxes at earlier states (fading)"),
+                       Line2D([], [], color="black", marker="o", mfc="0.7", lw=1.4,
+                              label="center path: input -> stage 1..k" if a.mode == "stages" else "center path, every step")]
+            if a.show_x0 or refiner:
+                handles.append(Line2D([], [], color=C_UNET, lw=2.0 if refiner else 1.2, ls="-" if refiner else ":",
+                                      label="U-Net x0 (from eps) of the step leading here" if refiner
+                                      else "predicted x0 (from eps) of that step" if policy else "predicted x0 (stage 6) of that step"))
+            if refiner:
+                handles.append(Line2D([], [], color=C_REFINER, lw=2.0, label="refiner box (x_t + delta) of the step leading here"))
+            handles += [Line2D([], [], color="lime", lw=1.6, marker="+", label="latest removed object (target)"),
+                        Line2D([], [], color="lime", lw=1.0, ls="--", label="earlier removed objects")]
+            fig.legend(handles=handles, loc="lower center", ncol=4 if refiner else 6, fontsize=8, frameon=False)
+            seen = "train image, seen class" if split == "train" else "unseen class"
+            fig.suptitle(f"{a.name or os.path.basename(os.path.dirname(os.path.abspath(a.ckpt))) + '/' + os.path.basename(a.ckpt)}"
+                         f" ({it if isinstance(it, str) else f'iter {it}'}) | "
+                         f"{split} {br}, turn {turn} ({seen} '{cls}') | text = '{cls}' | one box per generation, seed {a.seed} | "
+                         + (f"ONE denoising pass at t={a.stage_t}: noisy box (clipped to canvas, as stage 1 sees it) -> 6 stages"
+                            if a.mode == "stages" else
+                            f"mock sampler (paper): pure noise labelled t={a.mock_steps - 1}..0, x -= eps/{a.mock_steps}"
+                            if a.sampler == "mock" else
+                            "DDPM 1000 steps (correct ancestral sampler)" if a.sampler == "ddpm" else
+                            f"DDIM {a.steps} steps, eta {a.eta:g}, from t={model.num_timesteps - 1 if a.t_start is None else a.t_start}"),
+                         fontsize=10)
+            fig.tight_layout(rect=(0, 0.03, 1, 0.97))
         fig.savefig(os.path.join(a.out, f"{split}_{br}_t{turn}.png"), dpi=100)
         plt.close(fig)
         summary.append(case)

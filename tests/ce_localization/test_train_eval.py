@@ -633,6 +633,13 @@ def test_plot_refiner_steps_box_policy(tmp_path, monkeypatch):
     with open(os.path.join(out2, "refiner_steps.json")) as f:
         r0 = json.load(f)[0]["rows"][0]
     assert [s["after_step"] for s in r0["states"]] == [250, 500, 750, 1000] and len(r0["path"]) == 1001
+    outc = str(tmp_path / "outc")                                                # --compact cũng dùng được cho CE-Loc không refiner
+    monkeypatch.setattr(sys, "argv", base + ["--compact", "--out", outc])
+    tool.main()
+    with open(os.path.join(outc, "refiner_steps.json")) as f:
+        rc = json.load(f)[0]["rows"]
+    assert len(rc) == 1 and (rc[0]["image"], rc[0]["density"]) == ("inpainted", "own") and "per_step" not in rc[0]
+    assert [s["after_step"] for s in rc[0]["states"]] == [25, 50, 75, 100]       # (text giả ngẫu nhiên ⇒ không so giá trị box)
     for bad in (["--mode", "stages"], ["--sampler", "ddim"]):
         monkeypatch.setattr(sys, "argv", base + bad + ["--out", str(tmp_path / "bad")])
         with pytest.raises(SystemExit):
@@ -708,6 +715,14 @@ def test_plot_refiner_steps_delta(tmp_path, monkeypatch):
         assert [p["t"] for p in r["per_step"]] == list(range(99, -1, -1))
         assert all(("iou_unet_hole" in p) == inp and p["delta"] > 0 for p in r["per_step"])
     assert rows[0]["path"][0][1:] == rows[2]["path"][0][1:]                      # cùng seed ⇒ cùng nhiễu ban đầu
+
+    outc = str(tmp_path / "outc")                                                # --compact: 1 hàng (ảnh inpaint + density của nó)
+    monkeypatch.setattr(sys, "argv", base + ["--ckpt", ckpt("delta1"), "--compact", "--out", outc])
+    tool.main()
+    with open(os.path.join(outc, "refiner_steps.json")) as f:
+        rc = json.load(f)[0]["rows"]
+    assert [(r["image"], r["density"]) for r in rc] == [("inpainted", "own")] and rc[0]["states"] == rows[0]["states"]
+    assert set(os.listdir(outc)) == {"test_3000_b1_t2.png", "refiner_steps.json"}
 
     bad = ckpt("delta1", text_sha=b"\x01" * 32)                                  # CLIP text khác bản lúc train ⇒ dừng
     monkeypatch.setattr(sys, "argv", base + ["--ckpt", bad, "--out", str(tmp_path / "bad")])
