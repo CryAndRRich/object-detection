@@ -397,18 +397,15 @@ def main():
                         rect(ax, hb, "lime", lw=1.0, ls="--")
                     rect(ax, hole, "lime", lw=1.6)
                     ax.plot(*hc, "+", color="lime", ms=10, mew=2)
-                if not a.compact:                                                # box các trạng thái trước: mờ dần
-                    prev = list(range(0, si, trail))
-                    for n_, j in enumerate(prev):
-                        rect(ax, boxes[j], "red", lw=0.8, alpha=0.08 + 0.4 * (n_ + 1) / max(len(prev), 1))
-                pc = np.stack(cents[: si + 1])
-                ax.plot(pc[:, 0], pc[:, 1], "-", color="black", lw=1.0 if a.compact else 1.4, alpha=0.6 if a.compact else 0.85,
-                        zorder=5)
-                if not a.compact:
-                    for j in [0] + snaps[:k]:
-                        ax.plot(*cents[j], "o", color="0.7", mec="black", mew=0.6, ms=5, zorder=6)
-                        ax.annotate(tlabel[j], cents[j], xytext=(4, 4), textcoords="offset points", fontsize=7,
-                                    bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="none", alpha=0.7), zorder=7)
+                prev = list(range(0, si, trail))                                 # box các trạng thái trước: viền mảnh, mờ dần
+                for n_, j in enumerate(prev):
+                    rect(ax, boxes[j], "red", lw=0.8, alpha=0.08 + 0.4 * (n_ + 1) / max(len(prev), 1))
+                pc = np.stack(cents[: si + 1])                                   # đường tâm box đỏ qua MỌI bước
+                ax.plot(pc[:, 0], pc[:, 1], "-", color="black", lw=1.4, alpha=0.85, zorder=5)
+                for j in [0] + snaps[:k]:
+                    ax.plot(*cents[j], "o", color="0.7", mec="black", mew=0.6, ms=5, zorder=6)
+                    ax.annotate(tlabel[j], cents[j], xytext=(4, 4), textcoords="offset points", fontsize=7,
+                                bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="none", alpha=0.7), zorder=7)
                 if (a.show_x0 or refiner or a.compact) and a.mode == "steps":   # x̂0 U-Net của bước dẫn tới ô này
                     rect(ax, steps[si - 1]["x0"] if policy else steps[si - 1]["stages"][-1, 0, 0].numpy(), C_UNET,
                          lw=2.0 if refiner or a.compact else 1.2, ls="-" if refiner or a.compact else ":")
@@ -472,12 +469,13 @@ def main():
                 axes[r, c].set_xticks([])
                 axes[r, c].set_yticks([])
         if a.compact:
-            handles = [Line2D([], [], color="red", lw=2.4, marker="o", label="predicted box x_t"),
+            handles = [Line2D([], [], color="red", lw=2.4, marker="o", label="predicted box x_t (now)"),
+                       Line2D([], [], color="red", lw=0.8, alpha=0.35, label="earlier x_t (fading)"),
+                       Line2D([], [], color="black", marker="o", mfc="0.7", lw=1.4, label="center path of x_t"),
                        Line2D([], [], color=C_UNET, lw=2.0, label="U-Net box (x0 from eps)")]
             if refiner:
                 handles.append(Line2D([], [], color=C_REFINER, lw=2.0, label="refiner box (x_t + delta)"))
-            handles += [Line2D([], [], color="black", alpha=0.6, label="center path"),
-                        Line2D([], [], color="lime", lw=1.6, label="removed object (target)")]
+            handles.append(Line2D([], [], color="lime", lw=1.6, marker="+", label="removed object (target)"))
             fig.legend(handles=handles, loc="lower center", ncol=len(handles), fontsize=9, frameon=False)
             fig.suptitle(f"{a.name or os.path.basename(os.path.dirname(os.path.abspath(a.ckpt)))} | {split} {br}, turn {turn} | "
                          f"'{cls}'", fontsize=11)
