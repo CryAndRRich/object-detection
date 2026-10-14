@@ -325,7 +325,10 @@ def main():
             model.check_text_fingerprint(tsha)                                    # CLIP text tải lại phải đúng bản lúc train
         text = table([cls], dev)
         ncol = 8 if a.mode == "stages" else 6
-        fig, axes = plt.subplots(len(rows), ncol, figsize=(ncol * 3.3, 4.2 if a.compact else 4 * (3.9 if refiner else 3.5)),
+        # compact: mỗi hàng hình theo vết MỘT loại box (x_t đỏ / U-Net xanh / refiner tím hồng); bố cục đầy đủ: hàng = (ảnh, density)
+        tracks = (["x_t", "x0"] + (["refined"] if refiner else [])) if a.compact else [None]
+        nfr = len(tracks) if a.compact else len(rows)
+        fig, axes = plt.subplots(nfr, ncol, figsize=(ncol * 3.3, nfr * (3.7 if a.compact else 3.9 if refiner else 3.5)),
                                  squeeze=False)
         c_ss, c_traj = (1, 2) if a.compact else (ncol - 1, 1)                     # cột SpatialSoftmax / ô quỹ đạo đầu tiên
         case = {k: cs[k] for k in ("split", "branch", "turn", "class", "sample", "size")}
@@ -373,59 +376,10 @@ def main():
             bg = x[:3].numpy().transpose(1, 2, 0)
             den = x[3].numpy()
             inp = kind == "inpainted"
-            ax = axes[r, 0]
-            if a.compact:                                                        # cột 1: ảnh test + lỗ
-                ax.imshow(bg)
-                for hb in holes[:-1]:
-                    rect(ax, hb, "lime", lw=1.0, ls="--")
-                rect(ax, hole, "lime", lw=1.6)
-                ax.set_title(f"Test image ('{cls}')", fontsize=10)
-            else:
-                im = ax.imshow(den, cmap="viridis", vmin=0, vmax=1)
-                rect(ax, hole, "lime", lw=1.2)
-                ax.set_title(f"Density Map ({dens})\nmin {den.min():.3f} max {den.max():.3f} | in hole "
-                             f"{den[int(hole[1]):int(hole[3]), int(hole[0]):int(hole[2])].mean():.3f}", fontsize=8.5)
-                ax.set_ylabel(row_label(kind, dens, turn), fontsize=9.5)
-                fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
             row = {"image": kind, "density": dens, "states": []}
             iou_h = lambda b: float(box_iou(b[None].clip(min=0), hole[None])[0][0, 0])  # noqa: E731
-            for k, si in enumerate(snaps):
-                ax = axes[r, c_traj + k]
-                ax.imshow(bg)
-                if inp:
-                    for hb in holes[:-1]:
-                        rect(ax, hb, "lime", lw=1.0, ls="--")
-                    rect(ax, hole, "lime", lw=1.6)
-                    ax.plot(*hc, "+", color="lime", ms=10, mew=2)
-                prev = list(range(0, si, trail))                                 # box các trạng thái trước: viền mảnh, mờ dần
-                fade = lambda n_: 0.08 + 0.4 * (n_ + 1) / max(len(prev), 1)     # noqa: E731
-                for n_, j in enumerate(prev):
-                    rect(ax, boxes[j], "red", lw=0.8, alpha=fade(n_))
-                # box U-Net / refiner của các bước trước (bước j dẫn tới trạng thái j + 1) + đường tâm của chúng, cùng kiểu với box đỏ
-                trails = []
-                if policy and a.mode == "steps" and (a.compact or refiner):
-                    trails.append(("x0", C_UNET))
-                if refiner:
-                    trails.append(("refined", C_REFINER))
-                for key, col in trails:
-                    for n_, j in enumerate(range(0, si - 1, trail)):
-                        rect(ax, steps[j][key], col, lw=0.8, alpha=fade(n_))
-                    pk = center(np.stack([steps[j][key] for j in range(si)]))
-                    ax.plot(pk[:, 0], pk[:, 1], "-", color=col, lw=0.8, alpha=0.9, zorder=5)
-                    ax.plot(*pk[-1], "o", color=col, mec="black", mew=0.5, ms=5, zorder=8)
-                pc = np.stack(cents[: si + 1])                                   # đường tâm box đỏ qua MỌI bước
-                ax.plot(pc[:, 0], pc[:, 1], "-", color="black", lw=0.8, alpha=0.85, zorder=5)
-                for j in [0] + snaps[:k]:                                        # mốc t chỉ trên đường tâm box đỏ
-                    ax.plot(*cents[j], "o", color="0.7", mec="black", mew=0.6, ms=5, zorder=6)
-                    ax.annotate(tlabel[j], cents[j], xytext=(4, 4), textcoords="offset points", fontsize=7,
-                                bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="none", alpha=0.7), zorder=7)
-                if (a.show_x0 or refiner or a.compact) and a.mode == "steps":   # x̂0 U-Net của bước dẫn tới ô này
-                    rect(ax, steps[si - 1]["x0"] if policy else steps[si - 1]["stages"][-1, 0, 0].numpy(), C_UNET,
-                         lw=2.0 if refiner or a.compact else 1.2, ls="-" if refiner or a.compact else ":")
-                if refiner:
-                    rect(ax, steps[si - 1]["refined"], C_REFINER, lw=2.0)
-                rect(ax, boxes[si], "red", lw=2.4)
-                ax.plot(*cents[si], "o", color="red", mec="black", mew=0.6, ms=7, zorder=8)
+            ttls = []
+            for k, si in enumerate(snaps):                                       # số đo từng ô (JSON) + tiêu đề bố cục đầy đủ
                 is_out = si == len(boxes) - 1
                 if a.mode == "stages":
                     ttl = f"stage {si}/{len(boxes) - 1} output (t = {steps[0]['t']})"
@@ -448,7 +402,7 @@ def main():
                     if inp:
                         rec["iou_refined_hole"], rec["iou_unet_hole"] = iou_h(sp["refined"]), iou_h(sp["x0"])
                         ttl += f"\nIoU w/ hole: refined {rec['iou_refined_hole']:.2f} | U-Net x0 {rec['iou_unet_hole']:.2f}"
-                ax.set_title(f"{name} step {si}/{len(steps)}" if a.compact else ttl, fontsize=10 if a.compact else 8.5)
+                ttls.append(ttl)
                 row["states"].append(rec)
             row["path"] = [[lab, *b.tolist()] for lab, b in zip(tlabel, boxes)]
             if refiner:                                                          # JSON: refiner vs U-Net ở MỌI bước
@@ -458,41 +412,96 @@ def main():
             xy, att = spatial_softmax(model, xb, vhw)
             eff = effective_cells(att).numpy()
             px, py = keypoint_pixels(xy.numpy(), att.shape[1])
-            ax = axes[r, c_ss]
-            ax.imshow(bg)
-            order = np.argsort(-eff)
-            sc = ax.scatter(px[order], py[order], c=eff[order], s=size[order], cmap="plasma_r",
-                            norm=LogNorm(vmin=1, vmax=att.shape[1] * att.shape[2]), edgecolors="black", linewidths=0.3,
-                            alpha=0.9)
-            cb = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.02)
-            # nhãn trục log dạng số thường ("1", "10", "100"), KHÔNG mathtext "$10^{k}$": matplotlib cũ + pyparsing ≥ 3.3
-            # (Kaggle) cảnh báo PyparsingDeprecationWarning mỗi lần dựng / parse mathtext
-            cb.ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
-            cb.ax.yaxis.set_minor_formatter(NullFormatter())
             sharp = float((eff < SHARP).mean())
-            ax.set_title("SpatialSoftmax" if a.compact else f"SpatialSoftmax Output ({att.shape[0]} ch)\nsharp (<{SHARP} cells) "
-                         f"{sharp * 100:.1f}% | median cells {np.median(eff):.0f}", fontsize=10 if a.compact else 8.5)
-            if inp:
-                rect(ax, hole, "lime", lw=1.2)
             row["sharp_frac"], row["median_cells"] = sharp, float(np.median(eff))
             case["rows"].append(row)
-            for c in range(ncol):
-                axes[r, c].set_xlim(0, T)
-                axes[r, c].set_ylim(T, 0)
-                axes[r, c].set_xticks([])
-                axes[r, c].set_yticks([])
+
+            def draw_traj(ax, k, si, tr):
+                """Ô quỹ đạo sau bước si. tr None (bố cục đầy đủ): vết x_t + box U-Net / refiner của bước đó. tr = "x_t" | "x0" |
+                "refined" (compact): vết (box các bước trước viền mảnh mờ dần + đường tâm) CHỈ của loại đó, hai loại kia chỉ box ở bước
+                này. Box U-Net / refiner của trạng thái si = của bước si − 1 (bước dẫn tới nó)."""
+                ax.imshow(bg)
+                if inp:
+                    for hb in holes[:-1]:
+                        rect(ax, hb, "lime", lw=1.0, ls="--")
+                    rect(ax, hole, "lime", lw=1.6)
+                    ax.plot(*hc, "+", color="lime", ms=10, mew=2)
+                key = tr or "x_t"
+                col = {"x_t": "red", "x0": C_UNET, "refined": C_REFINER}[key]
+                seq = boxes[: si + 1] if key == "x_t" else [steps[j][key] for j in range(si)]
+                prev = list(range(0, len(seq) - 1, trail))                       # box các bước trước: viền mảnh, mờ dần
+                for n_, j in enumerate(prev):
+                    rect(ax, seq[j], col, lw=0.8, alpha=0.08 + 0.4 * (n_ + 1) / max(len(prev), 1))
+                pk = center(np.stack(seq))                                       # đường tâm qua MỌI bước
+                ax.plot(pk[:, 0], pk[:, 1], "-", color="black" if key == "x_t" else col, lw=0.8, alpha=0.85, zorder=5)
+                if key == "x_t":                                                 # mốc t chỉ trên đường tâm box đỏ
+                    for j in [0] + snaps[:k]:
+                        ax.plot(*cents[j], "o", color="0.7", mec="black", mew=0.6, ms=5, zorder=6)
+                        ax.annotate(tlabel[j], cents[j], xytext=(4, 4), textcoords="offset points", fontsize=7,
+                                    bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="none", alpha=0.7), zorder=7)
+                if (a.show_x0 or refiner or a.compact) and a.mode == "steps":   # box ở bước này: U-Net, refiner, x_t
+                    rect(ax, steps[si - 1]["x0"] if policy else steps[si - 1]["stages"][-1, 0, 0].numpy(), C_UNET,
+                         lw=2.0 if refiner or a.compact else 1.2, ls="-" if refiner or a.compact else ":")
+                if refiner:
+                    rect(ax, steps[si - 1]["refined"], C_REFINER, lw=2.0)
+                rect(ax, boxes[si], "red", lw=2.4)
+                ax.plot(*pk[-1], "o", color=col, mec="black", mew=0.6, ms=7, zorder=8)
+
+            for q, tr in enumerate(tracks):
+                fr = q if a.compact else r
+                ax = axes[fr, 0]
+                if a.compact:                                                    # cột 1: ảnh test + lỗ
+                    ax.imshow(bg)
+                    for hb in holes[:-1]:
+                        rect(ax, hb, "lime", lw=1.0, ls="--")
+                    rect(ax, hole, "lime", lw=1.6)
+                    ax.set_title(f"Test image ('{cls}')", fontsize=10)
+                    ax.set_ylabel({"x_t": "trace: predicted box x_t", "x0": "trace: U-Net box",
+                                   "refined": "trace: refiner box"}[tr], fontsize=10,
+                                  color={"x_t": "red", "x0": C_UNET, "refined": C_REFINER}[tr])
+                else:
+                    im = ax.imshow(den, cmap="viridis", vmin=0, vmax=1)
+                    rect(ax, hole, "lime", lw=1.2)
+                    ax.set_title(f"Density Map ({dens})\nmin {den.min():.3f} max {den.max():.3f} | in hole "
+                                 f"{den[int(hole[1]):int(hole[3]), int(hole[0]):int(hole[2])].mean():.3f}", fontsize=8.5)
+                    ax.set_ylabel(row_label(kind, dens, turn), fontsize=9.5)
+                    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+                for k, si in enumerate(snaps):
+                    ax = axes[fr, c_traj + k]
+                    draw_traj(ax, k, si, tr)
+                    ax.set_title(f"{name} step {si}/{len(steps)}" if a.compact else ttls[k], fontsize=10 if a.compact else 8.5)
+                ax = axes[fr, c_ss]
+                ax.imshow(bg)
+                order = np.argsort(-eff)
+                sc = ax.scatter(px[order], py[order], c=eff[order], s=size[order], cmap="plasma_r",
+                                norm=LogNorm(vmin=1, vmax=att.shape[1] * att.shape[2]), edgecolors="black", linewidths=0.3,
+                                alpha=0.9)
+                cb = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.02)
+                # nhãn trục log dạng số thường ("1", "10", "100"), KHÔNG mathtext "$10^{k}$": matplotlib cũ + pyparsing ≥ 3.3
+                # (Kaggle) cảnh báo PyparsingDeprecationWarning mỗi lần dựng / parse mathtext
+                cb.ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
+                cb.ax.yaxis.set_minor_formatter(NullFormatter())
+                ax.set_title("SpatialSoftmax" if a.compact else f"SpatialSoftmax Output ({att.shape[0]} ch)\nsharp (<{SHARP} cells) "
+                             f"{sharp * 100:.1f}% | median cells {np.median(eff):.0f}", fontsize=10 if a.compact else 8.5)
+                if inp:
+                    rect(ax, hole, "lime", lw=1.2)
+                for c in range(ncol):
+                    axes[fr, c].set_xlim(0, T)
+                    axes[fr, c].set_ylim(T, 0)
+                    axes[fr, c].set_xticks([])
+                    axes[fr, c].set_yticks([])
         if a.compact:
-            handles = [Line2D([], [], color="red", lw=2.4, marker="o", label="predicted box x_t (now)"),
-                       Line2D([], [], color="0.4", lw=0.8, alpha=0.6, label="earlier boxes (thin, fading)"),
-                       Line2D([], [], color="black", marker="o", mfc="0.7", lw=0.8, label="center path of x_t"),
-                       Line2D([], [], color=C_UNET, lw=2.0, marker="o", label="U-Net box (x0 from eps) + center path")]
+            handles = [Line2D([], [], color="red", lw=2.4, label="predicted box x_t"),
+                       Line2D([], [], color=C_UNET, lw=2.0, label="U-Net box (x0 from eps)")]
             if refiner:
-                handles.append(Line2D([], [], color=C_REFINER, lw=2.0, marker="o", label="refiner box (x_t + delta) + center path"))
+                handles.append(Line2D([], [], color=C_REFINER, lw=2.0, label="refiner box (x_t + delta)"))
+            handles += [Line2D([], [], color="0.4", lw=0.8, alpha=0.6, label="traced type: earlier boxes (thin, fading)"),
+                        Line2D([], [], color="0.2", lw=0.8, marker="o", mfc="0.7", label="traced type: center path (t labels on x_t)")]
             handles.append(Line2D([], [], color="lime", lw=1.6, marker="+", label="removed object (target)"))
             fig.legend(handles=handles, loc="lower center", ncol=len(handles), fontsize=9, frameon=False)
             fig.suptitle(f"{a.name or os.path.basename(os.path.dirname(os.path.abspath(a.ckpt)))} | {split} {br}, turn {turn} | "
                          f"'{cls}'", fontsize=11)
-            fig.tight_layout(rect=(0, 0.07, 1, 0.95))
+            fig.tight_layout(rect=(0, 0.04, 1, 0.96))
         else:
             handles = [Line2D([], [], color="red", lw=2.2, marker="o",
                               label="box + center of this stage" if a.mode == "stages" else
