@@ -35,6 +35,8 @@ def group_of(name):
         return "refiner.head"
     if name.startswith("refiner."):
         return "refiner.embed"
+    if name.startswith(("mid_in.", "mid_out.")):                  # DELTA4.1: Linear h <-> box quanh refiner chèn giữa U-Net
+        return "refiner.mid"
     if name.startswith(("vis_proj.", "text_proj.")):
         return name.split(".")[0]
     if name.startswith("backbone.fpn."):

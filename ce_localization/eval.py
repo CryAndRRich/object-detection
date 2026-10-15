@@ -19,7 +19,8 @@ GAMMA4.0.x (`model.obj_k`): chỉ `obj_k` vật vào cross-attn (`obj_select` ne
 ngoài phân bố train); tên khoá kết quả không đổi ⇒ phân biệt bằng `--out`.
 Cùng `--seed` + `--batch-size` ⇒ x_T ban đầu trùng nhau từng mẫu giữa các checkpoint (so cặp).
 DELTA (`model.refiner`): thêm `<ảnh>_norefine` (mock, bỏ refiner: refined = x_t — ngoài phân bố train; không có ở DELTA3 vì không có
-U-Net; DELTA3.x: chỉ U-Net) và TB |Δ| của refiner theo khoảng t (`refine_delta_by_t`; DELTA3.x: |Δε|); token chữ CLIP text tính lại
+U-Net; DELTA3.x: chỉ U-Net; DELTA4.1: bỏ nhánh chèn) và TB |Δ| của refiner theo khoảng t (`refine_delta_by_t`; DELTA3.x: |Δε|;
+DELTA4.1: |refined − b|); token chữ CLIP text tính lại
 từ HF phải khớp vân tay trong checkpoint.
 `--dataset cocount` (CE-CoCount, mục 18): cùng mọi checkpoint add, khoá `cocount<hậu tố>`; lỗ = 10 chỗ trống GT (chỉ số `_any`, không
 `_latest`), density trống, `on_object` trên box cả hai lớp, C-NLL trên box cùng lớp; `prior` = lỗ train CE-130 như cũ.
@@ -138,7 +139,7 @@ def add_variants(add_samplers, obj_attn=False, norefine=False):
         out += [(s_ + "_noobj", d_ + ", TẮT box vật", {**v_, "sample_kw": {**v_["sample_kw"], "use_objects": False}})
                 for s_, d_, v_ in base]
     if norefine:
-        out += [(s_ + "_norefine", d_ + ", BỎ refiner (refined = x_t)",
+        out += [(s_ + "_norefine", d_ + ", BỎ refiner (concat: refined = x_t; post: ε̂ = ε̂₁ của U-Net; mid: bỏ nhánh chèn)",
                  {**v_, "sample_kw": {**v_["sample_kw"], "use_refiner": False}})
                 for s_, d_, v_ in base if v_["sampler"] == "mock"]
     return out

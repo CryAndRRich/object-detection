@@ -55,10 +55,12 @@ DEFAULT_ATTENTION_FLOW = {
 
 # Mặc định trong CODE của tác giả (`BoxRefiner.__init__` + `ObjectPlacementPolicy`); config DELTA ghi tường minh mọi khoá.
 # `text_model_name` (thêm ở đây, DELTA2.x): CLIP text cho token chữ; None = cùng tên `clip_model_name` như tác giả.
+# `mid_aux_weight` (thêm ở đây, DELTA4.1 `unet_input: mid`): trọng số MSE(b, x0) của box giữa U-Net.
 REFINER_DEFAULTS = {
     'clip_model_name': 'openai/clip-vit-base-patch16', 'text_model_name': None, 'vision_layer': -2, 'd_model': 256,
     'num_layers': 4, 'num_heads': 8, 'mlp_ratio': 4.0, 'dropout': 0.0, 'rope_theta': 100.0, 'roi_size': 3, 'num_stages': 1,
-    'use_density': True, 'unet_input': 'concat', 'aux_loss_weight': 0.0, 'attention_flow': DEFAULT_ATTENTION_FLOW,
+    'use_density': True, 'unet_input': 'concat', 'aux_loss_weight': 0.0, 'mid_aux_weight': 0.0,
+    'attention_flow': DEFAULT_ATTENTION_FLOW,
 }
 
 

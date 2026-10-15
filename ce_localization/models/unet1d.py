@@ -12,6 +12,8 @@ của mỗi tầng (down 64 / 128 / 256, mid 256, up 128 / 64), trước skip / 
 lấy feature ở đúng 6 vị trí ⇒ ở mọi tầng token vật cùng số chiều, cùng không gian với feature box nhiễu. `ObjCrossAttn`:
 `h + out_proj(MHA(LN(h) -> LN(token)))`, out_proj khởi tạo 0 (lúc đầu = U-Net không attention), tính fp32.
 `output_dim` (DELTA, bản cập nhật của tác giả `noise_pred_net.py`): số kênh ra khác số kênh vào (vào [x_t ; refined] 8, ra ε 4).
+`inject` (DELTA4.1, `forward`): hàm h [N, d_mid, 1] -> h gọi ở vị trí MID (`mid_site`), SAU cross-attn box vật của vị trí đó — chỉ
+luồng box nhiễu; mã hoá gương box vật (`encode_objects`) không đi qua.
 """
 
 import math
@@ -156,6 +158,7 @@ class ConditionalUnet1D(nn.Module):
         if self.obj_attn:                                    # 6 vị trí: down × 3, mid, up × 2
             site_dims = list(down_dims) + [mid_dim] + [d_in for d_in, _ in reversed(in_out[1:])]
             self.obj_xattn = nn.ModuleList([ObjCrossAttn(d, obj_heads) for d in site_dims])
+        self.mid_site, self.mid_dim = len(self.down_modules), mid_dim      # chỉ số vị trí mid trong `_trunk` (sau down × 3)
 
     def _trunk(self, x, g, site):
         """Thân U-Net (down / mid / up, chưa final conv); `site(i, x) -> x` gọi ở 6 vị trí (sau cặp ResBlock mỗi tầng)."""
@@ -201,14 +204,17 @@ class ConditionalUnet1D(nn.Module):
         self._trunk(x[..., None], g, collect)
         return [f.new_zeros(N, M, f.shape[-1]).index_put((bi, mi), f) for f in feats]
 
-    def forward(self, sample, timestep, global_cond, obj_tokens=None, obj_mask=None):
+    def forward(self, sample, timestep, global_cond, obj_tokens=None, obj_mask=None, inject=None):
         """sample [B, 1, 4] (horizon 1), timestep [B] long, global_cond [B, G] -> [B, 1, 4].
-        obj_tokens (list 6 [B, M, d_ℓ] của `encode_objects`) + obj_mask [B, M]: cross-attend box vật; None = không (như bài)."""
+        obj_tokens (list 6 [B, M, d_ℓ] của `encode_objects`) + obj_mask [B, M]: cross-attend box vật; None = không (như bài).
+        inject (DELTA4.1): hàm h -> h ở vị trí mid, sau cross-attn; None = không."""
         x = sample.permute(0, 2, 1)                          # b h t -> b t h
         timesteps = timestep.expand(sample.shape[0])
         g = torch.cat([self.diffusion_step_encoder(timesteps), global_cond], dim=-1)
-        if obj_tokens is None:
-            x = self._trunk(x, g, lambda i, x_: x_)
-        else:
-            x = self._trunk(x, g, lambda i, x_: self.obj_xattn[i](x_, obj_tokens[i], obj_mask))
+
+        def site(i, x_):
+            if obj_tokens is not None:
+                x_ = self.obj_xattn[i](x_, obj_tokens[i], obj_mask)
+            return inject(x_) if inject is not None and i == self.mid_site else x_
+        x = self._trunk(x, g, site)
         return self.final_conv(x).permute(0, 2, 1)

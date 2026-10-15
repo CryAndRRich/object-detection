@@ -78,7 +78,9 @@ LOG_LABEL = {"loss_ce": "ce", "loss_bbox": "l1", "loss_giou": "giou", "iou_match
              "loss_center": "center", "loss_size": "size", "center_px": "center_px"}
 # DELTA: thống kê refiner trên dòng log (TB cửa sổ) và trong history — `BoxPolicy.pop_stats`; DELTA3.x (`unet_input: post`):
 # ε₁ = ε-MSE của U-Net trước refiner, |Δ| = TB |Δε|, ε/ε₁ < 1 ⇒ refiner có ích
-EXTRA_LOG = {"loss_eps": "ε", "loss_eps1": "ε₁", "loss_aux": "aux", "delta_abs": "|Δ|", "aux_ratio": "aux/x_t", "eps_ratio": "ε/ε₁"}
+# DELTA4.1 (`mid`): mid = MSE(b, x0) của box giữa U-Net, |Δ| = TB |refined − b|, aux/mid < 1 ⇒ refiner sửa tốt hơn đoán của U-Net
+EXTRA_LOG = {"loss_eps": "ε", "loss_eps1": "ε₁", "loss_aux": "aux", "loss_mid": "mid", "delta_abs": "|Δ|", "aux_ratio": "aux/x_t",
+             "eps_ratio": "ε/ε₁", "mid_ratio": "aux/mid"}
 
 
 def config_diff(saved, cfg):

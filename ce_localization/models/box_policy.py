@@ -24,8 +24,12 @@ DELTA — bản CE-Loc cập nhật của tác giả gốc (`refs/CE-Loc-update/
   loss = MSE(ε̂, ε) + `aux_loss_weight` · MSE(ε̂₁, ε); bỏ refiner (`_norefine`) = ε̂₁. Cần token chữ CLIP text
   (`text_tokens`, `models/text.TextTable`). CLIP ViT frozen nạp từ HF lúc dựng (không vào state_dict); buffer `clip_sha` = vân tay
   (vision, text) kiểm khớp khi nạp.
-- refiner + `obj_attn` (DELTA4 / 3.2): như GAMMA4; U-Net 8 kênh (`concat`) thì box vật mã hoá gương dưới dạng `[o ; o]` (refined của box
-  sạch = chính nó).
+- `unet_input: mid` (DELTA4.1, mục 10.6): refiner CHÈN giữa U-Net (4 kênh), ở vị trí mid sau cross-attn box vật: h [d_mid] ->
+  b = x_t + `mid_in`(h) (Linear d_mid -> 4, khởi tạo 0 ⇒ lúc đầu b = x_t) -> refined = refiner(b) -> h ← h + `mid_out`(refined) (Linear
+  4 -> d_mid, khởi tạo 0 ⇒ lúc đầu ≡ U-Net không refiner); loss = ε-MSE + `aux_loss_weight` · MSE(refined, x0) + `mid_aux_weight` ·
+  MSE(b, x0) (b = U-Net đoán box giữa chừng). Bỏ refiner (`_norefine`) = bỏ nhánh chèn (ngoài phân bố train).
+- refiner + `obj_attn` (DELTA4 / 3.2 / 4.1): như GAMMA4; U-Net 8 kênh (`concat`) thì box vật mã hoá gương dưới dạng `[o ; o]` (refined
+  của box sạch = chính nó); `mid`: box vật KHÔNG qua nhánh chèn.
 - `use_condition: false` (DELTA1.1): điều kiện ảnh + text = 0 (embedding t giữ), refiner bỏ qua (refined = x_t), aux tắt — như tác giả.
   Ở đây refiner không được dựng và `vision` / `text_proj` đóng băng (không ai đọc) ⇒ mọi tham số train vẫn có grad (DDP không find_unused).
 
@@ -54,7 +58,7 @@ __all__ = ["BoxPolicy", "PaperVisionEncoder", "boxes_to_unit", "unit_to_boxes", 
            "paper_spatial_softmax", "nearest_mask", "VISIONS", "UNET_INPUTS", "OBJ_SELECTS"]
 
 VISIONS = ("r50_fpn", "r18_paper")
-UNET_INPUTS = ("concat", "none", "post")     # DELTA: U-Net nhận [x_t ; refined] | không U-Net | U-Net trước, refiner sửa ε sau
+UNET_INPUTS = ("concat", "none", "post", "mid")   # DELTA: U-Net nhận [x_t ; refined] | không U-Net | refiner sửa ε sau U-Net | chèn giữa
 OBJ_SELECTS = ("nearest", "random")          # GAMMA4.0.x: cách chọn `obj_k` vật vào cross-attn
 
 C5_STRIDE = 32
@@ -214,6 +218,7 @@ class BoxPolicy(nn.Module):
         rcfg = clip_refiner.refiner_config(refiner)
         self.use_refiner, self.use_condition = rcfg is not None, bool(use_condition)
         self.refiner_aux_weight = float(rcfg["aux_loss_weight"]) if rcfg else 0.0
+        self.mid_aux_weight = float(rcfg["mid_aux_weight"]) if rcfg else 0.0
         unet_input = rcfg["unet_input"] if rcfg else None
         self.box_norm = "canvas"
         if rcfg:
@@ -229,6 +234,10 @@ class BoxPolicy(nn.Module):
                 raise ValueError("refiner.unet_input post cần use_condition: true (không thì không có refiner)")
             if unet_input == "post" and int(rcfg["num_stages"]) != 1:
                 raise ValueError("refiner.unet_input post cần num_stages 1 (stage sau RoIAlign quanh box lẫn đơn vị ε)")
+            if unet_input == "mid" and not self.use_condition:
+                raise ValueError("refiner.unet_input mid cần use_condition: true (không thì không có refiner, mid_in / mid_out không grad)")
+            if self.mid_aux_weight and unet_input != "mid":
+                raise ValueError("refiner.mid_aux_weight chỉ dùng với unet_input mid")
         self.unet_input = unet_input
         self.unet_in_dim = 8 if unet_input == "concat" else 4     # DELTA1 / 2.x / 4: U-Net nhận [x_t ; refined]
         self.obj_attn, self.obj_max = bool(obj_attn), obj_max
@@ -268,6 +277,11 @@ class BoxPolicy(nn.Module):
             sha = torch.zeros(2, 32, dtype=torch.uint8)
             sha[0] = torch.tensor(list(clip_refiner.weights_sha256(vision_model)), dtype=torch.uint8)
             self.register_buffer("clip_sha", sha)                    # [vân tay CLIP vision ; vân tay CLIP text] (text đặt sau)
+        if unet_input == "mid":                                      # DELTA4.1: h -> box b -> refiner -> h (cả hai khởi tạo 0)
+            self.mid_in, self.mid_out = nn.Linear(self.noise_net.mid_dim, 4), nn.Linear(4, self.noise_net.mid_dim)
+            for lin in (self.mid_in, self.mid_out):
+                nn.init.zeros_(lin.weight)
+                nn.init.zeros_(lin.bias)
         if not self.use_condition:                                   # không ai đọc ảnh / text: đóng băng (mọi tham số train có grad)
             for mod in (self.vision if vision == "r18_paper" else self.backbone, self.text_proj):
                 mod.requires_grad_(False)
@@ -355,7 +369,8 @@ class BoxPolicy(nn.Module):
         return self._denoise(x, t, cond, ctx, ctx_index, obj)[:2]
 
     def _denoise(self, x, t, cond, ctx=None, ctx_index=None, obj=None):
-        """Lõi của `predict_noise` -> (ε̂, refined | None, ε̂₁ của U-Net trước refiner — chỉ `post` | None)."""
+        """Lõi của `predict_noise` -> (ε̂, refined | None, phụ | None): phụ = ε̂₁ của U-Net trước refiner (`post`) | box b giữa U-Net
+        mà refiner nhận (`mid`)."""
         if obj is not None:
             tok, mask, units = obj
             if self.obj_k is not None and self.obj_select == "nearest":
@@ -372,6 +387,19 @@ class BoxPolicy(nn.Module):
             if self.track_refine:
                 self._track_delta(t, delta.abs().mean(-1))
             return eps, None, eps1
+        if self.unet_input == "mid":                           # DELTA4.1: refiner chèn ở vị trí mid của U-Net
+            mid = {}
+
+            def inject(h):
+                with torch.autocast(device_type=h.device.type, enabled=False):
+                    b = x.float() + self.mid_in(h[..., 0].float())
+                    mid["b"], mid["refined"] = b, self.refiner(b, t, ctx, ctx_index)
+                    return h + self.mid_out(mid["refined"])[..., None].to(h.dtype)
+            eps = self.noise_net(x.unsqueeze(1), t, cond, *(obj or (None, None)),
+                                 inject=None if ctx is None else inject).squeeze(1)
+            if ctx is not None and self.track_refine:
+                self._track_delta(t, (mid["refined"] - mid["b"]).abs().mean(-1))
+            return eps, mid.get("refined"), mid.get("b")
         unet_in, refined = x, None
         if self.use_refiner:
             refined = self.refiner(x, t, ctx, ctx_index) if ctx is not None else x
@@ -402,7 +430,8 @@ class BoxPolicy(nn.Module):
         return out
 
     def pop_stats(self):
-        """-> thống kê loss lần forward train gần nhất (loss_eps, loss_aux, delta_abs, aux_ratio — DELTA) rồi xoá."""
+        """-> thống kê loss lần forward train gần nhất (loss_eps, loss_aux, delta_abs, aux_ratio — DELTA; + loss_eps1, eps_ratio — post;
+        + loss_mid, mid_ratio — mid) rồi xoá."""
         st, self._stats = self._stats, {}
         return st
 
@@ -460,8 +489,9 @@ class BoxPolicy(nn.Module):
         t = torch.randint(0, self.num_timesteps, (x0.shape[0],), device=dev, generator=generator)
         noise = torch.randn(x0.shape, device=dev, generator=generator)
         noisy = q_sample(x0, t, noise, self.alphas_cumprod)
-        pred, refined, eps1 = self._denoise(noisy, t, cond, ctx, None, obj)
-        if eps1 is not None:                                   # DELTA3.x: ε cuối + ε của U-Net trước refiner
+        pred, refined, extra = self._denoise(noisy, t, cond, ctx, None, obj)
+        if self.unet_input == "post":                          # DELTA3.x: ε cuối + ε của U-Net trước refiner
+            eps1 = extra
             with torch.autocast(device_type=dev.type, enabled=False):
                 loss, loss1 = F.mse_loss(pred.float(), noise.float()), F.mse_loss(eps1.float(), noise.float())
                 self._stats = {"loss_eps": loss.detach(), "loss_eps1": loss1.detach(),
@@ -470,17 +500,23 @@ class BoxPolicy(nn.Module):
             return loss + self.refiner_aux_weight * loss1
         loss = F.mse_loss(pred, noise) if self.noise_net is not None else None      # DELTA3: không có số hạng ε
         if refined is not None and ctx is not None:
+            src = extra if self.unet_input == "mid" else noisy                  # box refiner nhận: b (DELTA4.1) | x_t
             with torch.autocast(device_type=dev.type, enabled=False):          # refined fp32 (refiner tắt autocast)
                 aux = F.mse_loss(refined, x0.to(refined.dtype))
                 st = {} if loss is None else {"loss_eps": loss.detach().float()}
                 self._stats = {**st, "loss_aux": aux.detach().float(),
-                               "delta_abs": (refined - noisy.to(refined.dtype)).abs().mean().detach().float(),
+                               "delta_abs": (refined - src.to(refined.dtype)).abs().mean().detach().float(),
                                "aux_ratio": (aux / F.mse_loss(noisy.to(refined.dtype), x0.to(refined.dtype)).clamp_min(1e-12))
                                .detach().float()}
+                if self.unet_input == "mid":                                   # MSE(b, x0): b = U-Net đoán box giữa chừng
+                    lmid = F.mse_loss(extra, x0.float())
+                    self._stats.update({"loss_mid": lmid.detach(), "mid_ratio": (aux / lmid.clamp_min(1e-12)).detach()})
             if loss is None:
                 loss = self.refiner_aux_weight * aux
             elif self.refiner_aux_weight > 0:
                 loss = loss + self.refiner_aux_weight * aux
+            if self.unet_input == "mid" and self.mid_aux_weight > 0:
+                loss = loss + self.mid_aux_weight * lmid
         return loss
 
     @torch.no_grad()

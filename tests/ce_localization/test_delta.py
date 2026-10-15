@@ -1,6 +1,6 @@
 """DELTA (docs/EXPERIMENT_DELTA.md): BoxRefiner của tác giả gốc trong CE-Loc (`models/clip_refiner.py`, `models/box_policy.py`) —
 DELTA1 / 1.1 (mục 4–8), DELTA2.x (đổi CLIP-ViT của refiner, mục 9.1), DELTA3 (refiner không U-Net, mục 9.2), DELTA4 (GAMMA4 + refiner,
-mục 10.1), DELTA3.1 / 3.2 (refiner sau U-Net, sửa ε, mục 10.2).
+mục 10.1), DELTA3.1 / 3.2 (refiner sau U-Net, sửa ε, mục 10.2), DELTA4.1 (refiner chèn giữa U-Net, mục 10.6).
 
 Tham chiếu: bản sao NGUYÊN VĂN `BoxRefiner.forward` / `_sample_tokens` / `_attn_mask` / `RefinerBlock.forward` / `apply_rope_2d` của
 `refs/CE-Loc-update/models/box_refiner.py` (chép vào đây — không import refs), chạy trên CÙNG tham số của `ClipBoxRefiner`. CLIP ViT thay
@@ -478,6 +478,10 @@ def test_refiner_rejects_bad_combos():
         _policy(refiner={**POST, "num_stages": 2})
     with pytest.raises(ValueError, match="use_condition"):
         _policy(refiner=POST, use_condition=False)
+    with pytest.raises(ValueError, match="use_condition"):
+        _policy(refiner=MID, use_condition=False)
+    with pytest.raises(ValueError, match="mid_aux_weight"):
+        _policy(refiner={**AUTHOR_REFINER, "mid_aux_weight": 0.1})
     with pytest.raises(ValueError, match="4 kênh"):
         BoxPolicy(in_channels=3, pretrained_backbone=False, num_timesteps=20, vision="r18_paper", refiner=AUTHOR_REFINER)
     with pytest.raises(ValueError, match="unet_input"):
@@ -599,6 +603,7 @@ def test_delta2_delta3_configs():
 # ----------------------------------------------------------------------------- DELTA4 / DELTA3.x (mục 10)
 
 POST = {**AUTHOR_REFINER, "unet_input": "post", "aux_loss_weight": 1.0}
+MID = {**AUTHOR_REFINER, "unet_input": "mid", "mid_aux_weight": 0.1}
 
 
 def _off_identity(m, std=0.05):
@@ -664,20 +669,80 @@ def test_post_refiner_after_unet(obj_attn):
     assert [n for n, p in m.named_parameters() if p.requires_grad and p.grad is None] == []
 
 
+@pytest.mark.parametrize("obj_attn", [False, True])
+def test_mid_refiner_inside_unet(obj_attn):
+    """DELTA4.1 (`unet_input: mid`): U-Net 4 kênh; lúc khởi tạo b = x_t, refined = b, ε̂ == U-Net không refiner == bản không refiner cùng
+    seed (GAMMA4) TỪNG BIT; nhánh chèn gọi ĐÚNG MỘT lần, ở vị trí mid (d 256), sau cross-attn box vật; box vật không qua nhánh chèn; bỏ
+    refiner == U-Net trần; loss = ε + 0,1·MSE(refined, x0) + 0,1·MSE(b, x0); mọi tham số train nhận grad (kể cả khi Linear khởi tạo 0)."""
+    m = _policy(refiner=MID, obj_attn=obj_attn).train()
+    ref = _policy(refiner=None, obj_attn=obj_attn).train()                    # GAMMA4 / gamma2_celoc cùng seed
+    assert m.unet_in_dim == 4 and m.noise_net.mid_site == 3 and m.noise_net.mid_dim == 256
+    assert m.mid_in.weight.shape == (4, 256) and m.mid_out.weight.shape == (256, 4)
+    sd = ref.state_dict()
+    assert all(torch.equal(v, sd[k]) for k, v in m.state_dict().items() if k in sd) and set(sd) <= set(m.state_dict())
+    x, text, vhw, x0, tok = _batch()
+    xt, t = torch.randn(2, 4), torch.tensor([3, 17])
+    with torch.no_grad():
+        cond, ctx = m.condition(x, text, vhw), m.refiner_context(x, tok)
+        obj = m.object_tokens(OBJS, 128, cond) if obj_attn else None
+        eps, refined, b = m._denoise(xt, t, cond, ctx, None, obj)
+        assert torch.equal(b, xt) and torch.equal(refined, b)
+        assert torch.equal(eps, ref.predict_noise(xt, t, cond, None, None, obj)[0])
+        assert torch.equal(m.predict_noise(xt, t, cond, None, None, obj)[0], eps)          # bỏ refiner
+    _off_identity(m)
+    for lin in (m.mid_in, m.mid_out):
+        nn.init.normal_(lin.weight, std=0.05)
+    calls = []
+    orig = m.refiner.forward
+    m.refiner.forward = lambda bx, *a: calls.append(bx.shape) or orig(bx, *a)  # noqa: E731
+    seen = []
+    if obj_attn:
+        m.noise_net.obj_xattn[3].register_forward_hook(lambda mod, a, out: seen.append("xattn"))
+    m.mid_out.register_forward_pre_hook(lambda mod, a: seen.append("mid"))
+    with torch.no_grad():
+        eps2, refined2, b2 = m._denoise(xt, t, cond, ctx, None, obj)
+        e_nr = m.predict_noise(xt, t, cond, None, None, obj)[0]
+        direct = m.noise_net(xt.unsqueeze(1), t, cond, *((obj[0], obj[1]) if obj else (None, None))).squeeze(1)
+        assert torch.equal(e_nr, direct) and not torch.equal(eps2, direct) and not torch.equal(b2, xt)
+        assert not torch.equal(refined2, b2)
+        if obj_attn:                                                           # box vật không qua nhánh chèn
+            n0 = len(calls)
+            again = m.object_tokens(OBJS, 128, cond)
+            assert len(calls) == n0 and all(torch.equal(a, c) for a, c in zip(again[0], obj[0]))
+    assert len(calls) == 1 and seen[:2] == (["xattn", "mid"] if obj_attn else ["mid"])       # chỉ lần có ctx
+    m.refiner.forward = orig
+    kw = {"objects": OBJS} if obj_attn else {}
+    loss = m(x, text, vhw, x0, k=2, generator=torch.Generator().manual_seed(4), text_tokens=tok, **kw)
+    st = m.pop_stats()
+    assert set(st) == {"loss_eps", "loss_aux", "loss_mid", "delta_abs", "aux_ratio", "mid_ratio"}
+    assert torch.allclose(loss, st["loss_eps"] + 0.1 * st["loss_aux"] + 0.1 * st["loss_mid"], atol=1e-6)
+    assert torch.allclose(st["mid_ratio"], st["loss_aux"] / st["loss_mid"])
+    loss.backward()
+    assert [n for n, p in m.named_parameters() if p.requires_grad and p.grad is None] == []
+    m0 = _policy(refiner=MID, obj_attn=obj_attn).train()                       # khởi tạo thật (mọi khối zero): vẫn đủ grad
+    m0(x, text, vhw, x0, k=1, text_tokens=tok, **kw).backward()
+    assert [n for n, p in m0.named_parameters() if p.requires_grad and p.grad is None] == []
+    assert float(m0.mid_in.weight.grad.abs().sum()) > 0 and float(m0.mid_out.weight.grad.abs().sum()) > 0
+
+
 def test_delta4_delta3x_configs():
     """delta4 = gamma4 + `use_condition: true` + khối refiner của delta2_1; delta3_1 / 3_2 = delta2_1 / delta4 chỉ khác
-    `refiner.unet_input: post` + `aux_loss_weight: 1.0`."""
+    `refiner.unet_input: post` + `aux_loss_weight: 1.0`; delta4_1 = delta4 chỉ khác `unet_input: mid` + `mid_aux_weight: 0.1`."""
     load = lambda k: yaml.safe_load(open(CFG_G[k]))  # noqa: E731
     g4, d4, d21 = load("obj"), load("delta4"), load("delta2_1")
     assert d4["model"].pop("refiner") == d21["model"]["refiner"] and d4["model"].pop("use_condition") is True
     for x in (g4, d4):
         x.pop("experiment"), x.pop("description")
     assert d4 == g4
-    for kind, base in (("delta3_1", "delta2_1"), ("delta3_2", "delta4")):
+    for kind, base in (("delta3_1", "delta2_1"), ("delta3_2", "delta4"), ("delta4_1", "delta4")):
         d, b = load(kind), load(base)
         r, rb = d["model"]["refiner"], b["model"]["refiner"]
-        assert r.pop("unet_input") == "post" and r.pop("aux_loss_weight") == 1.0
-        rb.pop("unet_input"), rb.pop("aux_loss_weight")
+        if kind == "delta4_1":
+            assert r.pop("unet_input") == "mid" and r.pop("mid_aux_weight") == 0.1 and "mid_aux_weight" not in rb
+            rb.pop("unet_input")
+        else:
+            assert r.pop("unet_input") == "post" and r.pop("aux_loss_weight") == 1.0
+            rb.pop("unet_input"), rb.pop("aux_loss_weight")
         for x in (d, b):
             x.pop("experiment"), x.pop("description")
         assert d == b
@@ -716,6 +781,7 @@ def test_grad_groups_refiner():
     assert group_of("refiner.heads.0.3.weight") == "refiner.head"
     assert group_of("refiner.image_proj.1.weight") == "refiner.embed"
     assert group_of("noise_net.final_conv.1.weight") == "unet1d"
+    assert group_of("mid_in.weight") == group_of("mid_out.bias") == "refiner.mid"
 
 
 def _eval(monkeypatch, ck, out, extra=(), clip_seed=0):
@@ -730,10 +796,11 @@ def _eval(monkeypatch, ck, out, extra=(), clip_seed=0):
         return json.load(f)
 
 
-@pytest.mark.parametrize("kind", ["delta4", "delta3", "delta3_2"])   # refiner trước U-Net + box vật / không U-Net / refiner sau U-Net
+@pytest.mark.parametrize("kind", ["delta4", "delta3", "delta3_2", "delta4_1"])   # refiner trước U-Net / không U-Net / sau U-Net / giữa
 def test_full_flow_delta_train_resume_eval(tmp_path, monkeypatch, kind):
-    """DELTA4 / 3 / 3.2 thu nhỏ (refiner kích thước thật, CLIP giả, T = 100 cho vòng mock) — ba đường mã của refiner (`concat` + box vật,
-    `none`, `post` + box vật): DELTA4 train 2 + --resume tới 4 == train liền 4 (mọi tensor kể cả `clip_sha`), hai bản kia train một lượt;
+    """DELTA4 / 3 / 3.2 / 4.1 thu nhỏ (refiner kích thước thật, CLIP giả, T = 100 cho vòng mock) — bốn đường mã của refiner (`concat` +
+    box vật, `none`, `post` + box vật, `mid` + box vật): DELTA4 train 2 + --resume tới 4 == train liền 4 (mọi tensor kể cả `clip_sha`), các
+    bản kia train một lượt;
     history có thống kê refiner; eval mock 100 cho cả 2 loại ảnh (+ `_norefine` khi có U-Net, `_noobj` khi có box vật); CLIP khác bản
     lúc train ⇒ eval từ chối."""
     base = str(tmp_path / "d")
@@ -760,9 +827,12 @@ def test_full_flow_delta_train_resume_eval(tmp_path, monkeypatch, kind):
     logs = [h for h in kb["history"] if "loss" in h]
     post = kind.startswith("delta3_")
     want_log = ({"loss_eps", "loss_eps1", "delta_abs", "eps_ratio", "refiner_gates"} if post else
-                {"loss_aux", "delta_abs", "aux_ratio", "refiner_gates"} | ({"loss_eps"} if kind != "delta3" else set()))
+                {"loss_aux", "delta_abs", "aux_ratio", "refiner_gates"} | ({"loss_eps"} if kind != "delta3" else set())
+                | ({"loss_mid", "mid_ratio"} if kind == "delta4_1" else set()))
     assert all(want_log <= set(h) for h in logs) and (kind != "delta3" or not any("loss_eps" in h for h in logs))
     assert not post or not any("loss_aux" in h for h in logs)
+    assert (kind == "delta4_1") == ("mid_in.weight" in kb["model"]) and (kind != "delta4_1" or float(kb["model"]["mid_in.weight"]
+                                                                                                    .abs().sum()) > 0)
     res = _eval(monkeypatch, os.path.join(b, "best.pth"), str(tmp_path / "res.json"),
                 ["--add-samplers", "mock", "--dump-boxes", str(tmp_path / "boxes.json")])
     want = {"inpainted", "original"} | (set() if kind == "delta3" else {"inpainted_norefine", "original_norefine"})
@@ -853,7 +923,7 @@ def _ddp_worker_delta(rank, world, port, argv):
     _ddp_worker_strict(rank, world, port, argv, None)
 
 
-@pytest.mark.parametrize("kind", ["delta4", "delta3_2"])
+@pytest.mark.parametrize("kind", ["delta4", "delta3_2", "delta4_1"])
 def test_ddp_delta_no_find_unused(tmp_path, kind):
     """DELTA trên 2 tiến trình gloo, DDP KHÔNG find_unused + gradient_as_bucket_view: tham số nào thiếu grad hay lệch stride thì lỗi
     ngay; loss hữu hạn, đủ iter."""
