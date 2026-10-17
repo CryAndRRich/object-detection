@@ -332,6 +332,27 @@ def test_cnll_matches_gaussian_definition():
     assert cnll(box, objs[:4], (W, H)) is None
 
 
+def test_cnll_f1all_relations_over_all_classes():
+    """F1all (CE-CoCount, 2026-10-17): chiều quan hệ của F1 tính trên vật CẢ HAI lớp, Gaussian + hiệu chỉnh chỉ trên vật cùng lớp.
+    Không có lớp kia ≡ F1; F2 không đổi; box đè lên vật lớp kia bị phạt nặng hơn F1 (F1 không thấy vật đó); `other_class` kiểm
+    `objects_all` = [cùng lớp ; lớp kia]."""
+    from ce_localization.engine.add_eval import cnll, other_class
+    objs = np.array([[10.0 + 15 * k, 10.0, 20.0 + 15 * k, 20.0] for k in range(6)])          # một hàng vật cùng lớp
+    others = np.array([[10.0 + 15 * k, 60.0, 20.0 + 15 * k, 70.0] for k in range(4)])        # lớp kia, hàng dưới
+    wh = (120.0, 100.0)
+    box = np.array([[10.0, 60.0, 20.0, 70.0], [55.0, 35.0, 65.0, 45.0]])                     # đè vật lớp kia | chỗ trống
+    f1 = cnll(box, objs, wh, "F1")
+    assert np.array_equal(cnll(box, objs, wh, "F1", others=None), f1)
+    assert np.array_equal(cnll(box, objs, wh, "F1", others=np.zeros((0, 4))), f1)
+    assert np.array_equal(cnll(box, objs, wh, "F2", others=others), cnll(box, objs, wh, "F2"))
+    fa = cnll(box, objs, wh, "F1", others=others)
+    assert fa[0] > f1[0] + 1.0 and np.isfinite(fa).all()                     # đè vật lớp kia: F1all phạt, F1 thì không thấy
+    assert cnll(box, objs[:4], wh, "F1", others=others) is None              # < 5 vật CÙNG lớp: vẫn bỏ dù tổng >= 5
+    assert np.array_equal(other_class(objs, np.concatenate([objs, others])), others)
+    with pytest.raises(ValueError, match="objects_all"):
+        other_class(objs, np.concatenate([others, objs]))
+
+
 def test_prior_records_map_unit_boxes_to_valid_region():
     from ce_localization.engine.add_eval import prior_records
     rec = _rec([[0, 0, 1, 1]] * 2, [[0, 0, 1, 1]], [], wh=(200.0, 100.0))

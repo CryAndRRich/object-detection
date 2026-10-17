@@ -23,7 +23,8 @@ U-Net; DELTA3.x: chỉ U-Net; DELTA4.1: bỏ nhánh chèn) và TB |Δ| của ref
 DELTA4.1: |refined − b|); token chữ CLIP text tính lại
 từ HF phải khớp vân tay trong checkpoint.
 `--dataset cocount` (CE-CoCount, mục 18): cùng mọi checkpoint add, khoá `cocount<hậu tố>`; lỗ = 10 chỗ trống GT (chỉ số `_any`, không
-`_latest`), density trống, `on_object` trên box cả hai lớp, C-NLL trên box cùng lớp; `prior` = lỗ train CE-130 như cũ.
+`_latest`), density trống, `on_object` trên box cả hai lớp, C-NLL trên box cùng lớp (+ `cnll_F1all_*`: đặc trưng quan hệ tính trên
+box cả hai lớp, Gaussian trên box cùng lớp); `prior` = lỗ train CE-130 như cũ. Chấm lại dump cũ: `tools/rescore_cocount.py`.
 `--dump-boxes F.json` (user study, docs/EXPERIMENT_GAMMA.md mục 17): ghi thêm box THÔ của từng mẫu mọi khoá kết quả
 (`image_id`, `t`, `wh` = (nw, nh) vùng ảnh thật trên canvas, `boxes` [K,4] xyxy pixel canvas) cho `user_study/build.py`.
 `--cocount-obj-filter K`: CE-CoCount, bỏ box vật SAM có cạnh > K × cạnh TB exemplar (`data/cocount.filter_objects`; ảnh hưởng box vật
@@ -112,7 +113,8 @@ def print_results(tag, res):
 ADD_KEYS = ("best_iou@{K}_any", "hit50@{K}_any", "best_iou@{K}_latest", "hit50@{K}_latest", "mean_iou_any",
             "box_hit50_any", "mean_iou_latest", "box_hit50_latest", "hole_cover", "on_object", "in_image",
             "degenerate", "cnll_F1_n1_mean", "cnll_F1_n1_median", "cnll_F1_sel_mean", "cnll_F1_sel_median",
-            "cnll_F2_n1_mean", "cnll_F2_n1_median", "cnll_F2_sel_mean", "cnll_F2_sel_median")
+            "cnll_F2_n1_mean", "cnll_F2_n1_median", "cnll_F2_sel_mean", "cnll_F2_sel_median",
+            "cnll_F1all_n1_mean", "cnll_F1all_n1_median", "cnll_F1all_sel_mean", "cnll_F1all_sel_median")
 
 
 def print_add(tag, res, prior, K):

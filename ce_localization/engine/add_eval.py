@@ -22,6 +22,9 @@ Không cần GT (cả ảnh gốc không lỗ):
                  khoảng cách chia sqrt(nw·nh). Hai chế độ: `n1` = mọi box (một mẫu ngẫu nhiên — chất lượng mô hình),
                  `sel` = box có q lớn nhất trong K (bộ chọn của paper; paper chọn theo box CountGD + SAM, ở đây theo
                  cùng `all_bboxes` — ghi rõ khi báo cáo). Ảnh có < CNLL_MIN_OBJ vật đang có thì bỏ (n_cnll).
+  C-NLL F1all    (người dùng 2026-10-17, chỉ record có `objects_all` — CE-CoCount): như F1 nhưng hai chiều quan hệ (IoU lớn nhất,
+                 khoảng cách 3 vật gần nhất) tính so với MỌI box vật trong ảnh (cả hai lớp); Gaussian + hiệu chỉnh vẫn chỉ trên vật
+                 CÙNG lớp ⇒ box đè / sát vật lớp kia bị phạt. CE-130 (một lớp / ảnh) F1all ≡ F1 nên không tính.
 Hậu xử lý `resize_to_objects` (`eval.py --obj-size`): giữ tâm box, đặt w / h theo box vật cùng lớp của ảnh — `SIZE_STATS`:
   mean      TB w / TB h của `objects`            median    trung vị w / trung vị h
   trim      TB sau khi bỏ outlier (cạnh √(wh) > Q3 + 1,5·IQR)     small     TB nửa nhỏ (cạnh √(wh) <= trung vị)
@@ -39,7 +42,7 @@ from ce_localization.utils.box_ops_np import box_iou, ioa
 from ce_localization.utils.log import fmt_time
 
 __all__ = ["CNLL_MIN_OBJ", "SIZE_STATS", "predict_add", "prior_unit_boxes", "prior_records", "object_size", "resize_to_objects",
-           "clip_boxes", "cnll", "add_metrics"]
+           "clip_boxes", "cnll", "other_class", "add_metrics"]
 
 HIT = 0.5
 CNLL_MIN_OBJ = 5                 # Gaussian 4-D cần >= 5 điểm để hiệp phương sai có hạng đủ
@@ -183,6 +186,7 @@ def _knn_mean(centers, ref, k, exclude_self=False):
 
 
 def _features(boxes, objects, wh, kind, is_objects=False):
+    """`is_objects`: boxes = objects[:len(boxes)] (vật tham chiếu đứng đầu) ⇒ bỏ chính nó (đường chéo) ở IoU / láng giềng."""
     nw, nh = wh
     c = np.stack([(boxes[:, 0] + boxes[:, 2]) / 2, (boxes[:, 1] + boxes[:, 3]) / 2], 1)
     w, h = boxes[:, 2] - boxes[:, 0], boxes[:, 3] - boxes[:, 1]
@@ -196,12 +200,14 @@ def _features(boxes, objects, wh, kind, is_objects=False):
     return np.stack([w / nw, h / nh, iou.max(1) if iou.size else np.zeros(len(boxes)), knn / np.sqrt(nw * nh)], 1)
 
 
-def cnll(boxes, objects, wh, kind="F1"):
-    """C-NLL của từng box [K] (đã kẹp). None nếu < CNLL_MIN_OBJ vật đang có."""
+def cnll(boxes, objects, wh, kind="F1", others=None):
+    """C-NLL của từng box [K] (đã kẹp). None nếu < CNLL_MIN_OBJ vật đang có. `others` (F1all): box vật lớp KHÁC — đặc trưng quan hệ
+    (F1) tính trên [objects ; others], Gaussian + hiệu chỉnh chỉ trên `objects` (F2 không có chiều quan hệ ⇒ không đổi)."""
     if len(objects) < CNLL_MIN_OBJ:
         return None
-    z = _features(objects, objects, wh, kind, is_objects=True)
-    x = _features(boxes, objects, wh, kind)
+    ref = objects if others is None or not len(others) else np.concatenate([objects, others])
+    z = _features(objects, ref, wh, kind, is_objects=True)          # objects = ref[:M] ⇒ bỏ chính nó = đường chéo
+    x = _features(boxes, ref, wh, kind)
     mu = z.mean(0)
     cov = np.cov(z.T, bias=True) + CNLL_RIDGE * np.eye(4)
     inv = np.linalg.inv(cov)
@@ -214,6 +220,15 @@ def cnll(boxes, objects, wh, kind="F1"):
     return nll(x) - nll(z).min()
 
 
+def other_class(objects, objects_all):
+    """Box vật lớp kia = `objects_all` bỏ phần đầu `objects` (`data/cocount.read_cocount` ghép [cùng lớp ; lớp kia])."""
+    objects_all = np.asarray(objects_all, dtype=np.float64).reshape(-1, 4)
+    m = len(objects)
+    if len(objects_all) < m or not np.array_equal(objects_all[:m], objects):
+        raise ValueError("objects_all phải bắt đầu bằng đúng `objects` (cùng lớp) rồi mới tới lớp kia")
+    return objects_all[m:]
+
+
 def add_metrics(records, with_holes=True, latest=True):
     """records (box thô) -> dict chỉ số (mục docstring). Hàm thuần. `latest=False` (CE-CoCount: các lỗ = 10 chỗ trống GT, không có
     thứ tự lượt) bỏ mọi chỉ số `_latest` và `by_turn`."""
@@ -221,6 +236,8 @@ def add_metrics(records, with_holes=True, latest=True):
                            "on_object", "in_image", "degenerate")}
     cover, by_turn = [], {}
     cn = {f"{f}_{m}": [] for f in ("F1", "F2") for m in ("n1", "sel")}
+    if any("objects_all" in r for r in records):                         # CE-CoCount: + F1all (quan hệ với vật cả hai lớp)
+        cn.update({f"F1all_{m}": [] for m in ("n1", "sel")})
     n_cnll = 0
     for r in records:
         b, deg = clip_boxes(r["boxes"])
@@ -247,7 +264,10 @@ def add_metrics(records, with_holes=True, latest=True):
         if c1 is not None:
             n_cnll += 1
             c2 = cnll(b, obj, r["wh"], "F2")
-            for f, c in (("F1", c1), ("F2", c2)):
+            cs = [("F1", c1), ("F2", c2)]
+            if "objects_all" in r:
+                cs.append(("F1all", cnll(b, obj, r["wh"], "F1", others=other_class(obj, r["objects_all"]))))
+            for f, c in cs:
                 cn[f"{f}_n1"] += c.tolist()
                 cn[f"{f}_sel"].append(float(c.min()))
     m = lambda v: float(np.mean(v)) if len(v) else float("nan")  # noqa: E731

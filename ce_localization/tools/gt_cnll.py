@@ -6,7 +6,9 @@ Cùng công thức + cùng vật tham chiếu như `eval.py` (`engine/add_eval.c
 chia (W, H) nên bất biến với letterbox của eval.
   CE-130 (ảnh inpaint lượt t, split `--split` theo `--split-source` như GAMMA2+: test samples = 4.948 mẫu): vật tham chiếu = vật CÒN
           trong ảnh ở lượt t; GT = lỗ mới nhất (`latest`, đích train) và mọi lỗ tới lượt t (`any`; `sel` = lỗ C-NLL nhỏ nhất mỗi mẫu)
-  CE-CoCount (`--cocount-root`): vật tham chiếu = box vật CÙNG lớp (`Anno_with_exam_bbox`); GT = 10 `loc_bbox` (`any`, `sel`)
+  CE-CoCount (`--cocount-root`): vật tham chiếu = box vật CÙNG lớp (`Anno_with_exam_bbox`); GT = 10 `loc_bbox` (`any`, `sel`);
+          + F1all (như `eval.py`: chiều quan hệ của F1 tính trên box vật CẢ HAI lớp, Gaussian trên vật cùng lớp); khoá
+          `cocount_objsize` = cùng box GT đổi cỡ = TB box vật cùng lớp, giữ tâm (mốc của `eval.py --obj-size mean`)
 Báo trung vị (như bảng của eval: trung bình bị vài box cực xấu kéo lên hàng trăm) kèm trung bình. Không model, không GPU, ~1–2 phút.
 
   cd /mnt/disk1/aiotlab/haitn/object-detection/ce_localization
@@ -26,9 +28,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from ce_localization.data.cocount import read_cocount  # noqa: E402
 from ce_localization.data.turns import TurnIndex  # noqa: E402
-from ce_localization.engine.add_eval import CNLL_MIN_OBJ, cnll  # noqa: E402
+from ce_localization.engine.add_eval import CNLL_MIN_OBJ, cnll, other_class, resize_to_objects  # noqa: E402
 
-__all__ = ["ce130_gt", "cocount_gt", "summarize"]
+__all__ = ["ce130_gt", "cocount_gt", "resize_gt", "summarize"]
 
 
 def ce130_gt(index, split="test", source="samples"):
@@ -45,7 +47,7 @@ def ce130_gt(index, split="test", source="samples"):
 
 
 def cocount_gt(root, max_obj_ratio=None):
-    """-> list (10 loc_bbox, vật cùng lớp, (W, H)) cho mọi mẫu CE-CoCount (`max_obj_ratio`: lọc box vật như eval.py)."""
+    """-> list (10 loc_bbox, vật cùng lớp, (W, H), vật lớp kia) cho mọi mẫu CE-CoCount (`max_obj_ratio`: lọc box vật như eval.py)."""
     out = []
     for f in sorted(os.listdir(os.path.join(root, "Anno"))):
         if not f.endswith(".json"):
@@ -54,21 +56,29 @@ def cocount_gt(root, max_obj_ratio=None):
         r = read_cocount(root, name, max_obj_ratio)
         with Image.open(os.path.join(root, "Image", name + ".jpg")) as im:
             wh = im.size
-        out.append((r["loc"], r["objects"], wh))
+        out.append((r["loc"], r["objects"], wh, other_class(r["objects"], r["objects_all"])))
     return out
 
 
+def resize_gt(samples, stat="mean"):
+    """Box GT đổi cỡ = TB box vật cùng lớp, giữ tâm (`add_eval.resize_to_objects`) — cùng hậu xử lý `--obj-size` của eval."""
+    recs = resize_to_objects([{"boxes": gt, "objects": objs} for gt, objs, *_ in samples], stat)
+    return [(r["boxes"], *x[1:]) for r, x in zip(recs, samples)]
+
+
 def summarize(samples, latest=False):
-    """samples: list (gt, objects, wh) -> dict: với F1 / F2, `any_n1` (mọi box GT), `sel` (box GT C-NLL nhỏ nhất / mẫu), `latest_n1`
-    (box GT cuối = lỗ mới nhất, chỉ khi latest=True): median / mean; n mẫu đủ vật."""
-    acc = {f"{f}_{m}": [] for f in ("F1", "F2") for m in (("any_n1", "sel", "latest_n1") if latest else ("any_n1", "sel"))}
+    """samples: list (gt, objects, wh[, vật lớp kia]) -> dict: với F1 / F2 (+ F1all khi có vật lớp kia — CE-CoCount), `any_n1` (mọi
+    box GT), `sel` (box GT C-NLL nhỏ nhất / mẫu), `latest_n1` (box GT cuối = lỗ mới nhất, chỉ khi latest=True): median / mean; n mẫu
+    đủ vật."""
+    feats = ("F1", "F2", "F1all") if any(len(x) > 3 for x in samples) else ("F1", "F2")
+    acc = {f"{f}_{m}": [] for f in feats for m in (("any_n1", "sel", "latest_n1") if latest else ("any_n1", "sel"))}
     n = 0
-    for gt, objs, wh in samples:
+    for gt, objs, wh, *rest in samples:
         if len(gt) == 0 or cnll(gt, objs, wh, "F1") is None:
             continue
         n += 1
-        for f in ("F1", "F2"):
-            c = cnll(gt, objs, wh, f)
+        for f in feats:
+            c = cnll(gt, objs, wh, "F1", others=rest[0] if rest else None) if f == "F1all" else cnll(gt, objs, wh, f)
             acc[f"{f}_any_n1"] += c.tolist()
             acc[f"{f}_sel"].append(float(c.min()))
             if latest:
@@ -92,8 +102,9 @@ def main():
     res = {"ce130": summarize(ce130_gt(TurnIndex(a.turn_index), a.split, a.split_source), latest=True)}
     res["ce130"].update(split=a.split, split_source=a.split_source)
     if a.cocount_root:
-        res["cocount"] = summarize(cocount_gt(a.cocount_root, a.cocount_obj_filter))
-        res["cocount"]["obj_filter"] = a.cocount_obj_filter
+        cc = cocount_gt(a.cocount_root, a.cocount_obj_filter)
+        res["cocount"], res["cocount_objsize"] = summarize(cc), summarize(resize_gt(cc))
+        res["cocount"]["obj_filter"] = res["cocount_objsize"]["obj_filter"] = a.cocount_obj_filter
     for name, r in res.items():
         print(f"== {name}: {r['n_cnll']} / {r['n_samples']} mẫu có >= {r['min_obj']} vật")
         for k in sorted(k for k in r if k.startswith("cnll_") and k.endswith("_median")):

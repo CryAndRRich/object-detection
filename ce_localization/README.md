@@ -136,7 +136,7 @@ tự nhận `task: add`: `--image inpainted original`, `--n-samples`, `--add-den
 `docs/EXPERIMENT_GAMMA.md`.
 
 CE-CoCount (tập test phụ của bài, `data/cocount/`): `eval.py --dataset cocount --cocount-root ../data/cocount` (ảnh gốc, 10 chỗ trống GT
-làm lỗ, density trống; `data/cocount.py`); C-NLL của box GT trên CE-130 + CE-CoCount: `tools/gt_cnll.py`; `--obj-size` thêm khoá `_objsize` (giữ tâm, cỡ = TB box vật cùng lớp). Mục 18 của EXPERIMENT_GAMMA.
+làm lỗ, density trống; `data/cocount.py`); C-NLL của box GT trên CE-130 + CE-CoCount: `tools/gt_cnll.py`; `--obj-size` thêm khoá `_objsize` (giữ tâm, cỡ = TB box vật cùng lớp). Mục 18 của EXPERIMENT_GAMMA. C-NLL `F1all` (chiều quan hệ trên box vật cả hai lớp, Gaussian trên lớp cần thêm) + chấm lại dump cũ không cần model: `tools/rescore_cocount.py` — mục 10.9 của EXPERIMENT_DELTA.
 
 DELTA (`config/delta/`, `docs/EXPERIMENT_DELTA.md`): train trên Kaggle (`add_kaggle.ipynb`, chỉ train), eval trên server (khuôn lệnh mục 7):
 vòng mock 100 bước + `_norefine` (bỏ refiner, khi có U-Net) + `_noobj` (khi có box vật); cần

@@ -102,6 +102,8 @@ def test_add_metrics_objects_all_and_no_latest():
     assert not any("latest" in k for k in res) and "by_turn" not in res
     assert res["best_iou@2_any"] == 1.0 and res["hole_cover"] == 0.5
     assert res["cnll_F1_n1_median"] == base["cnll_F1_n1_median"]             # C-NLL vẫn trên vật cùng lớp
+    assert not any("F1all" in k for k in base) and res["n_cnll"] == 1         # F1all chỉ khi có `objects_all` (CE-CoCount)
+    assert res["cnll_F1all_n1_median"] > res["cnll_F1_n1_median"]             # box 2 đè vật lớp kia: F1all phạt
 
 
 def test_resize_to_objects():
@@ -145,15 +147,21 @@ def test_gt_cnll_tool(tmp_path, monkeypatch):
     cc = g.cocount_gt(root)
     assert len(cc) == 4 and all(len(x[0]) == 10 for x in cc) and cc[0][2] in ((200, 120), (90, 160))
     assert [len(x[1]) for x in g.cocount_gt(root, 3)] == [len(x[1]) for x in cc]          # dữ liệu giả không có box khổng lồ
+    assert all(len(x) == 4 and len(x[3]) > 0 for x in cc)                            # + vật lớp kia (F1all)
     sc = g.summarize(cc)
-    assert sc["n_cnll"] == 4 and not any("latest" in k for k in sc)
+    assert sc["n_cnll"] == 4 and not any("latest" in k for k in sc) and np.isfinite(sc["cnll_F1all_any_n1_median"])
+    assert not any("F1all" in k for k in s)                                             # CE-130: một lớp / ảnh
+    rz = g.resize_gt(cc)
+    for (b, o, *_), (b0, o0, *_) in zip(rz, cc):
+        assert np.allclose((b[:, :2] + b[:, 2:]) / 2, (b0[:, :2] + b0[:, 2:]) / 2) and o is o0
+        assert np.allclose(b[:, 2] - b[:, 0], (o[:, 2] - o[:, 0]).mean())
     out = str(tmp_path / "gt.json")
     monkeypatch.setattr(sys, "argv", ["gt_cnll.py", "--turn-index", tpath, "--split-source", "ce130", "--cocount-root", root,
                                       "--cocount-obj-filter", "3", "--out", out])
     g.main()
     with open(out) as f:
         res = json.load(f)
-    assert set(res) == {"ce130", "cocount"} and res["cocount"]["n_cnll"] == 4 and res["cocount"]["obj_filter"] == 3
+    assert set(res) == {"ce130", "cocount", "cocount_objsize"} and res["cocount"]["n_cnll"] == 4 and res["cocount"]["obj_filter"] == 3
 
 
 @pytest.mark.parametrize("kind", ["paper", "obj_rand", "pr"])
@@ -210,3 +218,58 @@ def test_eval_cocount_full_flow(tmp_path, monkeypatch, kind):
                 assert np.allclose(b[:, :2] + b[:, 2:], c[:, :2] + c[:, 2:], atol=0.02)
                 assert np.allclose(c[:, 2] - c[:, 0], (o[:, 2] - o[:, 0]).mean(), atol=0.02)
                 assert np.allclose(c[:, 3] - c[:, 1], (o[:, 3] - o[:, 1]).mean(), atol=0.02)
+
+
+def test_rescore_cocount_from_dump(tmp_path, monkeypatch):
+    """`tools/rescore_cocount.py`: dump box (kiểu `eval.py --dump-boxes`, làm tròn) + annotation -> dựng lại record y `CoCountAddDataset`
+    + prior cùng seed ⇒ chỉ số cũ khớp (`--check`), có thêm `cnll_F1all_*`; khoá `_objsize` (box trong dump đã đổi cỡ) + prior đổi cỡ."""
+    from ce_localization.data.cocount import CoCountAddDataset
+    from ce_localization.engine.add_eval import add_metrics, prior_records, prior_unit_boxes, resize_to_objects
+    from ce_localization.tools import rescore_cocount as rc
+    from tests.ce_localization.helpers import _fake_turn_index
+    base = str(tmp_path / "d")
+    os.makedirs(base)
+    _, _, tpath, index, _ = _fake_turn_index(base)
+    root = _fake_cocount(str(tmp_path / "cc"))
+    ds = CoCountAddDataset(root, 128, max_obj_ratio=3)
+    rng = np.random.default_rng(0)
+    rec = []
+    for i in range(len(ds)):
+        it = ds[i]
+        nh, nw = it["valid_hw"]
+        xy = rng.uniform(0, 1, (5, 2)) * [nw, nh]
+        rec.append({"image_id": it["image_id"], "t": 0, "wh": np.array([nw, nh], dtype=np.float64),
+                    "boxes": np.concatenate([xy, xy + 12], 1), "holes": it["holes"].numpy().astype(np.float64),
+                    **{k: it[k].numpy().astype(np.float64) for k in ("objects", "objects_all", "exemplars")}})
+    unit = prior_unit_boxes(index, "train", "ce130")
+    old = {"results": {}, "prior": {}}
+    dump = {"ckpt": "x", "iter": 1, "split": "test", "n_samples": 5, "seed": 0, "results": {}}
+    for key, post in (("cocount", None), ("cocount_objsize", "mean")):
+        r_ = rec if post is None else resize_to_objects(rec, post)
+        pr = prior_records(r_, unit, 5, seed=0)
+        old["results"][key] = {k: v for k, v in add_metrics(r_, latest=False).items() if "F1all" not in k}
+        old["prior"][key] = add_metrics(pr if post is None else resize_to_objects(pr, post), latest=False)
+        dump["results"][key] = [{"image_id": r["image_id"], "t": 0, "wh": r["wh"].round(3).tolist(),
+                                 "boxes": r["boxes"].round(2).tolist()} for r in r_]
+    d = tmp_path / "out"
+    d.mkdir()
+    with open(d / "boxes_m.json", "w") as f:
+        json.dump(dump, f)
+    with open(d / "test_m.json", "w") as f:
+        json.dump(old, f)
+    monkeypatch.setattr(sys, "argv", ["rescore_cocount.py", str(d / "boxes_m.json"), "--cocount-root", root, "--cocount-obj-filter", "3",
+                                      "--image-size", "128", "--turn-index", tpath, "--prior-source", "ce130", "--check"])
+    rc.main()                                                                      # lệch thì sys.exit
+    with open(d / "rescore_m.json") as f:
+        new = json.load(f)
+    assert set(new["results"]) == set(new["prior"]) == {"cocount", "cocount_objsize"}
+    for key in ("cocount", "cocount_objsize"):
+        assert np.isfinite(new["results"][key]["cnll_F1all_n1_median"]) and "cnll_F1all_sel_mean" in new["prior"][key]
+    assert rc.size_stat("cocount_noobj_objsize") == "mean" and rc.size_stat("cocount_objsize_exemplar") == "exemplar"
+    assert rc.size_stat("cocount_norefine") is None
+    old["results"]["cocount"]["on_object"] += 0.5                                 # chỉ số cũ lệch -> --check báo lỗi
+    with open(d / "test_m.json", "w") as f:
+        json.dump(old, f)
+    with pytest.raises(SystemExit):
+        rc.main()
+
