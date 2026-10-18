@@ -88,7 +88,7 @@ def predict_add(model, loader, text_table, n_samples=30, seed=0, log_every=0, lo
         nwhwh = norm_whwh(model, batch["whwh"], batch["images"].shape[-1])
         wh = batch["whwh"][:, :2].cpu().numpy()
         for vi, u in enumerate(us):
-            boxes = unit_to_boxes(u.float(), nwhwh[:, None, :]).cpu().numpy().astype(np.float64)
+            boxes = unit_to_boxes(u.float(), nwhwh[:, None, :], getattr(model, "box_coder", None)).cpu().numpy().astype(np.float64)
             dst = records[vi] if multi else records
             for i in range(len(batch["image_id"])):
                 dst.append({"image_id": batch["image_id"][i], "t": batch["t"][i], "wh": wh[i].astype(np.float64),

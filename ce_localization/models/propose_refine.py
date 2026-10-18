@@ -51,6 +51,8 @@ class ProposeRefine(nn.Module):
                  relation_embed=16):
         super().__init__()
         self.proposer = BoxPolicy(**proposer_kw)
+        if self.proposer.box_coder["type"] != "linear":           # refine đổi box qua boxes_to_unit / unit_to_boxes linear
+            raise ValueError("ProposeRefine chỉ hỗ trợ proposer box_coder linear")
         if self.proposer.vision_kind != "r18_paper":
             raise ValueError("ProposeRefine dùng chung ResNet18 của CE-Loc: proposer cần vision r18_paper")
         if self.proposer.use_refiner or not self.proposer.use_condition:

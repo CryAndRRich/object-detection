@@ -59,7 +59,8 @@ def _box_policy_kw(m, d, pre):
     """Tham số `BoxPolicy` từ nhánh config model / diffusion (dùng cho `box_policy` và proposer của `propose_refine`).
     DELTA3 (`refiner.unet_input: none`): không backbone / FiLM / U-Net ⇒ config không mang khoá của chúng."""
     kw = dict(in_channels=m.get("in_channels", 3), num_timesteps=d["num_timesteps"], beta_start=d["beta_start"],
-              beta_end=d["beta_end"], refiner=m.get("refiner"), use_condition=m.get("use_condition", True))
+              beta_end=d["beta_end"], refiner=m.get("refiner"), use_condition=m.get("use_condition", True),
+              box_coder=m.get("box_coder"))
     if (refiner_config(m.get("refiner")) or {}).get("unet_input") == "none":
         return kw
     return dict(kw, pretrained_backbone=pre, fpn_dim=m.get("d_model", 256), vis_dim=m["vis_dim"], text_in=m.get("text_dim", 512),

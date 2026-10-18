@@ -37,7 +37,8 @@ Checkpoint CE-Loc gốc của bài (`model_state_dict`, vd weights/add/paper/bes
 (đường dẫn dữ liệu): eval bài add như GAMMA, kèm `excl_paper_train` (bỏ mẫu samples/train mà bài đã train).
 
 GAMMA (`task: add`, docs/EXPERIMENT_GAMMA.md mục 5): mỗi mẫu (nhánh, lượt) sinh `--n-samples` box độc lập (U-Net 1D — GAMMA0,
-GAMMA2 pha 1, checkpoint của bài: `--add-samplers`, mặc định mock 100 bước như bài, `ddpm` = 1000 bước đúng công thức; GAMMA1:
+GAMMA2 pha 1, checkpoint của bài: `--add-samplers`, mặc định mock 100 bước như bài, `ddpm` = 1000 bước đúng công thức, `ddim` =
+sampler bản log-scale của tác giả (DELTA5: `--ddim-steps` 100 bước cách đều, `--eta` 1, x̂0 kẹp; box giải mã theo `model.box_coder`); GAMMA1:
 DDIM `--steps` bước, mỗi số bước một lượt), chấm IoU với lỗ + C-NLL + on_object (`engine/add_eval.py`),
 kèm mốc `prior` (lỗ train ngẫu nhiên, không nhìn ảnh). GAMMA1 in thêm attention của query lên [t ; text ; vis].
   --image inpainted original : ảnh inpaint (có lỗ) và ảnh gốc không lỗ (phép thử lối tắt; chỉ chỉ số không cần GT)
@@ -129,13 +130,17 @@ def print_add(tag, res, prior, K):
               f"best_iou_latest {d['best_latest']:.4f}")
 
 
-def add_variants(add_samplers, obj_attn=False, norefine=False):
+def add_variants(add_samplers, obj_attn=False, norefine=False, ddim_steps=100, eta=1.0):
     """Biến thể suy luận của mô hình U-Net 1D -> list (hậu tố khoá, mô tả, kw của `predict_add`). Một sampler: không hậu tố (khoá cũ);
-    nhiều sampler: `_mock` (vòng 100 bước của bài) / `_ddpm`. `obj_attn` (GAMMA4): mỗi biến thể thêm `_noobj`; `norefine` (DELTA có
-    U-Net): biến thể mock thêm `_norefine`. `sample_kw` của biến thể con GỘP với gốc."""
+    nhiều sampler: `_mock` (vòng 100 bước của bài) / `_ddpm` / `_ddim` (sampler của bản log-scale tác giả — DELTA5: `ddim_steps` bước
+    cách đều, `eta`, x̂0 kẹp). `obj_attn` (GAMMA4): mỗi biến thể thêm `_noobj`; `norefine` (DELTA có U-Net): biến thể mock / ddim thêm
+    `_norefine`. `sample_kw` của biến thể con GỘP với gốc."""
     one = len(add_samplers) == 1
-    base = [("" if one else "_mock", "mock 100 bước (vòng của bài)", {"sampler": "mock", "sample_kw": {}}) if sm == "mock" else
-            ("" if one else "_ddpm", "DDPM 1000 bước", {"sampler": "ddpm", "sample_kw": {}}) for sm in add_samplers]
+    kinds = {"mock": ("_mock", "mock 100 bước (vòng của bài)", {"sampler": "mock", "sample_kw": {}}),
+             "ddpm": ("_ddpm", "DDPM 1000 bước", {"sampler": "ddpm", "sample_kw": {}}),
+             "ddim": ("_ddim", f"DDIM tác giả {ddim_steps} bước, eta {eta}, kẹp x̂0",
+                      {"sampler": "ddim", "sample_kw": {"ddim_steps": ddim_steps, "eta": eta}})}
+    base = [("" if one else kinds[sm][0], *kinds[sm][1:]) for sm in add_samplers]
     out = list(base)
     if obj_attn:
         out += [(s_ + "_noobj", d_ + ", TẮT box vật", {**v_, "sample_kw": {**v_["sample_kw"], "use_objects": False}})
@@ -143,7 +148,7 @@ def add_variants(add_samplers, obj_attn=False, norefine=False):
     if norefine:
         out += [(s_ + "_norefine", d_ + ", BỎ refiner (concat: refined = x_t; post: ε̂ = ε̂₁ của U-Net; mid: bỏ nhánh chèn)",
                  {**v_, "sample_kw": {**v_["sample_kw"], "use_refiner": False}})
-                for s_, d_, v_ in base if v_["sampler"] == "mock"]
+                for s_, d_, v_ in base if v_["sampler"] in ("mock", "ddim")]
     return out
 
 
@@ -201,7 +206,8 @@ def main_add(a, cfg, ck, dev, t0):
         if "mock" in a.add_samplers and isinstance(model, BoxPolicy) and model.num_timesteps < 100:
             sys.exit(f"vòng mock 100 bước > T = {model.num_timesteps} của checkpoint")
         variants = add_variants(a.add_samplers, obj_attn=bool(cfg["model"].get("obj_attn")) and not paper,
-                                norefine=getattr(model, "refiner", None) is not None and model.noise_net is not None)
+                                norefine=getattr(model, "refiner", None) is not None and model.noise_net is not None,
+                                ddim_steps=a.ddim_steps, eta=a.eta)
     refine_vars = []
     if cfg["model"].get("arch") == "propose_refine" and not paper:
         for v in a.refine_t:
@@ -216,7 +222,8 @@ def main_add(a, cfg, ck, dev, t0):
         if cfg["model"].get("relation"):              # GAMMA3.1: giữ attention tới vật, bỏ Rel hình học
             refine_vars += [(s_ + "_norel", d_ + ", bỏ Rel", {**v_, "rel_bias": False}) for s_, d_, v_ in base]
     out = {"ckpt": a.ckpt, "iter": it, "split": a.split, "dataset": a.dataset, "n_samples": K, "density": {}, "results": {},
-           "prior": {}, "density_weight_ratio": dwr, "add_samplers": a.add_samplers, "proposer_sampler": a.proposer_sampler,
+           "prior": {}, "density_weight_ratio": dwr, "add_samplers": a.add_samplers,
+           **({"ddim_steps": a.ddim_steps, "eta": a.eta} if "ddim" in a.add_samplers else {}), "proposer_sampler": a.proposer_sampler,
            "amp": amp}
     if getattr(model, "obj_k", None) is not None:
         out.update(obj_k=model.obj_k, obj_select=model.obj_select)
@@ -341,9 +348,12 @@ def main():
     ap.add_argument("--refine-steps", type=int, default=1, help="GAMMA2: số bước DDIM của refine")
     ap.add_argument("--proposer-sampler", default="mock", choices=["ddpm", "mock"],
                     help="GAMMA2: sampler của CE-Loc — mặc định mock 100 bước như bài")
-    ap.add_argument("--add-samplers", nargs="+", default=["mock"], choices=["ddpm", "mock"],
+    ap.add_argument("--add-samplers", nargs="+", default=["mock"], choices=["ddpm", "mock", "ddim"],
                     help="GAMMA0 / GAMMA2 pha 1 / checkpoint của bài (U-Net 1D): mock (mặc định — vòng 100 bước của bài) và / hoặc "
-                         "ddpm (1000 bước đúng công thức)")
+                         "ddpm (1000 bước đúng công thức) và / hoặc ddim (sampler bản log-scale của tác giả — DELTA5: --ddim-steps bước "
+                         "cách đều, --eta, x̂0 kẹp [-1, 1])")
+    ap.add_argument("--ddim-steps", type=int, default=100, help="sampler ddim: số bước cách đều trên T (DELTA5: 100)")
+    ap.add_argument("--eta", type=float, default=1.0, help="sampler ddim: 1 = kiểu DDPM (tác giả, mặc định), 0 = DDIM tất định")
     ap.add_argument("--samples-root", default=None, help="GAMMA: ghi đè data.samples_root")
     ap.add_argument("--turn-index", default=None, help="GAMMA: ghi đè data.turn_index")
     ap.add_argument("--dataset", default="ce130", choices=["ce130", "cocount"],

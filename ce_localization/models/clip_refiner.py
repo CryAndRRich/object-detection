@@ -37,6 +37,7 @@ import torch.nn.functional as F
 from torchvision.ops import roi_align
 
 from ce_localization.models.unet1d import SinusoidalPosEmb
+from ce_localization.utils.box_coder import to_linear_unit
 
 __all__ = ["GROUPS", "CLIP_MEAN", "CLIP_STD", "DEFAULT_ATTENTION_FLOW", "REFINER_DEFAULTS", "apply_rope_2d", "BoxFourierEmb",
            "RefinerBlock", "ClipBoxRefiner", "load_clip", "weights_sha256", "refiner_config", "text_model_name",
@@ -56,10 +57,12 @@ DEFAULT_ATTENTION_FLOW = {
 # Mặc định trong CODE của tác giả (`BoxRefiner.__init__` + `ObjectPlacementPolicy`); config DELTA ghi tường minh mọi khoá.
 # `text_model_name` (thêm ở đây, DELTA2.x): CLIP text cho token chữ; None = cùng tên `clip_model_name` như tác giả.
 # `mid_aux_weight` (thêm ở đây, DELTA4.1 `unet_input: mid`): trọng số MSE(b, x0) của box giữa U-Net.
+# `aux_giou_weight` (bản log-scale của tác giả, DELTA5.x): loss phụ = aux_loss_weight · [MSE(refined, x0) + aux_giou_weight · (1 − GIoU)];
+# mặc định 0 = chỉ MSE (như mọi config cũ / tác giả khi thiếu khoá).
 REFINER_DEFAULTS = {
     'clip_model_name': 'openai/clip-vit-base-patch16', 'text_model_name': None, 'vision_layer': -2, 'd_model': 256,
     'num_layers': 4, 'num_heads': 8, 'mlp_ratio': 4.0, 'dropout': 0.0, 'rope_theta': 100.0, 'roi_size': 3, 'num_stages': 1,
-    'use_density': True, 'unet_input': 'concat', 'aux_loss_weight': 0.0, 'mid_aux_weight': 0.0,
+    'use_density': True, 'unet_input': 'concat', 'aux_loss_weight': 0.0, 'mid_aux_weight': 0.0, 'aux_giou_weight': 0.0,
     'attention_flow': DEFAULT_ATTENTION_FLOW,
 }
 
@@ -194,6 +197,7 @@ class ClipBoxRefiner(nn.Module):
     def __init__(self, cfg, vision_model, text_hidden):
         super().__init__()
         cfg = {**REFINER_DEFAULTS, **(cfg or {})}
+        self.box_coder = None                     # `BoxPolicy` đặt khi `model.box_coder` là log (thuộc tính thường, không vào state_dict)
         dim = cfg['d_model']
         num_heads = cfg['num_heads']
         num_layers = cfg['num_layers']
@@ -299,8 +303,10 @@ class ClipBoxRefiner(nn.Module):
         return {k: v.index_select(0, index) for k, v in ctx.items()}
 
     def _sample_tokens(self, box, img_map, roi_index=None):
-        """RoIAlign the box on the image token map. box: [R, 4] (cx, cy, w, h) in [-1, 1]; roi_index [R]: map ảnh của từng box
+        """RoIAlign the box on the image token map. box: [R, 4] (cx, cy, w, h) mã hoá theo `self.box_coder` (None / linear: [-1, 1];
+        log — DELTA5: giải mã về linear trước, như `BoxCoder.decode(box, g)` của bản log-scale); roi_index [R]: map ảnh của từng box
         (None = box i ↔ ảnh i, như tác giả)."""
+        box = to_linear_unit(box, self.box_coder)
         B, g, k = box.shape[0], self.grid, self.roi_size
         # [-1, 1] -> patch-grid units; clamp because noisy samples can be anywhere
         cx = ((box[:, 0] + 1) / 2 * g).clamp(0, g)

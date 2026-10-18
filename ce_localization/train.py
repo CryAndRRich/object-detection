@@ -80,7 +80,7 @@ LOG_LABEL = {"loss_ce": "ce", "loss_bbox": "l1", "loss_giou": "giou", "iou_match
 # ε₁ = ε-MSE của U-Net trước refiner, |Δ| = TB |Δε|, ε/ε₁ < 1 ⇒ refiner có ích
 # DELTA4.1 (`mid`): mid = MSE(b, x0) của box giữa U-Net, |Δ| = TB |refined − b|, aux/mid < 1 ⇒ refiner sửa tốt hơn đoán của U-Net
 EXTRA_LOG = {"loss_eps": "ε", "loss_eps1": "ε₁", "loss_aux": "aux", "loss_mid": "mid", "delta_abs": "|Δ|", "aux_ratio": "aux/x_t",
-             "eps_ratio": "ε/ε₁", "mid_ratio": "aux/mid"}
+             "eps_ratio": "ε/ε₁", "mid_ratio": "aux/mid", "loss_giou": "1−GIoU"}
 
 
 def config_diff(saved, cfg):
@@ -270,7 +270,8 @@ def _step_loss(net, crit, batch, text_table, cfg, model, gen, dev):
             geo = ({"objects": batch["objects"]} if m_.get("geo") or m_.get("relation")
                    or m_.get("proposer", {}).get("obj_attn") else {})            # GAMMA3 / 3.1 / 4.1: box vật đang có
             return net(batch["images"], text, batch["valid_hw"], batch["target"], batch["whwh"], k=k, generator=gen, **geo)
-        x0 = boxes_to_unit(batch["target"], norm_whwh(model, batch["whwh"], batch["images"].shape[-1]))  # GAMMA0: ε-MSE
+        x0 = boxes_to_unit(batch["target"], norm_whwh(model, batch["whwh"], batch["images"].shape[-1]),  # GAMMA0: ε-MSE
+                           getattr(model, "box_coder", None))                                          # DELTA5: log
         obj = {"objects": batch["objects"]} if cfg["model"].get("obj_attn") else {}      # GAMMA4: box vật đang có
         if getattr(model, "needs_text_tokens", False):                                   # DELTA: token chữ CLIP cho refiner
             obj["text_tokens"] = text_table.tokens(batch["text"], dev)

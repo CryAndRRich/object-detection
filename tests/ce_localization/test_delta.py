@@ -1,6 +1,7 @@
 """DELTA (docs/EXPERIMENT_DELTA.md): BoxRefiner của tác giả gốc trong CE-Loc (`models/clip_refiner.py`, `models/box_policy.py`) —
 DELTA1 / 1.1 (mục 4–8), DELTA2.x (đổi CLIP-ViT của refiner, mục 9.1), DELTA3 (refiner không U-Net, mục 9.2), DELTA4 (GAMMA4 + refiner,
-mục 10.1), DELTA3.1 / 3.2 (refiner sau U-Net, sửa ε, mục 10.2), DELTA4.1 (refiner chèn giữa U-Net, mục 10.6).
+mục 10.1), DELTA3.1 / 3.2 (refiner sau U-Net, sửa ε, mục 10.2), DELTA4.1 (refiner chèn giữa U-Net, mục 10.6), DELTA5.x (box mã hoá
+log + GIoU + sampler của bản log-scale tác giả, mục 11 — đối chiếu bản sao nguyên văn `refs/CE-Loc-logScale/`).
 
 Tham chiếu: bản sao NGUYÊN VĂN `BoxRefiner.forward` / `_sample_tokens` / `_attn_mask` / `RefinerBlock.forward` / `apply_rope_2d` của
 `refs/CE-Loc-update/models/box_refiner.py` (chép vào đây — không import refs), chạy trên CÙNG tham số của `ClipBoxRefiner`. CLIP ViT thay
@@ -748,6 +749,197 @@ def test_delta4_delta3x_configs():
         assert d == b
 
 
+# ----------------------------------------------------------------------------- DELTA5.x: bản log-scale của tác giả
+
+class _AuthorBoxCoder:
+    """`BoxCoder` nguyên văn của `refs/CE-Loc-logScale/utils/normalization.py` (chỉ phần encode / decode)."""
+    def __init__(self, cfg=None):
+        import math
+        cfg = cfg or {}
+        self.type = cfg.get('type', 'linear')
+        self.min_size_ratio = cfg.get('min_size_ratio', 1 / 128)
+        self.log_min = math.log(self.min_size_ratio)
+
+    def encode(self, box, canvas_size):
+        cw, ch = float(canvas_size), float(canvas_size)
+        scale = box.new_tensor([cw, ch, cw, ch])
+        rel = box / scale
+        out = rel * 2 - 1
+        if self.type == 'log':
+            size = rel[..., 2:].clamp(min=self.min_size_ratio).log()
+            out = torch.cat([out[..., :2], (size - self.log_min) / -self.log_min * 2 - 1], dim=-1)
+        return out
+
+    def decode(self, box, canvas_size=1.0):
+        cw, ch = float(canvas_size), float(canvas_size)
+        scale = box.new_tensor([cw, ch, cw, ch])
+        rel = (box + 1) / 2
+        if self.type == 'log':
+            size = ((box[..., 2:].clamp(-5, 5) + 1) / 2 * -self.log_min + self.log_min).exp()
+            rel = torch.cat([rel[..., :2], size], dim=-1)
+        return rel * scale
+
+
+def _author_cxcywh_to_xyxy(box):
+    cx, cy = box[..., 0], box[..., 1]
+    w, h = box[..., 2].clamp(min=0), box[..., 3].clamp(min=0)
+    return torch.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], dim=-1)
+
+
+def _author_giou(box1, box2):
+    a, b = _author_cxcywh_to_xyxy(box1), _author_cxcywh_to_xyxy(box2)
+    iw = (torch.minimum(a[..., 2], b[..., 2]) - torch.maximum(a[..., 0], b[..., 0])).clamp(min=0)
+    ih = (torch.minimum(a[..., 3], b[..., 3]) - torch.maximum(a[..., 1], b[..., 1])).clamp(min=0)
+    inter = iw * ih
+    area_a = (a[..., 2] - a[..., 0]) * (a[..., 3] - a[..., 1])
+    area_b = (b[..., 2] - b[..., 0]) * (b[..., 3] - b[..., 1])
+    union = area_a + area_b - inter
+    iou = inter / (union + 1e-6)
+    ew = torch.maximum(a[..., 2], b[..., 2]) - torch.minimum(a[..., 0], b[..., 0])
+    eh = torch.maximum(a[..., 3], b[..., 3]) - torch.minimum(a[..., 1], b[..., 1])
+    enclose = ew * eh
+    return iou - (enclose - union) / (enclose + 1e-6)
+
+
+def _author_sample(predict, alphas_cumprod, num_timesteps, B, device, num_inference_steps=None, eta=1.0, clip_sample=True,
+                   generator=None):
+    """Vòng `ObjectPlacementPolicy.sample` nguyên văn (predict(box, t_batch) thay `self.predict_noise(box, t_batch, cond)[0]`)."""
+    steps = num_inference_steps or num_timesteps
+    timesteps = torch.linspace(num_timesteps - 1, 0, steps, device=device).round().long().unique_consecutive()
+    box = torch.randn((B, 4), device=device, generator=generator)
+    for i, t in enumerate(timesteps):
+        t_batch = t.expand(B)
+        eps = predict(box, t_batch)
+        ab_t = alphas_cumprod[t]
+        ab_prev = alphas_cumprod[timesteps[i + 1]] if i + 1 < len(timesteps) else box.new_tensor(1.0)
+        x0 = (box - (1 - ab_t).sqrt() * eps) / ab_t.sqrt()
+        if clip_sample:
+            x0 = x0.clamp(-1, 1)
+            eps = (box - ab_t.sqrt() * x0) / (1 - ab_t).sqrt()
+        sigma = eta * ((1 - ab_prev) / (1 - ab_t) * (1 - ab_t / ab_prev)).sqrt()
+        box = ab_prev.sqrt() * x0 + (1 - ab_prev - sigma ** 2).clamp(min=0).sqrt() * eps
+        if i + 1 < len(timesteps):
+            box = box + sigma * torch.randn(box.shape, device=device, generator=generator)
+    return box
+
+
+LOG = {"type": "log", "min_size_ratio": 1 / 128}
+
+
+def test_box_coder_matches_author():
+    """`boxes_to_unit` / `unit_to_boxes` với coder log == `BoxCoder` của tác giả; ví dụ README (5 / 10 / 50 % canvas -> −0,23 / 0,05 /
+    0,71); giải mã luôn cạnh > 0 kể cả nhiễu lớn; linear (None / dict) trùng hàm cũ TỪNG BIT, `to_linear_unit` trả chính tensor."""
+    from ce_localization.models.box_policy import boxes_to_unit, unit_to_boxes
+    from ce_localization.utils.box_coder import box_coder_config, to_linear_unit
+    g = torch.Generator().manual_seed(0)
+    cxcy = torch.rand(50, 2, generator=g) * 512
+    wh = torch.exp(torch.empty(50, 2).uniform_(np.log(2), np.log(500), generator=g))           # 2 px .. 500 px (có cạnh < 4 px)
+    cxcywh = torch.cat([cxcy, wh], -1).double()
+    xyxy = torch.cat([cxcywh[:, :2] - cxcywh[:, 2:] / 2, cxcywh[:, :2] + cxcywh[:, 2:] / 2], -1)
+    canvas = torch.full((4,), 512.0, dtype=torch.float64)
+    for cfg in (LOG, {"type": "linear"}):
+        coder, ref = box_coder_config(cfg), _AuthorBoxCoder(cfg)
+        u = boxes_to_unit(xyxy, canvas, coder)
+        assert torch.allclose(u, ref.encode(cxcywh, 512), atol=1e-12)
+        noisy = u + torch.randn(u.shape, generator=g, dtype=torch.float64) * 3
+        assert torch.allclose(unit_to_boxes(noisy, canvas, coder), _author_cxcywh_to_xyxy(ref.decode(noisy, 512)) if cfg is LOG
+                              else unit_to_boxes(noisy, canvas), atol=1e-9)
+    ex = torch.tensor([[256.0, 256.0, 0.05 * 512, 0.10 * 512], [256.0, 256.0, 0.5 * 512, 0.5 * 512]], dtype=torch.float64)
+    u = boxes_to_unit(torch.cat([ex[:, :2] - ex[:, 2:] / 2, ex[:, :2] + ex[:, 2:] / 2], -1), canvas, box_coder_config(LOG))
+    assert np.allclose(u[:, 2:].numpy(), [[-0.23, 0.05], [0.71, 0.71]], atol=0.01)
+    from ce_localization.utils.box_coder import unit_fraction
+    assert (unit_fraction(torch.randn(1000, 4, generator=g) * 10, box_coder_config(LOG))[:, 2:] > 0).all()   # cạnh luôn > 0
+    lin = box_coder_config(None)
+    assert torch.equal(boxes_to_unit(xyxy, canvas, lin), boxes_to_unit(xyxy, canvas)) and to_linear_unit(u, lin) is u
+    with pytest.raises(ValueError, match="box_coder"):
+        box_coder_config({"type": "sqrt"})
+
+
+def test_refiner_roialign_decodes_log_box():
+    """Refiner với coder log: RoIAlign trên box log == refiner linear trên box đã giải mã (y `BoxCoder.decode(box, g)` của tác giả);
+    embedding Fourier vẫn đọc box mã hoá (tác giả không đổi chỗ này)."""
+    from ce_localization.utils.box_coder import box_coder_config, to_linear_unit
+    r = _refiner(dtype=torch.float64)
+    ctx = _ctx(r)
+    g = torch.Generator().manual_seed(3)
+    box = torch.rand(2, 4, generator=g, dtype=torch.float64) * 2 - 1
+    tok_lin, pos_lin = r._sample_tokens(to_linear_unit(box, box_coder_config(LOG)), ctx["image_map"])
+    r.box_coder = box_coder_config(LOG)
+    tok_log, pos_log = r._sample_tokens(box, ctx["image_map"])
+    assert torch.equal(tok_lin, tok_log) and torch.equal(pos_lin, pos_log)
+    grid = _AuthorBoxCoder(LOG).decode(box, r.grid)
+    x1 = grid[:, 0].clamp(0, r.grid) - grid[:, 2].clamp(0.5, r.grid) / 2
+    assert torch.allclose(pos_log[:, 0, 0], x1 + (grid[:, 2].clamp(0.5, r.grid) / r.roi_size) / 2, atol=1e-9)
+
+
+@pytest.mark.parametrize("steps,eta,clip", [(None, 1.0, True), (7, 1.0, True), (7, 0.0, True), (5, 0.5, False)])
+def test_ddim_sample_matches_author(steps, eta, clip):
+    """`ddim_sample` == vòng `sample` của tác giả (cùng generator): đủ T bước / cách đều, eta 1 / 0 / 0,5, có / không kẹp x̂0."""
+    from ce_localization.models.box_policy import ddim_sample
+    from ce_localization.utils.diffusion_math import linear_alphas_cumprod
+    ab = linear_alphas_cumprod(20)
+    W = torch.randn(4, 4, generator=torch.Generator().manual_seed(1))
+
+    def fn(x, t):
+        return torch.tanh(x @ W) * (1 + t[:, None].float() / 20)
+    ours = ddim_sample(fn, 6, ab, ddim_steps=steps, eta=eta, clip_sample=clip, generator=torch.Generator().manual_seed(5))
+    ref = _author_sample(fn, ab, 20, 6, "cpu", steps, eta, clip, generator=torch.Generator().manual_seed(5))
+    assert torch.allclose(ours, ref, atol=1e-6)
+    x, traj = ddim_sample(fn, 6, ab, ddim_steps=steps, eta=eta, clip_sample=clip, generator=torch.Generator().manual_seed(5),
+                          record="all")
+    assert torch.equal(x, ours) and len(traj) == (steps or 20) and traj[0]["t"] == 19 and traj[-1]["t"] == 0
+
+
+def test_delta5_aux_giou_and_log_targets():
+    """DELTA5.x: loss = ε + 0,1·[MSE(refined, x0) + w·(1 − GIoU)], GIoU == `generalized_box_iou` của tác giả trên box giải mã;
+    stats có `loss_giou`; mọi tham số có grad; box vật mã hoá cùng coder log; sampler ddim chạy; post + GIoU bị chặn."""
+    m = _off_identity(_policy(refiner={**AUTHOR_REFINER, "aux_giou_weight": 0.5}, obj_attn=True, box_coder=LOG)).train()
+    assert m.refiner.box_coder == m.box_coder and m.box_coder["type"] == "log"
+    x, text, vhw, x0, tok = _batch()
+    loss = m(x, text, vhw, x0, k=2, generator=torch.Generator().manual_seed(4), objects=OBJS, text_tokens=tok)
+    st = m.pop_stats()
+    assert torch.allclose(loss, st["loss_eps"] + 0.1 * (st["loss_aux"] + 0.5 * st["loss_giou"]), atol=1e-6)
+    loss.backward()
+    assert [n for n, p in m.named_parameters() if p.requires_grad and p.grad is None] == []
+    from ce_localization.models.box_policy import boxes_to_unit
+    from ce_localization.utils.box_coder import generalized_box_iou_cxcywh, unit_fraction
+    with torch.no_grad():
+        cond = m.condition(x, text, vhw)
+        _, _, units = m.object_tokens(OBJS, 128, cond)
+        assert torch.allclose(units[1, :1], boxes_to_unit(OBJS[1], torch.full((4,), 128.0), m.box_coder))
+        a, b = torch.rand(9, 4) * 2 - 1, torch.rand(9, 4) * 2 - 1
+        dec = _AuthorBoxCoder(LOG)
+        assert torch.allclose(generalized_box_iou_cxcywh(unit_fraction(a, m.box_coder), unit_fraction(b, m.box_coder)),
+                              _author_giou(dec.decode(a), dec.decode(b)), atol=1e-6)
+        m.eval()
+        out = m.sample(x, text, vhw, 3, generator=torch.Generator().manual_seed(0), sampler="ddim", ddim_steps=5, objects=OBJS,
+                       text_tokens=tok)
+        assert out.shape == (2, 3, 4) and torch.isfinite(out).all()
+        with pytest.raises(ValueError, match="sampler"):
+            m.sample(x, text, vhw, 1, sampler="dpm", objects=OBJS, text_tokens=tok)
+    with pytest.raises(ValueError, match="aux_giou_weight"):
+        _policy(refiner={**POST, "aux_giou_weight": 0.1})
+
+
+def test_delta5_configs():
+    """delta5 = delta4 + `model.box_coder` log (1/128) + `aux_giou_weight` 0 + val bằng sampler ddim của tác giả (100 bước, eta 1);
+    delta5_1 / 5_2 chỉ khác `aux_giou_weight` 0,1 / 0,5."""
+    load = lambda k: yaml.safe_load(open(CFG_G[k]))  # noqa: E731
+    d4, d5 = load("delta4"), load("delta5")
+    assert d5["model"].pop("box_coder") == {"type": "log", "min_size_ratio": 1 / 128}
+    assert d5["model"]["refiner"].pop("aux_giou_weight") == 0.0
+    assert d5["eval"].pop("sample_kw") == {"sampler": "ddim", "ddim_steps": 100, "eta": 1.0} and d4["eval"].pop("sample_kw")
+    for x in (d4, d5):
+        x.pop("experiment"), x.pop("description")
+    assert d4 == d5
+    for kind, w in (("delta5_1", 0.1), ("delta5_2", 0.5)):
+        d, b = load(kind), load("delta5")
+        assert d["model"]["refiner"].pop("aux_giou_weight") == w and b["model"]["refiner"].pop("aux_giou_weight") == 0.0
+        for x in (d, b):
+            x.pop("experiment"), x.pop("description")
+        assert d == b
+
+
 # ----------------------------------------------------------------------------- config, eval, train trọn luồng
 
 def test_delta_configs_only_add_refiner():
@@ -770,6 +962,10 @@ def test_eval_add_variants_naming():
     assert keys(v) == ["", "_norefine"] and v[1][2] == {"sampler": "mock", "sample_kw": {"use_refiner": False}}
     assert keys(add_variants(["mock", "ddpm"], norefine=True)) == ["_mock", "_ddpm", "_mock_norefine"]
     assert keys(add_variants(["mock"], obj_attn=True, norefine=True)) == ["", "_noobj", "_norefine"]     # DELTA4 / 3.2
+    v = add_variants(["ddim"], obj_attn=True, norefine=True, ddim_steps=100, eta=1.0)                    # DELTA5
+    assert keys(v) == ["", "_noobj", "_norefine"] and v[0][2] == {"sampler": "ddim", "sample_kw": {"ddim_steps": 100, "eta": 1.0}}
+    assert v[2][2]["sample_kw"] == {"ddim_steps": 100, "eta": 1.0, "use_refiner": False}
+    assert keys(add_variants(["mock", "ddim"], norefine=True)) == ["_mock", "_ddim", "_mock_norefine", "_ddim_norefine"]
     o = add_variants(["mock", "ddpm"], obj_attn=True)
     assert keys(o) == ["_mock", "_ddpm", "_mock_noobj", "_ddpm_noobj"] and o[3][2] == {"sampler": "ddpm",
                                                                                          "sample_kw": {"use_objects": False}}
@@ -796,7 +992,7 @@ def _eval(monkeypatch, ck, out, extra=(), clip_seed=0):
         return json.load(f)
 
 
-@pytest.mark.parametrize("kind", ["delta4", "delta3", "delta3_2", "delta4_1"])   # refiner trước U-Net / không U-Net / sau U-Net / giữa
+@pytest.mark.parametrize("kind", ["delta4", "delta3", "delta3_2", "delta4_1", "delta5_2"])   # refiner trước / không U-Net / sau / giữa / log
 def test_full_flow_delta_train_resume_eval(tmp_path, monkeypatch, kind):
     """DELTA4 / 3 / 3.2 / 4.1 thu nhỏ (refiner kích thước thật, CLIP giả, T = 100 cho vòng mock) — bốn đường mã của refiner (`concat` +
     box vật, `none`, `post` + box vật, `mid` + box vật): DELTA4 train 2 + --resume tới 4 == train liền 4 (mọi tensor kể cả `clip_sha`), các
@@ -828,13 +1024,14 @@ def test_full_flow_delta_train_resume_eval(tmp_path, monkeypatch, kind):
     post = kind.startswith("delta3_")
     want_log = ({"loss_eps", "loss_eps1", "delta_abs", "eps_ratio", "refiner_gates"} if post else
                 {"loss_aux", "delta_abs", "aux_ratio", "refiner_gates"} | ({"loss_eps"} if kind != "delta3" else set())
-                | ({"loss_mid", "mid_ratio"} if kind == "delta4_1" else set()))
+                | ({"loss_mid", "mid_ratio"} if kind == "delta4_1" else set()) | ({"loss_giou"} if kind == "delta5_2" else set()))
     assert all(want_log <= set(h) for h in logs) and (kind != "delta3" or not any("loss_eps" in h for h in logs))
     assert not post or not any("loss_aux" in h for h in logs)
     assert (kind == "delta4_1") == ("mid_in.weight" in kb["model"]) and (kind != "delta4_1" or float(kb["model"]["mid_in.weight"]
                                                                                                     .abs().sum()) > 0)
     res = _eval(monkeypatch, os.path.join(b, "best.pth"), str(tmp_path / "res.json"),
-                ["--add-samplers", "mock", "--dump-boxes", str(tmp_path / "boxes.json")])
+                ["--add-samplers", "ddim" if kind == "delta5_2" else "mock", "--dump-boxes", str(tmp_path / "boxes.json")])
+    assert kind != "delta5_2" or (res["add_samplers"] == ["ddim"] and res["ddim_steps"] == 100 and res["eta"] == 1.0)
     want = {"inpainted", "original"} | (set() if kind == "delta3" else {"inpainted_norefine", "original_norefine"})
     want |= {"inpainted_noobj", "original_noobj"} if cfg["model"].get("obj_attn") else set()
     assert set(res["results"]) == want
@@ -923,7 +1120,7 @@ def _ddp_worker_delta(rank, world, port, argv):
     _ddp_worker_strict(rank, world, port, argv, None)
 
 
-@pytest.mark.parametrize("kind", ["delta4", "delta3_2", "delta4_1"])
+@pytest.mark.parametrize("kind", ["delta4", "delta3_2", "delta4_1", "delta5_2"])
 def test_ddp_delta_no_find_unused(tmp_path, kind):
     """DELTA trên 2 tiến trình gloo, DDP KHÔNG find_unused + gradient_as_bucket_view: tham số nào thiếu grad hay lệch stride thì lỗi
     ngay; loss hữu hạn, đủ iter."""

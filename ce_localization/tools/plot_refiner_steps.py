@@ -319,10 +319,10 @@ def main():
                     u, traj = model.sample(xb, text, vhw, 1, generator=g, sampler=a.sampler, record="all",
                                            text_tokens=table.tokens([cls], dev) if refiner else None)
                 steps = [{"t": s["t"], "x": s["x_t"],
-                          "x0": sorted_box(unit_to_boxes(s["x0_hat"][0, 0], canvas).numpy())} for s in traj]
+                          "x0": sorted_box(unit_to_boxes(s["x0_hat"][0, 0], canvas, getattr(model, "box_coder", None)).numpy())} for s in traj]
                 if refiner:                                                      # box refiner đề xuất ở từng bước + TB |Δ| (đơn vị box)
                     for st, s in zip(steps, traj):
-                        st["refined"] = sorted_box(unit_to_boxes(s["refined"][0, 0], canvas).numpy())
+                        st["refined"] = sorted_box(unit_to_boxes(s["refined"][0, 0], canvas, getattr(model, "box_coder", None)).numpy())
                         st["delta"] = float((s["refined"][0, 0] - s["x_t"][0, 0].float()).abs().mean())
             elif a.mode == "stages":                                               # MỘT lượt ở t = --stage-t: 6 tầng
                 _, steps = model.sample(xb, text, vhw, 1, generator=g, steps=1, return_stages=True, t_start=a.stage_t)

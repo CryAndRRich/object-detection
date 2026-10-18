@@ -277,7 +277,7 @@ def main():
             _, traj = model.sample(x[None].to(dev), texts([c["text"]], dev), torch.tensor([[nh, nw]], device=dev), 1,
                                    generator=gen, sampler=s, record="all", null_text=c["text"] == "<zero>")
             steps = [st["t"] for st in traj]
-            boxes = np.stack([unit_to_boxes(st[key][0, 0].to(dev), whwh[0]).cpu().numpy() for st in traj])   # [S,4]
+            boxes = np.stack([unit_to_boxes(st[key][0, 0].to(dev), whwh[0], getattr(model, "box_coder", None)).cpu().numpy() for st in traj])   # [S,4]
             shown = {"<empty>": '"" (empty string)', "<zero>": "none (text embedding = 0)"}.get(c["text"], f"'{c['text']}'")
             orig = a.image == "original"
             title = (f"{s} | {c['name']}: {c['file']} ({a.image} image) | text {shown} (true class '{ann['class']}') | "

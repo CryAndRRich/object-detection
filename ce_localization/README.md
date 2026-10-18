@@ -33,6 +33,7 @@ DELTA (`model.refiner`, `models/clip_refiner.py`): BoxRefiner của tác giả g
 - `none`: không có U-Net, refiner là cả mạng khử nhiễu (DELTA3);
 - `post`: U-Net trước, refiner nhìn x̂0 của U-Net rồi sửa ε (DELTA3.1 / 3.2).
 - `mid`: refiner chèn giữa U-Net ở vị trí mid: Linear h → box b (giám sát về x0, `mid_aux_weight`) → refiner → Linear về h (DELTA4.1).
+- `model.box_coder: log` (DELTA5.x, `utils/box_coder.py`, bản log-scale của tác giả): w, h trên thang log; `refiner.aux_giou_weight`: GIoU trong loss phụ; sampler `ddim` (`eval.py --add-samplers ddim --ddim-steps 100 --eta 1`).
 
 Kết hợp được với `obj_attn` (DELTA4): luồng vật vào U-Net 8 kênh dưới dạng `[o ; o]`.
 GAMMA1 (`model.arch: box_refiner`, `models/box_refiner.py`): cùng điều kiện nhưng là memory `[t ; text ; SpatialSoftmax C5]`;
@@ -89,6 +90,7 @@ Code soi SpatialSoftmax (`celoc_paper/`, `tools/inspect_*spatial_softmax.py`, TN
 | `delta/delta4.yaml` | `gamma4` (box attention tới mọi vật) + refiner của `delta2_1` (CLIP ViT-B/32, text B/16) trước U-Net; luồng vật `[o ; o]` | 〃 mục 10.1 |
 | `delta/delta3_1.yaml` / `delta3_2.yaml` | `delta2_1` / `delta4` với `refiner.unet_input: post`: U-Net trước, refiner sửa ε, loss = MSE(ε̂, ε) + 1·MSE(ε̂₁, ε) | 〃 mục 10.2 |
 | `delta/delta4_1.yaml` | `delta4` với `refiner.unet_input: mid` + `mid_aux_weight: 0.1`: refiner chèn giữa U-Net, loss = ε + 0,1·MSE(refined, x0) + 0,1·MSE(b, x0) | 〃 mục 10.6 |
+| `delta/delta5.yaml` / `delta5_1.yaml` / `delta5_2.yaml` | `delta4` + `model.box_coder: log` + val bằng sampler ddim của tác giả; `aux_giou_weight` 0 / 0,1 / 0,5 | 〃 mục 11 |
 
 ## Chạy
 

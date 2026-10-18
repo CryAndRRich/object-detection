@@ -30,6 +30,9 @@ DELTA — bản CE-Loc cập nhật của tác giả gốc (`refs/CE-Loc-update/
   MSE(b, x0) (b = U-Net đoán box giữa chừng). Bỏ refiner (`_norefine`) = bỏ nhánh chèn (ngoài phân bố train).
 - refiner + `obj_attn` (DELTA4 / 3.2 / 4.1): như GAMMA4; U-Net 8 kênh (`concat`) thì box vật mã hoá gương dưới dạng `[o ; o]` (refined
   của box sạch = chính nó); `mid`: box vật KHÔNG qua nhánh chèn.
+- DELTA5.x (mục 11, bản log-scale của tác giả `refs/CE-Loc-logScale/`): `box_coder` (`utils/box_coder.py`: linear | log — w, h trên
+  thang log) áp cho box đích, box vật, RoIAlign của refiner, giải mã khi eval; loss phụ thêm `aux_giou_weight` · (1 − GIoU) trên box
+  đã giải mã; sampler `ddim` của tác giả (`ddim_sample`: x̂0 kẹp [−1, 1], `eta`, `ddim_steps` bước cách đều trên T).
 - `use_condition: false` (DELTA1.1): điều kiện ảnh + text = 0 (embedding t giữ), refiner bỏ qua (refined = x_t), aux tắt — như tác giả.
   Ở đây refiner không được dựng và `vision` / `text_proj` đóng băng (không ai đọc) ⇒ mọi tham số train vẫn có grad (DDP không find_unused).
 
@@ -40,6 +43,7 @@ ngẫu nhiên chọn TRƯỚC khi mã hoá — train rút lại mỗi lần, eva
 """
 
 import zlib
+from functools import partial
 
 import torch
 import torch.nn as nn
@@ -51,15 +55,18 @@ from ce_localization.models.backbone import ResNet50FPN
 from ce_localization.models.geo import pad_objects
 from ce_localization.models.memory import valid_cells_mask
 from ce_localization.models.unet1d import ConditionalUnet1D
+from ce_localization.utils.box_coder import (box_coder_config, encode_rel, generalized_box_iou_cxcywh, is_log, to_linear_unit,
+                                             unit_fraction)
 from ce_localization.utils.diffusion_math import (linear_alphas_cumprod, predict_noise_from_start, predict_start_from_noise,
                                                   q_sample)
 
 __all__ = ["BoxPolicy", "PaperVisionEncoder", "boxes_to_unit", "unit_to_boxes", "norm_whwh", "ddpm_sample", "mock_sample",
-           "paper_spatial_softmax", "nearest_mask", "VISIONS", "UNET_INPUTS", "OBJ_SELECTS"]
+           "ddim_sample", "paper_spatial_softmax", "nearest_mask", "VISIONS", "UNET_INPUTS", "OBJ_SELECTS", "SAMPLERS"]
 
 VISIONS = ("r50_fpn", "r18_paper")
 UNET_INPUTS = ("concat", "none", "post", "mid")   # DELTA: U-Net nhận [x_t ; refined] | không U-Net | refiner sửa ε sau U-Net | chèn giữa
 OBJ_SELECTS = ("nearest", "random")          # GAMMA4.0.x: cách chọn `obj_k` vật vào cross-attn
+SAMPLERS = ("ddpm", "mock", "ddim")           # DDPM T bước | vòng mock của bài | DDIM / DDPM có kẹp của bản log-scale (DELTA5)
 
 C5_STRIDE = 32
 C5_CHANNELS = 2048
@@ -71,18 +78,19 @@ def norm_whwh(model, whwh, canvas):
     return torch.full_like(whwh, float(canvas)) if getattr(model, "box_norm", "valid") == "canvas" else whwh
 
 
-def boxes_to_unit(boxes_xyxy, whwh):
-    """xyxy pixel canvas [...,4] + whwh [...,4] (nw, nh, nw, nh) -> cxcywh/(nw,nh) ·2 − 1."""
+def boxes_to_unit(boxes_xyxy, whwh, coder=None):
+    """xyxy pixel canvas [...,4] + whwh [...,4] (nw, nh, nw, nh) -> cxcywh/(nw,nh) ·2 − 1 (`coder` log — DELTA5: w, h trên thang log,
+    `utils/box_coder.py`)."""
     b = boxes_xyxy / whwh
     c = torch.stack([(b[..., 0] + b[..., 2]) / 2, (b[..., 1] + b[..., 3]) / 2,
                      b[..., 2] - b[..., 0], b[..., 3] - b[..., 1]], dim=-1)
-    return c * 2 - 1
+    return encode_rel(c, coder)
 
 
-def unit_to_boxes(u, whwh):
-    """Ngược `boxes_to_unit`: [...,4] trong [−1,1] -> xyxy pixel canvas. KHÔNG kẹp (w, h âm giữ nguyên để
-    đo tỉ lệ box suy biến; IoU tự kẹp w, h về 0)."""
-    c = (u + 1) / 2
+def unit_to_boxes(u, whwh, coder=None):
+    """Ngược `boxes_to_unit`: [...,4] mã hoá -> xyxy pixel canvas. KHÔNG kẹp (linear: w, h âm giữ nguyên để
+    đo tỉ lệ box suy biến; IoU tự kẹp w, h về 0. log: w, h luôn > 0)."""
+    c = (to_linear_unit(u, coder) + 1) / 2
     xyxy = torch.stack([c[..., 0] - c[..., 2] / 2, c[..., 1] - c[..., 3] / 2,
                         c[..., 0] + c[..., 2] / 2, c[..., 1] + c[..., 3] / 2], dim=-1)
     return xyxy * whwh
@@ -124,6 +132,35 @@ def ddpm_sample(eps_fn, n_rows, alphas_cumprod, generator=None, device="cpu", re
             x = mean + torch.sqrt(var) * torch.randn(x.shape, device=device, generator=generator)
         else:
             x = mean
+    return x if traj is None else (x, traj)
+
+
+@torch.no_grad()
+def ddim_sample(eps_fn, n_rows, alphas_cumprod, ddim_steps=None, eta=1.0, clip_sample=True, generator=None, device="cpu",
+                record=None):
+    """`ObjectPlacementPolicy.sample` của bản log-scale tác giả (`refs/CE-Loc-logScale/models/diffusion_module.py`, viết lại đúng phép
+    tính — có test so bản sao nguyên văn): `ddim_steps` bước cách đều T−1 -> 0 (None = đủ T bước), mỗi bước x̂0 = (x − √(1−ᾱ)ε̂)/√ᾱ, kẹp
+    [−1, 1] (`clip_sample`) rồi suy lại ε̂; σ = eta·√((1−ᾱ_prev)/(1−ᾱ)·(1−ᾱ/ᾱ_prev)); x ← √ᾱ_prev·x̂0 + √(1−ᾱ_prev−σ²)·ε̂ (+ σ·z trừ
+    bước cuối). eta 1 ≈ DDPM, 0 = DDIM tất định. -> x0 [R,4]; `record` -> (x0, quỹ đạo)."""
+    ab = alphas_cumprod.to(device)
+    T = ab.shape[0]
+    timesteps = torch.linspace(T - 1, 0, ddim_steps or T, device=device).round().long().unique_consecutive()
+    traj = [] if record is not None else None
+    x = torch.randn((n_rows, 4), device=device, generator=generator)
+    for i, t in enumerate(timesteps):
+        tb = t.expand(n_rows)
+        eps = eps_fn(x, tb)
+        ab_t = ab[t]
+        _snap(traj, record, int(t), x, eps, ab_t)
+        ab_prev = ab[timesteps[i + 1]] if i + 1 < len(timesteps) else x.new_tensor(1.0)
+        x0 = (x - (1 - ab_t).sqrt() * eps) / ab_t.sqrt()
+        if clip_sample:
+            x0 = x0.clamp(-1, 1)
+            eps = (x - ab_t.sqrt() * x0) / (1 - ab_t).sqrt()
+        sigma = eta * ((1 - ab_prev) / (1 - ab_t) * (1 - ab_t / ab_prev)).sqrt()
+        x = ab_prev.sqrt() * x0 + (1 - ab_prev - sigma ** 2).clamp(min=0).sqrt() * eps
+        if i + 1 < len(timesteps):
+            x = x + sigma * torch.randn(x.shape, device=device, generator=generator)
     return x if traj is None else (x, traj)
 
 
@@ -213,12 +250,15 @@ class BoxPolicy(nn.Module):
     def __init__(self, in_channels=3, pretrained_backbone=True, fpn_dim=256, vis_dim=128, text_in=512,
                  text_dim=128, step_embed_dim=256, down_dims=(64, 128, 256), kernel_size=3, n_groups=8,
                  num_timesteps=1000, beta_start=1e-4, beta_end=0.02, vision="r50_fpn", ss_mask=False,
-                 obj_attn=False, obj_heads=4, obj_max=300, obj_k=None, obj_select="nearest", refiner=None, use_condition=True):
+                 obj_attn=False, obj_heads=4, obj_max=300, obj_k=None, obj_select="nearest", refiner=None, use_condition=True,
+                 box_coder=None):
         super().__init__()
         rcfg = clip_refiner.refiner_config(refiner)
         self.use_refiner, self.use_condition = rcfg is not None, bool(use_condition)
         self.refiner_aux_weight = float(rcfg["aux_loss_weight"]) if rcfg else 0.0
         self.mid_aux_weight = float(rcfg["mid_aux_weight"]) if rcfg else 0.0
+        self.aux_giou_weight = float(rcfg["aux_giou_weight"]) if rcfg else 0.0
+        self.box_coder = box_coder_config(box_coder)            # DELTA5: log; mọi config cũ: linear (trùng từng bit)
         unet_input = rcfg["unet_input"] if rcfg else None
         self.box_norm = "canvas"
         if rcfg:
@@ -238,6 +278,8 @@ class BoxPolicy(nn.Module):
                 raise ValueError("refiner.unet_input mid cần use_condition: true (không thì không có refiner, mid_in / mid_out không grad)")
             if self.mid_aux_weight and unet_input != "mid":
                 raise ValueError("refiner.mid_aux_weight chỉ dùng với unet_input mid")
+            if self.aux_giou_weight and unet_input == "post":
+                raise ValueError("refiner.aux_giou_weight cần box refined (concat / none / mid) — post: loss phụ là ε-MSE của U-Net")
         self.unet_input = unet_input
         self.unet_in_dim = 8 if unet_input == "concat" else 4     # DELTA1 / 2.x / 4: U-Net nhận [x_t ; refined]
         self.obj_attn, self.obj_max = bool(obj_attn), obj_max
@@ -277,6 +319,7 @@ class BoxPolicy(nn.Module):
             sha = torch.zeros(2, 32, dtype=torch.uint8)
             sha[0] = torch.tensor(list(clip_refiner.weights_sha256(vision_model)), dtype=torch.uint8)
             self.register_buffer("clip_sha", sha)                    # [vân tay CLIP vision ; vân tay CLIP text] (text đặt sau)
+            self.refiner.box_coder = self.box_coder if is_log(self.box_coder) else None   # RoIAlign giải mã box log (DELTA5)
         if unet_input == "mid":                                      # DELTA4.1: h -> box b -> refiner -> h (cả hai khởi tạo 0)
             self.mid_in, self.mid_out = nn.Linear(self.noise_net.mid_dim, 4), nn.Linear(4, self.noise_net.mid_dim)
             for lin in (self.mid_in, self.mid_out):
@@ -456,7 +499,7 @@ class BoxPolicy(nn.Module):
                 o = o[torch.randperm(len(o), generator=torch.Generator().manual_seed(seed))[: self.obj_k]]
             elif cap and len(o) > self.obj_max:
                 o = o[torch.randperm(len(o), generator=torch.Generator().manual_seed(draw()))[: self.obj_max]]
-            units.append(boxes_to_unit(o, whwh))
+            units.append(boxes_to_unit(o, whwh, self.box_coder))
         objs, mask = pad_objects(units, dev, min_m=1)
         enc = torch.cat([objs, objs], -1) if self.unet_in_dim == 8 else objs      # DELTA4: U-Net 8 kênh nhận [o ; o]
         return self.noise_net.encode_objects(enc, mask, cond), mask, objs
@@ -503,14 +546,22 @@ class BoxPolicy(nn.Module):
             src = extra if self.unet_input == "mid" else noisy                  # box refiner nhận: b (DELTA4.1) | x_t
             with torch.autocast(device_type=dev.type, enabled=False):          # refined fp32 (refiner tắt autocast)
                 aux = F.mse_loss(refined, x0.to(refined.dtype))
+                giou = None
+                if self.aux_giou_weight > 0:                                   # DELTA5.x: GIoU trên box giải mã (tỉ lệ canvas)
+                    giou = (1 - generalized_box_iou_cxcywh(unit_fraction(refined, self.box_coder),
+                                                           unit_fraction(x0.to(refined.dtype), self.box_coder))).mean()
                 st = {} if loss is None else {"loss_eps": loss.detach().float()}
                 self._stats = {**st, "loss_aux": aux.detach().float(),
                                "delta_abs": (refined - src.to(refined.dtype)).abs().mean().detach().float(),
                                "aux_ratio": (aux / F.mse_loss(noisy.to(refined.dtype), x0.to(refined.dtype)).clamp_min(1e-12))
                                .detach().float()}
+                if giou is not None:
+                    self._stats["loss_giou"] = giou.detach()
                 if self.unet_input == "mid":                                   # MSE(b, x0): b = U-Net đoán box giữa chừng
                     lmid = F.mse_loss(extra, x0.float())
                     self._stats.update({"loss_mid": lmid.detach(), "mid_ratio": (aux / lmid.clamp_min(1e-12)).detach()})
+            if giou is not None:                                               # aux = MSE + w_giou · (1 − GIoU) (tác giả)
+                aux = aux + self.aux_giou_weight * giou
             if loss is None:
                 loss = self.refiner_aux_weight * aux
             elif self.refiner_aux_weight > 0:
@@ -521,19 +572,23 @@ class BoxPolicy(nn.Module):
 
     @torch.no_grad()
     def sample(self, images, text_raw, valid_hw, n_samples, generator=None, sampler="ddpm", record=None,
-               null_text=False, objects=None, use_objects=True, text_tokens=None, use_refiner=True):
+               null_text=False, objects=None, use_objects=True, text_tokens=None, use_refiner=True, ddim_steps=None, eta=1.0,
+               clip_sample=True):
         """n_samples mẫu ĐỘC LẬP mỗi ảnh (ảnh mã hoá một lần, các mẫu khử nhiễu song song).
         -> [B, n_samples, 4] trong [−1,1]; `record` (tập t / "all") -> (box, quỹ đạo: list {t, x_t, x0_hat} [B,n,4]).
         GAMMA4: `objects` = box vật (token tính MỘT lần mỗi ảnh, dùng cho mọi bước; 4.0.1 chọn `obj_k` gần nhất mỗi bước); `use_objects=False`
         = tắt (`_noobj`).
-        DELTA: `text_tokens` (token chữ CLIP); `use_refiner=False` = bỏ refiner (refined = x_t — `_norefine`, ngoài phân bố train)."""
+        DELTA: `text_tokens` (token chữ CLIP); `use_refiner=False` = bỏ refiner (refined = x_t — `_norefine`, ngoài phân bố train).
+        `sampler` ∈ SAMPLERS; `ddim` (DELTA5): `ddim_steps` / `eta` / `clip_sample` của `ddim_sample`."""
         cond = self.condition(images, text_raw, valid_hw, null_text)
         obj = (self.object_tokens(objects, images.shape[-1], cond) if self.obj_attn and use_objects else None)
         ctx = self.refiner_context(images, text_tokens) if use_refiner else None
-        return self.sample_from_cond(cond, n_samples, generator, sampler, record, obj=obj, ctx=ctx)
+        return self.sample_from_cond(cond, n_samples, generator, sampler, record, obj=obj, ctx=ctx, ddim_steps=ddim_steps, eta=eta,
+                                     clip_sample=clip_sample)
 
     @torch.no_grad()
-    def sample_from_cond(self, cond, n_samples, generator=None, sampler="ddpm", record=None, obj=None, ctx=None):
+    def sample_from_cond(self, cond, n_samples, generator=None, sampler="ddpm", record=None, obj=None, ctx=None, ddim_steps=None,
+                         eta=1.0, clip_sample=True):
         """Như `sample` nhưng từ cond [B, D] đã tính sẵn (+ token vật của `object_tokens`, ngữ cảnh refiner `refiner_context`).
         Mọi hàng cùng t ở mỗi bước (mock / DDPM) ⇒ refiner tính luồng ngữ cảnh một lần mỗi ảnh (`ctx_index`).
         DELTA + `record`: mỗi bước quỹ đạo thêm `refined` [B,n,4] (box refiner đề xuất ở bước đó; `x0_hat` = x̂0 suy từ ε̂ của U-Net)."""
@@ -548,7 +603,10 @@ class BoxPolicy(nn.Module):
             if refs is not None and refined is not None:
                 refs[int(t[0])] = refined.detach().float().cpu()
             return eps
-        run = ddpm_sample if sampler == "ddpm" else mock_sample
+        if sampler not in SAMPLERS:
+            raise ValueError(f"sampler {sampler!r} không thuộc {SAMPLERS}")
+        run = {"ddpm": ddpm_sample, "mock": mock_sample,
+               "ddim": partial(ddim_sample, ddim_steps=ddim_steps, eta=eta, clip_sample=clip_sample)}[sampler]
         out = run(fn, cond.shape[0], self.alphas_cumprod, generator=generator, device=cond.device, record=record)
         if record is None:
             return out.view(B, n_samples, 4)
