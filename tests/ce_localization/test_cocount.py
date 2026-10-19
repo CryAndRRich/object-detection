@@ -166,7 +166,8 @@ def test_gt_cnll_tool(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("kind", ["paper", "obj_rand", "pr"])
 def test_eval_cocount_full_flow(tmp_path, monkeypatch, kind):
-    """eval.py --dataset cocount: khoá `cocount*`, đủ mẫu, không chỉ số `_latest`, on_object trên cả hai lớp, dump box chạy được."""
+    """eval.py --dataset cocount: khoá `cocount*`, đủ mẫu, không chỉ số `_latest`, on_object trên cả hai lớp, dump box chạy được;
+    `obj_rand` chạy HAI sampler (ddpm + ddim của DELTA5) ⇒ khoá hậu tố `_ddpm` / `_ddim` kèm `_noobj` / `_objsize*`."""
     import ce_localization.eval as ea
     import ce_localization.train as ta
     from ce_localization.models.detector import build_model
@@ -187,7 +188,7 @@ def test_eval_cocount_full_flow(tmp_path, monkeypatch, kind):
         model = build_model(cfg, pretrained_backbone=False)
         torch.save({"model": model.state_dict(), "config": cfg, "iter": 0}, ck)
         extra = (["--refine-t", "none", "5", "--proposer-sampler", "ddpm"] if kind == "pr" else
-                 ["--add-samplers", "ddpm", "--cocount-obj-filter", "3"])     # config thu nhỏ T = 20: mock 100 bước không chạy
+                 ["--add-samplers", "ddpm", "ddim", "--cocount-obj-filter", "3"])     # config thu nhỏ T = 20: mock 100 bước không chạy
     out, dump = str(tmp_path / "res.json"), str(tmp_path / "boxes.json")
     monkeypatch.setattr(sys, "argv", ["eval.py", "--ckpt", ck, "--dataset", "cocount", "--cocount-root", root, "--n-samples", "3",
                                       "--num-workers", "0", "--out", out, "--dump-boxes", dump, "--device", "cpu", "--obj-size", "mean",
@@ -196,7 +197,7 @@ def test_eval_cocount_full_flow(tmp_path, monkeypatch, kind):
     ea.main()
     with open(out) as f:
         res = json.load(f)
-    want = {"paper": {"cocount"}, "obj": {"cocount", "cocount_noobj"}, "obj_rand": {"cocount", "cocount_noobj"},
+    want = {"paper": {"cocount"}, "obj_rand": {"cocount" + s + o for s in ("_ddpm", "_ddim") for o in ("", "_noobj")},
             "pr": {"cocount_ce", "cocount_t5"}}[kind]
     want |= {k + sfx for k in want for sfx in ("_objsize", "_objsize_exemplar")}
     assert set(res["results"]) == want and res["dataset"] == "cocount" and res["density"] == {"cocount": "empty"}

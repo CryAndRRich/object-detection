@@ -90,7 +90,7 @@ Code soi SpatialSoftmax (`celoc_paper/`, `tools/inspect_*spatial_softmax.py`, TN
 | `delta/delta4.yaml` | `gamma4` (box attention tới mọi vật) + refiner của `delta2_1` (CLIP ViT-B/32, text B/16) trước U-Net; luồng vật `[o ; o]` | 〃 mục 10.1 |
 | `delta/delta3_1.yaml` / `delta3_2.yaml` | `delta2_1` / `delta4` với `refiner.unet_input: post`: U-Net trước, refiner sửa ε, loss = MSE(ε̂, ε) + 1·MSE(ε̂₁, ε) | 〃 mục 10.2 |
 | `delta/delta4_1.yaml` | `delta4` với `refiner.unet_input: mid` + `mid_aux_weight: 0.1`: refiner chèn giữa U-Net, loss = ε + 0,1·MSE(refined, x0) + 0,1·MSE(b, x0) | 〃 mục 10.6 |
-| `delta/delta5.yaml` / `delta5_1.yaml` / `delta5_2.yaml` | `delta4` + `model.box_coder: log` + val bằng sampler ddim của tác giả; `aux_giou_weight` 0 / 0,1 / 0,5 | 〃 mục 11 |
+| `delta/delta5.yaml` / `delta5_1.yaml` / `delta5_2.yaml` / `delta5_3.yaml` / `delta5_4.yaml` | `delta4` + `model.box_coder: log` + val bằng sampler ddim của tác giả; `aux_giou_weight` 0 / 0,1 / 0,5 / 0,25 / 0,75 | 〃 mục 11 |
 
 ## Chạy
 

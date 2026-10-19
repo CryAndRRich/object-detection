@@ -923,7 +923,7 @@ def test_delta5_aux_giou_and_log_targets():
 
 def test_delta5_configs():
     """delta5 = delta4 + `model.box_coder` log (1/128) + `aux_giou_weight` 0 + val bằng sampler ddim của tác giả (100 bước, eta 1);
-    delta5_1 / 5_2 chỉ khác `aux_giou_weight` 0,1 / 0,5."""
+    delta5_1 / 5_2 / 5_3 / 5_4 chỉ khác `aux_giou_weight` 0,1 / 0,5 / 0,25 / 0,75."""
     load = lambda k: yaml.safe_load(open(CFG_G[k]))  # noqa: E731
     d4, d5 = load("delta4"), load("delta5")
     assert d5["model"].pop("box_coder") == {"type": "log", "min_size_ratio": 1 / 128}
@@ -932,7 +932,7 @@ def test_delta5_configs():
     for x in (d4, d5):
         x.pop("experiment"), x.pop("description")
     assert d4 == d5
-    for kind, w in (("delta5_1", 0.1), ("delta5_2", 0.5)):
+    for kind, w in (("delta5_1", 0.1), ("delta5_2", 0.5), ("delta5_3", 0.25), ("delta5_4", 0.75)):
         d, b = load(kind), load("delta5")
         assert d["model"]["refiner"].pop("aux_giou_weight") == w and b["model"]["refiner"].pop("aux_giou_weight") == 0.0
         for x in (d, b):
@@ -997,8 +997,9 @@ def test_full_flow_delta_train_resume_eval(tmp_path, monkeypatch, kind):
     """DELTA4 / 3 / 3.2 / 4.1 thu nhỏ (refiner kích thước thật, CLIP giả, T = 100 cho vòng mock) — bốn đường mã của refiner (`concat` +
     box vật, `none`, `post` + box vật, `mid` + box vật): DELTA4 train 2 + --resume tới 4 == train liền 4 (mọi tensor kể cả `clip_sha`), các
     bản kia train một lượt;
-    history có thống kê refiner; eval mock 100 cho cả 2 loại ảnh (+ `_norefine` khi có U-Net, `_noobj` khi có box vật); CLIP khác bản
-    lúc train ⇒ eval từ chối."""
+    history có thống kê refiner; eval mock 100 cho cả 2 loại ảnh (+ `_norefine` khi có U-Net, `_noobj` khi có box vật; DELTA5.2: ddim;
+    DELTA4: mock + ddim cùng lúc — khoá hậu tố `_mock` / `_ddim`, model linear qua ddim, lệnh eval 2026-10-19); CLIP khác bản lúc train ⇒
+    eval từ chối."""
     base = str(tmp_path / "d")
     os.makedirs(base)
     _fake_turn_index(base)
@@ -1029,12 +1030,16 @@ def test_full_flow_delta_train_resume_eval(tmp_path, monkeypatch, kind):
     assert not post or not any("loss_aux" in h for h in logs)
     assert (kind == "delta4_1") == ("mid_in.weight" in kb["model"]) and (kind != "delta4_1" or float(kb["model"]["mid_in.weight"]
                                                                                                     .abs().sum()) > 0)
+    smp = {"delta5_2": ["ddim"], "delta4": ["mock", "ddim"]}.get(kind, ["mock"])
     res = _eval(monkeypatch, os.path.join(b, "best.pth"), str(tmp_path / "res.json"),
-                ["--add-samplers", "ddim" if kind == "delta5_2" else "mock", "--dump-boxes", str(tmp_path / "boxes.json")])
-    assert kind != "delta5_2" or (res["add_samplers"] == ["ddim"] and res["ddim_steps"] == 100 and res["eta"] == 1.0)
-    want = {"inpainted", "original"} | (set() if kind == "delta3" else {"inpainted_norefine", "original_norefine"})
-    want |= {"inpainted_noobj", "original_noobj"} if cfg["model"].get("obj_attn") else set()
+                ["--add-samplers", *smp, "--dump-boxes", str(tmp_path / "boxes.json")])
+    assert res["add_samplers"] == smp and ("ddim" not in smp or (res["ddim_steps"] == 100 and res["eta"] == 1.0))
+    base = [img + ("" if len(smp) == 1 else "_" + sm) for img in ("inpainted", "original") for sm in smp]
+    want = set(base) | (set() if kind == "delta3" else {k + "_norefine" for k in base})
+    want |= {k + "_noobj" for k in base} if cfg["model"].get("obj_attn") else set()
     assert set(res["results"]) == want
+    with open(tmp_path / "boxes.json") as f:
+        assert set(json.load(f)["results"]) == want
     for key, r in res["results"].items():
         assert r["n"] > 0 and bool(r["refine_delta_by_t"]) == ("norefine" not in key)
     with pytest.raises(RuntimeError, match="vân tay"):
