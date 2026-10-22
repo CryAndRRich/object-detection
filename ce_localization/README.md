@@ -160,6 +160,9 @@ CE-CoCount, mỗi màn một file = một lớp, box gốc chưa lọc, chỉ hi
 box lỗ CE-130, mỗi màn một nhánh; `--objects-only` chỉ box vật). Kết quả `output/add/box_review/<nguồn>.jsonl` (một dòng mỗi màn: chỉ
 số box bị loại theo thứ tự file chú thích gốc). CE-CoCount lọc trùng tự động trước khi hiện (2026-10-21: cụm IoU > 0,9 giữ box
 nhỏ hơn / trung vị diện tích, khoá `auto`; box bị loại cuối cùng = `bad` ∪ `auto`). Phím + định dạng: docstring `box_review/app.py`.
+Rà xong CE-CoCount 2026-10-22 (99.003 box → giữ 49.181; 1.263 / 1.484 file còn >= 5 box vật cùng lớp). Eval trên bản rà:
+`eval.py --dataset cocount --cocount-review <jsonl> --cocount-min-obj 5` (thay `--cocount-obj-filter`; `tools/gt_cnll.py` nhận cùng hai cờ
+cho mốc C-NLL box GT) — docs/EXPERIMENT_DELTA.md mục 11.2.
 
 ## Đọc số
 

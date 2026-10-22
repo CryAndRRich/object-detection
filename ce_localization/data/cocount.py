@@ -14,6 +14,8 @@ Một phần tử = một tên (một lớp cần thêm), cùng khuôn `CE130Add
   `max_obj_ratio` k (mặc định None = giữ hết): BỎ box vật có cạnh √(wh) > k × cạnh TB 3 exemplar của chính file đó (lớp kia: exemplar
   của file kia) — box SAM ở ~15 % mẫu khoanh cả đống vật (docs/EXPERIMENT_GAMMA.md mục 18); k = 3 giữ 77 % box, cạnh vật / chỗ trống GT
   trung vị 1,00, p90 1,41 (không lọc: p90 8,0); 80 mẫu còn < 5 vật.
+  `review` (bản rà tay `box_review/`, người dùng 2026-10-22; `load_review`): BỎ box vật bị loại tay (`bad`) hoặc lọc trùng (`auto`) ở
+  cả hai lớp — thay cho `max_obj_ratio` (không dùng chung); `min_obj` n: chỉ giữ file còn >= n box vật cùng lớp.
   t = 0, density TRỐNG (bản tải về không có density map; người dùng chốt 2026-10-07), text = `class_name` bỏ phần trong ngoặc và dấu chấm.
 """
 
@@ -29,7 +31,7 @@ from torch.utils.data import Dataset
 from ce_localization.data.dataset import letterbox, scale_boxes
 from ce_localization.data.turns import _letterbox_l_u8
 
-__all__ = ["clean_class", "twin_name", "filter_objects", "read_cocount", "CoCountAddDataset"]
+__all__ = ["clean_class", "twin_name", "filter_objects", "load_review", "read_cocount", "CoCountAddDataset"]
 
 
 def clean_class(name):
@@ -54,9 +56,35 @@ def filter_objects(objs, exemplars, max_ratio=None):
     return objs[_side(objs) <= max_ratio * _side(exemplars).mean()]
 
 
-def read_cocount(root, name, max_obj_ratio=None):
+def load_review(path):
+    """File jsonl của `box_review/app.py cocount` -> {tên file: (số box gốc, set chỉ số box bị loại = `bad` ∪ `auto`)} (dòng sau đè dòng
+    trước cùng tên)."""
+    out = {}
+    with open(path) as f:
+        for line in f:
+            if line.strip():
+                r = json.loads(line)
+                for g, n in r["n"].items():
+                    out[g] = (int(n), set(r["bad"].get(g, [])) | set(r.get("auto", {}).get(g, [])))
+    return out
+
+
+def _apply_review(objs, name, review):
+    if name not in review:
+        raise ValueError(f"CE-CoCount: {name} chưa có trong bản rà box")
+    n, removed = review[name]
+    if n != len(objs):
+        raise ValueError(f"CE-CoCount: {name} có {len(objs)} box nhưng bản rà ghi {n} — bản rà không khớp dữ liệu")
+    return objs[[i for i in range(len(objs)) if i not in removed]]
+
+
+def read_cocount(root, name, max_obj_ratio=None, review=None):
     """-> dict thô (pixel ảnh gốc): class, loc [10,4], objects [M,4] cùng lớp, objects_all [M',4] cả hai lớp, exemplars [3,4], count.
-    `max_obj_ratio`: lọc box vật (`filter_objects`, mỗi lớp theo exemplar của file lớp đó)."""
+    `max_obj_ratio`: lọc box vật (`filter_objects`, mỗi lớp theo exemplar của file lớp đó); `review` (`load_review`): bỏ box đã loại khi
+    rà tay (mỗi lớp theo bản rà của file lớp đó)."""
+    if max_obj_ratio is not None and review is not None:
+        raise ValueError("CE-CoCount: chọn MỘT cách lọc box vật — max_obj_ratio hoặc review")
+
     def load(sub, n):
         with open(os.path.join(root, sub, n + ".json")) as f:
             return json.load(f)
@@ -64,7 +92,7 @@ def read_cocount(root, name, max_obj_ratio=None):
     def boxes_ex(n):
         objs = np.asarray([x["bbox"] for x in load("Anno_with_exam_bbox", n)["exam_bbox"]], dtype=np.float64).reshape(-1, 4)
         ex = np.asarray(load("Anno", n)["counting_anno"].get("exemplars", []), dtype=np.float64).reshape(-1, 4)
-        return filter_objects(objs, ex, max_obj_ratio), ex
+        return (_apply_review(objs, n, review) if review is not None else filter_objects(objs, ex, max_obj_ratio)), ex
 
     a = load("Anno", name)
     objs, ex = boxes_ex(name)
@@ -80,12 +108,15 @@ class CoCountAddDataset(Dataset):
     """Đầu vào kiểu bài như `CE130AddDataset`: uint8 HWC (+ density trống `.convert("L")` của PNG jet trống = 14/255 trên vùng thật).
     `density` None (model 3 kênh) hoặc "empty"."""
 
-    def __init__(self, root, image_size=512, density="empty", limit=None, max_obj_ratio=None):
+    def __init__(self, root, image_size=512, density="empty", limit=None, max_obj_ratio=None, review=None, min_obj=None):
         if density not in (None, "empty"):
             raise ValueError(f"CE-CoCount không có density map: density phải là None hoặc 'empty', không phải {density!r}")
         self.root, self.image_size, self.density = root, image_size, density
-        self.max_obj_ratio = max_obj_ratio
+        self.max_obj_ratio, self.review = max_obj_ratio, review
         self.keys = sorted(f[:-5] for f in os.listdir(os.path.join(root, "Anno")) if f.endswith(".json"))
+        self.n_all = len(self.keys)
+        if min_obj:                                   # chỉ file còn >= min_obj box vật cùng lớp SAU lọc
+            self.keys = [k for k in self.keys if len(read_cocount(root, k, max_obj_ratio, review)["objects"]) >= min_obj]
         if limit:
             self.keys = self.keys[:limit]
         self._cls = {}
@@ -102,7 +133,7 @@ class CoCountAddDataset(Dataset):
 
     def __getitem__(self, i):
         key = self.keys[i]
-        r = read_cocount(self.root, key, self.max_obj_ratio)
+        r = read_cocount(self.root, key, self.max_obj_ratio, self.review)
         img = Image.open(os.path.join(self.root, "Image", key + ".jpg")).convert("RGB")
         x, scale, nw, nh = letterbox(img, self.image_size)
         if self.density == "empty":

@@ -14,6 +14,7 @@ Báo trung vị (như bảng của eval: trung bình bị vài box cực xấu k
   cd /mnt/disk1/aiotlab/haitn/object-detection/ce_localization
   python tools/gt_cnll.py --turn-index ../data/turn_index.json --cocount-root ../data/cocount \\
       --out /mnt/disk1/aiotlab/haitn/output/add/cocount/raw/gt_cnll.json
+  (bản rà tay, chỉ mẫu >= 5 vật: + --cocount-review <jsonl> --cocount-min-obj 5, như eval.py)
 """
 
 import argparse
@@ -26,7 +27,7 @@ from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from ce_localization.data.cocount import read_cocount  # noqa: E402
+from ce_localization.data.cocount import load_review, read_cocount  # noqa: E402
 from ce_localization.data.turns import TurnIndex  # noqa: E402
 from ce_localization.engine.add_eval import CNLL_MIN_OBJ, cnll, other_class, resize_to_objects  # noqa: E402
 
@@ -46,14 +47,17 @@ def ce130_gt(index, split="test", source="samples"):
     return out
 
 
-def cocount_gt(root, max_obj_ratio=None):
-    """-> list (10 loc_bbox, vật cùng lớp, (W, H), vật lớp kia) cho mọi mẫu CE-CoCount (`max_obj_ratio`: lọc box vật như eval.py)."""
+def cocount_gt(root, max_obj_ratio=None, review=None, min_obj=None):
+    """-> list (10 loc_bbox, vật cùng lớp, (W, H), vật lớp kia) cho mọi mẫu CE-CoCount (`max_obj_ratio` / `review` (`load_review`): lọc box
+    vật như eval.py; `min_obj`: chỉ mẫu còn >= min_obj vật cùng lớp, như `eval.py --cocount-min-obj`)."""
     out = []
     for f in sorted(os.listdir(os.path.join(root, "Anno"))):
         if not f.endswith(".json"):
             continue
         name = f[:-5]
-        r = read_cocount(root, name, max_obj_ratio)
+        r = read_cocount(root, name, max_obj_ratio, review)
+        if min_obj and len(r["objects"]) < min_obj:
+            continue
         with Image.open(os.path.join(root, "Image", name + ".jpg")) as im:
             wh = im.size
         out.append((r["loc"], r["objects"], wh, other_class(r["objects"], r["objects_all"])))
@@ -97,14 +101,18 @@ def main():
     ap.add_argument("--split-source", default="samples", help="như data.split_source của GAMMA2+ (samples: test 4.948 mẫu)")
     ap.add_argument("--cocount-root", default="../data/cocount", help="rỗng = bỏ CE-CoCount")
     ap.add_argument("--cocount-obj-filter", type=float, default=None, help="như eval.py: bỏ box vật > K × cạnh TB exemplar")
+    ap.add_argument("--cocount-review", default=None, help="như eval.py: bản rà box tay (jsonl của box_review), thay --cocount-obj-filter")
+    ap.add_argument("--cocount-min-obj", type=int, default=None, help="như eval.py: chỉ mẫu còn >= N box vật cùng lớp")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     res = {"ce130": summarize(ce130_gt(TurnIndex(a.turn_index), a.split, a.split_source), latest=True)}
     res["ce130"].update(split=a.split, split_source=a.split_source)
     if a.cocount_root:
-        cc = cocount_gt(a.cocount_root, a.cocount_obj_filter)
+        cc = cocount_gt(a.cocount_root, a.cocount_obj_filter, load_review(a.cocount_review) if a.cocount_review else None,
+                        a.cocount_min_obj)
         res["cocount"], res["cocount_objsize"] = summarize(cc), summarize(resize_gt(cc))
-        res["cocount"]["obj_filter"] = res["cocount_objsize"]["obj_filter"] = a.cocount_obj_filter
+        for k in ("cocount", "cocount_objsize"):
+            res[k].update(obj_filter=a.cocount_obj_filter, review=a.cocount_review, min_obj_filter=a.cocount_min_obj)
     for name, r in res.items():
         print(f"== {name}: {r['n_cnll']} / {r['n_samples']} mẫu có >= {r['min_obj']} vật")
         for k in sorted(k for k in r if k.startswith("cnll_") and k.endswith("_median")):

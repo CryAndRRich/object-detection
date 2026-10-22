@@ -28,7 +28,8 @@ box cả hai lớp, Gaussian trên box cùng lớp); `prior` = lỗ train CE-130
 `--dump-boxes F.json` (user study, docs/EXPERIMENT_GAMMA.md mục 17): ghi thêm box THÔ của từng mẫu mọi khoá kết quả
 (`image_id`, `t`, `wh` = (nw, nh) vùng ảnh thật trên canvas, `boxes` [K,4] xyxy pixel canvas) cho `user_study/build.py`.
 `--cocount-obj-filter K`: CE-CoCount, bỏ box vật SAM có cạnh > K × cạnh TB exemplar (`data/cocount.filter_objects`; ảnh hưởng box vật
-vào GAMMA4, C-NLL, `on_object`, `--obj-size`).
+vào GAMMA4, C-NLL, `on_object`, `--obj-size`). `--cocount-review F.jsonl` thay cách lọc đó bằng bản rà tay (`box_review/`, 2026-10-22:
+bỏ `bad` ∪ `auto` ở cả hai lớp); `--cocount-min-obj N`: chỉ eval file còn >= N box vật cùng lớp (JSON ghi `cocount_files` / `_all`).
 `--obj-size [STAT ...]` (GAMMA): mỗi khoá thêm bản CÙNG box (cùng lượt sinh) giữ tâm, (w, h) đổi theo box vật cùng lớp của ảnh
 (`engine/add_eval.resize_to_objects`, STAT ∈ mean | median | trim | small | exemplar, mặc định mean): khoá `<khoá>_objsize` (mean) /
 `<khoá>_objsize_<STAT>`; `prior` của khoá đó đổi cỡ y như vậy. `exemplar` = 3 box mẫu gán tay, chỉ CE-CoCount.
@@ -74,7 +75,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ce_localization.data.dataset import CE130Dataset, collate  # noqa: E402
 from ce_localization.data.density import EVAL_MODES, DensityIndex  # noqa: E402
-from ce_localization.data.cocount import CoCountAddDataset  # noqa: E402
+from ce_localization.data.cocount import CoCountAddDataset, load_review  # noqa: E402
 from ce_localization.data.turns import ADD_DENSITY, IMAGE_KINDS, CE130AddDataset, TurnIndex, collate_add  # noqa: E402
 from ce_localization.engine.add_eval import (SIZE_STATS, add_metrics, predict_add, prior_records,  # noqa: E402
                                              prior_unit_boxes, resize_to_objects)
@@ -238,8 +239,15 @@ def main_add(a, cfg, ck, dev, t0):
     for image in (["cocount"] if cocount else a.image):
         if cocount:                                   # CE-CoCount (mục 18): ảnh gốc + 10 chỗ trống GT, KHÔNG density map -> trống
             dens = "empty" if four else None
-            ds = CoCountAddDataset(a.cocount_root, d["image_size"], density=dens, max_obj_ratio=a.cocount_obj_filter)
-            out["cocount_obj_filter"] = a.cocount_obj_filter
+            review = load_review(a.cocount_review) if a.cocount_review else None
+            ds = CoCountAddDataset(a.cocount_root, d["image_size"], density=dens, max_obj_ratio=a.cocount_obj_filter, review=review,
+                                   min_obj=a.cocount_min_obj)
+            out.update(cocount_obj_filter=a.cocount_obj_filter, cocount_review=a.cocount_review, cocount_min_obj=a.cocount_min_obj,
+                       cocount_files=len(ds), cocount_files_all=ds.n_all)
+            how = (f"rà tay {a.cocount_review}" if review else f"lọc cạnh > {a.cocount_obj_filter} × exemplar"
+                   if a.cocount_obj_filter else "gốc (không lọc)")
+            print(f"[eval] CE-CoCount: box vật {how} | giữ {len(ds)} / {ds.n_all} file"
+                  + (f" (>= {a.cocount_min_obj} box vật cùng lớp)" if a.cocount_min_obj else ""), flush=True)
         else:
             dens = (a.add_density or ("sample" if image == "inpainted" else "full")) if four else None
             dindex = DensityIndex(d["density_index"], d["density_root"]) if dens == "full" else None
@@ -380,8 +388,15 @@ def main():
                     help="GAMMA4 / 4.0.x: cách chọn K vật — nearest (gần tâm x_t mỗi bước) | random (một bộ mỗi ảnh)")
     ap.add_argument("--cocount-obj-filter", type=float, default=None,
                     help="GAMMA, CE-CoCount: bỏ box vật có cạnh > K × cạnh TB 3 exemplar gán tay (mặc định giữ hết; đề xuất 3)")
+    ap.add_argument("--cocount-review", default=None,
+                    help="GAMMA, CE-CoCount: file jsonl rà box tay (`box_review/app.py cocount`, vd ../../output/add/box_review/"
+                         "cocount.jsonl) — bỏ box loại tay + lọc trùng ở cả hai lớp; không dùng chung --cocount-obj-filter")
+    ap.add_argument("--cocount-min-obj", type=int, default=None,
+                    help="GAMMA, CE-CoCount: chỉ eval file còn >= N box vật cùng lớp sau lọc (C-NLL cần >= 5)")
     ap.add_argument("--dump-boxes", default=None, help="GAMMA: file .json ghi box thô từng mẫu (user study, user_study/build.py)")
     a = ap.parse_args()
+    if a.cocount_review and a.cocount_obj_filter is not None:
+        sys.exit("--cocount-review thay cho --cocount-obj-filter: chọn một")
     if a.obj_size == []:                              # --obj-size không kèm STAT = mean (như trước)
         a.obj_size = ["mean"]
 
