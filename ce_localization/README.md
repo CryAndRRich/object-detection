@@ -52,6 +52,7 @@ L1 + GIoU ở mọi tầng; suy luận DDIM `--steps`.
 | `utils/` | hình học box (torch / numpy), toán khuếch tán, chấm điểm numpy, checkpoint ghi nguyên tử, grad theo nhóm, log |
 | `tools/` | `build_density_index`, `build_density_points`, `build_turn_index` (bài add, cửa G0), `visualize_data` (xem đầu vào bằng mắt), `check_data_facts`, `plot_denoise_trajectory` (bài add: box qua từng bước khử nhiễu, checkpoint của bài hoặc GAMMA0), `plot_refiner_steps` (quỹ đạo khử nhiễu + SpatialSoftmax cho GAMMA1 / CE-Loc kiểu bài / DELTA; DELTA vẽ thêm box refiner + box U-Net mỗi bước; `--compact` = 1 hình mỗi ca, mỗi hàng theo vết một loại box) |
 | `user_study/` | user study bài add: `selection` (chọn 4 box từ 30 mẫu), `build` (gộp dump → `items.json`), `app` (web Gradio chấm), `score` (chỉ số) |
+| `box_review/` | web Gradio rà box dữ liệu bằng tay: `sources` (CE-CoCount theo file, CE-130 theo nhánh: box vật + box lỗ), `app` (bấm box = loại, box biến mất; Enter lưu, Ctrl+Z hoàn tác) |
 | `notebooks/` | `train_kaggle.ipynb` (một config trên T4×2: ALPHA / BETA / GAMMA0–1), `add_kaggle.ipynb` (bài add từ GAMMA2: `gamma2_celoc` / `gamma2` / `gamma2_1` / `gamma3` / `gamma3_1` / `gamma4` / `gamma4_0_1` / `gamma4_0_2` / `gamma4_1`, DELTA) — gitignore, chỉ ở local |
 
 Test ở `object-detection/tests/ce_localization/` theo module: `test_data`, `test_models`,
@@ -90,7 +91,7 @@ Code soi SpatialSoftmax (`celoc_paper/`, `tools/inspect_*spatial_softmax.py`, TN
 | `delta/delta4.yaml` | `gamma4` (box attention tới mọi vật) + refiner của `delta2_1` (CLIP ViT-B/32, text B/16) trước U-Net; luồng vật `[o ; o]` | 〃 mục 10.1 |
 | `delta/delta3_1.yaml` / `delta3_2.yaml` | `delta2_1` / `delta4` với `refiner.unet_input: post`: U-Net trước, refiner sửa ε, loss = MSE(ε̂, ε) + 1·MSE(ε̂₁, ε) | 〃 mục 10.2 |
 | `delta/delta4_1.yaml` | `delta4` với `refiner.unet_input: mid` + `mid_aux_weight: 0.1`: refiner chèn giữa U-Net, loss = ε + 0,1·MSE(refined, x0) + 0,1·MSE(b, x0) | 〃 mục 10.6 |
-| `delta/delta5.yaml` / `delta5_1.yaml` / `delta5_2.yaml` / `delta5_3.yaml` / `delta5_4.yaml` | `delta4` + `model.box_coder: log` + val bằng sampler ddim của tác giả; `aux_giou_weight` 0 / 0,1 / 0,5 / 0,25 / 0,75 | 〃 mục 11 |
+| `delta/delta5.yaml` / `delta5_1.yaml` / `delta5_2.yaml` / `delta5_3.yaml` / `delta5_4.yaml` / `delta5_5.yaml` | `delta4` + `model.box_coder: log` + val bằng sampler ddim của tác giả; `aux_giou_weight` 0 / 0,1 / 0,5 / 0,25 / 0,75 / 1,0 | 〃 mục 11 |
 
 ## Chạy
 
@@ -148,6 +149,12 @@ vòng mock 100 bước + `_norefine` (bỏ refiner, khi có U-Net) + `_noobj` (k
 User study (người chấm box đề xuất, `user_study/`): `eval.py --dump-boxes` (server) → `user_study/build.py` (chọn 4 box / model,
 xáo màn) → `user_study/app.py` (web Gradio chấm ở local, `pip install gradio`) → `user_study/score.py`. Lệnh + chỉ số:
 `docs/EXPERIMENT_GAMMA.md` mục 17.
+
+Rà box dữ liệu bằng tay (`box_review/`, local, chạy bằng `.venv-cpu/bin/python`; 2026-10-20): `python box_review/app.py cocount` (loại box vật lỗi
+CE-CoCount, mỗi màn một file = một lớp, box gốc chưa lọc, chỉ hiện ảnh + box) | `python box_review/app.py ce130 --split train|val|test` (soi box vật +
+box lỗ CE-130, mỗi màn một nhánh; `--objects-only` chỉ box vật). Kết quả `output/add/box_review/<nguồn>.jsonl` (một dòng mỗi màn: chỉ
+số box bị loại theo thứ tự file chú thích gốc). CE-CoCount lọc trùng tự động trước khi hiện (2026-10-21: cụm IoU > 0,9 giữ box
+nhỏ hơn / trung vị diện tích, khoá `auto`; box bị loại cuối cùng = `bad` ∪ `auto`). Phím + định dạng: docstring `box_review/app.py`.
 
 ## Đọc số
 

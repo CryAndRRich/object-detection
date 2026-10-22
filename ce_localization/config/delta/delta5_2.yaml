@@ -1,7 +1,7 @@
 # EXPERIMENT DELTA5.2 (docs/EXPERIMENT_DELTA.md mục 11, người dùng chốt 2026-10-18) = delta4.yaml với bản log-scale
 # của tác giả (refs/CE-Loc-logScale/): `model.box_coder: log` (box đích, box vật, RoIAlign của refiner, giải mã khi eval), loss phụ
 # thêm GIoU (`aux_giou_weight` 0.5), sampler DDIM/DDPM của tác giả cho val + test (eta 1, 100 bước cách đều trên T = 1000,
-# x̂0 kẹp [-1, 1]). Train như DELTA4 (T = 1000). delta5 / 5_1 / 5_2 / 5_3 / 5_4 CHỈ khác `aux_giou_weight` 0 / 0,1 / 0,5 / 0,25 / 0,75 (có test).
+# x̂0 kẹp [-1, 1]). Train như DELTA4 (T = 1000). delta5 / 5_1 / 5_2 / 5_3 / 5_4 / 5_5 CHỈ khác `aux_giou_weight` 0 / 0,1 / 0,5 / 0,25 / 0,75 / 1,0 (có test).
 
 experiment: "delta5_2"
 description: "DELTA4 + box mã hoá log (w, h) + sampler DDIM/DDPM của tác giả; loss phụ GIoU 0.5"

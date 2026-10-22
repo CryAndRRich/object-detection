@@ -212,7 +212,7 @@ CFG_G = {"density": os.path.join(CFG_DIR, "gamma", "gamma0.yaml"), "rgb": os.pat
          "pr_obj": os.path.join(CFG_DIR, "gamma", "gamma4_1.yaml"),
          **{k: os.path.join(CFG_DIR, "delta", f"{k}.yaml") for k in ("delta1", "delta1_1", "delta2_1", "delta2_2", "delta2_3",
                                                                      "delta3", "delta4", "delta3_1", "delta3_2", "delta4_1", "delta5", "delta5_1", "delta5_2",
-                                                                     "delta5_3", "delta5_4")}}
+                                                                     "delta5_3", "delta5_4", "delta5_5")}}
 
 
 def _fake_ce130_turns(base, seed=0):

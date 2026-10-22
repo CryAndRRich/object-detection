@@ -923,7 +923,7 @@ def test_delta5_aux_giou_and_log_targets():
 
 def test_delta5_configs():
     """delta5 = delta4 + `model.box_coder` log (1/128) + `aux_giou_weight` 0 + val bằng sampler ddim của tác giả (100 bước, eta 1);
-    delta5_1 / 5_2 / 5_3 / 5_4 chỉ khác `aux_giou_weight` 0,1 / 0,5 / 0,25 / 0,75."""
+    delta5_1 / 5_2 / 5_3 / 5_4 / 5_5 chỉ khác `aux_giou_weight` 0,1 / 0,5 / 0,25 / 0,75 / 1,0."""
     load = lambda k: yaml.safe_load(open(CFG_G[k]))  # noqa: E731
     d4, d5 = load("delta4"), load("delta5")
     assert d5["model"].pop("box_coder") == {"type": "log", "min_size_ratio": 1 / 128}
@@ -932,7 +932,7 @@ def test_delta5_configs():
     for x in (d4, d5):
         x.pop("experiment"), x.pop("description")
     assert d4 == d5
-    for kind, w in (("delta5_1", 0.1), ("delta5_2", 0.5), ("delta5_3", 0.25), ("delta5_4", 0.75)):
+    for kind, w in (("delta5_1", 0.1), ("delta5_2", 0.5), ("delta5_3", 0.25), ("delta5_4", 0.75), ("delta5_5", 1.0)):
         d, b = load(kind), load("delta5")
         assert d["model"]["refiner"].pop("aux_giou_weight") == w and b["model"]["refiner"].pop("aux_giou_weight") == 0.0
         for x in (d, b):
