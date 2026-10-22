@@ -39,8 +39,8 @@ from torchvision.ops import roi_align
 from ce_localization.models.unet1d import SinusoidalPosEmb
 from ce_localization.utils.box_coder import to_linear_unit
 
-__all__ = ["GROUPS", "CLIP_MEAN", "CLIP_STD", "DEFAULT_ATTENTION_FLOW", "REFINER_DEFAULTS", "apply_rope_2d", "BoxFourierEmb",
-           "RefinerBlock", "ClipBoxRefiner", "load_clip", "weights_sha256", "refiner_config", "text_model_name",
+__all__ = ["GROUPS", "CLIP_MEAN", "CLIP_STD", "DEFAULT_ATTENTION_FLOW", "REFINER_DEFAULTS", "apply_rope_2d", "rope_cos_sin",
+           "rope_rotate", "BoxFourierEmb", "RefinerBlock", "ClipBoxRefiner", "load_clip", "weights_sha256", "refiner_config", "text_model_name",
            "needs_text_tokens"]
 
 GROUPS = ('text', 'image', 'sample')
@@ -102,20 +102,28 @@ def load_clip(vision_name, text_name):
     return vision, CLIPTextConfig.from_pretrained(text_name).hidden_size
 
 
+def rope_cos_sin(pos, dh, theta, dtype):
+    """cos / sin [B, 1, N, Dh/2] của `apply_rope_2d` — tách ra để q, k và mọi block cùng vị trí dùng chung (cùng phép tính)."""
+    quarter = dh // 4
+    freqs = theta ** (-torch.arange(quarter, device=pos.device, dtype=torch.float32) / quarter)
+    angles = (pos.float()[..., None] * freqs).flatten(-2)  # [B, N, Dh/2]
+    return angles.cos()[:, None].to(dtype), angles.sin()[:, None].to(dtype)
+
+
+def rope_rotate(x, cos_sin):
+    cos, sin = cos_sin
+    dh = x.shape[-1]
+    x1, x2 = x[..., :dh // 2], x[..., dh // 2:]
+    return torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], dim=-1)
+
+
 def apply_rope_2d(x, pos, theta):
     """
     Axial 2D RoPE with continuous positions.
     x: [B, heads, N, Dh], pos: [B, N, 2] as (x, y) in patch units.
     A quarter of the rotation pairs use x, the other quarter use y.
     """
-    dh = x.shape[-1]
-    quarter = dh // 4
-    freqs = theta ** (-torch.arange(quarter, device=x.device, dtype=torch.float32) / quarter)
-    angles = (pos.float()[..., None] * freqs).flatten(-2)  # [B, N, Dh/2]
-    cos = angles.cos()[:, None].to(x.dtype)
-    sin = angles.sin()[:, None].to(x.dtype)
-    x1, x2 = x[..., :dh // 2], x[..., dh // 2:]
-    return torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], dim=-1)
+    return rope_rotate(x, rope_cos_sin(pos, x.shape[-1], theta, x.dtype))
 
 
 class BoxFourierEmb(nn.Module):
@@ -163,12 +171,12 @@ class RefinerBlock(nn.Module):
         """-> (shift1, scale1, gate1, shift2, scale2, gate2), mỗi cái [B, 1, D]."""
         return self.ada(t_emb)[:, None].chunk(6, dim=-1)
 
-    def qkv_rope(self, x, pos, shift1, scale1):
-        """-> q, k, v [B, heads, N, Dh] (q, k đã quay RoPE)."""
+    def qkv_rope(self, x, cos_sin, shift1, scale1):
+        """-> q, k, v [B, heads, N, Dh] (q, k đã quay RoPE); cos_sin = `rope_cos_sin` của vị trí token (tính một lần, dùng chung)."""
         B, N, D = x.shape
         h = self.norm1(x) * (1 + scale1) + shift1
         q, k, v = self.qkv(h).view(B, N, 3, self.num_heads, D // self.num_heads).permute(2, 0, 3, 1, 4)
-        return apply_rope_2d(q, pos, self.rope_theta), apply_rope_2d(k, pos, self.rope_theta), v
+        return rope_rotate(q, cos_sin), rope_rotate(k, cos_sin), v
 
     def attend(self, q, k, v, attn_mask):
         return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask,
@@ -376,19 +384,23 @@ class ClipBoxRefiner(nn.Module):
         mask_c = full[:, :, :Nc, :Nc]
         mask_s = full[:, :, Nc:, :].index_select(0, idx)                      # [R, 1, n_samp, N]
 
+        blk0 = self.stages[0][0]
+        rope = lambda pos: rope_cos_sin(pos, blk0.qkv.out_features // 3 // blk0.num_heads, blk0.rope_theta, sample.dtype)  # noqa: E731
+        rope_c = rope(pos_c)                                                  # vị trí như nhau ở mọi block / stage
         box = sample
         for blocks, head in zip(self.stages, self.heads):
             # Detach the box used to build tokens (DETR-style iterative refinement)
             box_in = box.detach()
             samp_tok, samp_pos = self._sample_tokens(box_in, ctx['image_map'], idx)
+            rope_s = rope(samp_pos)
             xs = samp_tok + self.box_emb(box_in)[:, None] + self.type_emb[2]
             xc = x_ctx0                                                       # tác giả dựng lại chuỗi từ token ban đầu mỗi stage
             last = len(blocks) - 1
             for li, blk in enumerate(blocks):
                 mc = blk.modulation(t_emb_c)                                  # ngữ cảnh: [C, 1, D] × 6
                 ms = [m.index_select(0, idx) for m in mc]                     # mẫu: cùng t với hàng ngữ cảnh của nó
-                qc, kc, vc = blk.qkv_rope(xc, pos_c, mc[0], mc[1])
-                qs, ks, vs = blk.qkv_rope(xs, samp_pos, ms[0], ms[1])
+                qc, kc, vc = blk.qkv_rope(xc, rope_c, mc[0], mc[1])
+                qs, ks, vs = blk.qkv_rope(xs, rope_s, ms[0], ms[1])
                 k_all = torch.cat([kc.index_select(0, idx), ks], dim=2)
                 v_all = torch.cat([vc.index_select(0, idx), vs], dim=2)
                 xs_next = blk.finish(xs, blk.attend(qs, k_all, v_all, mask_s), ms[2], ms[3], ms[4], ms[5])

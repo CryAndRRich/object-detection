@@ -31,6 +31,7 @@ Hậu xử lý `resize_to_objects` (`eval.py --obj-size`): giữ tâm box, đặ
   exemplar  TB 3 box mẫu GÁN TAY (`exemplars`, chỉ CE-CoCount — box SAM của ~10 % mẫu khoanh cả đống vật)
 """
 
+import hashlib
 import time
 
 import numpy as np
@@ -206,18 +207,37 @@ def cnll(boxes, objects, wh, kind="F1", others=None):
     if len(objects) < CNLL_MIN_OBJ:
         return None
     ref = objects if others is None or not len(others) else np.concatenate([objects, others])
+    mu, inv, logdet, zmin = _cnll_fit(objects, ref, wh, kind)
+    d = _features(boxes, ref, wh, kind) - mu
+    return 0.5 * (np.einsum("ni,ij,nj->n", d, inv, d) + logdet + 4 * np.log(2 * np.pi)) - zmin
+
+
+_FIT, _FIT_MAX = {}, 4096
+
+
+def _cnll_fit(objects, ref, wh, kind):
+    """Gaussian của C-NLL trên box vật (chỉ phụ thuộc ảnh, không phụ thuộc box đề xuất) — nhớ theo nội dung (vật, tham chiếu, cỡ
+    ảnh, kiểu): mỗi ảnh được chấm nhiều lần (model / prior × đổi cỡ box × biến thể). -> (mu, inv, logdet, min NLL của chính vật)."""
+    objects, ref = np.ascontiguousarray(objects), np.ascontiguousarray(ref)
+    h = hashlib.blake2b(digest_size=16)
+    for a in (objects, ref):
+        h.update(f"{a.dtype.str}{a.shape}".encode())
+        h.update(a.tobytes())
+    key = (kind, tuple(float(v) for v in wh), h.digest())
+    hit = _FIT.get(key)
+    if hit is not None:
+        return hit
     z = _features(objects, ref, wh, kind, is_objects=True)          # objects = ref[:M] ⇒ bỏ chính nó = đường chéo
-    x = _features(boxes, ref, wh, kind)
     mu = z.mean(0)
     cov = np.cov(z.T, bias=True) + CNLL_RIDGE * np.eye(4)
     inv = np.linalg.inv(cov)
     _, logdet = np.linalg.slogdet(cov)
-
-    def nll(v):
-        d = v - mu
-        return 0.5 * (np.einsum("ni,ij,nj->n", d, inv, d) + logdet + 4 * np.log(2 * np.pi))
-
-    return nll(x) - nll(z).min()
+    d = z - mu
+    zmin = (0.5 * (np.einsum("ni,ij,nj->n", d, inv, d) + logdet + 4 * np.log(2 * np.pi))).min()
+    if len(_FIT) >= _FIT_MAX:
+        _FIT.clear()
+    _FIT[key] = (mu, inv, logdet, zmin)
+    return _FIT[key]
 
 
 def other_class(objects, objects_all):

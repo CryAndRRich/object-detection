@@ -257,6 +257,19 @@ def test_warmup_multistep_matches_detectron2():
     assert warmup_multistep(11999, [9000, 11000]) == pytest.approx(0.01)
 
 
+def test_gpu_peak_window_and_format(monkeypatch):
+    """`gpu_peak`: CPU -> None (log không đổi); CUDA -> (đỉnh tensor, đỉnh giữ) GB rồi reset cửa sổ (allocator giả lập)."""
+    from ce_localization.engine.train_utils import fmt_gpu_peak, gpu_peak
+    assert gpu_peak(torch.device("cpu")) is None and fmt_gpu_peak(None) == ""
+    st = {"a": 3 * 2 ** 30, "r": 4 * 2 ** 30}
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda d=None: st["a"])
+    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda d=None: st["r"])
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda d=None: st.update(a=0, r=0))
+    dev = torch.device("cuda", 0)
+    assert gpu_peak(dev, reset=False) == (3.0, 4.0) and gpu_peak(dev) == (3.0, 4.0) and gpu_peak(dev) == (0.0, 0.0)
+    assert fmt_gpu_peak((1.234, 2.5)) == " | GPU đỉnh 1.23 GB (giữ 2.50)"
+
+
 def test_epoch_batches_disjoint_across_ranks_and_reproducible():
     a = epoch_batches(11, 1, 0, 2, 0, 3)
     b = epoch_batches(11, 1, 1, 2, 0, 3)
@@ -351,6 +364,28 @@ def test_cnll_f1all_relations_over_all_classes():
     assert np.array_equal(other_class(objs, np.concatenate([objs, others])), others)
     with pytest.raises(ValueError, match="objects_all"):
         other_class(objs, np.concatenate([others, objs]))
+
+
+def test_cnll_fit_cache_same_bits_and_keyed_by_content():
+    """Gaussian của C-NLL nhớ theo nội dung (vật, tham chiếu, cỡ ảnh, kiểu): lần chấm sau trùng TỪNG BIT với lần đầu / bộ nhớ rỗng;
+    sửa box vật tại chỗ, đổi cỡ ảnh, đổi kiểu, thêm lớp kia -> fit lại (không trả nhầm)."""
+    from ce_localization.engine import add_eval as ae
+    rng = np.random.default_rng(1)
+    xy = rng.uniform(0, 80, (9, 2))
+    objs = np.concatenate([xy, xy + rng.uniform(5, 15, (9, 2))], 1)
+    others = objs[:3] + 7.0
+    box = rng.uniform(0, 90, (6, 4))
+    box[:, 2:] = box[:, :2] + 10
+    args = [((100.0, 80.0), "F1", None), ((100.0, 80.0), "F2", None), ((100.0, 80.0), "F1", others), ((120.0, 80.0), "F1", None)]
+    ae._FIT.clear()
+    cold = [ae.cnll(box, objs, wh, k, others=o) for wh, k, o in args]
+    assert len(ae._FIT) == 4 and len({c.tobytes() for c in cold}) == 4
+    assert all(np.array_equal(ae.cnll(box, objs, wh, k, others=o), c) for (wh, k, o), c in zip(args, cold))
+    assert len(ae._FIT) == 4
+    objs[0] += 3.0                                                            # sửa tại chỗ: khoá theo nội dung -> fit mới
+    moved = ae.cnll(box, objs, (100.0, 80.0), "F1")
+    ae._FIT.clear()
+    assert np.array_equal(ae.cnll(box, objs, (100.0, 80.0), "F1"), moved) and not np.array_equal(moved, cold[0])
 
 
 def test_prior_records_map_unit_boxes_to_valid_region():

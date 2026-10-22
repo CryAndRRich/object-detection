@@ -125,6 +125,11 @@ echo "PID $! -> $LOG"
 ```
 Có NMS thì JSON báo cả hai thứ tự hậu xử lý: `steps{k}` (top-k trước) và `steps{k}_nmsfirst`.
 
+**Bộ nhớ GPU** (2026-10-22): `train.py` / `eval.py` đặt sẵn `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (bớt phân mảnh, không
+đổi phép tính; tự đặt biến này trước khi chạy thì giữ giá trị của mình). Dòng log train mỗi `log_every` iter, dòng `[eval it …]` và mỗi
+biến thể của `eval.py` (bài add) in `GPU đỉnh a GB (giữ b)` = đỉnh bộ nhớ tensor / allocator giữ trong khoảng đó (rank 0), ghi vào
+`history.json` / JSON eval (`gpu_peak_gb`, `gpu_reserved_gb`).
+
 **Density** (config có `data.density`): dựng chỉ mục một lần
 ```bash
 python tools/build_density_index.py --samples ../data/samples --ce130 ../data/all_phase2_V2 \

@@ -11,7 +11,7 @@ import torch
 import torch.distributed as dist
 
 __all__ = ["setup_dist", "PthCheckpoints", "warmup_multistep", "lr_factor", "epoch_batches",
-           "noise_seed"]
+           "noise_seed", "gpu_peak", "fmt_gpu_peak"]
 
 
 def setup_dist(device=None):
@@ -77,6 +77,21 @@ class PthCheckpoints:
 
     def load_last(self, map_location="cpu"):
         return torch.load(self.last_path, map_location=map_location, weights_only=False)
+
+
+def gpu_peak(dev, reset=True):
+    """-> (đỉnh bộ nhớ tensor, đỉnh bộ nhớ allocator giữ) GB trên `dev` từ lần reset trước | None (CPU); `reset` bắt đầu cửa sổ mới.
+    Chỉ đọc bộ đếm của allocator (không đồng bộ GPU)."""
+    if dev.type != "cuda":
+        return None
+    out = torch.cuda.max_memory_allocated(dev) / 2 ** 30, torch.cuda.max_memory_reserved(dev) / 2 ** 30
+    if reset:
+        torch.cuda.reset_peak_memory_stats(dev)
+    return out
+
+
+def fmt_gpu_peak(peak):
+    return "" if peak is None else f" | GPU đỉnh {peak[0]:.2f} GB (giữ {peak[1]:.2f})"
 
 
 def warmup_multistep(it, steps, gamma=0.1, warmup_iters=1000, warmup_factor=0.01):

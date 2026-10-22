@@ -62,9 +62,13 @@ import os
 import sys
 import time
 
-import torch
-import yaml
-from torch.utils.data import DataLoader
+# allocator CUDA cấp phát theo đoạn mở rộng được: bớt phân mảnh (bộ nhớ "giữ" thừa) — không đổi phép tính; phải đặt TRƯỚC khi
+# CUDA khởi tạo. Đặt sẵn biến môi trường (kể cả chuỗi rỗng) thì giữ nguyên.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+import torch  # noqa: E402
+import yaml  # noqa: E402
+from torch.utils.data import DataLoader  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -78,6 +82,7 @@ from ce_localization.engine.evaluate import attention_diagnostics, predict, scor
 from ce_localization.models.backbone import density_ratio_of  # noqa: E402
 from ce_localization.models.box_policy import OBJ_SELECTS, BoxPolicy  # noqa: E402
 from ce_localization.models.detector import load_checkpoint_model  # noqa: E402
+from ce_localization.engine.train_utils import fmt_gpu_peak, gpu_peak  # noqa: E402
 from ce_localization.utils.log import fmt_time  # noqa: E402
 import ce_localization.train as train_mod  # noqa: E402
 
@@ -251,11 +256,13 @@ def main_add(a, cfg, ck, dev, t0):
         out["density"][image] = dens
         holes = image in ("inpainted", "cocount")
 
-        def report(key, desc, rec, sec, attn_key=None, post=None):
+        def report(key, desc, rec, sec, attn_key=None, post=None, peak=None):
             if post:                                  # --obj-size: hậu xử lý cùng box, áp cả cho prior
                 rec = post(rec)
             res = add_metrics(rec, with_holes=holes, latest=not cocount)
             res["eval_sec"] = sec
+            if peak is not None:                      # lượt lấy mẫu của biến thể này (đổi cỡ box: không chạy lại model)
+                res["gpu_peak_gb"], res["gpu_reserved_gb"] = peak
             if hasattr(model, "pop_attn") and post is None:
                 res["attn"] = model.pop_attn() if attn_key is None else model.pop_attn(attn_key)
             if hasattr(model, "pop_refine_stats") and post is None:   # DELTA: TB |Δ| refiner theo khoảng t
@@ -270,7 +277,7 @@ def main_add(a, cfg, ck, dev, t0):
                 res["excl_paper_train"] = add_metrics([rec[i] for i in keep], with_holes=holes)
                 pri["excl_paper_train"] = add_metrics([pri_rec[i] for i in keep], with_holes=holes)
             res["n_paper_train"] = int(sum(seen))
-            print_add(f"ảnh {image}, {desc} ({fmt_time(sec)})", res, pri, K)
+            print_add(f"ảnh {image}, {desc} ({fmt_time(sec)}{fmt_gpu_peak(peak)})", res, pri, K)
             if "excl_paper_train" in res:
                 ex = res["excl_paper_train"]
                 print(f"  -- bỏ {res['n_paper_train']} mẫu thuộc samples/train (bài đã train), còn {ex['n']}: " + " | ".join(
@@ -298,17 +305,20 @@ def main_add(a, cfg, ck, dev, t0):
         if refine_vars:                               # GAMMA2: CE-Loc chạy MỘT lần / batch, mọi biến thể refine dùng lại
             head(f"CE-Loc {a.proposer_sampler} -> {[d_ for _, d_, _ in refine_vars]}")
             t = time.time()
+            gpu_peak(dev)
             recs = predict_add(model, loader, text_table, K, seed=a.seed, log_every=max(len(loader) // 10, 1),
                                sample_kw={"proposer_sampler": a.proposer_sampler}, variants=[v for _, _, v in refine_vars],
                                amp=amp)
+            peak = gpu_peak(dev)
             for vi, ((suffix, desc, _), rec) in enumerate(zip(refine_vars, recs)):
-                report(image + suffix, desc, rec, time.time() - t, attn_key=vi)
+                report(image + suffix, desc, rec, time.time() - t, attn_key=vi, peak=peak)
             continue
         for suffix, desc, kw in variants:             # GAMMA1: mỗi số bước DDIM; GAMMA0 / bài: DDPM (+ mock nếu xin)
             head(desc)
             t = time.time()
+            gpu_peak(dev)                             # đỉnh bộ nhớ GPU đo riêng từng biến thể
             rec = predict_add(model, loader, text_table, K, seed=a.seed, log_every=max(len(loader) // 10, 1), amp=amp, **kw)
-            report(image + suffix, desc, rec, time.time() - t)
+            report(image + suffix, desc, rec, time.time() - t, peak=gpu_peak(dev))
     if a.out:
         write_json(a.out, out)
     if dump is not None:

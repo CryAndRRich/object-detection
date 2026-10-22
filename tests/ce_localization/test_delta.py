@@ -458,6 +458,19 @@ def test_mock_default_unchanged_without_refiner():
     assert torch.equal(a.view(6, 4), b)
 
 
+def test_refine_track_bins_by_t_on_device():
+    """Thống kê |Δ| refiner (eval): cộng dồn trên thiết bị theo khoảng t 100 bước qua nhiều lần gọi, `pop_refine_stats` -> TB từng
+    khoảng có mẫu (khoảng trống không có khoá) rồi xoá; chưa ghi gì -> None."""
+    m = _policy(num_timesteps=300)
+    assert m.pop_refine_stats() is None
+    t1, d1 = torch.tensor([5, 99, 250, 250]), torch.tensor([1.0, 3.0, 2.0, 4.0])
+    t2, d2 = torch.tensor([0, 299]), torch.tensor([5.0, 6.0])
+    m._track_delta(t1, d1)
+    m._track_delta(t2, d2)
+    assert m.pop_refine_stats() == {"t0-99": 3.0, "t200-299": 4.0}
+    assert m.pop_refine_stats() is None
+
+
 def test_mock_sample_steps():
     from ce_localization.models.box_policy import mock_sample
     ab = torch.linspace(0.99, 0.01, 300)

@@ -41,10 +41,15 @@ import sys
 import time
 
 import numpy as np
-import torch
-import torch.distributed as dist
-import yaml
-from torch.utils.data import DataLoader
+
+# allocator CUDA cấp phát theo đoạn mở rộng được: bớt phân mảnh (bộ nhớ "giữ" thừa) — không đổi phép tính; phải đặt TRƯỚC khi
+# CUDA khởi tạo. Đặt sẵn biến môi trường (kể cả chuỗi rỗng) thì giữ nguyên.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+import torch  # noqa: E402
+import torch.distributed as dist  # noqa: E402
+import yaml  # noqa: E402
+from torch.utils.data import DataLoader  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -57,8 +62,8 @@ from ce_localization.engine import nan_debug  # noqa: E402
 from ce_localization.engine.criterion import Criterion, build_targets  # noqa: E402
 from ce_localization.engine.diffusion import prepare_train_boxes  # noqa: E402
 from ce_localization.engine.evaluate import predict, score  # noqa: E402
-from ce_localization.engine.train_utils import (PthCheckpoints, epoch_batches,  # noqa: E402
-                                               lr_factor, noise_seed, setup_dist)
+from ce_localization.engine.train_utils import (PthCheckpoints, epoch_batches, fmt_gpu_peak,  # noqa: E402
+                                               gpu_peak, lr_factor, noise_seed, setup_dist)
 from ce_localization.models.backbone import density_ratio_of  # noqa: E402
 from ce_localization.models.box_policy import boxes_to_unit, norm_whwh  # noqa: E402
 from ce_localization.models.clip_refiner import needs_text_tokens, refiner_config, text_model_name  # noqa: E402
@@ -580,6 +585,7 @@ def main():
                 el = time.time() - t_train
                 spi = (time.time() - t_last) / max(win["n"], 1)
                 eta = spi * (tr["max_iter"] - it)
+                peak = gpu_peak(dev)                    # đỉnh bộ nhớ GPU của cửa sổ log này (rank 0)
                 if crit is None:
                     lps = st.get("loss_per_stage")
                     detail = "" if lps is None else " (tầng " + " ".join(f"{float(x):.3f}" for x in lps) + ")"
@@ -596,6 +602,7 @@ def main():
                     f"grad {np.median(win['gn']):.1f} | {spi:.3f} s/iter (đọc {win['data'] / win['n']:.3f}) | "
                     f"đã chạy {fmt_time(el)} | ETA {fmt_time(eta)}"
                     + (f" | AMP scale {scaler.get_scale():.0f}" if amp else "")
+                    + fmt_gpu_peak(peak)
                     + (f" | ⚠️ bỏ {win['skip']} bước NaN" if win["skip"] else ""))
                 gsum = gmon.summary()
                 if gsum:
@@ -606,6 +613,7 @@ def main():
                          "loss_per_stage": [float(x) for x in st.get("loss_per_stage", [])],
                          "lr": sched.get_last_lr()[0], "grad_norm_p50": float(np.median(win["gn"])),
                          "s_per_iter": spi, "skipped": win["skip"], "elapsed_sec": el,
+                         **({} if peak is None else {"gpu_peak_gb": peak[0], "gpu_reserved_gb": peak[1]}),
                          **{k_: v / win["n"] for k_, v in win["extra"].items()}}
                 if getattr(model, "refiner", None) is not None:          # DELTA: refiner có rời identity không
                     entry["refiner_gates"] = model.refiner.gate_stats()
@@ -622,8 +630,12 @@ def main():
             if is_eval:
                 is_best = False
                 if main_proc:
+                    gpu_peak(dev)                                       # cửa sổ đo riêng cho val
                     res = run_val(model, ev_loader, text_table, cfg, log)
                     model.train()
+                    vpeak = gpu_peak(dev)
+                    if vpeak is not None:
+                        res["gpu_peak_gb"], res["gpu_reserved_gb"] = vpeak
                     val = res[sm]
                     is_best = best is None or val > best[sm]
                     dw = density_ratio_of(model)
@@ -635,6 +647,7 @@ def main():
                             best = {"iter": it, sm: val, **{k: res[k] for k in keys}}
                         log(f"[eval it {it}] {ev_split} ({res['n']} mẫu, {K} mẫu/ảnh): "
                             + " | ".join(f"{k} {res[k]:.4f}" for k in keys) + f" | {fmt_time(res['eval_sec'])}"
+                            + fmt_gpu_peak(vpeak)
                             + ("" if dw is None else f" | ‖W density‖/‖W RGB‖ conv1 {dw:.4f}")
                             + (" | *best" if is_best else ""))
                         if res.get("attn"):
@@ -652,6 +665,7 @@ def main():
                             f"AP75 {res['AP75']:.4f} | trần AP50 {res['oracle_score']['AP50']:.4f} | "
                             f"recall/stage {stage} | ĐIỂM: oracle_recall_pt {res['oracle_recall_pt']:.4f} "
                             f"AP_pt {res['AP_pt']:.4f} AUC_pt {res['score_AUC_pt']:.4f} | {fmt_time(res['eval_sec'])}"
+                            + fmt_gpu_peak(vpeak)
                             + ("" if dw is None else f" | ‖W density‖/‖W RGB‖ conv1 {dw:.4f}")
                             + (" | *best" if is_best else ""))
                         history.append({"iter": it, "eval": {k: v for k, v in res.items()

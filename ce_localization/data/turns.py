@@ -441,11 +441,17 @@ def collate_add(batch):
     }
 
 
+_LUT = {}
+
+
 def paper_to_float(images_u8):
     """Ảnh kiểu bài uint8 -> float32 `/255` qua bảng tra 256 giá trị tính bằng numpy float32: trùng TỪNG BIT với
-    `to_tensor` / đọc PNG (phép chia `/` của PyTorch CUDA theo vô hướng là nhân nghịch đảo, có thể lệch 1 ulp)."""
-    lut = torch.from_numpy(np.arange(256, dtype=np.float32) / np.float32(255.0)).to(images_u8.device)
-    return lut[images_u8.long()]
+    `to_tensor` / đọc PNG (phép chia `/` của PyTorch CUDA theo vô hướng là nhân nghịch đảo, có thể lệch 1 ulp). Bảng giữ sẵn trên
+    từng thiết bị; chỉ số int32 (int64 tạm gấp đôi bộ nhớ: 268 MB / batch 32 ảnh 4 kênh 512²)."""
+    lut = _LUT.get(images_u8.device)
+    if lut is None:
+        lut = _LUT[images_u8.device] = torch.from_numpy(np.arange(256, dtype=np.float32) / np.float32(255.0)).to(images_u8.device)
+    return lut[images_u8.int()]
 
 
 def to_device_add(batch, dev):

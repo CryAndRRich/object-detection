@@ -144,14 +144,15 @@ def ddim_sample(eps_fn, n_rows, alphas_cumprod, ddim_steps=None, eta=1.0, clip_s
     bước cuối). eta 1 ≈ DDPM, 0 = DDIM tất định. -> x0 [R,4]; `record` -> (x0, quỹ đạo)."""
     ab = alphas_cumprod.to(device)
     T = ab.shape[0]
-    timesteps = torch.linspace(T - 1, 0, ddim_steps or T, device=device).round().long().unique_consecutive()
+    # t dạng int (một lần đọc về CPU): chỉ số tensor 0-d trên GPU ép đồng bộ ở MỖI bước
+    timesteps = torch.linspace(T - 1, 0, ddim_steps or T, device=device).round().long().unique_consecutive().tolist()
     traj = [] if record is not None else None
     x = torch.randn((n_rows, 4), device=device, generator=generator)
     for i, t in enumerate(timesteps):
-        tb = t.expand(n_rows)
+        tb = torch.full((n_rows,), t, device=device, dtype=torch.long)
         eps = eps_fn(x, tb)
         ab_t = ab[t]
-        _snap(traj, record, int(t), x, eps, ab_t)
+        _snap(traj, record, t, x, eps, ab_t)
         ab_prev = ab[timesteps[i + 1]] if i + 1 < len(timesteps) else x.new_tensor(1.0)
         x0 = (x - (1 - ab_t).sqrt() * eps) / ab_t.sqrt()
         if clip_sample:
@@ -331,7 +332,7 @@ class BoxPolicy(nn.Module):
             if vision != "r18_paper":
                 self.vis_proj.requires_grad_(False)
         self.track_refine = False
-        self._stats, self._refine_track = {}, {}
+        self._stats, self._refine_track = {}, None
 
     def text_emb(self, text_raw, null_text=False):
         """[B, text_dim]; `null_text=True` -> 0 (bỏ hẳn điều kiện text — chỉ để soi model, không dùng khi train)."""
@@ -458,19 +459,23 @@ class BoxPolicy(nn.Module):
         return eps, refined, None
 
     def _track_delta(self, t, d):
-        """Suy luận (eval): cộng dồn TB |Δ| của refiner theo khoảng t (100 bước / khoảng)."""
-        for b in torch.unique(t // 100).tolist():
-            sel = (t // 100) == b
-            s, n = self._refine_track.get(b, (0.0, 0))
-            self._refine_track[b] = (s + float(d[sel].sum()), n + int(sel.sum()))
+        """Suy luận (eval): cộng dồn TB |Δ| của refiner theo khoảng t (100 bước / khoảng) — tổng / số đếm giữ trên thiết bị (float64),
+        không đồng bộ GPU→CPU ở mỗi bước; chỉ đọc về ở `pop_refine_stats`."""
+        nb = (self.num_timesteps + 99) // 100
+        b = torch.div(t, 100, rounding_mode="floor")
+        if self._refine_track is None:
+            self._refine_track = (d.new_zeros(nb, dtype=torch.float64), t.new_zeros(nb))
+        s, n = self._refine_track
+        s.index_add_(0, b, d.detach().to(torch.float64))
+        n.add_(torch.bincount(b, minlength=nb))
 
     def pop_refine_stats(self):
         """-> {"t<a>-<b>": TB |Δ|} (khoảng t) của các lần lấy mẫu từ lần gọi trước | None."""
-        if not self._refine_track:
+        if self._refine_track is None:
             return None
-        out = {f"t{b * 100}-{b * 100 + 99}": s / max(n, 1) for b, (s, n) in sorted(self._refine_track.items())}
-        self._refine_track = {}
-        return out
+        s, n = (v.cpu().tolist() for v in self._refine_track)
+        self._refine_track = None
+        return {f"t{b * 100}-{b * 100 + 99}": s[b] / n[b] for b in range(len(n)) if n[b]}
 
     def pop_stats(self):
         """-> thống kê loss lần forward train gần nhất (loss_eps, loss_aux, delta_abs, aux_ratio — DELTA; + loss_eps1, eps_ratio — post;
