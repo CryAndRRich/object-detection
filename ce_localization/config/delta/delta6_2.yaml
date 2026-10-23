@@ -1,10 +1,10 @@
-# EXPERIMENT DELTA6.2 (docs/EXPERIMENT_DELTA.md mục 12, người dùng chốt 2026-10-23) = delta5_4.yaml (DELTA5.4: log-scale +
-# GIoU 0,75 — tốt nhất CE-CoCount trong DELTA5.x) CHỈ đổi trọng số loss phụ của refiner `aux_loss_weight` 0,1 -> 0,25
-# (giữ tỉ lệ GIoU trong loss phụ: loss = ε + w · [MSE(refined, x0) + 0,75 · (1 − GIoU)]). delta6_1 / 6_2 / 6_3 / 6_4 CHỈ khác
-# `aux_loss_weight` 0,05 / 0,25 / 0,5 / 1,0 (có test).
+# EXPERIMENT DELTA6.2 (docs/EXPERIMENT_DELTA.md mục 12, người dùng chốt 2026-10-23) = delta5_4.yaml (DELTA5.4: log + GIoU 0,75) train lại theo giao thức
+# của CE-Loc gốc: KHÔNG val (`eval.split: null`), `best.pth` = epoch có loss train TB thấp nhất (`select_metric: train_loss`);
+# giữ 120 epoch nhưng lr 1e-4 + warmup 1 epoch + cosine về 0 đúng ở max_iter 37.440. Mọi khoá model / diffusion Y HỆT delta5_4.yaml
+# (có test). delta6 / 6_1 / 6_2 = train lại delta4 / delta5_2 / delta5_4. Test: eval.py --split test_all (toàn bộ samples/test).
 
 experiment: "delta6_2"
-description: "DELTA5.4 (log + GIoU 0.75), trọng số loss phụ refiner 0.25"
+description: "DELTA6.2 = DELTA5.4 với giao thức train của CE-Loc gốc (không val, best theo loss train) + lr 1e-4 cosine về 0"
 task: "add"
 
 data:
@@ -55,8 +55,8 @@ model:
     num_stages: 1
     use_density: true               # density pool về lưới token ảnh, cộng vào token ảnh
     unet_input: concat              # U-Net nhận [x_t ; refined] (8 kênh), ra ε 4 kênh
-    aux_loss_weight: 0.25           # DELTA6.2: + 0,25 · [MSE(refined, x0) + aux_giou_weight · (1 − GIoU)] (DELTA5.4: 0,1)
-    aux_giou_weight: 0.75           # GIoU trên box đã giải mã (tác giả: 1,0); như DELTA5.4
+    aux_loss_weight: 0.1            # + 0,1 · [MSE(refined, x0) + aux_giou_weight · (1 − GIoU)]
+    aux_giou_weight: 0.75           # GIoU trên box đã giải mã (tác giả: 1,0); DELTA5.4
     attention_flow:                 # nhóm query -> nhóm key (ảnh / text không nhìn box)
       sample: [sample, image, text]
       image: [image, text]
@@ -69,25 +69,24 @@ diffusion:
   beta_end: 0.02
   noise_per_image: 1
 
-training:                           # như bài trừ batch (gấp đôi) / số iter (nửa)
+training:                           # DELTA6.x (2026-10-23): cùng 120 epoch như DELTA4 / 5.x, lr 1e-4 + cosine VỀ 0 trong đúng 120 epoch
   batch_size: 64                    # TOÀN CỤC: Kaggle 2 GPU -> 32 / GPU
   sync_bn: false                    # BN thường: thống kê trên 32 ảnh / GPU = đúng batch BN của bài (SyncBN sẽ thành 64, chậm hơn)
   amp: true                         # Kaggle T4: autocast fp16 + GradScaler + channels_last (tensor core) — người dùng chốt 2026-10-02
-  lr: 5.0e-5
+  lr: 1.0e-4                        # tác giả 5e-5 ở batch 32 (train.sh) -> × 2 theo batch 64; = default.yaml của tác giả
   weight_decay: 0.01
   schedule: "cosine"
-  cosine_t_max: 93900               # = 300 epoch × 313 bước (⌈19.998 / 64⌉) — CosineAnnealingLR(T_max=300) của bài theo iter
-  max_iter: 37500
+  cosine_warmup_iters: 312          # warmup tuyến tính 1 epoch
+  cosine_t_max: 37440               # = max_iter: lr về 0 ở epoch 120 (DELTA4 / 5.x: t_max 93.900 ⇒ lr cuối còn 65 % lr đầu)
+  max_iter: 37440                   # = 120 epoch × 312 iter (⌊19.998 / 64⌋)
   grad_clip: null
   seed: 0
   log_every: 50
   ckpt_every: 1000
-  eval_every: 2500
 
-eval:
-  split: "val"
-  limit: 500
+eval:                               # KHÔNG val (như CE-Loc gốc); test trên server: eval.py --split test_all (6.122 mẫu)
+  split: null
   n_samples: 30
   batch_size: 16
   sample_kw: {sampler: "ddim", ddim_steps: 100, eta: 1.0}   # val + test: sampler của tác giả, 100 bước cách đều trên T = 1000, x̂0 kẹp
-  select_metric: "mean_iou_any"
+  select_metric: "train_loss"       # best.pth = loss train TB / epoch thấp nhất (train.py của tác giả)

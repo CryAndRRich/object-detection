@@ -205,14 +205,17 @@ class TurnIndex:
         self.branches, self.turns = d["branches"], d["turns"]
 
     def keys(self, split, source="ce130"):
-        """Khoá (nhánh, lượt) của `split`. `source` (mục docstring module): ce130 | samples."""
+        """Khoá (nhánh, lượt) của `split`. `source` (mục docstring module): ce130 | samples. `split` "test_all" (chỉ `samples`,
+        DELTA6.x 2026-10-23) = TOÀN BỘ `samples/test` như tác giả (= val + test của split samples: 1.174 + 4.948 mẫu)."""
         if source not in SPLIT_SOURCES:
             raise ValueError(f"split_source {source!r} không thuộc {SPLIT_SOURCES}")
+        if split == "test_all" and source != "samples":
+            raise ValueError("split 'test_all' chỉ có với split_source 'samples' (toàn bộ samples/test)")
         if source == "ce130":
             return sorted(k for k, v in self.turns.items() if self.branches[v["branch"]]["split"] == split)
         sdir = "train" if split == "train" else "test"
         return sorted(k for k, v in self.turns.items() if v["sample"].split("/")[0] == sdir
-                      and (split == "train" or self.branches[v["branch"]]["split"] == split))
+                      and (split in ("train", "test_all") or self.branches[v["branch"]]["split"] == split))
 
 
 class AddCache:

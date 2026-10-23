@@ -107,9 +107,12 @@ def warmup_multistep(it, steps, gamma=0.1, warmup_iters=1000, warmup_factor=0.01
 def lr_factor(it, tr):
     """Hệ số lr theo `training.schedule`: `multistep` (mặc định, ALPHA: warmup + giảm bậc) | `cosine` (CE-Loc gốc:
     `CosineAnnealingLR(T_max)` không warmup, ở đây theo ITERATION — `cosine_t_max` = 300 epoch × 625 bước = 187.500 như bài,
-    nên trong vài nghìn iter lr gần như giữ nguyên như đoạn đầu lịch của bài)."""
+    nên trong vài nghìn iter lr gần như giữ nguyên như đoạn đầu lịch của bài). `cosine_warmup_iters` (DELTA6.x, 2026-10-23): nhân thêm
+    warmup tuyến tính (it + 1) / W trong W iter đầu (vắng = không warmup, như mọi config cũ)."""
     if tr.get("schedule", "multistep") == "cosine":
-        return 0.5 * (1 + math.cos(math.pi * min(it, tr["cosine_t_max"]) / tr["cosine_t_max"]))
+        f = 0.5 * (1 + math.cos(math.pi * min(it, tr["cosine_t_max"]) / tr["cosine_t_max"]))
+        w = tr.get("cosine_warmup_iters") or 0
+        return f * min(1.0, (it + 1) / w) if w else f
     return warmup_multistep(it, tr["steps"], tr["gamma"], tr["warmup_iters"], tr["warmup_factor"])
 
 

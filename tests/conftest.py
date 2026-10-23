@@ -22,7 +22,7 @@ SLOW = {
     "test_full_flow_beta0_train_resume_eval_and_gt_never_in_loss", "test_full_flow_gamma_train_resume_eval",
     "test_full_flow_gamma2_celoc_then_refine", "test_full_flow_gamma3_geo_train_eval", "test_full_flow_gamma3_1_relation_train_eval",
     "test_full_flow_gamma4_train_resume_eval", "test_full_flow_gamma4_0_x_train_resume_eval", "test_full_flow_gamma4_then_refine",
-    "test_full_flow_delta_train_resume_eval", "test_full_flow_delta1_1_train_eval",
+    "test_full_flow_delta_train_resume_eval", "test_full_flow_delta1_1_train_eval", "test_full_flow_delta6_train_loss_select",
     "test_resume_refuses_changed_model_config", "test_lr_override_used_and_recorded", "test_bench_writes_nothing",
     "test_nan_debug_pinpoints_nan_input_channel", "test_train_max_iter_without_steps_and_batch_override",
     # eval checkpoint giả

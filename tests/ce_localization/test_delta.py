@@ -955,17 +955,44 @@ def test_delta5_configs():
 
 
 def test_delta6_configs():
-    """DELTA6.x (2026-10-23) = delta5_4 (log + GIoU 0,75) CHỈ đổi `aux_loss_weight` 0,1 -> 0,05 / 0,25 / 0,5 / 1,0 (giữ `aux_giou_weight`
-    0,75 ⇒ GIoU trong loss phụ tỉ lệ theo w)."""
-    base = yaml.safe_load(open(CFG_G["delta5_4"]))
-    assert base["model"]["refiner"]["aux_loss_weight"] == 0.1 and base["model"]["refiner"]["aux_giou_weight"] == 0.75
-    for kind, w in (("delta6_1", 0.05), ("delta6_2", 0.25), ("delta6_3", 0.5), ("delta6_4", 1.0)):
-        d, b = yaml.safe_load(open(CFG_G[kind])), yaml.safe_load(open(CFG_G["delta5_4"]))
+    """DELTA6 / 6.1 / 6.2 (2026-10-23) = delta4 / delta5_2 / delta5_4 train lại theo giao thức CE-Loc gốc: chỉ khác khối train / eval —
+    không val (`eval.split` null, best theo loss train), lr 1e-4, warmup 1 epoch, cosine về 0 đúng ở max_iter = 120 epoch × 312."""
+    for kind, src in (("delta6", "delta4"), ("delta6_1", "delta5_2"), ("delta6_2", "delta5_4")):
+        d, b = yaml.safe_load(open(CFG_G[kind])), yaml.safe_load(open(CFG_G[src]))
         assert d["experiment"] == kind
-        assert d["model"]["refiner"].pop("aux_loss_weight") == w and b["model"]["refiner"].pop("aux_loss_weight") == 0.1
+        assert d["training"] == {**{k: v for k, v in b["training"].items() if k != "eval_every"}, "lr": 1e-4, "cosine_warmup_iters": 312,
+                                 "cosine_t_max": 37440, "max_iter": 37440}
+        assert 37440 == 120 * (19998 // d["training"]["batch_size"])
+        assert d["eval"] == {**{k: v for k, v in b["eval"].items() if k != "limit"}, "split": None, "select_metric": "train_loss"}
         for x in (d, b):
-            x.pop("experiment"), x.pop("description")
+            for k in ("experiment", "description", "training", "eval"):
+                x.pop(k)
         assert d == b
+
+
+def test_cosine_warmup_lr_factor():
+    """`cosine_warmup_iters` W: hệ số = cosine × min(1, (it + 1) / W); vắng = cosine trần (config cũ y nguyên); về 0 ở t_max."""
+    import math
+    from ce_localization.engine.train_utils import lr_factor
+    tr = {"schedule": "cosine", "cosine_t_max": 1000}
+    cos = lambda it: 0.5 * (1 + math.cos(math.pi * min(it, 1000) / 1000))  # noqa: E731
+    assert all(lr_factor(it, tr) == cos(it) for it in (0, 10, 500, 999, 1000, 2000))
+    tw = {**tr, "cosine_warmup_iters": 100}
+    assert lr_factor(0, tw) == cos(0) / 100 and lr_factor(49, tw) == cos(49) * 0.5 and lr_factor(99, tw) == cos(99)
+    assert lr_factor(500, tw) == cos(500) and lr_factor(1000, tw) == 0.0
+
+
+def test_turn_index_test_all_split(tmp_path):
+    """split `test_all` (samples) = toàn bộ samples/test = val ∪ test của split samples; với split_source ce130 thì báo lỗi."""
+    from tests.ce_localization.helpers import _fake_turn_index
+    base = str(tmp_path / "d")
+    os.makedirs(base)
+    _, _, _, index, _ = _fake_turn_index(base)
+    allk = index.keys("test_all", "samples")
+    assert allk and allk == sorted(index.keys("val", "samples") + index.keys("test", "samples"))
+    assert all(index.turns[k]["sample"].startswith("test/") for k in allk) and not set(allk) & set(index.keys("train", "samples"))
+    with pytest.raises(ValueError, match="test_all"):
+        index.keys("test_all", "ce130")
 
 
 # ----------------------------------------------------------------------------- config, eval, train trọn luồng
@@ -1072,6 +1099,47 @@ def test_full_flow_delta_train_resume_eval(tmp_path, monkeypatch, kind):
         assert r["n"] > 0 and bool(r["refine_delta_by_t"]) == ("norefine" not in key)
     with pytest.raises(RuntimeError, match="vân tay"):
         _eval(monkeypatch, os.path.join(b, "best.pth"), str(tmp_path / "y.json"), ["--add-samplers", "ddpm"], clip_seed=1)
+
+
+def test_full_flow_delta6_train_loss_select(tmp_path, monkeypatch):
+    """DELTA6 thu nhỏ (`select_metric: train_loss`, không val): không dựng / chạy val; mỗi epoch TRỌN một dòng loss train TB = trung
+    bình đúng các bước của epoch (từ log cửa sổ 1 bước), phần lẻ cuối không chấm; best.pth = epoch thấp nhất; resume GIỮA epoch == train
+    liền (tổng dở dang trong last.pth); eval --split test_all trên best.pth chạy được."""
+    import ce_localization.train as ta
+    base = str(tmp_path / "d")
+    os.makedirs(base)
+    _fake_turn_index(base)
+    c_path, cfg = _gamma2_cfg(tmp_path, base, "delta6")
+    assert cfg["eval"]["split"] is None and cfg["eval"]["select_metric"] == "train_loss"
+    monkeypatch.setattr(ta, "run_val", lambda *x, **k: (_ for _ in ()).throw(AssertionError("không được chạy val")))
+    n_tr = len(ta.TurnIndex(os.path.join(base, "turn_index.json")).keys("train", "samples"))
+    bs = 6
+    ipe = n_tr // bs
+    n_it = 2 * ipe + 1                                                # 2 epoch trọn + 1 bước lẻ (không chấm)
+    assert ipe >= 2
+    a, b = str(tmp_path / "a"), str(tmp_path / "b")
+    run = lambda d, n, *x: _run_train(monkeypatch, ["--config", c_path, "--save-dir", d, "--batch-size", str(bs),  # noqa: E731
+                                                    "--max-iter", str(n), *x])
+    run(a, ipe + 1)                                                   # dừng giữa epoch 2
+    run(a, n_it, "--resume")
+    run(b, n_it)
+    ka, kb = (torch.load(os.path.join(x, "last.pth"), weights_only=False) for x in (a, b))
+    ep = [h for h in kb["history"] if "epoch_train_loss" in h]
+    steps = [h["loss"] for h in kb["history"] if "loss" in h]                 # log_every 1: mỗi bước một dòng
+    assert [h["iter"] for h in ep] == [ipe, 2 * ipe] and [h["epoch_steps"] for h in ep] == [ipe, ipe] and len(steps) == n_it
+    for h, (lo, hi) in zip(ep, ((0, ipe), (ipe, 2 * ipe))):
+        assert np.isclose(h["epoch_train_loss"], np.mean(steps[lo:hi]), rtol=1e-6)
+    i_best = int(np.argmin([h["epoch_train_loss"] for h in ep]))
+    assert kb["best"] == {"iter": ep[i_best]["iter"], "epoch": ep[i_best]["epoch"], "train_loss": ep[i_best]["epoch_train_loss"]}
+    assert torch.load(os.path.join(b, "best.pth"), weights_only=False)["iter"] == ep[i_best]["iter"]
+    ea_ = [h for h in ka["history"] if "epoch_train_loss" in h]
+    assert [h["iter"] for h in ea_] == [h["iter"] for h in ep] and ka["best"] == kb["best"]
+    assert np.allclose([h["epoch_train_loss"] for h in ea_], [h["epoch_train_loss"] for h in ep], rtol=1e-5)
+    assert not any("eval" in h for h in kb["history"])
+    res = _eval(monkeypatch, os.path.join(b, "best.pth"), str(tmp_path / "res.json"), ["--add-samplers", "mock", "--no-ablation",
+                                                                                        "--split", "test_all"])
+    tix = ta.TurnIndex(os.path.join(base, "turn_index.json"))
+    assert res["split"] == "test_all" and res["results"]["inpainted"]["n"] == len(tix.keys("test_all", "samples"))
 
 
 def test_full_flow_delta1_1_train_eval(tmp_path, monkeypatch):

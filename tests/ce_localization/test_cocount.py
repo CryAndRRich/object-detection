@@ -361,6 +361,50 @@ def test_plot_cnll_worst_ranks_and_draws(tmp_path, monkeypatch):
     assert all(len(x["sel"]) == len(set(x["sel"])) == 4 for x in r)                        # 4 box / mẫu < --select 5: chọn hết
 
 
+def test_plot_cnll_worst_ce130(tmp_path, monkeypatch):
+    """`plot_cnll_worst.py --dataset ce130`: hình học dựng từ turn_index == `CE130AddDataset` (vật / lỗ / vùng ảnh); C-NLL từng box ==
+    `record_cnll` của eval (= `cnll_F1` trong dump); `--rank-by min --top-pct` vẽ đúng số mẫu tệ nhất theo box tốt nhất."""
+    from ce_localization.data.turns import CE130AddDataset
+    from ce_localization.engine.add_eval import record_cnll
+    from ce_localization.tools import plot_cnll_worst as pw
+    from tests.ce_localization.helpers import _fake_turn_index
+    base = str(tmp_path / "d")
+    os.makedirs(base)
+    root, samples, tidx, index, _ = _fake_turn_index(base)
+    ds = CE130AddDataset(index, root, samples, "train", 128, split_source="samples")
+    rng = np.random.default_rng(0)
+    rows = []
+    for i in range(len(ds)):
+        s = ds[i]
+        nh, nw = s["valid_hw"]
+        g = pw.ce130_geometry(index, samples, s["image_id"], 128)
+        assert np.array_equal(g["wh"], [nw, nh]) and g["image"].startswith(samples)
+        assert np.allclose(g["objects"], s["objects"].numpy()) and np.allclose(g["holes"], s["holes"].numpy())
+        xy = rng.uniform(0, 1, (6, 2)) * [nw, nh]
+        boxes = np.concatenate([xy, xy + rng.uniform(3, 30, (6, 2))], 1).round(2)
+        rows.append({"image_id": s["image_id"], "t": s["t"], "wh": [float(nw), float(nh)], "boxes": boxes.tolist()})
+        rc = record_cnll({"boxes": boxes, "objects": s["objects"].numpy().astype(np.float64), "wh": (float(nw), float(nh)),
+                          "holes": s["holes"].numpy().astype(np.float64)})
+        if rc is not None:
+            rows[-1]["cnll_F1"] = rc["F1"].tolist()
+    geo = {x["image_id"]: pw.ce130_geometry(index, samples, x["image_id"], 128) for x in rows}
+    items = pw.score_samples(rows, geo, "F1")
+    assert items and len(items) == sum("cnll_F1" in x for x in rows)
+    ref = {x["image_id"]: x["cnll_F1"] for x in rows if "cnll_F1" in x}
+    assert all(np.allclose(it["c"], ref[it["image_id"]], rtol=1e-9) for it in items)
+    dump = str(tmp_path / "boxes_m.json")
+    with open(dump, "w") as f:
+        json.dump({"n_samples": 6, "results": {"inpainted": rows}}, f)
+    out = str(tmp_path / "viz")
+    monkeypatch.setattr(sys, "argv", ["plot_cnll_worst.py", dump, "--dataset", "ce130", "--turn-index", tidx, "--samples-root", samples,
+                                      "--image-size", "128", "--rank-by", "min", "--top-pct", "30", "--out", out])
+    pw.main()
+    r = json.load(open(os.path.join(out, "rank.json")))["samples"]
+    top = int(np.ceil(len(items) * 0.3))
+    assert [x["min"] for x in r] == sorted((x["min"] for x in r), reverse=True)
+    assert sorted(os.listdir(out)) == ["rank.json"] + [f"worst_{x['rank']:02d}_{x['image_id']}.png" for x in r[:top]]
+
+
 def test_cnll_outliers_tool(tmp_path, monkeypatch):
     """`tools/cnll_outliers.py`: sel = min C-NLL từng mẫu; trung bình bỏ p % lớn nhất; outlier trùng giữa model; ghi summary + 3 hình."""
     from ce_localization.tools import cnll_outliers as co

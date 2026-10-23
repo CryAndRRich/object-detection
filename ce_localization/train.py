@@ -32,6 +32,11 @@ chọn `best.pth` theo `eval.select_metric` (`mean_iou_any`).
 DELTA (`model.refiner` / `model.use_condition`, docs/EXPERIMENT_DELTA.md): `box_policy` + BoxRefiner của tác giả gốc
 (`models/clip_refiner.py`) — bảng text thêm token chữ CLIP text (`TextTable.tokens`), loss + aux, log thêm ε / aux / |Δ| / aux_ratio
 và độ lớn gate AdaLN của refiner (DELTA3, không U-Net: loss chỉ có aux).
+
+`eval.select_metric: "train_loss"` (DELTA6.x, người dùng 2026-10-23 — như `train.py` của CE-Loc gốc): KHÔNG eval định kỳ, không dựng
+tập val (`eval.split: null`); cuối mỗi epoch TRỌN (`len(train) // batch` iter) lấy loss train trung bình của epoch (mọi bước hữu hạn,
+cộng qua mọi GPU) -> thấp nhất = `best.pth`. Tổng dở dang của epoch nằm trong `last.pth` ⇒ `--resume` giữa epoch khớp; `max_iter`
+nên là bội của số iter / epoch (phần lẻ cuối không được chấm).
 """
 
 import argparse
@@ -135,8 +140,9 @@ def image_in_channels(cfg):
 
 
 def add_datasets(cfg, eval_split, limit=None):
-    """GAMMA: -> (ds_tr, ds_ev, TurnIndex). Eval định kỳ trên `eval.limit` mẫu CỐ ĐỊNH của split (hoán vị seed
-    12345, như eval định kỳ của CE-Loc gốc) — chỉ để chọn checkpoint; báo cáo bằng eval.py trên cả split."""
+    """GAMMA: -> (ds_tr, ds_ev | None, TurnIndex). Eval định kỳ trên `eval.limit` mẫu CỐ ĐỊNH của split (hoán vị seed
+    12345; CE-Loc gốc KHÔNG có val — chọn theo loss train, xem `select_metric: train_loss`) — chỉ để chọn checkpoint; báo cáo bằng
+    eval.py trên cả split. `eval_split` None ⇒ không dựng tập eval."""
     d = cfg["data"]
     try:
         index = TurnIndex(d["turn_index"])
@@ -149,6 +155,8 @@ def add_datasets(cfg, eval_split, limit=None):
     ds_tr = mk("train")
     if limit:
         ds_tr.keys = ds_tr.keys[:limit]
+    if eval_split is None:
+        return ds_tr, None, index
     ds_ev = mk("train" if eval_split == "train" else eval_split)
     if eval_split == "train":
         ds_ev.keys = ds_tr.keys[:]                      # G3: eval trên CHÍNH các mẫu đã train
@@ -385,6 +393,11 @@ def main():
     # ------------------------------------------------------------------ dữ liệu
     root, size = cfg["data"]["root"], cfg["data"]["image_size"]
     ev_split = cfg["eval"]["split"]
+    train_select = cfg["eval"]["select_metric"] == "train_loss"           # DELTA6.x: best = loss train TB / epoch thấp nhất
+    if train_select != (ev_split is None):
+        sys.exit("eval.select_metric 'train_loss' đi cùng eval.split null (không val) — và ngược lại")
+    if train_select and task != "add":
+        sys.exit("eval.select_metric 'train_loss' chỉ dành cho bài add")
     if task == "add":                                  # GAMMA: (nhánh, lượt), đích = lỗ mới nhất
         ds_tr, ds_ev, _ = add_datasets(cfg, ev_split, cfg["data"].get("limit"))
         d_tr = d_ev = cfg["data"].get("density")
@@ -408,8 +421,9 @@ def main():
     ipe = len(ds_tr) // tr["batch_size"]
     if ipe == 0:
         sys.exit(f"train chỉ có {len(ds_tr)} mẫu < batch_size {tr['batch_size']}")
-    log(f"[data] task {task} | train {len(ds_tr)} mẫu ({ipe} iter/epoch, batch {bpr}/GPU × {world}) | "
-        f"eval {ev_split} {len(ds_ev)} mẫu | density train {d_tr} / eval {d_ev} | đích train {targets}"
+    log(f"[data] task {task} | train {len(ds_tr)} mẫu ({ipe} iter/epoch, batch {bpr}/GPU × {world})"
+        + (" | KHÔNG val: best = loss train TB / epoch thấp nhất" if train_select else f" | eval {ev_split} {len(ds_ev)} mẫu")
+        + f" | density train {d_tr} / eval {d_ev} | đích train {targets}"
         + ("" if ptable is None else f" (điểm {cfg['data']['points']}, tham số tách đỉnh {ptable.params}, "
                                      f"cỡ giả {pseudo})")
         + f" | {fmt_time(time.time() - t_boot)}")
@@ -425,7 +439,7 @@ def main():
 
     # ------------------------------------------------------------------ text
     t = time.time()
-    names = sorted(set(ds_tr.classes()) | set(ds_ev.classes()))
+    names = sorted(set(ds_tr.classes()) | (set() if ds_ev is None else set(ds_ev.classes())))
     if main_proc:
         text_table = build_text_table(names, cfg, dev)          # rank 0 tải CLIP trước
     if world > 1:
@@ -482,6 +496,7 @@ def main():
         return bench(model, net, crit, loader_fn, text_table, cfg, opt, dev, a.bench, log, todev, amp)
 
     start, best, history = 0, None, []
+    ep_acc = torch.zeros(2, dtype=torch.float64, device=dev)          # train_loss: [tổng loss, số bước] epoch đang chạy (rank này)
     if a.resume:
         st = ckm.load_last(map_location="cpu")
         bad, warns = config_diff(st["config"], cfg)
@@ -497,14 +512,23 @@ def main():
         start, best, history = st["iter"], st["best"], st["history"]
         if main_proc:                                   # RNG toàn cục (dropout) của rank 0
             torch.set_rng_state(st["rng"]["torch"])
+            if train_select:                            # tổng dở dang của epoch (đã cộng qua mọi GPU, giữ ở rank 0)
+                ep_acc += torch.tensor(st["epoch_loss"], dtype=torch.float64, device=dev)
         log(f"[resume] {ckm.last_path}: đã xong {start} iter, best {best}")
     if start >= tr["max_iter"]:
         sys.exit(f"\nĐã train đủ {tr['max_iter']} iter; muốn thêm thì tăng --max-iter.\n")
 
-    ev_loader = make_eval_loader(ds_ev, cfg, nw) if main_proc else None
+    ev_loader = make_eval_loader(ds_ev, cfg, nw) if main_proc and ds_ev is not None else None
     gmon = GradMonitor(model, every=tr["log_every"])
     gen = torch.Generator(device=dev.type)
     sm = cfg["eval"]["select_metric"]
+
+    def reduce_epoch_acc():
+        """train_loss: cộng `ep_acc` của mọi GPU về rank 0 (rank khác về 0) ⇒ tổng toàn cục = tổng các rank, lưu được trong last.pth."""
+        if world > 1:
+            dist.all_reduce(ep_acc)
+            if not main_proc:
+                ep_acc.zero_()
 
     def save(it_next, is_best):
         if not main_proc:
@@ -512,7 +536,8 @@ def main():
         rng = torch.get_rng_state()
         ckm.save({"model": model.state_dict(), "optimizer": opt.state_dict(),
                   "scheduler": sched.state_dict(), "scaler": scaler.state_dict(), "iter": it_next, "best": best,
-                  "history": history, "config": cfg, "env": env, "rng": {"torch": rng}}, is_best)
+                  "history": history, "config": cfg, "env": env, "rng": {"torch": rng},
+                  **({"epoch_loss": ep_acc.tolist()} if train_select else {})}, is_best)
         with open(os.path.join(a.save_dir, "history.json"), "w") as f:
             json.dump({"config": cfg, "environment": env, "best": best, "history": history}, f,
                       indent=1, ensure_ascii=False, default=float)
@@ -573,6 +598,9 @@ def main():
                                  f"không hữu hạn ở it {it}: {bp[:10]}")
             scaler.update()
             advance_lr(sched)
+            if train_select and finite:
+                ep_acc[0] += float(st["loss"])
+                ep_acc[1] += 1
             win["loss"] += float(st["loss"])
             for k_ in EXTRA_LOG:                        # DELTA: thống kê refiner, TB trên cửa sổ log
                 if k_ in st:
@@ -625,9 +653,23 @@ def main():
                 win = {"loss": 0.0, "n": 0, "gn": [], "data": 0.0, "skip": 0, "extra": {}}
                 t_last = time.time()
 
-            is_eval = it % tr["eval_every"] == 0 or it == tr["max_iter"]
-            is_ckpt = is_eval or it % tr["ckpt_every"] == 0
-            if is_eval:
+            # train_loss: chỉ epoch TRỌN (như tác giả) — phần lẻ cuối (max_iter không chia hết) không chấm, tổng dở dang vẫn vào last.pth
+            is_eval = it % ipe == 0 if train_select else (it % tr["eval_every"] == 0 or it == tr["max_iter"])
+            is_ckpt = is_eval or it % tr["ckpt_every"] == 0 or it == tr["max_iter"]
+            if train_select and is_ckpt:
+                reduce_epoch_acc()
+            if is_eval and train_select:                                 # cuối epoch: loss train TB của epoch
+                is_best = False
+                if main_proc and ep_acc[1] > 0:
+                    ep_loss = float(ep_acc[0] / ep_acc[1])
+                    is_best = best is None or ep_loss < best["train_loss"]
+                    if is_best:
+                        best = {"iter": it, "epoch": -(-it // ipe), "train_loss": ep_loss}
+                    log(f"[epoch {-(-it // ipe)}] it {it} | loss train TB {ep_loss:.5f} ({int(ep_acc[1])} bước)"
+                        + (" | *best" if is_best else f" | best {best['train_loss']:.5f} @ it {best['iter']}"))
+                    history.append({"iter": it, "epoch": -(-it // ipe), "epoch_train_loss": ep_loss, "epoch_steps": int(ep_acc[1])})
+                ep_acc.zero_()
+            elif is_eval:
                 is_best = False
                 if main_proc:
                     gpu_peak(dev)                                       # cửa sổ đo riêng cho val
@@ -697,6 +739,8 @@ def main():
             t_data = time.time()
 
     if it >= tr["max_iter"]:
+        if train_select and tr["max_iter"] % ipe:
+            log(f"⚠️  max_iter {tr['max_iter']} không chia hết {ipe} iter / epoch: {tr['max_iter'] % ipe} bước cuối không vào epoch nào")
         log(f"[done] {tr['max_iter']} iter | {fmt_time(time.time() - t_train)} | best {best} -> {a.save_dir}")
     if world > 1:
         dist.barrier()

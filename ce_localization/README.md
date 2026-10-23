@@ -92,7 +92,7 @@ Code soi SpatialSoftmax (`celoc_paper/`, `tools/inspect_*spatial_softmax.py`, TN
 | `delta/delta3_1.yaml` / `delta3_2.yaml` | `delta2_1` / `delta4` với `refiner.unet_input: post`: U-Net trước, refiner sửa ε, loss = MSE(ε̂, ε) + 1·MSE(ε̂₁, ε) | 〃 mục 10.2 |
 | `delta/delta4_1.yaml` | `delta4` với `refiner.unet_input: mid` + `mid_aux_weight: 0.1`: refiner chèn giữa U-Net, loss = ε + 0,1·MSE(refined, x0) + 0,1·MSE(b, x0) | 〃 mục 10.6 |
 | `delta/delta5.yaml` / `delta5_1.yaml` / `delta5_2.yaml` / `delta5_3.yaml` / `delta5_4.yaml` / `delta5_5.yaml` | `delta4` + `model.box_coder: log` + val bằng sampler ddim của tác giả; `aux_giou_weight` 0 / 0,1 / 0,5 / 0,25 / 0,75 / 1,0 | 〃 mục 11 |
-| `delta/delta6_1.yaml` / `delta6_2.yaml` / `delta6_3.yaml` / `delta6_4.yaml` | `delta5_4` chỉ đổi `refiner.aux_loss_weight` 0,1 → 0,05 / 0,25 / 0,5 / 1,0 | 〃 mục 12 |
+| `delta/delta6.yaml` / `delta6_1.yaml` / `delta6_2.yaml` | `delta4` / `delta5_2` / `delta5_4` train theo giao thức CE-Loc gốc: không val (`eval.split: null`, `select_metric: train_loss` = loss train TB / epoch thấp nhất), lr 1e-4 + `cosine_warmup_iters` + cosine về 0; test `eval.py --split test_all` (toàn bộ samples/test) | 〃 mục 12 |
 
 ## Chạy
 
@@ -145,7 +145,7 @@ tự nhận `task: add`: `--image inpainted original`, `--n-samples`, `--add-den
 `docs/EXPERIMENT_GAMMA.md`.
 
 CE-CoCount (tập test phụ của bài, `data/cocount/`): `eval.py --dataset cocount --cocount-root ../data/cocount` (ảnh gốc, 10 chỗ trống GT
-làm lỗ, density trống; `data/cocount.py`); C-NLL của box GT trên CE-130 + CE-CoCount: `tools/gt_cnll.py`; `--obj-size` thêm khoá `_objsize` (giữ tâm, cỡ = TB box vật cùng lớp). Mục 18 của EXPERIMENT_GAMMA. C-NLL `F1all` (chiều quan hệ trên box vật cả hai lớp, Gaussian trên lớp cần thêm) + chấm lại dump cũ không cần model: `tools/rescore_cocount.py` — mục 10.9 của EXPERIMENT_DELTA. Vẽ mẫu C-NLL tệ / tốt nhất từ box dump (C-NLL từng box, xếp theo trung vị mẫu; `--cocount-review` như eval): `tools/plot_cnll_worst.py`.
+làm lỗ, density trống; `data/cocount.py`); C-NLL của box GT trên CE-130 + CE-CoCount: `tools/gt_cnll.py`; `--obj-size` thêm khoá `_objsize` (giữ tâm, cỡ = TB box vật cùng lớp). Mục 18 của EXPERIMENT_GAMMA. C-NLL `F1all` (chiều quan hệ trên box vật cả hai lớp, Gaussian trên lớp cần thêm) + chấm lại dump cũ không cần model: `tools/rescore_cocount.py` — mục 10.9 của EXPERIMENT_DELTA. Vẽ mẫu C-NLL tệ / tốt nhất từ box dump (C-NLL từng box, xếp theo trung vị mẫu hoặc box tốt nhất `--rank-by min`, `--top-pct`; `--cocount-review` như eval; CE-130 ảnh inpaint `--dataset ce130`): `tools/plot_cnll_worst.py`.
 
 DELTA (`config/delta/`, `docs/EXPERIMENT_DELTA.md`): train trên Kaggle (`add_kaggle.ipynb`, chỉ train), eval trên server (khuôn lệnh mục 7):
 vòng mock 100 bước + `_norefine` (bỏ refiner, khi có U-Net) + `_noobj` (khi có box vật); cần
