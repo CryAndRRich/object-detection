@@ -1,33 +1,9 @@
-"""Hình học box bằng numpy (không torch): đổi xyxy <-> cxcywh, IoU, IoA, lọc box suy biến. Dùng cho chấm điểm
-(`utils/metrics_np.py`, `engine/evaluate.py`, `engine/add_eval.py`), quét dữ liệu (`data/dataset.py`) và `user_study/`."""
+"""Hình học box bằng numpy (xyxy): IoU, IoA, lọc box suy biến."""
 
 import numpy as np
 
-__all__ = ["xyxy_to_cxcywh", "cxcywh_to_xyxy", "box_iou", "ioa", "filter_degenerate"]
+__all__ = ["box_iou", "ioa", "filter_degenerate"]
 
-
-# --------------------------------------------------------------------------
-# change format, NOT scale
-# --------------------------------------------------------------------------
-
-def xyxy_to_cxcywh(boxes):
-    """[..., 4] (x1,y1,x2,y2) -> (cx,cy,w,h). Units unchanged."""
-    b = np.asarray(boxes, dtype=np.float64)
-    x1, y1, x2, y2 = b[..., 0], b[..., 1], b[..., 2], b[..., 3]
-    return np.stack([(x1 + x2) / 2.0, (y1 + y2) / 2.0, x2 - x1, y2 - y1], axis=-1)
-
-
-def cxcywh_to_xyxy(boxes):
-    """[..., 4] (cx,cy,w,h) -> (x1,y1,x2,y2). Units unchanged."""
-    b = np.asarray(boxes, dtype=np.float64)
-    cx, cy, w, h = b[..., 0], b[..., 1], b[..., 2], b[..., 3]
-    return np.stack([cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0], axis=-1)
-
-
-
-# --------------------------------------------------------------------------
-# IoU / GIoU — take xyxy, shared by matcher, loss and tests alike
-# --------------------------------------------------------------------------
 
 def _area_xyxy(b):
     return np.clip(b[..., 2] - b[..., 0], 0, None) * np.clip(b[..., 3] - b[..., 1], 0, None)
@@ -50,13 +26,8 @@ def box_iou(boxes1, boxes2):
     return iou, union
 
 
-# --------------------------------------------------------------------------
-# Augmentation + data hygiene
-# --------------------------------------------------------------------------
-
-
 def ioa(boxes, objects):
-    """[K,4], [M,4] xyxy -> [K,M] giao / diện tích box (box diện tích 0 -> 0) — `on_object` của eval add."""
+    """[K,4], [M,4] xyxy -> [K,M] giao / diện tích box (box diện tích 0 -> 0) — `on_object` của eval."""
     b = np.asarray(boxes, dtype=np.float64).reshape(-1, 4)
     o = np.asarray(objects, dtype=np.float64).reshape(-1, 4)
     lt = np.maximum(b[:, None, :2], o[None, :, :2])
@@ -68,11 +39,7 @@ def ioa(boxes, objects):
 
 
 def filter_degenerate(boxes_xyxy, min_size=0.0):
-    """Drop boxes with w or h <= min_size. Returns (clean_boxes, keep_mask).
-
-    Measured 14 of 37,110 CE-130 train boxes are degenerate. Must be filtered
-    BEFORE the matcher AND before computing GIoU.
-    """
+    """Bỏ box có w hoặc h <= min_size -> (box còn lại, mask giữ)."""
     b = np.asarray(boxes_xyxy, dtype=np.float64).reshape(-1, 4)
     keep = (b[:, 2] - b[:, 0] > min_size) & (b[:, 3] - b[:, 1] > min_size)
     return b[keep], keep

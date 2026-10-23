@@ -1,21 +1,7 @@
-"""Density map cho ALPHA3 (docs/EXPERIMENT_ALPHA.md mục 5): kênh thứ 4 của R-50, như CE-Loc gốc.
-
-Nguồn: `samples/{train,test}/density/{iid}_{k}.png` — density CountGD sinh trên TỪNG ảnh inpaint
-(mỗi ảnh gốc có 1–12 bản, trung vị 7–9, mỗi bản thiếu các vật đã bị xoá tới lượt đó). Split của
-`samples/` khác split detect nên tra theo `iid`, không theo split.
-
-Giải mã: PNG tô màu **jet** của matplotlib (nền (0,0,127) = mức 0, đỏ đậm (127,0,0) = mức 255).
-Đổi màu ngược về mức 0..255 bằng màu GẦN NHẤT trong bảng jet 256 mức (trên dữ liệu thật mọi màu
-trùng đúng bảng, khoảng cách 0; bảng chỉ có 253 màu phân biệt: mức 29–32 cùng là (0,0,255) và giải
-mã về 29 -> sai tối đa 3/255). CE-Loc gốc đọc bằng `.convert("L")` (nền 14/255, blob đậm nhất thành vòng rỗng) —
-người dùng chốt giải mã jet (2026-09-29). Resize NEAREST + dán góc trên-trái như gốc, rồi /255.
-
-Chế độ chọn bản density cho một ảnh (`DensityIndex.pick`):
-  full    : bản có tổng diện tích blob (số pixel mức > 0) LỚN NHẤT — "bản count đầy đủ nhất"
-  partial : bản diện tích NHỎ NHẤT trong các bản còn lại (ảnh chỉ có 1 bản -> dùng bản full)
-  empty   : map trống (toàn 0)
-  mix     : 1/3 full · 1/3 một bản ngẫu nhiên khác full (1 bản -> full) · 1/3 empty
-ALPHA3.1 train `full`, ALPHA3.2 train `mix`; eval cả 3 chế độ full / partial / empty.
+"""Density map (kênh 4 của ảnh vào): `samples/{train,test}/density/{iid}_{k}.png` — density CountGD tô màu jet trên TỪNG ảnh inpaint
+(mỗi ảnh gốc 1–12 bản, mỗi bản thiếu các vật đã xoá tới lượt đó). Ảnh inpaint dùng density của chính mẫu (`data/turns.py`); ảnh GỐC dùng
+bản `full` = bản có tổng diện tích blob lớn nhất của ảnh gốc đó — chỉ mục `data/density_index.json` (`tools/build_density_index.py`,
+giải mã jet về mức 0..255 bằng màu gần nhất trong bảng jet 256 mức để đếm diện tích).
 """
 
 import json
@@ -26,11 +12,7 @@ from multiprocessing import Pool
 import numpy as np
 from PIL import Image
 
-__all__ = ["MODES", "EVAL_MODES", "JET", "decode_jet", "load_density_levels", "letterbox_density",
-           "build_index", "DensityIndex"]
-
-MODES = ("full", "partial", "empty", "mix")
-EVAL_MODES = ("full", "partial", "empty")
+__all__ = ["JET", "decode_jet", "build_index", "DensityIndex"]
 
 # `_jet_data` của matplotlib (matplotlib/_cm.py): (x, giá trị) từng kênh, nội suy tuyến tính.
 _JET_SEG = (((0.0, 0.0), (0.35, 0.0), (0.66, 1.0), (0.89, 1.0), (1.0, 0.5)),
@@ -58,20 +40,6 @@ def decode_jet(rgb):
     d = ((uc[:, None, :] - JET[None].astype(np.int32)) ** 2).sum(-1)
     lv = d.argmin(1).astype(np.uint8)
     return lv[inv.reshape(-1)].reshape(h, w), float(np.sqrt(d.min(1).max()))
-
-
-def load_density_levels(path):
-    """PNG density -> mức uint8 [H,W] (kích thước ảnh gốc)."""
-    return decode_jet(np.asarray(Image.open(path).convert("RGB")))[0]
-
-
-def letterbox_density(levels_u8, nw, nh, target):
-    """Mức uint8 [H,W] -> float32 [T,T] trong [0,1]: resize (nw,nh) NEAREST, dán góc trên-trái
-    lên canvas 0 — đúng `resize_and_pad` của CE-Loc gốc (phần density)."""
-    canvas = np.zeros((target, target), dtype=np.float32)
-    small = Image.fromarray(np.asarray(levels_u8, dtype=np.uint8)).resize((nw, nh), resample=Image.NEAREST)
-    canvas[:nh, :nw] = np.asarray(small, dtype=np.float32) / 255.0
-    return canvas
 
 
 # ----------------------------------------------------------------------------- chỉ mục
@@ -116,7 +84,7 @@ def build_index(samples_root, workers=8, log=print):
 
 
 class DensityIndex:
-    """Đọc chỉ mục JSON (`tools/build_density_index.py`); `pick` chọn bản density theo chế độ."""
+    """Đọc chỉ mục JSON (`tools/build_density_index.py`); `full(iid)` -> đường dẫn bản density đầy đủ nhất của ảnh gốc."""
 
     def __init__(self, index_path, samples_root):
         if not os.path.exists(index_path):
@@ -130,23 +98,5 @@ class DensityIndex:
     def __contains__(self, iid):
         return iid in self.variants
 
-    def path(self, rel):
-        return os.path.join(self.root, rel)
-
-    def pick(self, iid, mode, rng=None):
-        """-> (đường dẫn tương đối hoặc None = map trống, loại thực tế 'full'|'partial'|'empty')."""
-        v = self.variants[iid]
-        if mode == "full":
-            return v[0][0], "full"
-        if mode == "partial":
-            return (v[-1][0], "partial") if len(v) > 1 else (v[0][0], "full")
-        if mode == "empty":
-            return None, "empty"
-        if mode == "mix":
-            r = int(rng.integers(3))
-            if r == 0:
-                return v[0][0], "full"
-            if r == 1:
-                return (v[1 + int(rng.integers(len(v) - 1))][0], "partial") if len(v) > 1 else (v[0][0], "full")
-            return None, "empty"
-        raise ValueError(f"density mode {mode!r} không thuộc {MODES}")
+    def full(self, iid):
+        return os.path.join(self.root, self.variants[iid][0][0])

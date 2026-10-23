@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""ALPHA3: dựng chỉ mục density MỘT lần — mỗi ảnh gốc (iid) -> các bản density trong
-`samples/{train,test}/density/{iid}_{k}.png`, sắp theo diện tích blob giảm dần (bản đầu = `full`).
-Giải mã jet + đếm pixel mức > 0 (`data/density.py`). Kiểm luôn: phủ đủ 3 split detect, mọi màu
-thuộc bảng jet, kích thước density == ảnh gốc.
+"""Dựng chỉ mục density MỘT lần (eval ảnh gốc dùng bản `full`) — mỗi ảnh gốc (iid) -> các bản density trong
+`samples/{train,test}/density/{iid}_{k}.png`, sắp theo diện tích blob giảm dần (bản đầu = `full`; `data/density.py`). Kiểm luôn:
+phủ đủ 3 split CE-130, mọi màu thuộc bảng jet, kích thước density == ảnh gốc.
 
 ~26k PNG: vài phút với 8 worker (tính cả đọc đĩa) -> chạy nền trên server:
   cd object-detection/ce_localization
-  LOG=/mnt/disk1/aiotlab/haitn/log/detection/density_index_$(date +%m%d_%H%M).log
+  LOG=/mnt/disk1/aiotlab/haitn/log/add/data/density_index_$(date +%m%d_%H%M).log
   nohup python tools/build_density_index.py --samples ../data/samples --ce130 ../data/all_phase2_V2 \\
       --out ../data/density_index.json --workers 8 > $LOG 2>&1 &
   echo "PID $! -> $LOG"

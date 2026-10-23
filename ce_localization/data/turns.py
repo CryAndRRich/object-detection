@@ -1,26 +1,15 @@
-"""Dữ liệu bài ADD (docs/EXPERIMENT_GAMMA.md mục 2): một mẫu = (nhánh, lượt t) của CE-130.
+"""Dữ liệu CE-130 của bài ADD: một mẫu = (nhánh, lượt t).
 
-Nhánh `all_phase2_V2/<split>/<iid>_b<k>/` xoá CỘNG DỒN tối đa 4 vật: `inpainted_turn_t.png` thiếu đúng vật
-1..t (`inpainted_bboxes[:t]`, xyxy pixel ảnh gốc). Đích train = lỗ MỚI NHẤT `inpainted_bboxes[t-1]` (như CE-Loc
-gốc); các lỗ cũ vẫn trong ảnh và cũng là chỗ thêm hợp lệ (chỉ để chấm).
+Nhánh `all_phase2_V2/<split>/<iid>_b<k>/` xoá CỘNG DỒN tối đa 4 vật: ảnh lượt t thiếu vật 1..t (`inpainted_bboxes[:t]`, xyxy pixel ảnh
+gốc). Đích train = lỗ MỚI NHẤT (như CE-Loc gốc); các lỗ cũ cũng là chỗ thêm hợp lệ (chỉ để chấm). `samples/{train,test}/images/{iid}_{j}.png`
+của bài = đúng các ảnh inpaint đó, kèm `density/` (density CountGD của chính ảnh) và `annotation/` (`target_bbox` cxcywh); chỉ mục
+`data/turn_index.json` (`tools/build_turn_index.py`) ghép (nhánh, lượt) <-> file samples bằng hash pixel.
 
-`samples/{train,test}/images/{iid}_{j}.png` của bài = đúng các ảnh inpaint đó (trùng từng pixel), kèm
-`density/{iid}_{j}.png` (density CountGD của CHÍNH ảnh đó) và `annotation/{iid}_{j}.json` (`target_bbox`
-cxcywh). Thứ tự j không theo nhánh / lượt và split của `samples/` lẫn lớp giữa các split ⇒ chỉ mục
-`data/turn_index.json` (`tools/build_turn_index.py`, cửa G0) khớp (nhánh, lượt) <-> file samples bằng hash pixel,
-còn split lấy theo thư mục `all_phase2_V2` (lớp 3 split rời nhau).
-
-Dataset đọc ảnh + density từ `samples/` (Kaggle chỉ cần zip samples + annotation CE-130), letterbox góc trên-trái, đầu vào KIỂU BÀI
-(CE-Loc gốc): `to_tensor` (/255) + density `.convert("L")` (độ sáng PNG jet; `empty` = PNG jet trống (0, 0, 127) -> 14/255 trên vùng
-thật) — như `image_inputs` / `ObjectPlacementDataset.resize_and_pad` của bài.
-`image="original"` thay ảnh vào bằng `ground_truth.jpg` của nhánh (không lỗ) — phép thử lối tắt "tìm vết inpaint".
-
-`split_source` (GAMMA2): `ce130` = split theo thư mục `all_phase2_V2` (mặc định); `samples` = split NHƯ CE-Loc GỐC TRAIN:
-train = mọi mẫu `samples/train` (gồm cả ảnh gốc val / test CE-130 bài đã dùng), val / test = mẫu `samples/test` có ảnh gốc
-thuộc val / test CE-130 (`samples/` train và test không chung ảnh gốc ⇒ chưa model nào train trên val / test này).
-`AddCache` (GAMMA2, Kaggle): ảnh inpaint + density của mẫu đã letterbox, uint8 [T,T,4] trong MỘT file (zlib hoặc memmap thô) —
-`/255` ra đúng từng bit đầu vào kiểu bài (có test); bỏ nghẽn giải mã PNG. Dataset trả ảnh uint8 HWC (cả khi không cache):
-`to_device_add` mới `/255` trên thiết bị (`paper_to_float`) — worker nhẹ hơn, PCIe chở 1/4 số byte.
+Split như CE-Loc gốc: train = mọi mẫu `samples/train`; val / test = mẫu `samples/test` có ảnh gốc thuộc val / test CE-130 (1.174 / 4.948);
+`test_all` = toàn bộ `samples/test` (6.122, như tác giả). Đầu vào kiểu bài: letterbox góc trên-trái (BILINEAR, đệm đen), ảnh /255,
+density `.convert("L")` (NEAREST). `image="original"` = `ground_truth.jpg` của nhánh (không lỗ) + density `full` của ảnh gốc.
+Dataset trả ảnh uint8 HWC; `to_device_add` mới /255 trên thiết bị. `AddCache` (Kaggle): ảnh + density đã letterbox, uint8 [T,T,4] trong
+một file (zlib hoặc memmap raw).
 """
 
 import glob
@@ -36,32 +25,44 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from ce_localization.data.dataset import _read_annotation, letterbox, scale_boxes
-from ce_localization.data.density import letterbox_density
 from ce_localization.utils.box_ops_np import box_iou, filter_degenerate
 
-__all__ = ["SPLITS", "IMAGE_KINDS", "ADD_DENSITY", "SPLIT_SOURCES", "pixel_hash", "assign_removed",
-           "build_turn_index", "TurnIndex", "AddCache", "build_add_cache", "convert_add_cache", "CE130AddDataset", "collate_add", "to_device_add",
-           "paper_to_float", "image_inputs"]
+__all__ = ["SPLITS", "IMAGE_KINDS", "letterbox", "scale_boxes", "read_annotation", "pixel_hash", "assign_removed", "build_turn_index",
+           "TurnIndex", "AddCache", "build_add_cache", "convert_add_cache", "CE130AddDataset", "collate_add", "to_device_add",
+           "paper_to_float"]
 
 SPLITS = ("train", "val", "test")
 IMAGE_KINDS = ("inpainted", "original")
-ADD_DENSITY = ("sample", "full", "empty")       # density của chính mẫu | bản `full` của ảnh gốc (ALPHA3) | trống
 TARGET_TOL_PX = 1.0                             # target_bbox (cxcywh, làm tròn) vs inpainted_bboxes (xyxy)
-SPLIT_SOURCES = ("ce130", "samples")
 
 
-def image_inputs(img_rgb, density_path=None, target=512):
-    """Một ảnh PIL RGB (+ PNG density: đường dẫn hoặc ảnh PIL) -> (tensor [3|4,T,T], scale, nw, nh), letterbox góc trên-trái, kiểu bài:
-    `to_tensor` (/255) + density `.convert("L")` (độ sáng của PNG jet, nền 14/255), resize NEAREST + độn 0 — đúng
-    `ObjectPlacementDataset.resize_and_pad` (có test so với công thức gốc)."""
-    canvas, scale, nw, nh = letterbox(img_rgb, target)
-    x = canvas.astype(np.float32).transpose(2, 0, 1) / 255.0
-    if density_path is not None:
-        den = Image.open(density_path) if isinstance(density_path, str) else density_path
-        lv = np.asarray(den.convert("L"), dtype=np.uint8)
-        x = np.concatenate([x, letterbox_density(lv, nw, nh, target)[None]], axis=0)
-    return torch.from_numpy(np.ascontiguousarray(x)), scale, nw, nh
+def letterbox(img, target=512):
+    """PIL RGB -> (canvas uint8 [T,T,3], scale, nw, nh). Y như `resize_and_pad` của CE-Loc gốc."""
+    w, h = img.size
+    scale = min(target / w, target / h)
+    nw, nh = int(w * scale), int(h * scale)
+    canvas = np.zeros((target, target, 3), dtype=np.uint8)            # đệm ĐEN như bản gốc
+    canvas[:nh, :nw] = np.asarray(img.resize((nw, nh), resample=Image.BILINEAR), dtype=np.uint8)
+    return canvas, scale, nw, nh
+
+
+def scale_boxes(boxes_xyxy_px, scale, nw, nh):
+    """Box xyxy pixel ảnh gốc -> xyxy pixel canvas, kẹp vào vùng ảnh thật, bỏ box rỗng."""
+    b = np.asarray(boxes_xyxy_px, dtype=np.float64).reshape(-1, 4) * scale
+    b[:, [0, 2]] = b[:, [0, 2]].clip(0, nw)
+    b[:, [1, 3]] = b[:, [1, 3]].clip(0, nh)
+    keep = (b[:, 2] > b[:, 0]) & (b[:, 3] > b[:, 1])
+    return b[keep]
+
+
+def read_annotation(branch_dir):
+    """`fixed_annotation.json` (chỉ val / test) hoặc `annotation.json`; None nếu không có."""
+    for name in ("fixed_annotation.json", "annotation.json"):
+        path = os.path.join(branch_dir, name)
+        if os.path.exists(path):
+            with open(path) as f:
+                return json.load(f)
+    return None
 
 
 def _pool(workers):
@@ -125,7 +126,7 @@ def build_turn_index(ce130_root, samples_root, workers=8, log=print):
     for split in SPLITS:
         for br in sorted(glob.glob(os.path.join(ce130_root, split, "*"))):
             name = os.path.basename(br)
-            ann = _read_annotation(br)
+            ann = read_annotation(br)
             if ann is None:
                 continue
             T = len(glob.glob(os.path.join(br, "inpainted_turn_*.png")))
@@ -204,15 +205,10 @@ class TurnIndex:
             d = json.load(f)
         self.branches, self.turns = d["branches"], d["turns"]
 
-    def keys(self, split, source="ce130"):
-        """Khoá (nhánh, lượt) của `split`. `source` (mục docstring module): ce130 | samples. `split` "test_all" (chỉ `samples`,
-        DELTA6.x 2026-10-23) = TOÀN BỘ `samples/test` như tác giả (= val + test của split samples: 1.174 + 4.948 mẫu)."""
-        if source not in SPLIT_SOURCES:
-            raise ValueError(f"split_source {source!r} không thuộc {SPLIT_SOURCES}")
-        if split == "test_all" and source != "samples":
-            raise ValueError("split 'test_all' chỉ có với split_source 'samples' (toàn bộ samples/test)")
-        if source == "ce130":
-            return sorted(k for k, v in self.turns.items() if self.branches[v["branch"]]["split"] == split)
+    def keys(self, split):
+        """Khoá (nhánh, lượt) của `split` (train | val | test | test_all — docstring module)."""
+        if split not in SPLITS + ("test_all",):
+            raise ValueError(f"split {split!r} không thuộc {SPLITS + ('test_all',)}")
         sdir = "train" if split == "train" else "test"
         return sorted(k for k, v in self.turns.items() if v["sample"].split("/")[0] == sdir
                       and (split in ("train", "test_all") or self.branches[v["branch"]]["split"] == split))
@@ -254,7 +250,7 @@ class AddCache:
 
 def _letterbox_l_u8(gray_u8, nw, nh, target):
     """Density kiểu bài (`.convert("L")`, uint8 [H,W]) -> uint8 [T,T]: resize NEAREST, dán góc trên-trái lên nền 0.
-    `/255` ra đúng `letterbox_density` (float)."""
+    `/255` ra đúng density kiểu bài (float)."""
     den = np.zeros((target, target), dtype=np.uint8)
     small = Image.fromarray(np.asarray(gray_u8, dtype=np.uint8)).resize((nw, nh), resample=Image.NEAREST)
     den[:nh, :nw] = np.asarray(small, dtype=np.uint8)
@@ -353,24 +349,20 @@ def convert_add_cache(src_dir, out_dir, workers=4, log=print):
 
 
 class CE130AddDataset(Dataset):
-    """Một phần tử = một (nhánh, lượt). Box ra là xyxy PIXEL CANVAS như ALPHA. Ảnh uint8 [C,T,T] kiểu bài (docstring module)."""
+    """Một phần tử = một (nhánh, lượt): ảnh uint8 [4,T,T] (RGB + density kiểu bài), box xyxy PIXEL CANVAS. Density: ảnh inpaint =
+    density của chính mẫu; ảnh gốc = bản `full` của ảnh gốc (`density_index`, `data/density.py`)."""
 
-    def __init__(self, index, ce130_root, samples_root, split, image_size=512, density=None, density_index=None,
-                 image="inpainted", split_source="ce130", cache=None):
+    def __init__(self, index, ce130_root, samples_root, split, image_size=512, image="inpainted", density_index=None, cache=None):
         if image not in IMAGE_KINDS:
             raise ValueError(f"image {image!r} không thuộc {IMAGE_KINDS}")
-        if density is not None and density not in ADD_DENSITY:
-            raise ValueError(f"density {density!r} không thuộc {ADD_DENSITY}")
-        if density == "full" and density_index is None:
-            raise ValueError("density 'full' cần density_index (data/density_index.json của ALPHA3)")
+        if image == "original" and density_index is None:
+            raise ValueError("ảnh gốc cần density_index (density `full` của ảnh gốc)")
         self.index, self.ce130_root, self.samples_root = index, ce130_root, samples_root
-        self.keys = index.keys(split, split_source)
-        self.image_size, self.density, self.density_index, self.image = image_size, density, density_index, image
-        # cache chỉ dùng được khi đầu vào đúng thứ đã cache: ảnh inpaint + density của mẫu (hoặc không density)
-        usable = cache is not None and image == "inpainted" and density in (None, "sample")
+        self.keys = index.keys(split)
+        self.image_size, self.image, self.density_index = image_size, image, density_index
         if cache is not None and cache.size != image_size:
             raise ValueError(f"cache image_size {cache.size} != {image_size}")
-        self.cache = cache if usable else None
+        self.cache = cache if image == "inpainted" else None          # cache = ảnh inpaint + density của mẫu
 
     def __len__(self):
         return len(self.keys)
@@ -378,31 +370,20 @@ class CE130AddDataset(Dataset):
     def classes(self):
         return sorted({self.index.branches[self.index.turns[k]["branch"]]["class"] for k in self.keys})
 
-    def entry(self, i):
-        e = self.index.turns[self.keys[i]]
-        return e, self.index.branches[e["branch"]]
-
     def __getitem__(self, i):
         key = self.keys[i]
-        e, b = self.entry(i)
+        e = self.index.turns[key]
+        b = self.index.branches[e["branch"]]
         t = e["t"]
         if self.cache is not None and key in self.cache:
-            arr, scale, nw, nh = self.cache.get(key)
-            x = arr if self.density is not None else arr[..., :3]
+            x, scale, nw, nh = self.cache.get(key)
         else:
             path = (os.path.join(self.samples_root, e["sample"]) if self.image == "inpainted" else
                     os.path.join(self.ce130_root, e["branch"], "ground_truth.jpg"))
-            img = Image.open(path).convert("RGB")
-            x, scale, nw, nh = letterbox(img, self.image_size)            # uint8 HWC (không chép sang CHW trong worker)
-        if self.density is not None and x.shape[-1] == 3:
-            if self.density == "empty":
-                den = _letterbox_l_u8(np.asarray(Image.new("RGB", img.size, (0, 0, 127)).convert("L")), nw, nh,
-                                      self.image_size)
-            else:
-                iid = e["branch"].split("/")[1].split("_b")[0]
-                path_d = (os.path.join(self.samples_root, e["density"]) if self.density == "sample" else
-                          self.density_index.path(self.density_index.pick(iid, "full")[0]))
-                den = _letterbox_l_u8(np.asarray(Image.open(path_d).convert("L"), dtype=np.uint8), nw, nh, self.image_size)
+            x, scale, nw, nh = letterbox(Image.open(path).convert("RGB"), self.image_size)
+            path_d = (os.path.join(self.samples_root, e["density"]) if self.image == "inpainted" else
+                      self.density_index.full(e["branch"].split("/")[1].split("_b")[0]))
+            den = _letterbox_l_u8(np.asarray(Image.open(path_d).convert("L"), dtype=np.uint8), nw, nh, self.image_size)
             x = np.concatenate([x, den[..., None]], axis=-1)
         holes = scale_boxes(b["holes"][:t], scale, nw, nh)
         if len(holes) != t:
@@ -416,7 +397,7 @@ class CE130AddDataset(Dataset):
             "image": torch.from_numpy(np.ascontiguousarray(x, dtype=np.uint8)).permute(2, 0, 1),
             "target": torch.from_numpy(holes[-1]).float(),               # lỗ MỚI NHẤT = đích train
             "holes": torch.from_numpy(holes).float(),                    # mọi lỗ tới lượt t (chấm)
-            "objects": torch.from_numpy(scale_boxes(objs, scale, nw, nh)).float(),   # vật đang có (chấm)
+            "objects": torch.from_numpy(scale_boxes(objs, scale, nw, nh)).float(),   # vật đang có
             "valid_hw": (nh, nw),
             "text": b["class"],
             "image_id": key,
@@ -440,7 +421,7 @@ def collate_add(batch):
         "image_id": [b["image_id"] for b in batch],
         "t": [b["t"] for b in batch],
         **({"objects_all": [b["objects_all"] for b in batch]} if "objects_all" in batch[0] else {}),   # CE-CoCount: cả hai lớp
-        **({"exemplars": [b["exemplars"] for b in batch]} if "exemplars" in batch[0] else {}),         # CE-CoCount: box mẫu gán tay
+        **({"exemplars": [b["exemplars"] for b in batch]} if "exemplars" in batch[0] else {}),         # CE-CoCount: 3 box mẫu gán tay
     }
 
 

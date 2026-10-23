@@ -1,8 +1,5 @@
-"""Dữ liệu giả + config test dùng chung cho mọi file test của ce_localization. Không tải gì:
-backbone `pretrained_backbone: false`, text thay bằng embedding giả, mọi lượt train ép `--device cpu`.
-DELTA: CLIP ViT của refiner thay bằng CLIP tí hon dựng từ config (`_fake_load_clip`, lưới theo tên ViT: B/16 14×14, B/32 7×7,
-L/14 16×16, L/14-336 24×24), token chữ giả.
-"""
+"""Dữ liệu giả + model / config thu nhỏ dùng chung. Không tải gì: CLIP ViT của refiner thay bằng CLIP tí hon dựng từ config
+(`_fake_load_clip`), text thay bằng embedding / token giả (`_fake_text_table`), mọi lượt train / eval ép `--device cpu`."""
 
 import hashlib
 import json
@@ -14,81 +11,24 @@ import torch
 import yaml
 from PIL import Image
 
-from ce_localization.data.density import DensityIndex, JET, build_index
-from ce_localization.data.points import PointTable
-from ce_localization.engine import criterion as C
+from ce_localization.data.density import JET, build_index
 from ce_localization.models.text import TextTable
 
-
-CFG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "ce_localization", "config")
-CFG0 = os.path.join(CFG_DIR, "alpha", "alpha0.yaml")
-CFG3 = {"full": os.path.join(CFG_DIR, "alpha", "alpha3_1.yaml"), "mix": os.path.join(CFG_DIR, "alpha", "alpha3_2.yaml")}
-CFG_B0 = os.path.join(CFG_DIR, "beta", "beta0.yaml")
-PSEUDO = {"knn": 3, "beta": 1.0, "min_frac": 0.02, "max_frac": 0.30}
-
-
-CFG_L = {"alpha": 0.25, "gamma": 2.0, "class_weight": 2.0, "l1_weight": 5.0, "giou_weight": 2.0,
-         "center_weight": 5.0, "size_weight": 1.0}
-CFG_M = {"ota_k": 5, "center_radius": 2.5}
-
-
-def _make_branch(root, split, iid, boxes_xyxy, category, w=200, h=150, seed=0):
-    br = os.path.join(root, split, f"{iid}_b1")
-    os.makedirs(br, exist_ok=True)
-    rng = np.random.default_rng(seed)
-    Image.fromarray(rng.integers(0, 255, (h, w, 3), dtype=np.uint8)).save(
-        os.path.join(br, "ground_truth.jpg"))
-    with open(os.path.join(br, "annotation.json"), "w") as f:
-        json.dump({"all_bboxes": boxes_xyxy, "inpainted_bboxes": boxes_xyxy[:1],
-                   "class_based_caption": category}, f)
-    return br
-
-
-def _fake_ce130(root, n_train=4, n_val=2, n_test=2):
-    rng = np.random.default_rng(1)
-    k = 0
-    for split, n, cats in (("train", n_train, ["apple", "egg"]), ("val", n_val, ["bird"]),
-                           ("test", n_test, ["cup"])):
-        for i in range(n):
-            boxes = []
-            for _ in range(int(rng.integers(3, 8))):
-                x1, y1 = rng.uniform(0, 150), rng.uniform(0, 110)
-                boxes.append([x1, y1, x1 + rng.uniform(8, 45), y1 + rng.uniform(8, 35)])
-            _make_branch(root, split, str(1000 + k), boxes, cats[i % len(cats)], seed=k)
-            k += 1
-
-
+CFG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "ce_localization", "config", "delta")
+RUNS = ("delta4", "delta5", "delta5_1", "delta5_2", "delta5_3", "delta5_4", "delta5_5", "delta6", "delta6_1", "delta6_2")
+COCOUNT_NAMES = ("INTRA_FOO_TOM1_TOM2_00008_00006_0_200", "INTER_OFF_PEN0_PNC0_00007_00005_0_40")
 FAKE_TEXT_SHA = hashlib.sha256(b"fake CLIP text").digest()
+# ViT thật -> (ảnh, patch, hidden giả): cùng lưới g = ảnh / patch như bản thật
+FAKE_VIT = {"openai/clip-vit-base-patch16": (224, 16, 32), "openai/clip-vit-base-patch32": (224, 32, 32)}
+SMALL_REFINER = {"enabled": True, "clip_model_name": "openai/clip-vit-base-patch32", "text_model_name": "openai/clip-vit-base-patch16",
+                 "d_model": 32, "num_heads": 2, "num_layers": 2, "aux_loss_weight": 0.1}
 
 
-def _fake_tokens(names, dim=512):
-    """Token chữ giả: độ dài 2 + len(tên) % 4 (khác nhau giữa các lớp), tất định theo tên."""
-    out = {}
-    for n in names:
-        g = torch.Generator().manual_seed(7 + sum(map(ord, n)))
-        out[n] = torch.randn(2 + len(n) % 4, dim, generator=g)
-    return out
-
-
-def _fake_text_table(names, cfg, dev, state_dict=None):
-    from ce_localization.models.clip_refiner import needs_text_tokens
-    table = {}
-    for n in names:
-        g = torch.Generator().manual_seed(sum(map(ord, n)))
-        table[n] = torch.randn(512, generator=g)
-    if needs_text_tokens(cfg["model"]):
-        return TextTable(table, _fake_tokens(names), FAKE_TEXT_SHA)
-    return TextTable(table)
-
-
-# ViT thật -> (ảnh, patch, hidden giả): cùng lưới g = ảnh / patch như bản thật; hidden khác nhau để thử `image_proj`
-FAKE_VIT = {"openai/clip-vit-base-patch16": (224, 16, 32), "openai/clip-vit-base-patch32": (224, 32, 32),
-            "openai/clip-vit-large-patch14": (224, 14, 48), "openai/clip-vit-large-patch14-336": (336, 14, 48)}
-
+# ----------------------------------------------------------------------------- CLIP / text giả
 
 def _fake_load_clip(name, text_name=None, *, seed=0):
-    """Thay `models.clip_refiner.load_clip`: CLIPVisionModel tí hon (2 tầng) dựng từ config, lưới như ViT `name` (`FAKE_VIT`); weight
-    tất định theo `seed`, KHÔNG đụng RNG toàn cục. -> (model frozen eval, hidden CLIP text 512 — B/16 / B/32)."""
+    """Thay `models.clip_refiner.load_clip`: CLIPVisionModel tí hon (2 tầng), lưới như ViT `name`; weight tất định theo `seed`, KHÔNG
+    đụng RNG toàn cục. -> (model frozen eval, hidden CLIP text 512)."""
     from transformers import CLIPVisionConfig, CLIPVisionModel
     size, patch, hid = FAKE_VIT[name]
     with torch.random.fork_rng():
@@ -103,133 +43,43 @@ def _patch_clip(monkeypatch, seed=0):
     monkeypatch.setattr(cr, "load_clip", lambda name, text_name: _fake_load_clip(name, text_name, seed=seed))
 
 
-def _test_cfg(tmp_path, memory="none", data_root=None, density=None):
-    with open(CFG0 if density is None else CFG3[density]) as f:
-        cfg = yaml.safe_load(f)
-    cfg["data"].update(root=data_root, image_size=128, num_workers=0)
-    if density is not None:
-        base = os.path.dirname(data_root)
-        cfg["data"].update(density_root=os.path.join(base, "samples"),
-                           density_index=os.path.join(base, "density_index.json"))
-    cfg["model"].update(memory=memory, pretrained_backbone=False)
-    cfg["diffusion"]["num_proposals"] = 20
-    cfg["training"].update(max_iter=4, steps=[3], warmup_iters=2, log_every=1, ckpt_every=2,
-                           eval_every=2)
-    cfg["eval"]["batch_size"] = 2
-    p = str(tmp_path / f"cfg_{memory}_{density}.yaml")
-    with open(p, "w") as f:
-        yaml.safe_dump(cfg, f)
-    return p, cfg
+def _fake_text_table(names, cfg=None, dev=None):
+    """Embedding pooler + token chữ giả, tất định theo tên (token dài 2 + len(tên) % 4)."""
+    table, tok = {}, {}
+    for n in names:
+        table[n] = torch.randn(512, generator=torch.Generator().manual_seed(sum(map(ord, n))))
+        tok[n] = torch.randn(2 + len(n) % 4, 512, generator=torch.Generator().manual_seed(7 + sum(map(ord, n))))
+    return TextTable(table, tok, FAKE_TEXT_SHA)
 
 
-def _run_train(monkeypatch, argv):
-    import ce_localization.train as ta
-    monkeypatch.setattr(ta, "build_text_table", _fake_text_table)
-    _patch_clip(monkeypatch)
-    monkeypatch.setattr(sys, "argv", ["train.py"] + argv + ["--device", "cpu"])
-    ta.main()
+def small_policy(seed=0, refiner=None, num_timesteps=100, **kw):
+    """BoxPolicy thu nhỏ (U-Net (16, 32, 64), refiner d 32) cho test đơn vị."""
+    from ce_localization.models.box_policy import BoxPolicy
+    torch.manual_seed(seed)
+    return BoxPolicy(pretrained_backbone=False, vis_dim=16, text_dim=16, step_embed_dim=32, down_dims=(16, 32, 64), n_groups=4,
+                     num_timesteps=num_timesteps, refiner={**SMALL_REFINER, **(refiner or {})}, **kw)
 
 
-def _fake_density(base, n_variants=None):
-    """samples/{train,test}/density/{iid}_{k}.png tô jet cho mọi ảnh của CE-130 giả: bản k chỉ vẽ
-    blob trên (số box − k) box đầu (mất dần vật, như lượt inpaint); ảnh đầu mỗi split chỉ 1 bản.
-    Rồi dựng chỉ mục như `tools/build_density_index.py`."""
-    root = os.path.join(base, "all_phase2_V2")
-    for split in ("train", "val", "test"):
-        for j, br in enumerate(sorted(os.listdir(os.path.join(root, split)))):
-            iid = br.split("_b")[0]
-            with open(os.path.join(root, split, br, "annotation.json")) as f:
-                boxes = json.load(f)["all_bboxes"]
-            w, h = Image.open(os.path.join(root, split, br, "ground_truth.jpg")).size
-            n = 1 if j == 0 else (n_variants or 3)
-            out = os.path.join(base, "samples", "test" if split == "test" else "train", "density")
-            os.makedirs(out, exist_ok=True)
-            for k in range(n):
-                lv = np.zeros((h, w), dtype=np.uint8)
-                for x1, y1, x2, y2 in boxes[: max(len(boxes) - k, 0)]:
-                    cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
-                    lv[max(cy - 3, 0):cy + 4, max(cx - 3, 0):cx + 4] = 255
-                    lv[max(cy - 1, 0):cy + 2, max(cx - 1, 0):cx + 2] = 128
-                Image.fromarray(JET[lv]).save(os.path.join(out, f"{iid}_{k + 1}.png"))
-    idx = build_index(os.path.join(base, "samples"), workers=0, log=lambda *a: None)
-    with open(os.path.join(base, "density_index.json"), "w") as f:
-        json.dump(idx, f)
-    return DensityIndex(os.path.join(base, "density_index.json"), os.path.join(base, "samples"))
+def small_batch(B=2, seed=0, size=64):
+    """-> (ảnh [B,4,T,T], text [B,512], valid_hw, x0 [B,4], token chữ, box vật list B)."""
+    g = torch.Generator().manual_seed(seed)
+    x = torch.rand(B, 4, size, size, generator=g)
+    vhw = torch.tensor([[48, 64], [64, 56]])[:B]
+    tok = (torch.randn(B, 5, 512, generator=g), torch.tensor([[1, 1, 1, 0, 0], [1, 1, 1, 1, 1]], dtype=torch.bool)[:B])
+    objs = [torch.tensor([[2.0, 3.0, 12.0, 20.0], [30.0, 5.0, 40.0, 18.0]]), torch.zeros(0, 4)][:B]
+    return x, torch.randn(B, 512, generator=g), vhw, torch.rand(B, 4, generator=g) * 2 - 1, tok, objs
 
 
-def _targets(gt, wh=(100.0, 100.0)):
-    return C.build_targets([gt], torch.tensor([[wh[0], wh[1], wh[0], wh[1]]]))
-
-
-def _gauss(h, w, centers, sigma=2.5, peak=1.0):
-    yy, xx = np.mgrid[0:h, 0:w] + 0.5
-    d = sum(np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * sigma ** 2)) for cx, cy in centers)
-    return np.round(d / d.max() * 255 * peak).astype(np.uint8)
-
-
-def _write_points(path, table):
-    with open(path, "w") as f:
-        json.dump({"params": {"tau": 8, "radius": 2}, "points": table}, f)
-    return PointTable(path)
-
-
-def _beta_cfg(tmp_path, root, points):
-    with open(CFG_B0) as f:
-        cfg = yaml.safe_load(f)
-    cfg["data"].update(root=root, image_size=128, num_workers=0, points=points)
-    cfg["model"]["pretrained_backbone"] = False
-    cfg["diffusion"]["num_proposals"] = 20
-    cfg["training"].update(max_iter=4, steps=[3], warmup_iters=2, log_every=1, ckpt_every=2, eval_every=2)
-    cfg["eval"]["batch_size"] = 2
-    p = str(tmp_path / "cfg_beta0.yaml")
-    with open(p, "w") as f:
-        yaml.safe_dump(cfg, f)
-    return p
-
-
-def _run_g0(monkeypatch, base, out, report, extra=()):
-    import ce_localization.tools.build_density_points as g0
-    monkeypatch.setattr(sys, "argv", ["build_density_points.py", "--ce130", os.path.join(base, "all_phase2_V2"),
-                                      "--samples", os.path.join(base, "samples"),
-                                      "--density-index", os.path.join(base, "density_index.json"),
-                                      "--out", out, "--report", report, "--workers", "0", *extra])
-    g0.main()
-
-
-# ----------------------------------------------------------------------------- GAMMA (bài add)
-
-CFG_G = {"density": os.path.join(CFG_DIR, "gamma", "gamma0.yaml"), "rgb": os.path.join(CFG_DIR, "gamma", "gamma0_1.yaml"),
-         "refiner": os.path.join(CFG_DIR, "gamma", "gamma1.yaml"),
-         "refiner_coords": os.path.join(CFG_DIR, "gamma", "gamma1_1.yaml"),
-         "celoc2": os.path.join(CFG_DIR, "gamma", "gamma2_celoc.yaml"),
-         "pr": os.path.join(CFG_DIR, "gamma", "gamma2.yaml"),
-         "pr_joint": os.path.join(CFG_DIR, "gamma", "gamma2_1.yaml"),
-         "geo": os.path.join(CFG_DIR, "gamma", "gamma3.yaml"),
-         "rel": os.path.join(CFG_DIR, "gamma", "gamma3_1.yaml"),
-         "obj": os.path.join(CFG_DIR, "gamma", "gamma4.yaml"),
-         "obj_near": os.path.join(CFG_DIR, "gamma", "gamma4_0_1.yaml"),          # GAMMA4.0.1: 3 vật gần x_t nhất
-         "obj_rand": os.path.join(CFG_DIR, "gamma", "gamma4_0_2.yaml"),          # GAMMA4.0.2: 3 vật ngẫu nhiên
-         "pr_obj": os.path.join(CFG_DIR, "gamma", "gamma4_1.yaml"),
-         **{k: os.path.join(CFG_DIR, "delta", f"{k}.yaml") for k in ("delta1", "delta1_1", "delta2_1", "delta2_2", "delta2_3",
-                                                                     "delta3", "delta4", "delta3_1", "delta3_2", "delta4_1", "delta5", "delta5_1", "delta5_2",
-                                                                     "delta5_3", "delta5_4", "delta5_5",
-                                                                     "delta6", "delta6_1", "delta6_2")}}
-
+# ----------------------------------------------------------------------------- CE-130 giả
 
 def _fake_ce130_turns(base, seed=0):
-    """CE-130 giả theo (nhánh, lượt) + `samples/` của bài: mỗi ảnh gốc 1–2 nhánh, nhánh xoá cộng dồn T <= 4 vật
-    (lỗ tô xám, `inpainted_bboxes` lệch vật `all_bboxes` 1 px như dữ liệu thật); file samples đặt tên
-    `{iid}_{j}` với j XÁO TRỘN (không theo nhánh / lượt), train + val -> `samples/train`, test -> `samples/test`
-    như bài, trừ ảnh gốc val 2001 -> `samples/test` (bài cũng để ~130 ảnh gốc val trong samples/test — split `samples`
-    của GAMMA2 lấy val từ đó). -> (ce130_root, samples_root). Vật thứ 0..1 KHÔNG bao giờ bị xoá."""
+    """CE-130 giả theo (nhánh, lượt) + `samples/` của bài: mỗi ảnh gốc 1–2 nhánh, nhánh xoá cộng dồn T <= 4 vật (lỗ tô xám,
+    `inpainted_bboxes` lệch vật `all_bboxes` 1 px như dữ liệu thật); file samples `{iid}_{j}` với j XÁO TRỘN; train + val -> samples/train,
+    test -> samples/test như bài, trừ ảnh gốc val 2001 -> samples/test. -> (ce130_root, samples_root). Vật 0..1 không bao giờ bị xoá."""
     rng = np.random.default_rng(seed)
     root, samples = os.path.join(base, "all_phase2_V2"), os.path.join(base, "samples")
     plan = (("train", ["1000", "1001", "1002"], "apple"), ("val", ["2000", "2001"], "bird"), ("test", ["3000", "3001"], "cup"))
     for split, iids, cat in plan:
-        # như bài: samples/train = train + val CE-130, samples/test = phần còn lại (cả vài ảnh gốc val — ở đây 2001)
-        sdir = os.path.join(samples, "test" if split == "test" else "train")
-        for d in ("images", "density", "annotation"):
-            os.makedirs(os.path.join(sdir, d), exist_ok=True)
         for iid in iids:
             sdir = os.path.join(samples, "test" if split == "test" or iid == "2001" else "train")
             for d in ("images", "density", "annotation"):
@@ -245,7 +95,7 @@ def _fake_ce130_turns(base, seed=0):
                 br = os.path.join(root, split, f"{iid}_b{b}")
                 os.makedirs(br, exist_ok=True)
                 Image.fromarray(gt).save(os.path.join(br, "ground_truth.jpg"))
-                holes = [[o + 1.0 for o in objs[i]] for i in order]          # lệch 1 px như all_bboxes ↔ inpainted
+                holes = [[o + 1.0 for o in objs[i]] for i in order]
                 img = np.asarray(Image.open(os.path.join(br, "ground_truth.jpg")).convert("RGB")).copy()
                 for t, (x1, y1, x2, y2) in enumerate(holes, 1):
                     img[int(y1):int(y2), int(x1):int(x2)] = 128
@@ -269,7 +119,7 @@ def _fake_ce130_turns(base, seed=0):
 
 
 def _fake_turn_index(base):
-    """CE-130 + samples giả, chỉ mục (nhánh, lượt) và chỉ mục density ALPHA3 (cho ảnh gốc, density `full`)."""
+    """CE-130 + samples giả, chỉ mục (nhánh, lượt) + chỉ mục density. -> (root, samples, đường dẫn chỉ mục, TurnIndex, report)."""
     from ce_localization.data.turns import TurnIndex, build_turn_index
     root, samples = _fake_ce130_turns(base)
     idx = build_turn_index(root, samples, workers=0, log=lambda *a: None)
@@ -281,67 +131,75 @@ def _fake_turn_index(base):
     return root, samples, p, TurnIndex(p), idx["report"]
 
 
-def _gamma_cfg(tmp_path, base, kind="density"):
-    with open(CFG_G[kind]) as f:
-        cfg = yaml.safe_load(f)
+# ----------------------------------------------------------------------------- CE-CoCount giả
+
+def _fake_cocount(root, seed=0):
+    """Mỗi frame hai file `_positive` / `_negative`, vật hai lớp xen kẽ, 10 loc_bbox ở chỗ trống."""
+    rng = np.random.default_rng(seed)
+    for d in ("Image", "Anno", "Anno_with_exam_bbox"):
+        os.makedirs(os.path.join(root, d), exist_ok=True)
+    for fi, stem in enumerate(COCOUNT_NAMES):
+        W, H = (200, 120) if fi == 0 else (90, 160)
+        for pol in ("positive", "negative"):
+            Image.fromarray(rng.integers(0, 255, (H, W, 3), dtype=np.uint8)).save(os.path.join(root, "Image", f"{stem}_{pol}.jpg"))
+        na, nb = int(stem.split("_")[4]), int(stem.split("_")[5])
+        for pol, n, cls, off in (("positive", na, "normal tomato(Big round tomato).", 0), ("negative", nb, "baby tomato.", 9)):
+            objs = [[float(5 + 11 * k), float(5 + off), float(13 + 11 * k), float(13 + off)] for k in range(n)]
+            loc = [[float(4 + 8 * k), float(40 + (k % 2) * 10), float(12 + 8 * k), float(48 + (k % 2) * 10)] for k in range(10)]
+            anno = {"class_name": cls, "loc_bbox": loc, "counting_anno": {"count": n, "exemplars": [list(map(int, o)) for o in objs[:3]]}}
+            with open(os.path.join(root, "Anno", f"{stem}_{pol}.json"), "w") as f:
+                json.dump(anno, f)
+            with open(os.path.join(root, "Anno_with_exam_bbox", f"{stem}_{pol}.json"), "w") as f:
+                json.dump({"class_name": cls, "exam_bbox": [{"bbox": o, "score": 0.9} for o in objs]}, f)
+    return root
+
+
+def _fake_review(root, path, drop_auto=None):
+    """Bản rà giả (khuôn `box_review/app.py`): mỗi file loại tay box 0; `drop_auto` {tên: [chỉ số]} = lọc trùng tự động."""
+    with open(path, "w") as f:
+        for n in sorted(x[:-5] for x in os.listdir(os.path.join(root, "Anno_with_exam_bbox"))):
+            m = len(json.load(open(os.path.join(root, "Anno_with_exam_bbox", n + ".json")))["exam_bbox"])
+            f.write(json.dumps({"id": n, "bad": {n: [0]}, "auto": {n: (drop_auto or {}).get(n, [])}, "n": {n: m}}) + "\n")
+    return path
+
+
+# ----------------------------------------------------------------------------- config / chạy train, eval
+
+def run_cfg(tmp_path, base, run, **training):
+    """Config thật `run` (đã gộp `base`) thu nhỏ cho dữ liệu giả: canvas 128, T = 100 (vòng mock 100 bước), 2 bộ nhiễu / ảnh, batch 2,
+    4 iter, log mỗi iter; refiner / U-Net giữ kích thước thật, CLIP giả. -> (đường dẫn yaml, cfg)."""
+    from ce_localization.utils.config import load_config
+    cfg = load_config(os.path.join(CFG_DIR, f"{run}.yaml"))
     cfg["data"].update(root=os.path.join(base, "all_phase2_V2"), samples_root=os.path.join(base, "samples"),
-                       turn_index=os.path.join(base, "turn_index.json"),
-                       density_index=os.path.join(base, "density_index.json"),
+                       turn_index=os.path.join(base, "turn_index.json"), density_index=os.path.join(base, "density_index.json"),
                        density_root=os.path.join(base, "samples"), image_size=128, num_workers=0)
     cfg["model"]["pretrained_backbone"] = False
-    cfg["diffusion"].update(num_timesteps=20, noise_per_image=2)
-    cfg["training"].update(batch_size=2, max_iter=4, steps=[3], warmup_iters=2, log_every=1, ckpt_every=2,
-                           eval_every=2)
+    cfg["diffusion"].update(num_timesteps=100, noise_per_image=2)
+    cfg["training"].update(batch_size=2, max_iter=4, log_every=1, ckpt_every=2, cosine_t_max=100,
+                           **({} if cfg["eval"]["split"] is None else {"eval_every": 2}), **training)
     cfg["eval"].update(n_samples=3, batch_size=2)
-    p = str(tmp_path / f"cfg_gamma_{kind}.yaml")
+    p = str(tmp_path / f"cfg_{run}.yaml")
     with open(p, "w") as f:
         yaml.safe_dump(cfg, f)
     return p, cfg
 
 
-def _gamma2_cfg(tmp_path, base, kind, proposer_ckpt=None):
-    """Config GAMMA2 / 3 / 4 / DELTA thật (`celoc2` | `pr` | `pr_joint` | `geo` | `rel` | `obj` | `obj_near` | `obj_rand` | `pr_obj` |
-    `delta*`) thu nhỏ cho CE-130 giả:
-    canvas 128, T = 20 (DELTA: 100 — vòng mock 100 bước của eval), 4 iter, batch 2 (refiner DELTA giữ nguyên kích thước thật, CLIP giả)."""
-    with open(CFG_G[kind]) as f:
-        cfg = yaml.safe_load(f)
-    cfg["data"].update(root=os.path.join(base, "all_phase2_V2"), samples_root=os.path.join(base, "samples"),
-                       turn_index=os.path.join(base, "turn_index.json"),
-                       density_index=os.path.join(base, "density_index.json"),
-                       density_root=os.path.join(base, "samples"), image_size=128, num_workers=0)
-    standalone = kind == "celoc2" or kind.startswith(("obj", "delta"))       # CE-Loc đứng một mình (pha 1 / GAMMA4 / 4.0.x / DELTA)
-    if "pretrained_backbone" in cfg["model"] or not standalone:              # DELTA3: không backbone ảnh
-        cfg["model"]["pretrained_backbone"] = not standalone                 # pha 2: True = nạp proposer_ckpt
-    cfg["diffusion"].update(num_timesteps=100 if kind.startswith("delta") else 20, noise_per_image=2)
-    if "proposer" in cfg["diffusion"]:
-        cfg["diffusion"]["proposer"]["num_timesteps"] = 20
-    if proposer_ckpt:
-        cfg["init"]["proposer_ckpt"] = proposer_ckpt
-    cfg["training"].update(batch_size=2, max_iter=4, warmup_iters=2, log_every=1, ckpt_every=2, eval_every=2,
-                           cosine_t_max=100, steps=[3])
-    cfg["eval"].update(n_samples=3, batch_size=2,
-                       sample_kw={} if standalone else {"refine_t": 10, "refine_steps": 1, "proposer_sampler": "ddpm"})
-    p = str(tmp_path / f"cfg_{kind}.yaml")
-    with open(p, "w") as f:
-        yaml.safe_dump(cfg, f)
-    return p, cfg
+def _run_train(monkeypatch, argv):
+    import ce_localization.train as ta
+    monkeypatch.setattr(ta, "build_text_table", _fake_text_table)
+    _patch_clip(monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["train.py"] + argv + ["--device", "cpu"])
+    ta.main()
 
 
-def _fake_paper_ckpt(path, in_channels=4, T=20, seed=0):
-    """Checkpoint giả ĐÚNG khuôn của bài (`model_state_dict` với tên module của `ObjectPlacementPolicy`):
-    `vision_encoder.*`, `text_encoder.projection`, `text_encoder.backbone.*` (CLIP), `noise_net.*`, `alphas_cumprod`."""
-    from ce_localization.models.box_policy import BoxPolicy
-    torch.manual_seed(seed)
-    m = BoxPolicy(in_channels=in_channels, pretrained_backbone=False, num_timesteps=T, vision="r18_paper")
-    sd = {}
-    for k, v in m.state_dict().items():
-        if k.startswith("vision."):
-            sd["vision_encoder." + k[len("vision."):]] = v
-        elif k.startswith("text_proj.0."):
-            sd["text_encoder.projection." + k[len("text_proj.0."):]] = v
-        else:
-            sd[k] = v
-    sd["text_encoder.backbone.text_model.final_layer_norm.weight"] = torch.ones(512)
-    sd["alphas_cumprod"] = m.alphas_cumprod.clone()
-    torch.save({"epoch": 113, "loss": 0.03, "model_state_dict": sd}, path)
-    return m
+def _run_eval(monkeypatch, argv, clip_seed=0):
+    """eval.py trên CPU, 3 box / mẫu, batch 2 -> (JSON chỉ số, JSON dump)."""
+    import ce_localization.eval as ea
+    import ce_localization.train as ta
+    monkeypatch.setattr(ta, "build_text_table", _fake_text_table)
+    _patch_clip(monkeypatch, clip_seed)
+    out = argv[argv.index("--out") + 1]
+    monkeypatch.setattr(sys, "argv", ["eval.py", "--n-samples", "3", "--batch-size", "2", "--num-workers", "0", "--device", "cpu", *argv])
+    ea.main()
+    with open(out) as f, open(os.path.splitext(out)[0] + "_boxes.json") as g:
+        return json.load(f), json.load(g)

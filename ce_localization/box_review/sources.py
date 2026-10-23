@@ -17,7 +17,7 @@ import numpy as np
 from PIL import Image
 
 from ce_localization.data.cocount import clean_class
-from ce_localization.data.dataset import _read_annotation
+from ce_localization.data.turns import read_annotation
 from ce_localization.data.turns import assign_removed
 from ce_localization.utils.box_ops_np import box_iou
 
@@ -85,7 +85,7 @@ def ce130_screens(root, split, holes=True):
     lượt; `holes=False`: chỉ rà box vật). Vật bị xoá ở lượt t (ghép bằng `assign_removed` như bài add) vẽ mờ từ view `turn t`."""
     out = []
     for br in sorted(glob.glob(os.path.join(root, split, "*_b*"))):
-        ann = _read_annotation(br)
+        ann = read_annotation(br)
         if ann is None or not os.path.exists(os.path.join(br, "ground_truth.jpg")):
             continue
         bname, iid = os.path.basename(br), os.path.basename(br).split("_b")[0]

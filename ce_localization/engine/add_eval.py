@@ -1,34 +1,19 @@
-"""Đánh giá bài ADD — docs/EXPERIMENT_GAMMA.md mục 5.
+"""Suy luận + chấm bài ADD. Mỗi mẫu: model sinh K box ĐỘC LẬP từ nhiễu thuần (ảnh mã hoá một lần, K mẫu khử nhiễu song song; không dùng
+số trong log train). Chấm bằng numpy trên box xyxy PIXEL CANVAS (IoU không đổi qua letterbox). Box suy biến kẹp về w / h = 0.
 
-Mỗi mẫu: model sinh K box ĐỘC LẬP (ảnh mã hoá một lần, K nhiễu khử song song từ nhiễu thuần: DDPM ở GAMMA0, DDIM ở
-GAMMA1 — không dùng số trong log train, cạm bẫy 9). Mọi thứ sau model là numpy, box xyxy PIXEL CANVAS; IoU không đổi qua phép
-co giãn đẳng hướng của letterbox nên chấm trên canvas = chấm trên ảnh gốc. Box suy biến (w hoặc h <= 0) kẹp về
-w / h = 0 trước khi chấm (IoU 0), tỉ lệ của chúng báo riêng (`degenerate`).
-
-IoU với LỖ (ảnh inpaint — `with_holes=True`):
-  best_iou@K_latest / hit50@K_latest  max IoU giữa K box và lỗ MỚI NHẤT (đích của bài; oracle best-of-K)
-  best_iou@K_any    / hit50@K_any     như trên với lỗ BẤT KỲ (ảnh lượt t có t lỗ, lỗ nào cũng hợp lệ)
-  mean_iou_any / box_hit50_any        IoU / tỉ lệ IoU >= 0,5 của MỘT box bất kỳ (không oracle) — CHỌN best.pth
-  mean_iou_latest / box_hit50_latest  như trên với lỗ mới nhất
-  hole_cover                          mẫu t >= 2: tỉ lệ lỗ được >= 1 box IoU >= 0,5 phủ
-  by_turn                             theo lượt t
-Không cần GT (cả ảnh gốc không lỗ):
-  on_object      tỉ lệ box có IoA (giao / diện tích box) >= 0,5 với một vật đang có (record có `objects_all` — CE-CoCount, hai lớp
-                 cùng ảnh — thì tính trên `objects_all`; C-NLL vẫn fit trên `objects` cùng lớp)
-  in_image       tỉ lệ box nằm trọn trong vùng ảnh thật
-  C-NLL (paper)  `−log q(x) − min_i(−log q(z_i))`, q = Gaussian 4-D fit trên vật đang có của ảnh. Paper tự mâu
-                 thuẫn về đặc trưng ⇒ báo cả hai: F1 = [w, h, IoU lớn nhất với vật có sẵn, TB khoảng cách tới tâm
-                 3 vật gần nhất] (paper mục 3.2 / 4), F2 = [cx, cy, w, h] (phụ lục A.2); toạ độ / cỡ chia (nw, nh),
-                 khoảng cách chia sqrt(nw·nh). Hai chế độ: `n1` = mọi box (một mẫu ngẫu nhiên — chất lượng mô hình),
-                 `sel` = box có q lớn nhất trong K (bộ chọn của paper; paper chọn theo box CountGD + SAM, ở đây theo
-                 cùng `all_bboxes` — ghi rõ khi báo cáo). Ảnh có < CNLL_MIN_OBJ vật đang có thì bỏ (n_cnll).
-  C-NLL F1all    (người dùng 2026-10-17, chỉ record có `objects_all` — CE-CoCount): như F1 nhưng hai chiều quan hệ (IoU lớn nhất,
-                 khoảng cách 3 vật gần nhất) tính so với MỌI box vật trong ảnh (cả hai lớp); Gaussian + hiệu chỉnh vẫn chỉ trên vật
-                 CÙNG lớp ⇒ box đè / sát vật lớp kia bị phạt. CE-130 (một lớp / ảnh) F1all ≡ F1 nên không tính.
-Hậu xử lý `resize_to_objects` (`eval.py --obj-size`): giữ tâm box, đặt w / h theo box vật cùng lớp của ảnh — `SIZE_STATS`:
-  mean      TB w / TB h của `objects`            median    trung vị w / trung vị h
-  trim      TB sau khi bỏ outlier (cạnh √(wh) > Q3 + 1,5·IQR)     small     TB nửa nhỏ (cạnh √(wh) <= trung vị)
-  exemplar  TB 3 box mẫu GÁN TAY (`exemplars`, chỉ CE-CoCount — box SAM của ~10 % mẫu khoanh cả đống vật)
+`add_metrics` (K box / mẫu):
+  best_iou@K_any / hit50@K_any         max IoU giữa K box và lỗ bất kỳ (best-of-K) / tỉ lệ mẫu >= 0,5
+  best_iou@K_latest / hit50@K_latest   như trên với lỗ MỚI NHẤT (CE-130; CE-CoCount không có thứ tự lỗ ⇒ không có)
+  mean_iou_any / box_hit50_any         IoU / tỉ lệ >= 0,5 của TỪNG box (không oracle) — chọn best.pth theo val (DELTA4 / 5.x)
+  mean_iou_latest / box_hit50_latest
+  hole_cover                           mẫu >= 2 lỗ: tỉ lệ lỗ được >= 1 box IoU >= 0,5 phủ
+  on_object / in_image / degenerate    box có IoA >= 0,5 với một vật (CE-CoCount: vật cả hai lớp) / nằm trọn trong ảnh / suy biến
+  cnll                                 C-NLL như bài Add One Take One: mỗi ảnh lấy box C-NLL THẤP nhất trong K (= q cao nhất),
+                                       TRUNG BÌNH trên các ảnh có >= 5 vật cùng lớp (n_cnll). cnll_gt: cùng cách trên lỗ GT (mốc).
+C-NLL(x) = −log q(x) − min_i(−log q(z_i)), q = Gaussian 4-D fit trên vật CÙNG lớp z_i, đặc trưng [w, h, IoU lớn nhất với vật, TB khoảng
+cách tới tâm 3 vật gần nhất] (w, h chia (nw, nh), khoảng cách chia √(nw·nh)). Hai chiều quan hệ tính với MỌI vật trong ảnh (CE-CoCount:
+cả lớp kia — "F1all", box đè / sát vật lớp kia bị phạt; CE-130 một lớp / ảnh). Trung bình bị vài ảnh vật xếp hàng đều chi phối (Gaussian
+suy biến) — C-NLL TỪNG box mọi ảnh nằm trong dump (`record_cnll`) để tính biến thể khác (trung vị, bỏ 1 %…, `tools/cnll_outliers.py`).
 """
 
 import hashlib
@@ -38,80 +23,63 @@ import numpy as np
 import torch
 
 from ce_localization.data.turns import to_device_add
-from ce_localization.models.box_policy import norm_whwh, unit_to_boxes
+from ce_localization.models.box_policy import unit_to_boxes
 from ce_localization.utils.box_ops_np import box_iou, ioa
 from ce_localization.utils.log import fmt_time
 
-__all__ = ["CNLL_MIN_OBJ", "SIZE_STATS", "predict_add", "prior_unit_boxes", "prior_records", "object_size", "resize_to_objects",
-           "clip_boxes", "cnll", "select_sequential", "other_class", "record_cnll", "add_metrics"]
+__all__ = ["CNLL_MIN_OBJ", "SIZE_STATS", "predict_add", "prior_unit_boxes", "prior_records", "resize_to_objects", "clip_boxes", "cnll",
+           "select_sequential", "other_class", "record_cnll", "add_metrics"]
 
 HIT = 0.5
 CNLL_MIN_OBJ = 5                 # Gaussian 4-D cần >= 5 điểm để hiệp phương sai có hạng đủ
 CNLL_RIDGE = 1e-6
 KNN = 3
-SIZE_STATS = ("mean", "median", "trim", "small", "exemplar")
+SIZE_STATS = ("mean", "exemplar")
 
 
 @torch.no_grad()
-def predict_add(model, loader, text_table, n_samples=30, seed=0, log_every=0, log=print, steps=None, sampler=None,
-                sample_kw=None, variants=None, amp=False):
-    """-> list record numpy: image_id, t, wh (nw, nh), boxes [K,4] (thô), holes [t,4], objects [M,4].
-    `steps`: số bước DDIM của `BoxRefiner` (GAMMA1; None = mặc định của model); `sampler`: ddpm | mock của `BoxPolicy`. BoxRefiner còn cộng dồn attention lên
-    [t ; text ; vis] — lấy bằng `model.pop_attn()` sau khi gọi. `sample_kw`: tham số thêm cho `model.sample`; `variants`
-    (ProposeRefine): list biến thể refine -> list record của TỪNG biến thể, cùng box CE-Loc. `amp`: autocast fp16 (chỉ CUDA)
-    như lúc train model `training.amp` (head refine tự giữ fp32). DELTA (`needs_text_tokens`): truyền token chữ CLIP; TB |Δ| của
-    refiner theo khoảng t lấy bằng `model.pop_refine_stats()` sau khi gọi."""
+def predict_add(model, loader, text_table, n_samples=30, seed=0, variants=(("", {"sampler": "mock"}),), amp=False, log_every=0,
+                log=print):
+    """-> {hậu tố: list record numpy (image_id, t, wh (nw, nh), boxes [K,4] thô, holes, objects (+ objects_all, exemplars))}.
+    `variants`: (hậu tố, kw của `BoxPolicy.sample_from_cond` — sampler, ddim_steps, eta, use_objects, use_refiner). Phần không phụ thuộc
+    t (`encode`) tính MỘT lần mỗi batch cho mọi biến thể; mỗi biến thể một generator seed `seed` ⇒ trùng từng bit với chạy riêng.
+    `amp`: autocast fp16 (CUDA) như lúc train."""
     model.eval()
-    kw = {"steps": steps} if steps else {}
-    if sampler:                                       # BoxPolicy (GAMMA0 / checkpoint của bài): ddpm | mock
-        kw["sampler"] = sampler
-    kw.update(sample_kw or {})                        # ProposeRefine: refine_t / refine_steps / proposer_sampler
-    multi = variants is not None                      # ProposeRefine: nhiều biến thể refine trên CÙNG box CE-Loc
-    if hasattr(model, "track_attn"):
-        model.track_attn = True
-    if hasattr(model, "track_refine"):
-        model.track_refine = True
     dev = next(model.parameters()).device
-    gen = torch.Generator(device=dev.type).manual_seed(seed)
-    records, t0, n = ([[] for _ in variants] if multi else []), time.time(), len(loader.dataset)
+    gens = {s: torch.Generator(device=dev.type).manual_seed(seed) for s, _ in variants}
+    records, t0, n = {s: [] for s, _ in variants}, time.time(), len(loader.dataset)
     for bi, batch in enumerate(loader):
         batch = to_device_add(batch, dev)
         text = text_table(batch["text"], dev)
-        geo = {"objects": batch["objects"]} if getattr(model, "needs_objects", False) else {}   # GAMMA3 / 3.1: box vật
-        if getattr(model, "needs_text_tokens", False):                                       # DELTA: token chữ CLIP
-            geo["text_tokens"] = text_table.tokens(batch["text"], dev)
         with torch.autocast(device_type=dev.type, dtype=torch.float16, enabled=amp and dev.type == "cuda"):
-            if multi:
-                us = model.sample_variants(batch["images"], text, batch["valid_hw"], n_samples, generator=gen,
-                                           variants=variants, **kw, **geo)
-            else:
-                us = [model.sample(batch["images"], text, batch["valid_hw"], n_samples, generator=gen, **kw, **geo)]
-        nwhwh = norm_whwh(model, batch["whwh"], batch["images"].shape[-1])
+            cond, obj, ctx = model.encode(batch["images"], text, batch["valid_hw"], batch["objects"],
+                                          text_table.tokens(batch["text"], dev))
+            us = {}
+            for s, kw in variants:
+                kw = dict(kw)
+                o = obj if kw.pop("use_objects", True) else None
+                c = ctx if kw.pop("use_refiner", True) else None
+                us[s] = model.sample_from_cond(cond, n_samples, gens[s], obj=o, ctx=c, **kw)
+        canvas = torch.full_like(batch["whwh"], float(batch["images"].shape[-1]))
         wh = batch["whwh"][:, :2].cpu().numpy()
-        for vi, u in enumerate(us):
-            boxes = unit_to_boxes(u.float(), nwhwh[:, None, :], getattr(model, "box_coder", None)).cpu().numpy().astype(np.float64)
-            dst = records[vi] if multi else records
+        for s, u in us.items():
+            boxes = unit_to_boxes(u.float(), canvas[:, None, :], model.box_coder).cpu().numpy().astype(np.float64)
             for i in range(len(batch["image_id"])):
-                dst.append({"image_id": batch["image_id"][i], "t": batch["t"][i], "wh": wh[i].astype(np.float64),
-                            "boxes": boxes[i], "holes": batch["holes"][i].numpy().astype(np.float64),
-                            "objects": batch["objects"][i].numpy().astype(np.float64),
-                            **{k: batch[k][i].numpy().astype(np.float64) for k in ("objects_all", "exemplars") if k in batch}})
-        done = len(records[0] if multi else records)
+                records[s].append({"image_id": batch["image_id"][i], "t": batch["t"][i], "wh": wh[i].astype(np.float64),
+                                   "boxes": boxes[i], "holes": batch["holes"][i].numpy().astype(np.float64),
+                                   "objects": batch["objects"][i].numpy().astype(np.float64),
+                                   **{k: batch[k][i].numpy().astype(np.float64) for k in ("objects_all", "exemplars") if k in batch}})
+        done = len(next(iter(records.values())))
         if log_every and (bi % log_every == 0 or done == n):
             el = time.time() - t0
-            log(f"    [eval {done:5d}/{n}] {el / done * 1000:.0f} ms/mẫu | {fmt_time(el)} | "
-                f"còn ~{fmt_time(el / done * (n - done))}")
-    if hasattr(model, "track_attn"):
-        model.track_attn = False
-    if hasattr(model, "track_refine"):
-        model.track_refine = False
+            log(f"    [eval {done:5d}/{n}] {el / done * 1000:.0f} ms/mẫu | {fmt_time(el)} | còn ~{fmt_time(el / done * (n - done))}")
     return records
 
 
-def prior_unit_boxes(index, split="train", source="ce130"):
-    """Lỗ MỚI NHẤT của mọi mẫu `split` (`source`: ce130 | samples), cxcywh chia (W, H) ảnh gốc -> [N,4]. Mốc `prior`."""
+def prior_unit_boxes(index, split="train"):
+    """Lỗ MỚI NHẤT của mọi mẫu `split`, cxcywh chia (W, H) ảnh gốc -> [N,4]. Mốc `prior`."""
     out = []
-    for k in index.keys(split, source):
+    for k in index.keys(split):
         e = index.turns[k]
         b = index.branches[e["branch"]]
         W, H = b["wh"]
@@ -131,38 +99,20 @@ def prior_records(records, prior_unit, n_samples=30, seed=0):
     return out
 
 
-def object_size(r, stat="mean"):
-    """(w, h) đích của record theo `stat` (SIZE_STATS); None nếu không có box nguồn (0 vật / không có `exemplars`)."""
+def resize_to_objects(records, stat="mean"):
+    """Giữ tâm mỗi box, (w, h) = TB box vật cùng lớp (`mean`) | TB 3 box mẫu gán tay (`exemplar`, CE-CoCount). Không có box nguồn:
+    giữ nguyên."""
     if stat not in SIZE_STATS:
         raise ValueError(f"stat {stat!r} không thuộc {SIZE_STATS}")
-    obj = np.asarray(r.get("exemplars" if stat == "exemplar" else "objects", np.zeros((0, 4))), dtype=np.float64).reshape(-1, 4)
-    if not len(obj):
-        return None
-    w, h = obj[:, 2] - obj[:, 0], obj[:, 3] - obj[:, 1]
-    if stat == "median":
-        return float(np.median(w)), float(np.median(h))
-    if stat in ("trim", "small"):
-        s = np.sqrt(np.clip(w, 0, None) * np.clip(h, 0, None))
-        if stat == "trim":
-            q1, q3 = np.percentile(s, [25, 75])
-            keep = s <= q3 + 1.5 * (q3 - q1)
-        else:
-            keep = s <= np.median(s)
-        w, h = w[keep], h[keep]
-    return float(w.mean()), float(h.mean())
-
-
-def resize_to_objects(records, stat="mean"):
-    """Giữ tâm mỗi box, đặt (w, h) = `object_size(r, stat)` (vật cùng lớp / box mẫu), không kẹp vào ảnh. Không có box nguồn: giữ nguyên."""
     out = []
     for r in records:
-        wh = object_size(r, stat)
-        if wh is None:
+        src = np.asarray(r.get("exemplars" if stat == "exemplar" else "objects", np.zeros((0, 4))), dtype=np.float64).reshape(-1, 4)
+        if not len(src):
             out.append(r)
             continue
+        w, h = float((src[:, 2] - src[:, 0]).mean()), float((src[:, 3] - src[:, 1]).mean())
         b = np.asarray(r["boxes"], dtype=np.float64).reshape(-1, 4)
         cx, cy = (b[:, 0] + b[:, 2]) / 2, (b[:, 1] + b[:, 3]) / 2
-        w, h = wh
         out.append({**r, "boxes": np.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], 1)})
     return out
 
@@ -186,48 +136,46 @@ def _knn_mean(centers, ref, k, exclude_self=False):
     return np.sort(d, axis=1)[:, :kk].mean(1)
 
 
-def _features(boxes, objects, wh, kind, is_objects=False):
-    """`is_objects`: boxes = objects[:len(boxes)] (vật tham chiếu đứng đầu) ⇒ bỏ chính nó (đường chéo) ở IoU / láng giềng."""
+def _features(boxes, ref, wh, is_objects=False):
+    """[w, h, IoU lớn nhất với `ref`, TB khoảng cách tới tâm 3 vật gần nhất]. `is_objects`: boxes = ref[:len(boxes)] ⇒ bỏ chính nó."""
     nw, nh = wh
     c = np.stack([(boxes[:, 0] + boxes[:, 2]) / 2, (boxes[:, 1] + boxes[:, 3]) / 2], 1)
     w, h = boxes[:, 2] - boxes[:, 0], boxes[:, 3] - boxes[:, 1]
-    if kind == "F2":
-        return np.stack([c[:, 0] / nw, c[:, 1] / nh, w / nw, h / nh], 1)
-    iou = box_iou(boxes, objects)[0]
+    iou = box_iou(boxes, ref)[0]
     if is_objects:
         np.fill_diagonal(iou, 0.0)
-    oc = np.stack([(objects[:, 0] + objects[:, 2]) / 2, (objects[:, 1] + objects[:, 3]) / 2], 1)
+    oc = np.stack([(ref[:, 0] + ref[:, 2]) / 2, (ref[:, 1] + ref[:, 3]) / 2], 1)
     knn = _knn_mean(c, oc, KNN, exclude_self=is_objects)
     return np.stack([w / nw, h / nh, iou.max(1) if iou.size else np.zeros(len(boxes)), knn / np.sqrt(nw * nh)], 1)
 
 
-def cnll(boxes, objects, wh, kind="F1", others=None):
-    """C-NLL của từng box [K] (đã kẹp). None nếu < CNLL_MIN_OBJ vật đang có. `others` (F1all): box vật lớp KHÁC — đặc trưng quan hệ
-    (F1) tính trên [objects ; others], Gaussian + hiệu chỉnh chỉ trên `objects` (F2 không có chiều quan hệ ⇒ không đổi)."""
+def cnll(boxes, objects, wh, others=None):
+    """C-NLL của từng box [K] (đã kẹp). None nếu < CNLL_MIN_OBJ vật cùng lớp. `others`: box vật lớp KHÁC (đặc trưng quan hệ tính trên
+    [objects ; others], Gaussian + hiệu chỉnh chỉ trên `objects`)."""
     if len(objects) < CNLL_MIN_OBJ:
         return None
     ref = objects if others is None or not len(others) else np.concatenate([objects, others])
-    mu, inv, logdet, zmin = _cnll_fit(objects, ref, wh, kind)
-    d = _features(boxes, ref, wh, kind) - mu
+    mu, inv, logdet, zmin = _cnll_fit(objects, ref, wh)
+    d = _features(boxes, ref, wh) - mu
     return 0.5 * (np.einsum("ni,ij,nj->n", d, inv, d) + logdet + 4 * np.log(2 * np.pi)) - zmin
 
 
 _FIT, _FIT_MAX = {}, 4096
 
 
-def _cnll_fit(objects, ref, wh, kind):
-    """Gaussian của C-NLL trên box vật (chỉ phụ thuộc ảnh, không phụ thuộc box đề xuất) — nhớ theo nội dung (vật, tham chiếu, cỡ
-    ảnh, kiểu): mỗi ảnh được chấm nhiều lần (model / prior × đổi cỡ box × biến thể). -> (mu, inv, logdet, min NLL của chính vật)."""
+def _cnll_fit(objects, ref, wh):
+    """Gaussian của C-NLL trên box vật (chỉ phụ thuộc ảnh) — nhớ theo nội dung (mỗi ảnh chấm nhiều lần: model / prior / box GT / đổi
+    cỡ). -> (mu, inv, logdet, min NLL của chính vật)."""
     objects, ref = np.ascontiguousarray(objects), np.ascontiguousarray(ref)
     h = hashlib.blake2b(digest_size=16)
     for a in (objects, ref):
         h.update(f"{a.dtype.str}{a.shape}".encode())
         h.update(a.tobytes())
-    key = (kind, tuple(float(v) for v in wh), h.digest())
+    key = (tuple(float(v) for v in wh), h.digest())
     hit = _FIT.get(key)
     if hit is not None:
         return hit
-    z = _features(objects, ref, wh, kind, is_objects=True)          # objects = ref[:M] ⇒ bỏ chính nó = đường chéo
+    z = _features(objects, ref, wh, is_objects=True)                # objects = ref[:M] ⇒ bỏ chính nó = đường chéo
     mu = z.mean(0)
     cov = np.cov(z.T, bias=True) + CNLL_RIDGE * np.eye(4)
     inv = np.linalg.inv(cov)
@@ -240,13 +188,12 @@ def _cnll_fit(objects, ref, wh, kind):
     return _FIT[key]
 
 
-def select_sequential(boxes, objects, wh, k=5, kind="F1", others=None):
-    """Chọn k box tuần tự như bài Add One Take One (mục 3.2 + thêm nhiều vật mục 6): mỗi bước lấy box có q(a) CAO nhất = C-NLL THẤP nhất
-    với vật hiện có, rồi coi box đó là vật mới (thêm vào `objects`, fit lại Gaussian) và chấm lại các box còn lại. `boxes` đã kẹp
-    (`clip_boxes`). -> (chỉ số box theo thứ tự chọn, C-NLL của mỗi box lúc được chọn) | None nếu < CNLL_MIN_OBJ vật."""
+def select_sequential(boxes, objects, wh, k=5, others=None):
+    """Chọn k box tuần tự như bài Add One Take One: mỗi bước lấy box C-NLL THẤP nhất với vật hiện có, coi nó là vật mới (fit lại),
+    chấm lại phần còn lại. `boxes` đã kẹp. -> (chỉ số theo thứ tự chọn, C-NLL lúc chọn) | None nếu < CNLL_MIN_OBJ vật."""
     cur, left, order, vals = np.asarray(objects, dtype=np.float64).reshape(-1, 4), list(range(len(boxes))), [], []
     for _ in range(min(k, len(boxes))):
-        c = cnll(boxes[left], cur, wh, kind, others=others)
+        c = cnll(boxes[left], cur, wh, others=others)
         if c is None:
             return None
         j = int(np.argmin(c))
@@ -258,7 +205,7 @@ def select_sequential(boxes, objects, wh, k=5, kind="F1", others=None):
 
 
 def other_class(objects, objects_all):
-    """Box vật lớp kia = `objects_all` bỏ phần đầu `objects` (`data/cocount.read_cocount` ghép [cùng lớp ; lớp kia])."""
+    """Box vật lớp kia = `objects_all` bỏ phần đầu `objects` (`read_cocount` ghép [cùng lớp ; lớp kia])."""
     objects_all = np.asarray(objects_all, dtype=np.float64).reshape(-1, 4)
     m = len(objects)
     if len(objects_all) < m or not np.array_equal(objects_all[:m], objects):
@@ -267,34 +214,23 @@ def other_class(objects, objects_all):
 
 
 def record_cnll(r):
-    """C-NLL F1 TỪNG box của MỘT record (đúng như `add_metrics`: box kẹp, vật cùng lớp) + của box GT (lỗ / chỗ trống) + F1all khi có
-    `objects_all` -> dict (None khi < CNLL_MIN_OBJ vật). Dùng cho dump phân tích từng ảnh (`eval.py --dump-boxes`)."""
+    """C-NLL TỪNG box của một record (box kẹp) + của lỗ GT -> (c [K], c_gt [t] | None) | None khi < CNLL_MIN_OBJ vật cùng lớp."""
     b, _ = clip_boxes(r["boxes"])
-    obj = r["objects"].reshape(-1, 4)
-    c = cnll(b, obj, r["wh"], "F1")
+    obj = np.asarray(r["objects"], dtype=np.float64).reshape(-1, 4)
+    oth = other_class(obj, r["objects_all"]) if "objects_all" in r else None
+    c = cnll(b, obj, r["wh"], others=oth)
     if c is None:
         return None
-    out = {"F1": c, "n_obj": len(obj)}
-    if "holes" in r and len(r["holes"]):
-        out["F1_gt"] = cnll(np.asarray(r["holes"], dtype=np.float64).reshape(-1, 4), obj, r["wh"], "F1")
-    if "objects_all" in r:
-        oth = other_class(obj, r["objects_all"])
-        out["F1all"] = cnll(b, obj, r["wh"], "F1", others=oth)
-        if "F1_gt" in out:
-            out["F1all_gt"] = cnll(np.asarray(r["holes"], dtype=np.float64).reshape(-1, 4), obj, r["wh"], "F1", others=oth)
-    return out
+    holes = np.asarray(r.get("holes", np.zeros((0, 4))), dtype=np.float64).reshape(-1, 4)
+    return c, (cnll(holes, obj, r["wh"], others=oth) if len(holes) else None)
 
 
 def add_metrics(records, with_holes=True, latest=True):
-    """records (box thô) -> dict chỉ số (mục docstring). Hàm thuần. `latest=False` (CE-CoCount: các lỗ = 10 chỗ trống GT, không có
-    thứ tự lượt) bỏ mọi chỉ số `_latest` và `by_turn`."""
+    """records (box thô) -> dict chỉ số (docstring module). `with_holes=False` (ảnh gốc không lỗ): bỏ chỉ số IoU; `latest=False`
+    (CE-CoCount): bỏ chỉ số `_latest`."""
     acc = {k: [] for k in ("best_any", "best_latest", "mean_any", "mean_latest", "boxhit_any", "boxhit_latest",
-                           "on_object", "in_image", "degenerate")}
-    cover, by_turn = [], {}
-    cn = {f"{f}_{m}": [] for f in ("F1", "F2") for m in ("n1", "sel")}
-    if any("objects_all" in r for r in records):                         # CE-CoCount: + F1all (quan hệ với vật cả hai lớp)
-        cn.update({f"F1all_{m}": [] for m in ("n1", "sel")})
-    n_cnll = 0
+                           "on_object", "in_image", "degenerate", "cnll", "cnll_gt")}
+    cover = []
     for r in records:
         b, deg = clip_boxes(r["boxes"])
         nw, nh = r["wh"]
@@ -312,36 +248,20 @@ def add_metrics(records, with_holes=True, latest=True):
                 acc[k].append(float(v))
             if iou.shape[1] >= 2:
                 cover.append(float((iou.max(0) >= HIT).mean()))
-            bt = by_turn.setdefault(int(r["t"]), {"best_any": [], "mean_any": [], "best_latest": []})
-            bt["best_any"].append(float(any_.max()))
-            bt["mean_any"].append(float(any_.mean()))
-            bt["best_latest"].append(float(lat.max()))
-        c1 = cnll(b, obj, r["wh"], "F1")
-        if c1 is not None:
-            n_cnll += 1
-            c2 = cnll(b, obj, r["wh"], "F2")
-            cs = [("F1", c1), ("F2", c2)]
-            if "objects_all" in r:
-                cs.append(("F1all", cnll(b, obj, r["wh"], "F1", others=other_class(obj, r["objects_all"]))))
-            for f, c in cs:
-                cn[f"{f}_n1"] += c.tolist()
-                cn[f"{f}_sel"].append(float(c.min()))
+        rc = record_cnll(r if with_holes else {k: v for k, v in r.items() if k != "holes"})
+        if rc is not None:
+            acc["cnll"].append(float(rc[0].min()))
+            if rc[1] is not None:
+                acc["cnll_gt"].append(float(rc[1].min()))
     m = lambda v: float(np.mean(v)) if len(v) else float("nan")  # noqa: E731
-    res = {"n": len(records), "on_object": m(acc["on_object"]), "in_image": m(acc["in_image"]),
-           "degenerate": m(acc["degenerate"]), "n_cnll": n_cnll}
-    for k, v in cn.items():
-        res[f"cnll_{k}_mean"] = m(v)
-        res[f"cnll_{k}_median"] = float(np.median(v)) if v else float("nan")
+    res = {"n": len(records), "on_object": m(acc["on_object"]), "in_image": m(acc["in_image"]), "degenerate": m(acc["degenerate"]),
+           "n_cnll": len(acc["cnll"]), "cnll": m(acc["cnll"])}
     if with_holes:
         K = len(records[0]["boxes"]) if records else 0
-        res.update({f"best_iou@{K}_any": m(acc["best_any"]), f"best_iou@{K}_latest": m(acc["best_latest"]),
-                    f"hit50@{K}_any": m(np.asarray(acc["best_any"]) >= HIT),
-                    f"hit50@{K}_latest": m(np.asarray(acc["best_latest"]) >= HIT),
-                    "mean_iou_any": m(acc["mean_any"]), "mean_iou_latest": m(acc["mean_latest"]),
-                    "box_hit50_any": m(acc["boxhit_any"]), "box_hit50_latest": m(acc["boxhit_latest"]),
-                    "hole_cover": m(cover), "n_multi_hole": len(cover),
-                    "by_turn": {t: {k: m(v) for k, v in d.items()} | {"n": len(d["best_any"])}
-                                for t, d in sorted(by_turn.items())}})
-        if not latest:
-            res = {k: v for k, v in res.items() if "latest" not in k and k != "by_turn"}
+        res.update({"cnll_gt": m(acc["cnll_gt"]), f"best_iou@{K}_any": m(acc["best_any"]), f"hit50@{K}_any": m(np.asarray(acc["best_any"]) >= HIT),
+                    "mean_iou_any": m(acc["mean_any"]), "box_hit50_any": m(acc["boxhit_any"]), "hole_cover": m(cover),
+                    "n_multi_hole": len(cover)})
+        if latest:
+            res.update({f"best_iou@{K}_latest": m(acc["best_latest"]), f"hit50@{K}_latest": m(np.asarray(acc["best_latest"]) >= HIT),
+                        "mean_iou_latest": m(acc["mean_latest"]), "box_hit50_latest": m(acc["boxhit_latest"])})
     return res

@@ -1,9 +1,5 @@
-"""Phân rã grad norm theo NHÓM MODULE — biết con số tổng (trước clip) đến từ đâu: backbone, FPN,
-chiếu RoI, decoder hay head của từng stage. Lấy mẫu mỗi `every` batch rồi `.item()` — không đồng bộ
-GPU mỗi bước.
-"""
+"""Phân rã grad norm theo NHÓM tham số (lấy mẫu mỗi `every` bước, trước clip) — biết norm tổng đến từ đâu."""
 
-import re
 from collections import defaultdict
 
 import numpy as np
@@ -11,46 +7,21 @@ import torch
 
 __all__ = ["GradMonitor", "group_of"]
 
-_STAGE = re.compile(r"head\.stages\.(\d+)\.(\w+)")
-
 
 def group_of(name):
-    """Tên tham số của `models.detector.Detector` / `models.box_policy.BoxPolicy` (+ `refiner` DELTA) / `models.box_refiner.BoxRefiner` /
-    `models.propose_refine.ProposeRefine` -> nhóm."""
-    if name.startswith("proposer.vision.backbone."):              # GAMMA2.1: backbone ResNet18 dùng chung
-        return "proposer.resnet18"
-    if name.startswith("proposer."):
-        return "proposer.khác"
-    if name.startswith("fpn."):
-        return "fpn"
-    if name.startswith("head.time_mlp."):
-        return "time_mlp"
-    if name.startswith("vision.backbone."):                       # GAMMA2 pha 1: ResNet18 của bài
+    """Tên tham số của `BoxPolicy` -> nhóm."""
+    if name.startswith("vision.backbone."):
         return "resnet18"
     if name.startswith("noise_net."):
         return "unet1d"
-    if name.startswith("refiner.stages."):                         # DELTA: BoxRefiner của tác giả (models/clip_refiner.py)
+    if name.startswith("refiner.stages."):
         return "refiner.blocks"
     if name.startswith("refiner.heads."):
         return "refiner.head"
     if name.startswith("refiner."):
         return "refiner.embed"
-    if name.startswith(("mid_in.", "mid_out.")):                  # DELTA4.1: Linear h <-> box quanh refiner chèn giữa U-Net
-        return "refiner.mid"
-    if name.startswith(("vis_proj.", "text_proj.")):
-        return name.split(".")[0]
-    if name.startswith("backbone.fpn."):
-        return "fpn"
-    if name.startswith("backbone."):
-        return "resnet"
-    if name.startswith("memory."):
-        return "memory." + name.split(".")[1]
-    m = _STAGE.match(name)
-    if m:
-        i, sub = int(m.group(1)), m.group(2)
-        if sub in ("roi_proj", "box_proj", "decoder", "cross_attn", "inst_interact"):
-            return f"{sub}[{i}]"
-        return f"heads[{i}]"
+    if name.startswith("text_proj."):
+        return "text_proj"
     return "khác"
 
 

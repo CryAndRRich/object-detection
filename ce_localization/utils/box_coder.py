@@ -1,14 +1,9 @@
-"""Mã hoá box trong không gian khuếch tán của `BoxPolicy` (CE-Loc bài add) — `BoxCoder` của bản CE-Loc log-scale tác giả gửi
-(`refs/CE-Loc-logScale/utils/normalization.py`, READ-ONLY, không import — viết lại ĐÚNG công thức; có test so với bản sao nguyên văn).
-DELTA5 (docs/EXPERIMENT_DELTA.md mục 11), khoá config `model.box_coder`:
-
-  linear (mặc định — MỌI config cũ không có khoá): (cx, cy, w, h) / canvas · 2 − 1
-  log: cx, cy như linear; w, h -> log(w / canvas) (kẹp dưới ở `min_size_ratio`, mặc định 1/128 = 4 px trên 512), ánh xạ tuyến tính
-       [log(min_size_ratio), 0] -> [−1, 1]. Giải mã kẹp giá trị chuẩn hoá về [−5, 5] trước exp (box nhiễu) ⇒ cạnh luôn > 0.
-       Box hợp lệ (trong canvas, cạnh trong [min_size_ratio, 1] canvas) nằm trong [−1, 1]⁴ ở cả hai chế độ.
-
-Mọi phép trong code đi qua `to_linear_unit` (box mã hoá -> box `linear` cùng canvas) rồi dùng lại công thức linear sẵn có (RoIAlign của
-refiner, `unit_to_boxes`) — `linear` trả lại CHÍNH tensor đầu vào ⇒ config cũ trùng từng bit.
+"""Mã hoá box trong không gian khuếch tán — `BoxCoder` của bản CE-Loc log-scale tác giả (`refs/CE-Loc-logScale/utils/normalization.py`,
+viết lại đúng công thức, có test so bản sao nguyên văn). Khoá `model.box_coder`:
+  linear (mặc định): (cx, cy, w, h) / canvas · 2 − 1
+  log (DELTA5+): cx, cy như linear; w, h -> log(w / canvas) (kẹp dưới ở `min_size_ratio`, mặc định 1/128) ánh xạ [log(min), 0] -> [−1, 1];
+       giải mã kẹp [−5, 5] trước exp ⇒ cạnh luôn > 0.
+Mọi phép đi qua `to_linear_unit` (box mã hoá -> box linear) rồi dùng công thức linear; `linear` trả lại CHÍNH tensor đầu vào.
 """
 
 import math

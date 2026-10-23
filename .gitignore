@@ -2,8 +2,7 @@
 
 # dữ liệu lớn — không push git, up thủ công lên server
 weights/
-# CHỈ data/ ở gốc repo. Không có dấu / đầu dòng thì rule này nuốt luôn package
-# code ce_localization/data/ và diffuse2seg/data/ -> server pull về sẽ crash.
+# CHỈ data/ ở gốc repo. Không có dấu / đầu dòng thì rule này nuốt luôn package code ce_localization/data/.
 /data/
 datasets/
 samples/
@@ -60,5 +59,3 @@ htmlcov/
 tmp.py
 *.log
 
-# baseline/: repo ngoài clone ghim commit (Open-GroundingDino) — không vào git
-baseline/third_party/

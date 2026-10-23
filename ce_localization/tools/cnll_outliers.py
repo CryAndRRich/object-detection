@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Ảnh outlier của C-NLL (người dùng 2026-10-23: điểm TRUNG BÌNH "box tốt nhất / ảnh" trên CE-130 nhảy loạn giữa các model) — đọc dump
-của `eval.py --dump-boxes` (từ 2026-10-23 mỗi mẫu kèm `cnll_F1` từng box, `cnll_F1_gt` của box GT / lỗ, `n_obj`), KHÔNG model, KHÔNG GPU.
+"""Ảnh outlier của C-NLL (điểm TRUNG BÌNH "box tốt nhất / ảnh" nhảy loạn giữa các model) — đọc dump `<out>_boxes.json` của `eval.py`
+(mỗi mẫu `cnll` từng box, `cnll_gt` từng lỗ GT, `n_obj`), KHÔNG model, KHÔNG GPU.
 
 Mỗi model, mỗi mẫu: `sel` = C-NLL thấp nhất trong K box (như bài: chọn box q cao nhất); rồi:
   1. trung bình / trung vị / trung bình bỏ p % mẫu `sel` lớn nhất (`--trim`), phần tổng do 1 % mẫu lớn nhất góp;
@@ -10,9 +10,9 @@ Mỗi model, mỗi mẫu: `sel` = C-NLL thấp nhất trong K box (như bài: ch
 Ghi `<out>/summary.json` + 3 hình: `sorted_sel.png` (đuôi phân bố), `trimmed_mean.png` (trung bình theo % bỏ), `outliers_heatmap.png`.
 
   cd object-detection/ce_localization
-  O=../../output/add/ce130_cnll
-  python tools/cnll_outliers.py --dump DELTA4=$O/boxes_delta4.json DELTA5.4=$O/boxes_delta5_4.json … --key inpainted \\
-      --out ../../output/add/viz/cnll_outliers/ce130_mock
+  O=../../output/add/ce130_test_all
+  python tools/cnll_outliers.py --dump DELTA6=$O/test_delta6_boxes.json DELTA6.2=$O/test_delta6_2_boxes.json … --key inpainted_mock \\
+      --out ../../output/add/viz/cnll_outliers/ce130_test_all_mock
 """
 
 import argparse
@@ -30,11 +30,11 @@ def per_sample(rows):
     """rows = `dump["results"][khoá]` -> {mẫu: (sel, trung vị K box, sel box GT | nan, n_obj)} (bỏ mẫu không có C-NLL: < 5 vật)."""
     out = {}
     for x in rows:
-        if "cnll_F1" not in x:
+        if "cnll" not in x:
             continue
         sid = f"{x['image_id']}|{x.get('t', 0)}"
-        c = np.asarray(x["cnll_F1"], dtype=np.float64)
-        gt = np.asarray(x.get("cnll_F1_gt", []), dtype=np.float64)
+        c = np.asarray(x["cnll"], dtype=np.float64)
+        gt = np.asarray(x.get("cnll_gt", []), dtype=np.float64)
         out[sid] = (float(c.min()), float(np.median(c)), float(gt.min()) if gt.size else float("nan"), int(x["n_obj"]))
     return out
 
@@ -110,7 +110,7 @@ def plot_all(per_model, tops, out, key):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--dump", nargs="+", required=True, help="NHÃN=đường_dẫn boxes_*.json (eval.py --dump-boxes, có cnll_F1)")
+    ap.add_argument("--dump", nargs="+", required=True, help="NHÃN=đường_dẫn <out>_boxes.json của eval.py")
     ap.add_argument("--key", default="inpainted", help="khoá kết quả trong dump (vd inpainted | inpainted_mock | cocount_mock)")
     ap.add_argument("--top", type=int, default=50, help="số mẫu outlier mỗi model (sel lớn nhất)")
     ap.add_argument("--out", required=True)
@@ -122,7 +122,7 @@ def main():
             rows = json.load(f)["results"][a.key]
         per_model[name] = per_sample(rows)
         if not per_model[name]:
-            raise SystemExit(f"{path}: không có `cnll_F1` trong dump — cần eval.py từ 2026-10-23 trở đi")
+            raise SystemExit(f"{path}: không có `cnll` trong dump (dump của branch `new` ghi `cnll_F1`)")
     ids = set.intersection(*(set(d) for d in per_model.values()))
     if any(len(d) != len(ids) for d in per_model.values()):
         print(f"⚠️ tập mẫu khác nhau giữa các dump -> chỉ dùng {len(ids)} mẫu chung")

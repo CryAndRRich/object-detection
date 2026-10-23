@@ -1,1 +1,1 @@
-"""CE-130: quét + letterbox ảnh gốc, density map (kênh 4), điểm density (đích giả)."""
+"""Dữ liệu bài add: CE-130 theo (nhánh, lượt), density, CE-CoCount."""

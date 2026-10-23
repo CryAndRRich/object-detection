@@ -1,31 +1,28 @@
-# EXPERIMENT DELTA4 (docs/EXPERIMENT_DELTA.md mục 10.1) = gamma4.yaml (CE-Loc + cross-attn box nhiễu -> MỌI box vật ở 6 vị trí U-Net)
-# + khối `refiner` của delta2_1.yaml (BoxRefiner trước U-Net, CLIP ViT-B/32, token chữ CLIP text B/16), người dùng chốt 2026-10-14.
-# U-Net nhận [x_t ; refined] (8 kênh) nên box vật mã hoá gương dưới dạng [o ; o]. Mọi khoá khác Y HỆT gamma4.yaml (có test)
-# ⇒ đối chứng gamma4 (lợi của refiner) và delta2_1 (lợi của box vật). Eval thêm `_noobj`, `_norefine`.
+# DELTA4 (docs/EXPERIMENT_DELTA.md mục 10) = GAMMA4 (CE-Loc gốc ResNet18 + cross-attn box nhiễu -> MỌI box vật ở 6 vị trí U-Net) + BoxRefiner
+# của tác giả trước U-Net (CLIP ViT-B/32, token chữ CLIP text B/16); U-Net nhận [x_t ; refined], box vật vào dạng gương [o ; o].
+# Mọi config sau kế thừa file này qua `base` (utils/config.py).
 
 experiment: "delta4"
-description: "GAMMA4 (box attention tới mọi vật) + BoxRefiner của DELTA2.1 (CLIP ViT-B/32, text B/16) trước U-Net; box vật vào U-Net dạng [o ; o]"
+description: "GAMMA4 (box attention tới mọi vật) + BoxRefiner của tác giả (CLIP ViT-B/32, text B/16) trước U-Net"
 task: "add"
 
 data:
   root: "../data/all_phase2_V2"
   samples_root: "../data/samples"
   turn_index: "../data/turn_index.json"
-  density_index: "../data/density_index.json"   # eval ảnh gốc với density `full`
+  density_index: "../data/density_index.json"   # eval ảnh gốc: density `full` của ảnh gốc
   density_root: "../data/samples"
-  split_source: "samples"           # train = samples/train ; val / test = samples/test theo split CE-130 của ảnh gốc
-  cache_dir: null                   # Kaggle: --cache-dir /kaggle/temp/add_cache (tools/build_add_cache.py)
+  cache_dir: null                   # Kaggle: --cache-dir (tools/build_add_cache.py)
   image_size: 512
   num_workers: 4
-  density: "sample"
 
 model:
   arch: "box_policy"
-  vision: "r18_paper"               # ResNet18 của bài (BN train, ImageNet, conv1 kênh 4 = TB RGB), box chia canvas
-  ss_mask: true                     # SpatialSoftmax: ô đệm −inf trước softmax (lưới toạ độ canvas của bài)
-  in_channels: 4
+  vision: "r18_paper"               # ResNet18 của bài (BN train, ImageNet, conv1 kênh 4 = TB RGB)
+  ss_mask: true                     # SpatialSoftmax: ô đệm −inf trước softmax
+  in_channels: 4                    # RGB + density
   pretrained_backbone: true
-  vis_dim: 128                      # Linear(2·512, 128) như bài
+  vis_dim: 128
   text_dim: 512
   text_proj_dim: 128
   step_embed_dim: 256
@@ -33,31 +30,29 @@ model:
   kernel_size: 3
   n_groups: 8
   clip_text: "openai/clip-vit-base-patch32"
-  obj_attn: true                    # GAMMA4: cross-attn tới box vật đang có ở 6 vị trí U-Net (models/unet1d.py)
+  obj_attn: true                    # cross-attn tới box vật đang có
   obj_heads: 4
-  obj_max: 300                      # > 300 vật: train lấy ngẫu nhiên 300 (p99 train 248), eval giữ hết
-  use_condition: true                # false = DELTA1.1
-  refiner:                          # BoxRefiner của tác giả gốc (refs/CE-Loc-update/config/model_config.yaml) — mặc định NGUYÊN VĂN
+  obj_max: 300                      # train: > 300 vật lấy ngẫu nhiên 300 (p99 train 248); eval giữ hết
+  refiner:                          # mặc định của tác giả (refs/CE-Loc-update/config/model_config.yaml)
     enabled: true
-    clip_model_name: "openai/clip-vit-base-patch32"   # CLIP ViT frozen (lưới 7×7); không vào checkpoint (vân tay clip_sha)
-    text_model_name: "openai/clip-vit-base-patch16"   # token chữ: CLIP text B/16 như DELTA1
+    clip_model_name: "openai/clip-vit-base-patch32"   # CLIP ViT frozen (lưới 7×7), không vào checkpoint (vân tay clip_sha)
+    text_model_name: "openai/clip-vit-base-patch16"
     vision_layer: -2
     d_model: 256
     num_layers: 4
-    num_heads: 8                    # head_dim 32 chia hết cho 4 (RoPE 2D)
+    num_heads: 8
     mlp_ratio: 4.0
     dropout: 0.0
     rope_theta: 100.0
     roi_size: 3
     num_stages: 1
-    use_density: true               # density pool về lưới token ảnh, cộng vào token ảnh
-    unet_input: concat              # U-Net nhận [x_t ; refined] (8 kênh), ra ε 4 kênh
-    aux_loss_weight: 0.1            # + 0,1 · MSE(refined, x0)
+    use_density: true
+    unet_input: concat
+    aux_loss_weight: 0.1            # loss = ε-MSE + 0,1 · [MSE(refined, x0) + aux_giou_weight · (1 − GIoU)]
     attention_flow:                 # nhóm query -> nhóm key (ảnh / text không nhìn box)
       sample: [sample, image, text]
       image: [image, text]
       text: [text, image]
-
 
 diffusion:
   num_timesteps: 1000
@@ -65,14 +60,14 @@ diffusion:
   beta_end: 0.02
   noise_per_image: 1
 
-training:                           # như bài trừ batch (gấp đôi) / số iter (nửa)
+training:
   batch_size: 64                    # TOÀN CỤC: Kaggle 2 GPU -> 32 / GPU
-  sync_bn: false                    # BN thường: thống kê trên 32 ảnh / GPU = đúng batch BN của bài (SyncBN sẽ thành 64, chậm hơn)
-  amp: true                         # Kaggle T4: autocast fp16 + GradScaler + channels_last (tensor core) — người dùng chốt 2026-10-02
+  sync_bn: false                    # BN thường: 32 ảnh / GPU = batch BN của bài
+  amp: true                         # fp16 + GradScaler + channels_last (Kaggle T4)
   lr: 5.0e-5
   weight_decay: 0.01
   schedule: "cosine"
-  cosine_t_max: 93900               # = 300 epoch × 313 bước (⌈19.998 / 64⌉) — CosineAnnealingLR(T_max=300) của bài theo iter
+  cosine_t_max: 93900               # 300 epoch × 313 bước (cắt ở max_iter ⇒ lr cuối còn 65 % — DELTA6 sửa)
   max_iter: 37500
   grad_clip: null
   seed: 0
@@ -80,10 +75,10 @@ training:                           # như bài trừ batch (gấp đôi) / số
   ckpt_every: 1000
   eval_every: 2500
 
-eval:
+eval:                               # val định kỳ chọn best.pth
   split: "val"
   limit: 500
   n_samples: 30
   batch_size: 16
-  sample_kw: {sampler: "mock"}      # eval định kỳ bằng vòng mock 100 bước của bài (DDPM 1000 bước quá chậm trên T4); test báo cả hai
+  sample_kw: {sampler: "mock"}      # vòng mock 100 bước của bài
   select_metric: "mean_iou_any"

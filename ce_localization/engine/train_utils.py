@@ -1,6 +1,5 @@
-"""Tiện ích train ALPHA: DDP, lịch lr kiểu detectron2, chia batch tái lập được, checkpoint .pth."""
+"""Tiện ích train: DDP, lịch lr, chia batch tái lập được, checkpoint .pth ghi nguyên tử, đỉnh bộ nhớ GPU."""
 
-import bisect
 import math
 import datetime
 import inspect
@@ -10,8 +9,7 @@ import shutil
 import torch
 import torch.distributed as dist
 
-__all__ = ["setup_dist", "PthCheckpoints", "warmup_multistep", "lr_factor", "epoch_batches",
-           "noise_seed", "gpu_peak", "fmt_gpu_peak"]
+__all__ = ["setup_dist", "PthCheckpoints", "lr_factor", "epoch_batches", "EpochBatches", "noise_seed", "gpu_peak", "fmt_gpu_peak"]
 
 
 def setup_dist(device=None):
@@ -94,26 +92,14 @@ def fmt_gpu_peak(peak):
     return "" if peak is None else f" | GPU đỉnh {peak[0]:.2f} GB (giữ {peak[1]:.2f})"
 
 
-def warmup_multistep(it, steps, gamma=0.1, warmup_iters=1000, warmup_factor=0.01):
-    """Hệ số lr ở iteration `it` — `WarmupMultiStepLR` của detectron2 (warmup tuyến tính):
-    trong warmup: factor·(1−α) + α với α = it / warmup_iters ; sau đó gamma^(số mốc đã qua)."""
-    f = gamma ** bisect.bisect_right(list(steps), it)
-    if it < warmup_iters:
-        a = it / warmup_iters
-        f *= warmup_factor * (1 - a) + a
-    return f
-
-
 def lr_factor(it, tr):
-    """Hệ số lr theo `training.schedule`: `multistep` (mặc định, ALPHA: warmup + giảm bậc) | `cosine` (CE-Loc gốc:
-    `CosineAnnealingLR(T_max)` không warmup, ở đây theo ITERATION — `cosine_t_max` = 300 epoch × 625 bước = 187.500 như bài,
-    nên trong vài nghìn iter lr gần như giữ nguyên như đoạn đầu lịch của bài). `cosine_warmup_iters` (DELTA6.x, 2026-10-23): nhân thêm
-    warmup tuyến tính (it + 1) / W trong W iter đầu (vắng = không warmup, như mọi config cũ)."""
-    if tr.get("schedule", "multistep") == "cosine":
-        f = 0.5 * (1 + math.cos(math.pi * min(it, tr["cosine_t_max"]) / tr["cosine_t_max"]))
-        w = tr.get("cosine_warmup_iters") or 0
-        return f * min(1.0, (it + 1) / w) if w else f
-    return warmup_multistep(it, tr["steps"], tr["gamma"], tr["warmup_iters"], tr["warmup_factor"])
+    """Hệ số lr: cosine theo ITERATION tới `cosine_t_max` (CosineAnnealingLR của CE-Loc gốc), nhân warmup tuyến tính (it + 1) / W trong
+    `cosine_warmup_iters` W iter đầu (vắng = không warmup — DELTA4 / 5.x)."""
+    if tr.get("schedule", "cosine") != "cosine":
+        raise ValueError(f"training.schedule {tr.get('schedule')!r}: chỉ còn cosine")
+    f = 0.5 * (1 + math.cos(math.pi * min(it, tr["cosine_t_max"]) / tr["cosine_t_max"]))
+    w = tr.get("cosine_warmup_iters") or 0
+    return f * min(1.0, (it + 1) / w) if w else f
 
 
 def epoch_batches(n, batch_per_rank, rank, world, seed, epoch):
@@ -128,6 +114,24 @@ def epoch_batches(n, batch_per_rank, rank, world, seed, epoch):
         chunk = perm[s * per_step:(s + 1) * per_step]
         out.append(chunk[rank * batch_per_rank:(rank + 1) * batch_per_rank])
     return out
+
+
+class EpochBatches:
+    """batch_sampler cho DataLoader worker BỀN (`persistent_workers`): đặt (epoch, batch bắt đầu) trước mỗi `iter(loader)` — cùng thứ tự
+    `epoch_batches`, khỏi dựng lại tiến trình worker mỗi epoch."""
+
+    def __init__(self, n, batch_per_rank, rank, world, seed):
+        self.args, self.epoch, self.start = (n, batch_per_rank, rank, world, seed), 0, 0
+
+    def set(self, epoch, start=0):
+        self.epoch, self.start = epoch, start
+
+    def __iter__(self):
+        return iter(epoch_batches(*self.args, self.epoch)[self.start:])
+
+    def __len__(self):
+        n, bpr, _, world, _ = self.args
+        return n // (bpr * world) - self.start
 
 
 def noise_seed(seed, it, rank):

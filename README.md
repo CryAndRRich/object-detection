@@ -1,71 +1,33 @@
 # object-detection
 
-Code của dự án `multi_condition` (bối cảnh: [`../CLAUDE.md`](../CLAUDE.md)).
+Code của dự án `multi_condition` (bối cảnh: [`../CLAUDE.md`](../CLAUDE.md)). Branch `delta`: chỉ CE-Loc bài ADD từ DELTA4 trở đi;
+mọi thứ cũ hơn (ALPHA / BETA / GAMMA, DELTA1–3.x, baseline detector, diffuse2seg, user study) ở branch `new`.
 
 | | nội dung |
 |---|---|
-| [`ce_localization/`](ce_localization/README.md) | **CE-Loc — trọng tâm.** Chọn box cho count editing trên CE-130 bằng khuếch tán trên toạ độ box |
-| [`baseline/`](baseline/README.md) | Baseline detector trên CE-130: BASELINE0 DiffusionDet (gồm code DiffusionDet + D.1 cũ), 1 Sparse R-CNN, 2 Faster R-CNN, 3.1/3.2 Grounding DINO — kế hoạch `../docs/BASELINES.md` |
-| [`diffuse2seg/`](diffuse2seg/README.md) | Diffuse2Seg training-free (arXiv 2609.06491), đứng ngoài luồng CE-Loc |
-| `tests/` | **toàn bộ test**, chia thư mục con theo project |
-| `tools/run_on_free_gpu.py` | chạy một script trên GPU có nhiều bộ nhớ trống nhất — dùng chung |
-| `data/`, `weights/` | dữ liệu + weight, **không vào git** (zip thủ công lên server) — [`data/README.md`](data/README.md) |
+| [`ce_localization/`](ce_localization/README.md) | CE-Loc: chọn box chỗ thêm vật bằng khuếch tán trên toạ độ box |
+| `tests/` | toàn bộ test: `python -m pytest tests -q` (từ `object-detection/`, test nhanh); `--runslow` thêm trọn luồng train / eval + DDP |
+| `tools/run_on_free_gpu.py` | chạy một script trên GPU có nhiều bộ nhớ trống nhất (thử lại khi OOM) — dùng chung |
+| `data/`, `weights/` | dữ liệu + weight, **không vào git** (zip thủ công lên server) |
 
-Mỗi project là một **package**, import theo tên đầy đủ (`ce_localization.models...`,
-`diffuse2seg.d2s...`) vì các project trùng tên package con (`data`, `utils`, `config`). Script
-tự thêm `object-detection/` vào `sys.path`, nên vẫn chạy `python train.py` trong thư mục project.
-
-```bash
-python -m pytest tests -q                      # từ object-detection/, ~4 phút CPU; test nặng (tests/conftest.py SLOW) bỏ qua
-python -m pytest tests -q --runslow            # cả test nặng (trọn luồng train / eval, DDP, tool vẽ) — khi sửa lõi
-cd ce_localization && python ../tools/run_on_free_gpu.py -- train.py --config config/alpha/alpha0.yaml --save-dir ../weights/detection/x
-```
+Package import theo tên đầy đủ (`ce_localization.models...`); script tự thêm `object-detection/` vào `sys.path` nên vẫn chạy
+`python train.py` trong thư mục project.
 
 ## `weights/` và `data/`
 
-**Mọi weight nằm trong `weights/`** — cả weight tải về lẫn checkpoint tự train (`--save-dir` /
-`OUTPUT_DIR` trỏ vào đây). **Không còn thư mục `checkpoints/`** ở bất cứ project nào.
-
 ```
-weights/detection/<run>/                     checkpoint tự train cho bài DETECT CE-130: alpha*, beta*, baseline*
-                                             (last.pth, best.pth, history.json; baseline thêm config.yaml, log.txt)
-weights/add/<run>/                           checkpoint tự train cho bài ADD (GAMMA)
-weights/add/paper/best_model.pth             checkpoint CE-Loc gốc của bài (ResNet18; nạp bằng `BoxPolicy.load_celoc_paper`)
-weights/diffusion_policy/                    checkpoint Push-T công bố của Diffusion Policy (TN3)
-weights/diffusiondet/                        7 checkpoint .pth, 5,8 GB (3 benchmark DiffusionDet cũ)
-weights/gdino/groundingdino_swint_ogc.pth    Grounding DINO Swin-T chính thức (BASELINE3)
-weights/diffuse2seg/stable-diffusion-v1-5/   SD cho diffuse2seg (hoặc tải qua $HF_HOME)
-data/all_phase2_V2/, samples/                CE-130 (CE-Loc)
-data/cache_clip_1024/                        cache patch token CLIP @1024 (sinh bằng tools/build_cache.py)
-data/ce130_coco/                             CE-130 dạng COCO (baseline, diffuse2seg)
-data/cocount/                                CE-CoCount: test phụ của bài (1.484 truy vấn / 742 frame CoCount-train; Image/ Anno/
-                                             Anno_with_exam_bbox/ masks/) — docs/EXPERIMENT_GAMMA.md mục 18
-data/coco*, voc, crowdhuman, paco            dataset detector / PACO
+weights/add/<run>/          last.pth, best.pth, history.json của từng run (delta4, delta5*, delta6*)
+data/all_phase2_V2/         CE-130 (nhánh xoá vật cộng dồn, annotation)
+data/samples/               ảnh inpaint + density + annotation của bài (train / test)
+data/turn_index.json        chỉ mục (nhánh, lượt) <-> samples (tools/build_turn_index.py)
+data/density_index.json     chỉ mục density (tools/build_density_index.py)
+data/cocount/               CE-CoCount (Image/ Anno/ Anno_with_exam_bbox/)
 ```
 
 ## Môi trường
 
-Một `requirements.txt` dùng chung. Server: env `ce-locmodel`
-(`/mnt/disk1/aiotlab/envs/ce-locmodel/bin/python`), Python 3.10.20, torch 2.3.0+cu121,
-driver 535, **3× A30 24 GB dùng chung**. `torch` chỉ để sàn — dựng env mới thì cài `torch`
-khớp driver trước. `diffuse2seg` cần thêm `diffusers` + `accelerate`; PACO cần `pycocotools`.
+Một `requirements.txt`. Server: env `ce-locmodel` (`/mnt/disk1/aiotlab/envs/ce-locmodel/bin/python`), Python 3.10, torch 2.3.0+cu121,
+3× A30 24 GB dùng chung; `huggingface_hub` phải `< 1.0`. Local: `ce_localization/.venv-cpu` (torch 2.2 CPU) cho test; `box_review/`
+cần thêm `gradio`.
 
-- ⚠️ **`huggingface_hub` phải `< 1.0`** (server: 0.36.2). Bản 1.x làm mọi `import diffusers`
-  chết với traceback trỏ vào diffusers, nhưng nguyên nhân ở `transformers`. Sửa:
-  `pip install -U "huggingface_hub>=0.34,<1.0"`. Bản 0.x dùng `huggingface-cli`, không có `hf`.
-- ⚠️ **`baseline/` (detectron2) hiện không import được detectron2** trên env này (D.1 từng chạy với
-  `/mnt/disk1/aiotlab/haitn/d2src/detectron2`, đường nối nay đã mất). Cần cho BASELINE0–2:
-  ```bash
-  pip install fvcore iopath pycocotools omegaconf hydra-core cloudpickle tabulate termcolor yacs opencv-python timm
-  pip install --no-build-isolation -e /mnt/disk1/aiotlab/haitn/d2src/detectron2   # nhánh main, KHÔNG v0.6
-  ```
-  `detectron2._C` không build được (không có `nvcc`) — D.1 vẫn chạy xong 12k iteration với
-  cảnh báo đó, đừng cố sửa.
-
-## Ghi công
-
-DiffusionDet: Chen, Sun, Song, Luo — arXiv 2211.09788, CC-BY-NC 4.0 ([LICENSE](LICENSE)).
-Diffuse2Seg: Hümmer, Sicking, Hüger, Gottschalk — arXiv 2609.06491; không có repo chính thức,
-`diffuse2seg/d2s/plaplacian.py` viết lại từ Algorithm 1, `d2s/attention.py` dựa trên M2N2
-(Karmann & Urfalioglu, CVPR 2025). CE-Loc: bài NeurIPS 2026 của chính người dùng; repo gốc
-vendored ở `../refs/repos/Count-Editing/`.
+CE-Loc: bài NeurIPS 2026 của chính người dùng; repo gốc + bản cập nhật của tác giả ở `../refs/` (read-only).

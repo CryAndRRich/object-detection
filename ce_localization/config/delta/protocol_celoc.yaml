@@ -1,0 +1,13 @@
+# Giao thức train của CE-Loc gốc (DELTA6+, docs/EXPERIMENT_DELTA.md mục 12): KHÔNG val, best.pth = epoch có loss train TB thấp nhất;
+# 120 epoch (= 37.440 iter × batch 64, như DELTA4 / 5.x) với lr 1e-4 (5e-5 batch 32 của tác giả × 2), warmup 1 epoch, cosine về 0.
+# Test: eval.py --split test_all (toàn bộ samples/test, 6.122 mẫu).
+training:
+  lr: 1.0e-4
+  cosine_warmup_iters: 312
+  cosine_t_max: 37440
+  max_iter: 37440                   # 120 epoch × 312 iter (⌊19.998 / 64⌋)
+  eval_every: null
+eval:
+  split: null
+  limit: null
+  select_metric: "train_loss"

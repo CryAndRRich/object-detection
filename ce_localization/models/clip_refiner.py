@@ -1,31 +1,14 @@
-"""`ClipBoxRefiner` — BoxRefiner của bản CE-Loc cập nhật mà tác giả gốc gửi (`refs/CE-Loc-update/models/box_refiner.py`, READ-ONLY,
-không import — viết lại ĐÚNG công thức, GIỮ tên module / tham số của tác giả để nạp được checkpoint của họ). DELTA
-(docs/EXPERIMENT_DELTA.md): khối nằm TRONG mạng khử nhiễu của CE-Loc, gọi ở MỌI bước khử nhiễu, trước U-Net 1D.
+"""`ClipBoxRefiner` — BoxRefiner của bản CE-Loc cập nhật tác giả gửi (`refs/CE-Loc-update/models/box_refiner.py`, read-only; viết lại
+ĐÚNG công thức, giữ tên module / tham số của tác giả). Nằm TRONG mạng khử nhiễu, gọi ở mọi bước, trước U-Net 1D.
 
-    một lần mỗi ảnh (`encode_context`):
-      rgb [0,1] canvas (letterbox, cả phần đệm) -> bicubic về độ phân giải của ViT (224 / 336) -> chuẩn hoá CLIP -> CLIP ViT FROZEN
-          (`clip_model_name`: B/16 = DELTA1, B/32 / L/14 / L/14-336 = DELTA2.x) -> hidden_states[-2] bỏ CLS
-          -> LN + Linear(hidden ViT, d) (+ Linear(1, d)(density pool về lưới g×g))       = token ảnh, map ảnh [d, g, g]
-      token chữ CLIP text FROZEN (`text_model_name`, mặc định = `clip_model_name`; DELTA2.x giữ B/16; `last_hidden_state`, tính sẵn ở
-          `models/text.encode_class_tokens`) -> LN + Linear(hidden text, d)
-    mỗi lần gọi, x_t [R,4] cxcywh / canvas · 2 − 1:
-      9 token box = RoIAlign(map ảnh, x_t) 3×3 + BoxFourierEmb(x_t) + type emb ; RoPE 2D liên tục (đơn vị ô lưới)
-      `num_layers` RefinerBlock (pre-norm, AdaLN-Zero theo t) trên [text | image | sample], mask nhóm `attention_flow`
-      head trên 9 token box -> Δ ;  refined = x_t + Δ   (`num_stages` > 1: lặp, RoIAlign lại quanh box mới, box detach)
+    một lần mỗi ảnh (`encode_context`): rgb canvas -> bicubic về độ phân giải ViT -> CLIP ViT FROZEN -> hidden_states[-2] bỏ CLS
+        -> LN + Linear (+ Linear(density pool về lưới g×g)) = token ảnh / map ảnh; token chữ CLIP text (tính sẵn) -> LN + Linear
+    mỗi lần gọi, x_t [R,4]: 9 token box = RoIAlign(map ảnh, x_t) 3×3 + BoxFourierEmb(x_t) + type emb ; RoPE 2D
+        `num_layers` RefinerBlock (AdaLN-Zero theo t) trên [text | image | sample], mask nhóm `attention_flow` -> head -> refined = x_t + Δ
 
-Khác bản tác giả ĐÚNG ở cách tính, không ở toán (có test so với bản sao nguyên văn `forward` của tác giả):
-- **Luồng ngữ cảnh tính MỘT lần mỗi (ảnh, t)** (`forward`): token ảnh / chữ KHÔNG nhìn token box (flow mặc định của tác giả — flow cho
-  ảnh / chữ nhìn box bị từ chối lúc dựng) ⇒ luồng [text | image] qua các block không phụ thuộc box; mọi hàng cùng ảnh và cùng t (vòng
-  mock / DDPM: một t cho mọi hàng) cho đúng cùng luồng đó ⇒ tính trên C hàng ngữ cảnh, 9 token box của R hàng attend K / V ngữ cảnh đã
-  cache (đã quay RoPE, cùng thứ tự khoá [text | image | sample]) + K / V của chính nó. Block cuối bỏ attention / MLP của ngữ cảnh (head
-  chỉ đọc token box). Bản tác giả chạy lại cả chuỗi ~215 token cho từng mẫu ở từng bước (30 mẫu × 1000 bước ⇒ eval không khả thi).
-- RoIAlign lấy chỉ số ảnh theo `ctx_index` trên map C ảnh (không nhân bản map như `expand_context` của tác giả) — cùng kết quả.
-- Token chữ tính sẵn mỗi tên lớp (bản tác giả tokenize theo batch, `padding=True`): CLIP text causal + đệm phải ⇒ token thật không thấy
-  phần đệm; phần đệm bị mask ⇒ cùng kết quả.
-- CLIP ViT KHÔNG đăng ký làm module con (giữ bằng `object.__setattr__`, `_apply` kéo theo khi `.to()`): không vào `state_dict`,
-  `parameters()`, DDP, optimizer — checkpoint nhẹ ~350 MB; `BoxPolicy.clip_sha` (vân tay weight) kiểm khớp khi nạp. Nạp qua
-  `load_clip(vision_name, text_name)` (hàm cấp module — test thay bằng CLIP tí hon).
-- Số học: CLIP chạy dưới autocast ngoài (fp16 khi train AMP, no_grad); mọi phần train được của refiner tắt autocast, fp32.
+Khác bản tác giả ở CÁCH tính, không ở toán (có test so bản sao nguyên văn): luồng ngữ cảnh [text | image] không nhìn token box ⇒ tính
+MỘT lần mỗi (ảnh, t) rồi R box attend K / V đã cache (`ctx_index` chọn ảnh); CLIP ViT không là module con (không vào state_dict /
+optimizer / DDP; `BoxPolicy.clip_sha` kiểm vân tay khi nạp). Phần train được tắt autocast (fp32).
 """
 
 import hashlib
@@ -40,8 +23,8 @@ from ce_localization.models.unet1d import SinusoidalPosEmb
 from ce_localization.utils.box_coder import to_linear_unit
 
 __all__ = ["GROUPS", "CLIP_MEAN", "CLIP_STD", "DEFAULT_ATTENTION_FLOW", "REFINER_DEFAULTS", "apply_rope_2d", "rope_cos_sin",
-           "rope_rotate", "BoxFourierEmb", "RefinerBlock", "ClipBoxRefiner", "load_clip", "weights_sha256", "refiner_config", "text_model_name",
-           "needs_text_tokens"]
+           "rope_rotate", "BoxFourierEmb", "RefinerBlock", "ClipBoxRefiner", "load_clip", "weights_sha256", "refiner_config",
+           "text_model_name"]
 
 GROUPS = ('text', 'image', 'sample')
 CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
@@ -54,15 +37,12 @@ DEFAULT_ATTENTION_FLOW = {
     'text': ['text', 'image'],
 }
 
-# Mặc định trong CODE của tác giả (`BoxRefiner.__init__` + `ObjectPlacementPolicy`); config DELTA ghi tường minh mọi khoá.
-# `text_model_name` (thêm ở đây, DELTA2.x): CLIP text cho token chữ; None = cùng tên `clip_model_name` như tác giả.
-# `mid_aux_weight` (thêm ở đây, DELTA4.1 `unet_input: mid`): trọng số MSE(b, x0) của box giữa U-Net.
-# `aux_giou_weight` (bản log-scale của tác giả, DELTA5.x): loss phụ = aux_loss_weight · [MSE(refined, x0) + aux_giou_weight · (1 − GIoU)];
-# mặc định 0 = chỉ MSE (như mọi config cũ / tác giả khi thiếu khoá).
+# Mặc định trong CODE của tác giả; `text_model_name` (thêm): CLIP text cho token chữ, None = `clip_model_name`; `aux_giou_weight` (bản
+# log-scale): loss phụ = aux_loss_weight · [MSE(refined, x0) + aux_giou_weight · (1 − GIoU)].
 REFINER_DEFAULTS = {
     'clip_model_name': 'openai/clip-vit-base-patch16', 'text_model_name': None, 'vision_layer': -2, 'd_model': 256,
     'num_layers': 4, 'num_heads': 8, 'mlp_ratio': 4.0, 'dropout': 0.0, 'rope_theta': 100.0, 'roi_size': 3, 'num_stages': 1,
-    'use_density': True, 'unet_input': 'concat', 'aux_loss_weight': 0.0, 'mid_aux_weight': 0.0, 'aux_giou_weight': 0.0,
+    'use_density': True, 'unet_input': 'concat', 'aux_loss_weight': 0.0, 'aux_giou_weight': 0.0,
     'attention_flow': DEFAULT_ATTENTION_FLOW,
 }
 
@@ -75,11 +55,6 @@ def refiner_config(refiner):
 def text_model_name(rcfg):
     """Tên CLIP text sinh token chữ của refiner."""
     return rcfg.get('text_model_name') or rcfg['clip_model_name']
-
-
-def needs_text_tokens(model_cfg):
-    """Cần bảng token chữ CLIP (refiner bật VÀ có điều kiện — `use_condition: false` bỏ qua refiner như tác giả)."""
-    return refiner_config(model_cfg.get('refiner')) is not None and model_cfg.get('use_condition', True)
 
 
 def weights_sha256(module):

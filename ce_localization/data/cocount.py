@@ -1,22 +1,14 @@
-"""CE-CoCount — tập test phụ của bài (docs/EXPERIMENT_GAMMA.md mục 18), `data/cocount/`:
+"""CE-CoCount — tập test phụ của bài, `data/cocount/`: 742 frame CoCount-train × 2 lớp, ẢNH GỐC KHÔNG LỖ, KHÔNG có density map.
 
-  Image/<tên>.jpg                     frame CoCount-train, ẢNH GỐC KHÔNG LỖ
-  Anno/<tên>.json                     class_name, loc_bbox (10 box GT chỗ trống để thêm, xyxy px), counting_anno (count, points, …)
-  Anno_with_exam_bbox/<tên>.json      exam_bbox = [{bbox, score}] box MỌI vật lớp đó (SAM + chỉnh tay)
-  <tên> = {INTRA|INTER}_{nhóm}_{A}_{B}_{sốA}_{sốB}_…_{positive|negative}; `_positive` / `_negative` = hai lớp CÙNG frame.
+  Image/<tên>.jpg, Anno/<tên>.json (class_name, loc_bbox = 10 box GT chỗ trống xyxy px, counting_anno.exemplars = 3 box mẫu gán tay),
+  Anno_with_exam_bbox/<tên>.json (exam_bbox = box MỌI vật lớp đó, SAM + chỉnh tay); `_positive` / `_negative` = hai lớp CÙNG frame.
 
-Một phần tử = một tên (một lớp cần thêm), cùng khuôn `CE130AddDataset` để `eval.py` / `predict_add` dùng lại:
-  holes       = 10 `loc_bbox` (đáp án; không có thứ tự lượt ⇒ chỉ số `_latest` vô nghĩa — `add_metrics(latest=False)`)
-  objects     = box vật CÙNG lớp (GAMMA4 nhận làm box vật; C-NLL fit trên chúng)
-  objects_all = box vật CẢ HAI lớp của frame (file `_positive` + `_negative`) — `on_object` tính trên đây
-  exemplars   = 3 box mẫu GÁN TAY (`counting_anno.exemplars`) — cỡ vật đáng tin nhất (box SAM của ~10 % mẫu khoanh cả đống vật);
-                chỉ dùng cho `eval.py --obj-size exemplar`
-  `max_obj_ratio` k (mặc định None = giữ hết): BỎ box vật có cạnh √(wh) > k × cạnh TB 3 exemplar của chính file đó (lớp kia: exemplar
-  của file kia) — box SAM ở ~15 % mẫu khoanh cả đống vật (docs/EXPERIMENT_GAMMA.md mục 18); k = 3 giữ 77 % box, cạnh vật / chỗ trống GT
-  trung vị 1,00, p90 1,41 (không lọc: p90 8,0); 80 mẫu còn < 5 vật.
-  `review` (bản rà tay `box_review/`, người dùng 2026-10-22; `load_review`): BỎ box vật bị loại tay (`bad`) hoặc lọc trùng (`auto`) ở
-  cả hai lớp — thay cho `max_obj_ratio` (không dùng chung); `min_obj` n: chỉ giữ file còn >= n box vật cùng lớp.
-  t = 0, density TRỐNG (bản tải về không có density map; người dùng chốt 2026-10-07), text = `class_name` bỏ phần trong ngoặc và dấu chấm.
+Một phần tử = một tên (một lớp cần thêm), cùng khuôn `CE130AddDataset`: holes = 10 chỗ trống GT (không thứ tự lượt), objects = box vật
+CÙNG lớp, objects_all = vật CẢ HAI lớp [cùng lớp ; lớp kia], exemplars, t = 0, density TRỐNG (PNG jet trống `.convert("L")` = 14/255
+trên vùng thật), text = `class_name` bỏ phần trong ngoặc và dấu chấm.
+Lọc box vật (cả hai lớp, chọn MỘT cách): `max_obj_ratio` k (filt3: k = 3) bỏ box có cạnh √(wh) > k × cạnh TB 3 exemplar — box SAM ở
+~15 % mẫu khoanh cả đống vật; `review` = bản rà tay (`box_review/`, `load_review`: bỏ `bad` ∪ `auto`); `min_obj` n: chỉ giữ file còn
+>= n box vật cùng lớp (review5 = review + n = 5).
 """
 
 import json
@@ -28,10 +20,9 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from ce_localization.data.dataset import letterbox, scale_boxes
-from ce_localization.data.turns import _letterbox_l_u8
+from ce_localization.data.turns import _letterbox_l_u8, letterbox, scale_boxes
 
-__all__ = ["clean_class", "twin_name", "filter_objects", "load_review", "read_cocount", "CoCountAddDataset"]
+__all__ = ["clean_class", "twin_name", "filter_objects", "load_review", "read_cocount", "cocount_geometry", "CoCountAddDataset"]
 
 
 def clean_class(name):
@@ -104,14 +95,25 @@ def read_cocount(root, name, max_obj_ratio=None, review=None):
             "exemplars": ex}
 
 
-class CoCountAddDataset(Dataset):
-    """Đầu vào kiểu bài như `CE130AddDataset`: uint8 HWC (+ density trống `.convert("L")` của PNG jet trống = 14/255 trên vùng thật).
-    `density` None (model 3 kênh) hoặc "empty"."""
+def cocount_geometry(root, name, image_size=512, max_obj_ratio=None, review=None):
+    """-> dict lỗ / box vật / box vật cả hai lớp / exemplar (pixel canvas, float32 như lúc eval) + (nw, nh) — y `CoCountAddDataset`."""
+    r = read_cocount(root, name, max_obj_ratio, review)
+    with Image.open(os.path.join(root, "Image", name + ".jpg")) as im:
+        w, h = im.size
+    scale = min(image_size / w, image_size / h)
+    nw, nh = int(w * scale), int(h * scale)
+    sb = lambda b: scale_boxes(b, scale, nw, nh).astype(np.float32).astype(np.float64)  # noqa: E731
+    return {"holes": sb(r["loc"]), "objects": sb(r["objects"]), "objects_all": sb(r["objects_all"]),
+            "exemplars": sb(r["exemplars"]), "wh": np.array([nw, nh], dtype=np.float64)}
 
-    def __init__(self, root, image_size=512, density="empty", limit=None, max_obj_ratio=None, review=None, min_obj=None):
-        if density not in (None, "empty"):
-            raise ValueError(f"CE-CoCount không có density map: density phải là None hoặc 'empty', không phải {density!r}")
-        self.root, self.image_size, self.density = root, image_size, density
+
+class CoCountAddDataset(Dataset):
+    """Đầu vào kiểu bài như `CE130AddDataset`: uint8 HWC 4 kênh (density trống)."""
+
+    def __init__(self, root, image_size=512, limit=None, max_obj_ratio=None, review=None, min_obj=None):
+        if max_obj_ratio is not None and review is not None:
+            raise ValueError("CE-CoCount: chọn MỘT cách lọc box vật — max_obj_ratio hoặc review")
+        self.root, self.image_size = root, image_size
         self.max_obj_ratio, self.review = max_obj_ratio, review
         self.keys = sorted(f[:-5] for f in os.listdir(os.path.join(root, "Anno")) if f.endswith(".json"))
         self.n_all = len(self.keys)
@@ -136,9 +138,8 @@ class CoCountAddDataset(Dataset):
         r = read_cocount(self.root, key, self.max_obj_ratio, self.review)
         img = Image.open(os.path.join(self.root, "Image", key + ".jpg")).convert("RGB")
         x, scale, nw, nh = letterbox(img, self.image_size)
-        if self.density == "empty":
-            den = _letterbox_l_u8(np.asarray(Image.new("RGB", img.size, (0, 0, 127)).convert("L")), nw, nh, self.image_size)
-            x = np.concatenate([x, den[..., None]], axis=-1)
+        den = _letterbox_l_u8(np.asarray(Image.new("RGB", img.size, (0, 0, 127)).convert("L")), nw, nh, self.image_size)
+        x = np.concatenate([x, den[..., None]], axis=-1)
         holes = scale_boxes(r["loc"], scale, nw, nh)
         return {
             "image": torch.from_numpy(np.ascontiguousarray(x, dtype=np.uint8)).permute(2, 0, 1),

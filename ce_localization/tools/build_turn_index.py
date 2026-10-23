@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cửa G0 của EXPERIMENT GAMMA (docs/EXPERIMENT_GAMMA.md mục 2.2): dựng `data/turn_index.json` MỘT lần.
+"""Dựng `data/turn_index.json` MỘT lần (chỉ mục (nhánh, lượt) <-> file samples/, `data/turns.py`).
 
 Khớp mỗi (nhánh, lượt) của `all_phase2_V2` (`inpainted_turn_t.png`) với đúng một file `samples/*/images/` bằng
 hash pixel, kiểm `target_bbox` (cxcywh) của sample = lỗ lượt t (`inpainted_bboxes[t-1]`, xyxy, lệch <= 1 px) và

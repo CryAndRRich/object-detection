@@ -1,1 +1,1 @@
-"""R-50 + FPN, RoIAlign, memory kiểu Diffusion Policy, stage decoder, detector, text CLIP."""
+"""BoxPolicy (CE-Loc DELTA4+), U-Net 1D, BoxRefiner của tác giả, text CLIP."""

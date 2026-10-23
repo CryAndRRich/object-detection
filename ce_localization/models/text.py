@@ -1,16 +1,6 @@
-"""Token text: CLIP ViT-B/32 text frozen (như CE-Loc gốc), `pooler_output` 512-d.
-
-CLIP đóng băng nên embedding của mỗi tên lớp là HẰNG SỐ -> tính MỘT lần lúc khởi động cho mọi
-lớp cần dùng rồi giải phóng CLIP (không nằm trong model, không vào checkpoint). Cần
-`export HF_HOME=/mnt/disk1/aiotlab/haitn/hf_cache` trên server.
-
-⚠️ Mỗi ảnh CE-130 chỉ có MỘT lớp -> với bài detect, token text gần như không mang tín hiệu
-(docs/EXPERIMENT_ALPHA.md mục 11). Vẫn giữ để đường ống giống CE-Loc.
-
-DELTA (`model.refiner`, `models/clip_refiner.py`): refiner của tác giả cần THÊM token chữ từng từ của một CLIP text KHÁC
-(`refiner.text_model_name`, mặc định `openai/clip-vit-base-patch16`, `last_hidden_state`) — `encode_class_tokens`, cũng tính một lần
-lúc khởi động; `TextTable.tokens` trả (token đệm phải [B, L, H], mask). Kèm vân tay sha256 weight CLIP text đó (`token_sha`) để kiểm
-khớp checkpoint.
+"""Text: CLIP text frozen — `pooler_output` 512-d cho cond (`model.clip_text`, như CE-Loc gốc) + token chữ từng từ (`last_hidden_state`)
+của CLIP text `refiner.text_model_name` cho refiner, kèm vân tay sha256 weight để kiểm khớp checkpoint. CLIP đóng băng ⇒ mỗi tên lớp
+tính MỘT lần lúc khởi động rồi giải phóng CLIP (không vào model / checkpoint). Server: `export HF_HOME=...` trước.
 """
 
 import torch
