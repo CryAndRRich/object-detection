@@ -43,7 +43,7 @@ from ce_localization.utils.box_ops_np import box_iou, ioa
 from ce_localization.utils.log import fmt_time
 
 __all__ = ["CNLL_MIN_OBJ", "SIZE_STATS", "predict_add", "prior_unit_boxes", "prior_records", "object_size", "resize_to_objects",
-           "clip_boxes", "cnll", "other_class", "add_metrics"]
+           "clip_boxes", "cnll", "select_sequential", "other_class", "record_cnll", "add_metrics"]
 
 HIT = 0.5
 CNLL_MIN_OBJ = 5                 # Gaussian 4-D cần >= 5 điểm để hiệp phương sai có hạng đủ
@@ -240,6 +240,23 @@ def _cnll_fit(objects, ref, wh, kind):
     return _FIT[key]
 
 
+def select_sequential(boxes, objects, wh, k=5, kind="F1", others=None):
+    """Chọn k box tuần tự như bài Add One Take One (mục 3.2 + thêm nhiều vật mục 6): mỗi bước lấy box có q(a) CAO nhất = C-NLL THẤP nhất
+    với vật hiện có, rồi coi box đó là vật mới (thêm vào `objects`, fit lại Gaussian) và chấm lại các box còn lại. `boxes` đã kẹp
+    (`clip_boxes`). -> (chỉ số box theo thứ tự chọn, C-NLL của mỗi box lúc được chọn) | None nếu < CNLL_MIN_OBJ vật."""
+    cur, left, order, vals = np.asarray(objects, dtype=np.float64).reshape(-1, 4), list(range(len(boxes))), [], []
+    for _ in range(min(k, len(boxes))):
+        c = cnll(boxes[left], cur, wh, kind, others=others)
+        if c is None:
+            return None
+        j = int(np.argmin(c))
+        order.append(left[j])
+        vals.append(float(c[j]))
+        cur = np.concatenate([cur, boxes[left[j]][None]])
+        del left[j]
+    return order, vals
+
+
 def other_class(objects, objects_all):
     """Box vật lớp kia = `objects_all` bỏ phần đầu `objects` (`data/cocount.read_cocount` ghép [cùng lớp ; lớp kia])."""
     objects_all = np.asarray(objects_all, dtype=np.float64).reshape(-1, 4)
@@ -247,6 +264,25 @@ def other_class(objects, objects_all):
     if len(objects_all) < m or not np.array_equal(objects_all[:m], objects):
         raise ValueError("objects_all phải bắt đầu bằng đúng `objects` (cùng lớp) rồi mới tới lớp kia")
     return objects_all[m:]
+
+
+def record_cnll(r):
+    """C-NLL F1 TỪNG box của MỘT record (đúng như `add_metrics`: box kẹp, vật cùng lớp) + của box GT (lỗ / chỗ trống) + F1all khi có
+    `objects_all` -> dict (None khi < CNLL_MIN_OBJ vật). Dùng cho dump phân tích từng ảnh (`eval.py --dump-boxes`)."""
+    b, _ = clip_boxes(r["boxes"])
+    obj = r["objects"].reshape(-1, 4)
+    c = cnll(b, obj, r["wh"], "F1")
+    if c is None:
+        return None
+    out = {"F1": c, "n_obj": len(obj)}
+    if "holes" in r and len(r["holes"]):
+        out["F1_gt"] = cnll(np.asarray(r["holes"], dtype=np.float64).reshape(-1, 4), obj, r["wh"], "F1")
+    if "objects_all" in r:
+        oth = other_class(obj, r["objects_all"])
+        out["F1all"] = cnll(b, obj, r["wh"], "F1", others=oth)
+        if "F1_gt" in out:
+            out["F1all_gt"] = cnll(np.asarray(r["holes"], dtype=np.float64).reshape(-1, 4), obj, r["wh"], "F1", others=oth)
+    return out
 
 
 def add_metrics(records, with_holes=True, latest=True):

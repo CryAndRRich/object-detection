@@ -953,6 +953,21 @@ def test_delta5_configs():
         assert d == b
 
 
+
+def test_delta6_configs():
+    """DELTA6.x (2026-10-23) = delta5_4 (log + GIoU 0,75) CHỈ đổi `aux_loss_weight` 0,1 -> 0,05 / 0,25 / 0,5 / 1,0 (giữ `aux_giou_weight`
+    0,75 ⇒ GIoU trong loss phụ tỉ lệ theo w)."""
+    base = yaml.safe_load(open(CFG_G["delta5_4"]))
+    assert base["model"]["refiner"]["aux_loss_weight"] == 0.1 and base["model"]["refiner"]["aux_giou_weight"] == 0.75
+    for kind, w in (("delta6_1", 0.05), ("delta6_2", 0.25), ("delta6_3", 0.5), ("delta6_4", 1.0)):
+        d, b = yaml.safe_load(open(CFG_G[kind])), yaml.safe_load(open(CFG_G["delta5_4"]))
+        assert d["experiment"] == kind
+        assert d["model"]["refiner"].pop("aux_loss_weight") == w and b["model"]["refiner"].pop("aux_loss_weight") == 0.1
+        for x in (d, b):
+            x.pop("experiment"), x.pop("description")
+        assert d == b
+
+
 # ----------------------------------------------------------------------------- config, eval, train trọn luồng
 
 def test_delta_configs_only_add_refiner():

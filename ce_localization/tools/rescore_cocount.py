@@ -28,7 +28,7 @@ from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from ce_localization.data.cocount import read_cocount  # noqa: E402
+from ce_localization.data.cocount import load_review, read_cocount  # noqa: E402
 from ce_localization.data.dataset import scale_boxes  # noqa: E402
 from ce_localization.data.turns import TurnIndex  # noqa: E402
 from ce_localization.engine.add_eval import add_metrics, prior_records, prior_unit_boxes, resize_to_objects  # noqa: E402
@@ -38,9 +38,10 @@ __all__ = ["cocount_geometry", "rebuild_records", "size_stat", "rescore", "compa
 CHECK_TOL = {"cnll": 0.02, "default": 1e-3}       # sai số cho phép khi so chỉ số cũ (C-NLL tương đối, còn lại tuyệt đối)
 
 
-def cocount_geometry(root, name, image_size=512, max_obj_ratio=None):
-    """-> dict lỗ / box vật / box vật cả hai lớp / exemplar (pixel canvas) + (nw, nh) của mẫu `name` — y `CoCountAddDataset`."""
-    r = read_cocount(root, name, max_obj_ratio)
+def cocount_geometry(root, name, image_size=512, max_obj_ratio=None, review=None):
+    """-> dict lỗ / box vật / box vật cả hai lớp / exemplar (pixel canvas) + (nw, nh) của mẫu `name` — y `CoCountAddDataset`
+    (`review` = `load_review` của bản rà tay, như `eval.py --cocount-review`)."""
+    r = read_cocount(root, name, max_obj_ratio, review)
     with Image.open(os.path.join(root, "Image", name + ".jpg")) as im:
         w, h = im.size
     scale = min(image_size / w, image_size / h)
@@ -107,12 +108,14 @@ def main():
     ap.add_argument("dumps", nargs="+", help="boxes_<run>.json của eval.py --dump-boxes (CE-CoCount)")
     ap.add_argument("--cocount-root", default="../data/cocount")
     ap.add_argument("--cocount-obj-filter", type=float, default=None, help="PHẢI giống lúc eval (filt3: 3)")
+    ap.add_argument("--cocount-review", default=None, help="PHẢI giống lúc eval (review5: jsonl rà box tay)")
     ap.add_argument("--image-size", type=int, default=512)
     ap.add_argument("--turn-index", default=None, help="có thì dựng lại prior (lỗ train CE-130)")
     ap.add_argument("--prior-source", default="samples", help="data.split_source của checkpoint (GAMMA2+ / DELTA: samples)")
     ap.add_argument("--check", action="store_true", help="so chỉ số cũ với test_<run>.json cạnh dump")
     a = ap.parse_args()
     prior_unit = prior_unit_boxes(TurnIndex(a.turn_index), "train", a.prior_source) if a.turn_index else None
+    review = load_review(a.cocount_review) if a.cocount_review else None
     geo, n_bad = {}, 0
     for path in a.dumps:
         t0 = time.time()
@@ -122,9 +125,10 @@ def main():
             sys.exit(f"{path}: không phải dump CE-CoCount (khoá {list(dump['results'])})")
         for x in next(iter(dump["results"].values())):
             if x["image_id"] not in geo:
-                geo[x["image_id"]] = cocount_geometry(a.cocount_root, x["image_id"], a.image_size, a.cocount_obj_filter)
+                geo[x["image_id"]] = cocount_geometry(a.cocount_root, x["image_id"], a.image_size, a.cocount_obj_filter, review)
         res = rescore(dump, geo, prior_unit)
-        res.update(dump=path, ckpt=dump.get("ckpt"), iter=dump.get("iter"), cocount_obj_filter=a.cocount_obj_filter)
+        res.update(dump=path, ckpt=dump.get("ckpt"), iter=dump.get("iter"), cocount_obj_filter=a.cocount_obj_filter,
+                   cocount_review=a.cocount_review)
         base = os.path.basename(path)
         run = base[len("boxes_"):-len(".json")] if base.startswith("boxes_") else base[:-len(".json")]
         out = os.path.join(os.path.dirname(os.path.abspath(path)), f"rescore_{run}.json")

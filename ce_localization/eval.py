@@ -67,6 +67,7 @@ import time
 # CUDA khởi tạo. Đặt sẵn biến môi trường (kể cả chuỗi rỗng) thì giữ nguyên.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
+import numpy as np  # noqa: E402
 import torch  # noqa: E402
 import yaml  # noqa: E402
 from torch.utils.data import DataLoader  # noqa: E402
@@ -77,7 +78,7 @@ from ce_localization.data.dataset import CE130Dataset, collate  # noqa: E402
 from ce_localization.data.density import EVAL_MODES, DensityIndex  # noqa: E402
 from ce_localization.data.cocount import CoCountAddDataset, load_review  # noqa: E402
 from ce_localization.data.turns import ADD_DENSITY, IMAGE_KINDS, CE130AddDataset, TurnIndex, collate_add  # noqa: E402
-from ce_localization.engine.add_eval import (SIZE_STATS, add_metrics, predict_add, prior_records,  # noqa: E402
+from ce_localization.engine.add_eval import (SIZE_STATS, add_metrics, predict_add, prior_records, record_cnll,  # noqa: E402
                                              prior_unit_boxes, resize_to_objects)
 from ce_localization.engine.evaluate import attention_diagnostics, predict, score  # noqa: E402
 from ce_localization.models.backbone import density_ratio_of  # noqa: E402
@@ -158,6 +159,14 @@ def add_variants(add_samplers, obj_attn=False, norefine=False, ddim_steps=100, e
     return out
 
 
+def _dump_cnll(r):
+    """C-NLL từng box (+ box GT, F1all) của record cho dump — phân tích từng ảnh (`tools/cnll_outliers.py`); {} khi < 5 vật."""
+    c = record_cnll(r)
+    if c is None:
+        return {}
+    return {"n_obj": c["n_obj"], **{f"cnll_{k}": np.round(v, 4).tolist() for k, v in c.items() if k != "n_obj"}}
+
+
 def write_json(path, obj, compact=False, note=""):
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w") as f:
@@ -211,8 +220,9 @@ def main_add(a, cfg, ck, dev, t0):
     else:                                             # U-Net 1D (GAMMA0 / pha 1 / GAMMA4 / DELTA / bài): mock 100 bước và / hoặc DDPM
         if "mock" in a.add_samplers and isinstance(model, BoxPolicy) and model.num_timesteps < 100:
             sys.exit(f"vòng mock 100 bước > T = {model.num_timesteps} của checkpoint")
-        variants = add_variants(a.add_samplers, obj_attn=bool(cfg["model"].get("obj_attn")) and not paper,
-                                norefine=getattr(model, "refiner", None) is not None and model.noise_net is not None,
+        variants = add_variants(a.add_samplers, obj_attn=bool(cfg["model"].get("obj_attn")) and not paper and not a.no_ablation,
+                                norefine=(getattr(model, "refiner", None) is not None and model.noise_net is not None
+                                          and not a.no_ablation),
                                 ddim_steps=a.ddim_steps, eta=a.eta)
     refine_vars = []
     if cfg["model"].get("arch") == "propose_refine" and not paper:
@@ -301,7 +311,7 @@ def main_add(a, cfg, ck, dev, t0):
             out["results"][key], out["prior"][key] = res, pri
             if dump is not None:
                 dump["results"][key] = [{"image_id": r["image_id"], "t": int(r["t"]), "wh": r["wh"].round(3).tolist(),
-                                         "boxes": r["boxes"].round(2).tolist()} for r in rec]
+                                         "boxes": r["boxes"].round(2).tolist(), **_dump_cnll(r)} for r in rec]
             for st in (a.obj_size or []) if post is None else []:
                 report(key + "_objsize" + ("" if st == "mean" else f"_{st}"), desc + f", giữ tâm, cỡ = box vật ({st})", rec, sec,
                        post=lambda r_, st=st: resize_to_objects(r_, st))
@@ -393,6 +403,8 @@ def main():
                          "cocount.jsonl) — bỏ box loại tay + lọc trùng ở cả hai lớp; không dùng chung --cocount-obj-filter")
     ap.add_argument("--cocount-min-obj", type=int, default=None,
                     help="GAMMA, CE-CoCount: chỉ eval file còn >= N box vật cùng lớp sau lọc (C-NLL cần >= 5)")
+    ap.add_argument("--no-ablation", action="store_true",
+                    help="GAMMA4 / DELTA: chỉ biến thể gốc, bỏ `_noobj` / `_norefine` (eval nhanh hơn ~2,5×)")
     ap.add_argument("--dump-boxes", default=None, help="GAMMA: file .json ghi box thô từng mẫu (user study, user_study/build.py)")
     a = ap.parse_args()
     if a.cocount_review and a.cocount_obj_filter is not None:

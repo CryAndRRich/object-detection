@@ -366,6 +366,48 @@ def test_cnll_f1all_relations_over_all_classes():
         other_class(objs, np.concatenate([others, objs]))
 
 
+def test_record_cnll_matches_add_metrics():
+    """`record_cnll` (dump phân tích từng ảnh): C-NLL từng box gộp lại == `add_metrics` (F1 / F1all); box GT = chỗ trống."""
+    from ce_localization.engine.add_eval import add_metrics, cnll, record_cnll
+    rng = np.random.default_rng(5)
+    def box(n):
+        xy = rng.uniform(0, 80, (n, 2))
+        return np.concatenate([xy, xy + rng.uniform(4, 15, (n, 2))], 1)
+    recs = []
+    for i in range(6):
+        obj = box(7 + i)
+        recs.append({"boxes": box(10), "objects": obj, "objects_all": np.concatenate([obj, box(3)]), "holes": box(4),
+                     "wh": (100.0, 100.0), "t": 0, "image_id": f"x{i}"})
+    m = add_metrics(recs, latest=False)
+    rc = [record_cnll(r) for r in recs]
+    assert np.isclose(np.median(np.concatenate([c["F1"] for c in rc])), m["cnll_F1_n1_median"])
+    assert np.isclose(np.median(np.concatenate([c["F1all"] for c in rc])), m["cnll_F1all_n1_median"])
+    assert np.isclose(np.median([c["F1"].min() for c in rc]), m["cnll_F1_sel_median"])
+    assert np.allclose(rc[0]["F1_gt"], cnll(recs[0]["holes"], recs[0]["objects"], (100.0, 100.0), "F1")) and rc[0]["n_obj"] == 7
+    assert record_cnll({**recs[0], "objects": recs[0]["objects"][:4]}) is None
+
+
+def test_select_sequential_like_paper():
+    """Chọn tuần tự như bài Add One Take One: bước 1 = box C-NLL THẤP nhất (q cao nhất) với vật hiện có; bước sau = thấp nhất khi box đã
+    chọn được thêm vào tập vật (Gaussian fit lại); không chọn lại; < 5 vật -> None; F1all truyền vật lớp kia."""
+    from ce_localization.engine.add_eval import cnll, select_sequential
+    rng = np.random.default_rng(3)
+    xy = rng.uniform(0, 80, (7, 2))
+    objs = np.concatenate([xy, xy + rng.uniform(6, 12, (7, 2))], 1)
+    xy = rng.uniform(0, 90, (12, 2))
+    boxes = np.concatenate([xy, xy + rng.uniform(3, 25, (12, 2))], 1)
+    others = objs[:2] + 40.0
+    for oth in (None, others):
+        order, vals = select_sequential(boxes, objs, (100.0, 100.0), 4, others=oth)
+        assert len(order) == len(set(order)) == 4
+        cur, left = objs, list(range(12))
+        for j, v in zip(order, vals):
+            c = cnll(boxes[left], cur, (100.0, 100.0), others=oth)
+            assert left[int(np.argmin(c))] == j and np.isclose(c.min(), v)
+            cur, left = np.concatenate([cur, boxes[j][None]]), [i for i in left if i != j]
+    assert select_sequential(boxes, objs[:4], (100.0, 100.0)) is None
+
+
 def test_cnll_fit_cache_same_bits_and_keyed_by_content():
     """Gaussian của C-NLL nhớ theo nội dung (vật, tham chiếu, cỡ ảnh, kiểu): lần chấm sau trùng TỪNG BIT với lần đầu / bộ nhớ rỗng;
     sửa box vật tại chỗ, đổi cỡ ảnh, đổi kiểu, thêm lớp kia -> fit lại (không trả nhầm)."""

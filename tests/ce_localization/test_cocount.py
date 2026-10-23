@@ -226,7 +226,7 @@ def test_eval_cocount_full_flow(tmp_path, monkeypatch, kind):
         model = build_model(cfg, pretrained_backbone=False)
         torch.save({"model": model.state_dict(), "config": cfg, "iter": 0}, ck)
         extra = (["--refine-t", "none", "5", "--proposer-sampler", "ddpm"] if kind == "pr" else
-                 ["--add-samplers", "ddpm", "--cocount-review", rv, "--cocount-min-obj", "6"] if kind == "review" else
+                 ["--add-samplers", "ddpm", "--cocount-review", rv, "--cocount-min-obj", "6", "--no-ablation"] if kind == "review" else
                  ["--add-samplers", "ddpm", "ddim", "--cocount-obj-filter", "3"])     # config thu nhỏ T = 20: mock 100 bước không chạy
     out, dump = str(tmp_path / "res.json"), str(tmp_path / "boxes.json")
     monkeypatch.setattr(sys, "argv", ["eval.py", "--ckpt", ck, "--dataset", "cocount", "--cocount-root", root, "--n-samples", "3",
@@ -237,7 +237,7 @@ def test_eval_cocount_full_flow(tmp_path, monkeypatch, kind):
     with open(out) as f:
         res = json.load(f)
     want = {"paper": {"cocount"}, "obj_rand": {"cocount" + s + o for s in ("_ddpm", "_ddim") for o in ("", "_noobj")},
-            "pr": {"cocount_ce", "cocount_t5"}, "review": {"cocount", "cocount_noobj"}}[kind]
+            "pr": {"cocount_ce", "cocount_t5"}, "review": {"cocount"}}[kind]                     # --no-ablation: bỏ _noobj
     want |= {k + sfx for k in want for sfx in ("_objsize", "_objsize_exemplar")}
     assert set(res["results"]) == want and res["dataset"] == "cocount" and res["density"] == {"cocount": "empty"}
     assert res["cocount_obj_filter"] == (3 if kind.startswith("obj") else None)
@@ -251,6 +251,10 @@ def test_eval_cocount_full_flow(tmp_path, monkeypatch, kind):
     with open(dump) as f:
         dd = json.load(f)
     assert set(dd["results"]) == want and all(np.asarray(x["boxes"]).shape == (3, 4) for x in dd["results"][sorted(want)[0]])
+    for k in want:                                                            # dump: C-NLL từng box == chỉ số của eval (trung vị gộp)
+        c = np.concatenate([x["cnll_F1"] for x in dd["results"][k]])
+        assert len(c) == 3 * n and np.isclose(np.median(c), res["results"][k]["cnll_F1_n1_median"], rtol=1e-3, atol=1e-3)
+        assert all(len(x["cnll_F1_gt"]) == 10 and len(x["cnll_F1all"]) == 3 for x in dd["results"][k])
     from ce_localization.data.cocount import load_review, read_cocount
     review = load_review(rv) if rv else None
     for k in want - {k for k in want if "_objsize" in k}:                    # cùng box: giữ tâm, cỡ = TB box vật cùng lớp / box mẫu
@@ -317,3 +321,65 @@ def test_rescore_cocount_from_dump(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         rc.main()
 
+
+
+def test_plot_cnll_worst_ranks_and_draws(tmp_path, monkeypatch):
+    """`tools/plot_cnll_worst.py` (2026-10-23): C-NLL từng box dựng lại từ dump + bản rà tay == chỉ số của `add_metrics` (trung vị gộp mọi
+    box: F1 lẫn F1all); xếp mẫu theo trung vị giảm dần; ghi hình + rank.json."""
+    from ce_localization.data.cocount import CoCountAddDataset, load_review
+    from ce_localization.engine.add_eval import add_metrics
+    from ce_localization.tools import plot_cnll_worst as pw
+    from ce_localization.tools.rescore_cocount import cocount_geometry, rebuild_records
+    root = _fake_cocount(str(tmp_path / "cc"))
+    rvp = _fake_review(root, str(tmp_path / "rv.jsonl"))
+    rv = load_review(rvp)
+    ds = CoCountAddDataset(root, 128, density=None, review=rv, min_obj=5)
+    rng = np.random.default_rng(0)
+    rows = []
+    for i in range(len(ds)):
+        s = ds[i]
+        nh, nw = s["valid_hw"]
+        xy = rng.uniform(0, 1, (4, 2)) * [nw, nh]
+        rows.append({"image_id": s["image_id"], "t": 0, "wh": [float(nw), float(nh)],
+                     "boxes": np.concatenate([xy, xy + rng.uniform(3, 30, (4, 2))], 1).round(2).tolist()})
+    geo = {x["image_id"]: cocount_geometry(root, x["image_id"], 128, review=rv) for x in rows}
+    ref = add_metrics(rebuild_records(rows, geo), with_holes=True, latest=False)
+    for kind in ("F1", "F1all"):
+        items = pw.score_samples(rows, geo, kind)
+        assert len(items) == len(rows) == ref["n_cnll"]
+        assert np.isclose(np.median(np.concatenate([it["c"] for it in items])), ref[f"cnll_{kind}_n1_median"], rtol=1e-12)
+    dump = str(tmp_path / "boxes_m.json")
+    with open(dump, "w") as f:
+        json.dump({"n_samples": 4, "results": {"cocount_mock": rows}}, f)
+    out = str(tmp_path / "viz")
+    monkeypatch.setattr(sys, "argv", ["plot_cnll_worst.py", dump, "--cocount-root", root, "--cocount-review", rvp, "--image-size", "128",
+                                      "--top", "3", "--out", out])
+    pw.main()
+    r = json.load(open(os.path.join(out, "rank.json")))["samples"]
+    assert sorted(os.listdir(out)) == ["rank.json"] + [f"worst_{x['rank']:02d}_{x['image_id']}.png" for x in r[:3]]     # mỗi mẫu một hình
+    assert [x["rank"] for x in r] == [1, 2, 3] and [x["median"] for x in r] == sorted((x["median"] for x in r), reverse=True)
+    assert all(len(x["sel"]) == len(set(x["sel"])) == 4 for x in r)                        # 4 box / mẫu < --select 5: chọn hết
+
+
+def test_cnll_outliers_tool(tmp_path, monkeypatch):
+    """`tools/cnll_outliers.py`: sel = min C-NLL từng mẫu; trung bình bỏ p % lớn nhất; outlier trùng giữa model; ghi summary + 3 hình."""
+    from ce_localization.tools import cnll_outliers as co
+    rng = np.random.default_rng(0)
+    rows = lambda bump: [{"image_id": f"im{i}", "t": 1, "n_obj": 5 + i % 7, "boxes": [],  # noqa: E731
+                          "cnll_F1": (rng.gamma(1.0, 1.0, 4) + (5000.0 if i in bump else 0)).tolist(),
+                          "cnll_F1_gt": rng.gamma(1.0, 0.5, 2).tolist()} for i in range(200)]
+    paths = []
+    for name, bump in (("A", {0, 1, 2}), ("B", {0, 1, 3})):
+        p = tmp_path / f"boxes_{name}.json"
+        p.write_text(json.dumps({"results": {"inpainted": rows(bump)}}))
+        paths.append(f"{name}={p}")
+    ps = co.per_sample(json.loads((tmp_path / "boxes_A.json").read_text())["results"]["inpainted"])
+    assert len(ps) == 200 and ps["im0|1"][0] > 5000 and ps["im5|1"][0] < 50
+    s = co.summarize([v[0] for v in ps.values()])
+    assert s["mean"] > s["mean_trim1"] > 0 and s["median"] < 5 and 0.6 < s["top1pct_share"] < 0.7   # 1 % = 2 / 3 mẫu bị đẩy
+    out = str(tmp_path / "o")
+    monkeypatch.setattr(sys, "argv", ["cnll_outliers.py", "--dump", *paths, "--top", "3", "--out", out])
+    co.main()
+    r = json.load(open(os.path.join(out, "summary.json")))
+    assert r["outliers_in_all_models"] == ["im0|1", "im1|1"] and r["overlap_matrix"][0][1] == 2 / 3
+    assert sorted(os.listdir(out)) == ["outliers_heatmap.png", "sorted_sel.png", "summary.json", "trimmed_mean.png"]
