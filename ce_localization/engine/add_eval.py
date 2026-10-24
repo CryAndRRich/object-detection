@@ -28,7 +28,7 @@ from ce_localization.utils.box_ops_np import box_iou, ioa
 from ce_localization.utils.log import fmt_time
 
 __all__ = ["CNLL_MIN_OBJ", "SIZE_STATS", "predict_add", "prior_unit_boxes", "prior_records", "resize_to_objects", "clip_boxes", "cnll",
-           "select_sequential", "other_class", "record_cnll", "add_metrics"]
+           "select_nms", "other_class", "record_cnll", "add_metrics"]
 
 HIT = 0.5
 CNLL_MIN_OBJ = 5                 # Gaussian 4-D cần >= 5 điểm để hiệp phương sai có hạng đủ
@@ -188,20 +188,16 @@ def _cnll_fit(objects, ref, wh):
     return _FIT[key]
 
 
-def select_sequential(boxes, objects, wh, k=5, others=None):
-    """Chọn k box tuần tự như bài Add One Take One: mỗi bước lấy box C-NLL THẤP nhất với vật hiện có, coi nó là vật mới (fit lại),
-    chấm lại phần còn lại. `boxes` đã kẹp. -> (chỉ số theo thứ tự chọn, C-NLL lúc chọn) | None nếu < CNLL_MIN_OBJ vật."""
-    cur, left, order, vals = np.asarray(objects, dtype=np.float64).reshape(-1, 4), list(range(len(boxes))), [], []
-    for _ in range(min(k, len(boxes))):
-        c = cnll(boxes[left], cur, wh, others=others)
-        if c is None:
-            return None
-        j = int(np.argmin(c))
-        order.append(left[j])
-        vals.append(float(c[j]))
-        cur = np.concatenate([cur, boxes[left[j]][None]])
-        del left[j]
-    return order, vals
+def select_nms(boxes, c, k=5, iou=0.5):
+    """k box C-NLL thấp nhất sau NMS (minh hoạ): duyệt box theo C-NLL `c` tăng dần, bỏ box có IoU > `iou` với box đã giữ (K mẫu hay
+    trùng nhau). Gaussian fit MỘT lần trên vật đang có — box đã chọn KHÔNG được coi là vật mới. `boxes` đã kẹp. -> list chỉ số."""
+    keep = []
+    for i in np.argsort(c, kind="stable"):
+        if len(keep) == k:
+            break
+        if not keep or box_iou(boxes[i:i + 1], boxes[keep])[0].max() <= iou:
+            keep.append(int(i))
+    return keep
 
 
 def other_class(objects, objects_all):

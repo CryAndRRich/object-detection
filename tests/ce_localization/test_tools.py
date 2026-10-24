@@ -75,7 +75,9 @@ def _rows(rng, items):
 
 def test_plot_cnll_worst_cocount_and_ce130(tmp_path, monkeypatch):
     """Hình học dựng lại (CE-CoCount qua bản rà tay; CE-130 từ turn_index) == dataset lúc eval; C-NLL từng box == dump (`record_cnll`,
-    F1all với lớp kia); xếp theo box tốt nhất giảm dần; `--top-pct` vẽ đúng số mẫu, mỗi mẫu một hình + rank.json."""
+    F1all với lớp kia); xếp theo box tốt nhất giảm dần; `--top-pct` vẽ đúng số mẫu, mỗi mẫu một hình + rank.json; box vẽ = <= 5 box C-NLL
+    thấp nhất không trùng nhau (IoU <= 0,5); nhiều dump: vẽ đúng giao top p % của mọi dump (lưới GT + từng setting) + intersect.json."""
+    from ce_localization.utils.box_ops_np import box_iou
     from ce_localization.data.cocount import CoCountAddDataset, load_review
     from ce_localization.data.turns import CE130AddDataset
     from ce_localization.tools import plot_cnll_worst as pw
@@ -113,3 +115,20 @@ def test_plot_cnll_worst_cocount_and_ce130(tmp_path, monkeypatch):
         assert [x["min"] for x in r] == sorted((x["min"] for x in r), reverse=True)
         top = int(np.ceil(len(r) * 0.5))
         assert sorted(os.listdir(out)) == ["rank.json"] + [f"worst_{x['rank']:02d}_{x['image_id']}.png" for x in r[:top]]
+        bx = {x["image_id"]: np.asarray(x["boxes"], dtype=np.float64) for x in rows}
+        for x in r:
+            sb = bx[x["image_id"]][x["sel"]]
+            iou = box_iou(sb, sb)[0] - np.eye(len(sb))
+            assert 0 < len(x["sel"]) <= 5 and iou.max() <= 0.5 and np.isclose(x["sel_cnll"][0], x["min"])
+        rows2 = _rows(rng, items if name == "cocount" else items_ce)
+        dump2 = str(tmp_path / f"{name}_boxes2.json")
+        json.dump({"results": {name: rows2}}, open(dump2, "w"))
+        out2 = str(tmp_path / f"inter_{name}")
+        monkeypatch.setattr(sys, "argv", ["plot_cnll_worst.py", f"A={dump}", f"B={dump2}", *extra, "--image-size", "128",
+                                          "--intersect-pct", "50", "--out", out2])
+        pw.main()
+        ref2 = {x["image_id"]: min(x["cnll"]) for x in rows2 if "cnll" in x}
+        k = int(round(len(ref) / 2))
+        want = set(sorted(ref, key=ref.get, reverse=True)[:k]) & set(sorted(ref2, key=ref2.get, reverse=True)[:k])
+        got = json.load(open(os.path.join(out2, "intersect.json")))["samples"]
+        assert {x["image_id"] for x in got} == want and len(os.listdir(out2)) == len(want) + 1

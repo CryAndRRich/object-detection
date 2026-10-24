@@ -76,20 +76,15 @@ def test_cnll_definition_f1all_and_paper_aggregate():
     assert np.allclose(rc[0][0], cnll(r0["boxes"], r0["objects"], (100.0, 100.0), others=other_class(r0["objects"], r0["objects_all"])))
 
 
-def test_select_sequential_and_fit_cache():
-    """Chọn tuần tự như bài: mỗi bước box C-NLL thấp nhất, thêm vào tập vật, fit lại; < 5 vật -> None. Gaussian nhớ theo NỘI DUNG
-    (sửa box vật tại chỗ -> fit lại, kết quả trùng từng bit với bộ nhớ rỗng)."""
+def test_select_nms_and_fit_cache():
+    """Minh hoạ: k box C-NLL thấp nhất sau NMS (box trùng IoU > ngưỡng bị bỏ, không fit lại). Gaussian nhớ theo NỘI DUNG (sửa box vật tại
+    chỗ -> fit lại, kết quả trùng từng bit với bộ nhớ rỗng)."""
     from ce_localization.engine import add_eval as ae
     rng = np.random.default_rng(3)
     objs, boxes = _boxes(rng, 7, size=(6, 12)), _boxes(rng, 12, hi=90, size=(3, 25))
-    for oth in (None, objs[:2] + 40.0):
-        order, vals = ae.select_sequential(boxes, objs, (100.0, 100.0), 4, others=oth)
-        cur, left = objs, list(range(12))
-        for j, v in zip(order, vals):
-            c = ae.cnll(boxes[left], cur, (100.0, 100.0), others=oth)
-            assert left[int(np.argmin(c))] == j and np.isclose(c.min(), v)
-            cur, left = np.concatenate([cur, boxes[j][None]]), [i for i in left if i != j]
-    assert ae.select_sequential(boxes, objs[:4], (100.0, 100.0)) is None
+    b = np.array([[10, 10, 30, 30], [11, 10, 31, 30], [60, 60, 80, 80], [40, 0, 50, 10]], dtype=np.float64)
+    c = np.array([1.0, 2.0, 3.0, 0.5])                                  # box 1 trùng box 0 (IoU 0,9)
+    assert ae.select_nms(b, c, 3) == [3, 0, 2] and ae.select_nms(b, c, 3, iou=0.95) == [3, 0, 1] and ae.select_nms(b, c, 9) == [3, 0, 2]
     ae._FIT.clear()
     cold = ae.cnll(boxes, objs, (100.0, 80.0))
     assert np.array_equal(ae.cnll(boxes, objs, (100.0, 80.0)), cold) and len(ae._FIT) == 1
