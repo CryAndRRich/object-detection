@@ -165,9 +165,9 @@ def _fake_review(root, path, drop_auto=None):
 
 # ----------------------------------------------------------------------------- config / chạy train, eval
 
-def run_cfg(tmp_path, base, run, **training):
+def run_cfg(tmp_path, base, run, name="", **training):
     """Config thật `run` (đã gộp `base`) thu nhỏ cho dữ liệu giả: canvas 128, T = 100 (vòng mock 100 bước), 2 bộ nhiễu / ảnh, batch 2,
-    4 iter, log mỗi iter; refiner / U-Net giữ kích thước thật, CLIP giả. -> (đường dẫn yaml, cfg)."""
+    4 iter, log mỗi iter; refiner / U-Net giữ kích thước thật, CLIP giả; `training` ghi đè thêm. -> (đường dẫn yaml, cfg)."""
     from ce_localization.utils.config import load_config
     cfg = load_config(os.path.join(CFG_DIR, f"{run}.yaml"))
     cfg["data"].update(root=os.path.join(base, "all_phase2_V2"), samples_root=os.path.join(base, "samples"),
@@ -178,7 +178,7 @@ def run_cfg(tmp_path, base, run, **training):
     cfg["training"].update(batch_size=2, max_iter=4, log_every=1, ckpt_every=2, cosine_t_max=100,
                            **({} if cfg["eval"]["split"] is None else {"eval_every": 2}), **training)
     cfg["eval"].update(n_samples=3, batch_size=2)
-    p = str(tmp_path / f"cfg_{run}.yaml")
+    p = str(tmp_path / f"cfg_{run}{name}.yaml")
     with open(p, "w") as f:
         yaml.safe_dump(cfg, f)
     return p, cfg

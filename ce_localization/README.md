@@ -19,7 +19,7 @@ U-Net 1D nhận [x_t ; refined] -> ε̂ ;  loss = ε-MSE + aux_loss_weight · [M
 | `models/` | `box_policy` (BoxPolicy, sampler mock / ddim, `build_model` / `load_checkpoint`), `unet1d`, `clip_refiner` (port `refs/CE-Loc-update/`), `text` |
 | `data/` | `turns` (CE-130 theo (nhánh, lượt), split như CE-Loc gốc, cache uint8), `density` (bản `full` cho ảnh gốc), `cocount` (CE-CoCount, lọc box) |
 | `engine/` | `add_eval` (suy luận K mẫu, IoU, on_object, C-NLL), `train_utils` (DDP, lịch lr, checkpoint nguyên tử) |
-| `tools/` | `build_turn_index`, `build_density_index`, `build_add_cache` (dữ liệu, một lần); `cnll_outliers`, `plot_cnll_worst` (đọc dump eval) |
+| `tools/` | `build_turn_index`, `build_density_index`, `build_add_cache`, `build_clip_cache` (dữ liệu / cache, một lần); `cnll_outliers`, `plot_cnll_worst`, `plot_snapshots` (đọc dump eval) |
 | `box_review/` | web Gradio rà box dữ liệu bằng tay (local) — docstring `box_review/app.py` |
 | `notebooks/add_kaggle.ipynb` | train một run trên Kaggle T4×2 (gitignore, chỉ ở local; tự clone branch `delta`) |
 
@@ -27,7 +27,7 @@ U-Net 1D nhận [x_t ; refined] -> ε̂ ;  loss = ε-MSE + aux_loss_weight · [M
 |---|---|---|
 | `delta4` | — (box linear, val mock, best theo val `mean_iou_any`) | mục 10 |
 | `delta5` / `5_1` / `5_3` / `5_2` / `5_4` / `5_5` | box log (`model.box_coder`), val ddim; `aux_giou_weight` 0 / 0,1 / 0,25 / 0,5 / 0,75 / 1,0 | mục 11 |
-| `delta6` / `6_1` / `6_2` | `delta4` / `5_2` / `5_4` + `protocol_celoc.yaml`: không val, best = loss train TB / epoch thấp nhất, 120 epoch, lr 1e-4 cosine về 0 | mục 12 |
+| `delta6` / `6_1` / `6_2` | `delta4` / `5_2` / `5_4` + `protocol_celoc.yaml`: không val, best = loss train TB / epoch thấp nhất, 120 epoch, lr 1e-4 cosine về 0, train lấy ngẫu nhiên 30 vật / ảnh; snapshot weight mỗi 10 epoch (`snapshots/`, eval sau để xem độ ổn định) | mục 12 |
 
 ## Chạy (server, trong `object-detection/ce_localization/`)
 
@@ -44,11 +44,15 @@ python ../tools/run_on_free_gpu.py -- eval.py --ckpt ../weights/add/delta6/best.
 python ../tools/run_on_free_gpu.py -- eval.py --ckpt ../weights/add/delta6/best.pth --dataset cocount --add-samplers mock ddim \
     --cocount-review ../../output/add/box_review/cocount.jsonl --cocount-min-obj 5 --obj-size mean exemplar \
     --out /mnt/disk1/aiotlab/haitn/output/add/cocount/review5/test_delta6.json
+# độ ổn định theo epoch: eval từng snapshot (weights/add/delta6/snapshots/epNNN.pth) rồi vẽ
+python ../tools/run_on_free_gpu.py -- eval.py --ckpt ../weights/add/delta6/snapshots/ep010.pth --split test_all \
+    --out /mnt/disk1/aiotlab/haitn/output/add/snapshots/delta6/ep010.json
+python tools/plot_snapshots.py --run DELTA6=../../output/add/snapshots/delta6 --out ../../output/add/viz/snapshots
 ```
 
-Đo 2026-10-23 (A30, batch 16 ảnh × 30 box, mock): CE-130 test 4.948 mẫu 11 phút (GPU rảnh) – 23 phút (GPU dùng chung), đỉnh 1,2 GB;
-tập train 19.998 mẫu 47 phút – 1h41m, đỉnh 5,4 GB (ảnh tới 1.228 vật). Mặc định nay batch 32 (bộ nhớ ~gấp đôi); GPU còn ít chỗ thì
-hạ `--batch-size`.
+Đo 2026-10-23 (A30, batch 16 ảnh × 30 box, mock, bản trước `ObjKV`): CE-130 test 4.948 mẫu 11 phút (GPU rảnh) – 23 phút (GPU dùng
+chung), đỉnh 1,2 GB; tập train 19.998 mẫu 47 phút – 1h41m, đỉnh 5,4 GB (ảnh tới 1.228 vật). Nay K / V token vật tính một lần mỗi ảnh
+(không nhân 30) ⇒ mặc định batch 64; OOM thì hạ `--batch-size 32`.
 
 ## Đọc số (`engine/add_eval.py`)
 

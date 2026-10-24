@@ -352,7 +352,8 @@ class CE130AddDataset(Dataset):
     """Một phần tử = một (nhánh, lượt): ảnh uint8 [4,T,T] (RGB + density kiểu bài), box xyxy PIXEL CANVAS. Density: ảnh inpaint =
     density của chính mẫu; ảnh gốc = bản `full` của ảnh gốc (`density_index`, `data/density.py`)."""
 
-    def __init__(self, index, ce130_root, samples_root, split, image_size=512, image="inpainted", density_index=None, cache=None):
+    def __init__(self, index, ce130_root, samples_root, split, image_size=512, image="inpainted", density_index=None, cache=None,
+                 clip_cache=None):
         if image not in IMAGE_KINDS:
             raise ValueError(f"image {image!r} không thuộc {IMAGE_KINDS}")
         if image == "original" and density_index is None:
@@ -363,6 +364,7 @@ class CE130AddDataset(Dataset):
         if cache is not None and cache.size != image_size:
             raise ValueError(f"cache image_size {cache.size} != {image_size}")
         self.cache = cache if image == "inpainted" else None          # cache = ảnh inpaint + density của mẫu
+        self.clip_cache = clip_cache                                   # token CLIP tính sẵn (`data/clip_cache.py`, chỉ train)
 
     def __len__(self):
         return len(self.keys)
@@ -402,6 +404,7 @@ class CE130AddDataset(Dataset):
             "text": b["class"],
             "image_id": key,
             "t": t,
+            **({"clip": self.clip_cache.get(key)} if self.clip_cache is not None else {}),
         }
 
 
@@ -422,6 +425,7 @@ def collate_add(batch):
         "t": [b["t"] for b in batch],
         **({"objects_all": [b["objects_all"] for b in batch]} if "objects_all" in batch[0] else {}),   # CE-CoCount: cả hai lớp
         **({"exemplars": [b["exemplars"] for b in batch]} if "exemplars" in batch[0] else {}),         # CE-CoCount: 3 box mẫu gán tay
+        **({"clip": torch.stack([b["clip"] for b in batch])} if "clip" in batch[0] else {}),          # token CLIP tính sẵn (train)
     }
 
 
@@ -443,7 +447,8 @@ def to_device_add(batch, dev):
     `/255` trên thiết bị."""
     nb = dev.type == "cuda"
     out = dict(batch)
-    for k in ("images", "target", "whwh", "valid_hw"):
-        out[k] = batch[k].to(dev, non_blocking=nb)
+    for k in ("images", "target", "whwh", "valid_hw", "clip"):
+        if k in batch:
+            out[k] = batch[k].to(dev, non_blocking=nb)
     out["images"] = paper_to_float(out["images"].permute(0, 3, 1, 2))
     return out

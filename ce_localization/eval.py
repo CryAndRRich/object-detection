@@ -92,7 +92,7 @@ def main():
     ap.add_argument("--ddim-steps", type=int, default=100)
     ap.add_argument("--eta", type=float, default=1.0)
     ap.add_argument("--n-samples", type=int, default=None, help="số box / mẫu (mặc định eval.n_samples = 30)")
-    ap.add_argument("--batch-size", type=int, default=32, help="số ẢNH / batch (× n_samples hàng khử nhiễu)")
+    ap.add_argument("--batch-size", type=int, default=64, help="số ẢNH / batch (× n_samples hàng khử nhiễu); OOM thì hạ 32")
     ap.add_argument("--num-workers", type=int, default=4)
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--seed", type=int, default=0)

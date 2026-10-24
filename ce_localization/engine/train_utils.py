@@ -73,6 +73,16 @@ class PthCheckpoints:
             shutil.copyfile(self.last_path, tmp)
             os.replace(tmp, self.best_path)
 
+    def save_snapshot(self, state, name):
+        """Ghi nguyên tử `<save_dir>/snapshots/<name>` (weight giữa chừng, không optimizer) -> đường dẫn."""
+        path = os.path.join(self.save_dir, "snapshots", name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save(state, path + ".tmp", _use_new_zipfile_serialization=False)
+        with open(path + ".tmp", "rb") as f:
+            os.fsync(f.fileno())
+        os.replace(path + ".tmp", path)
+        return path
+
     def load_last(self, map_location="cpu"):
         return torch.load(self.last_path, map_location=map_location, weights_only=False)
 

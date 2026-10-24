@@ -1,4 +1,4 @@
-"""Tool đọc dump của eval (không model): `cnll_outliers.py`, `plot_cnll_worst.py` (CE-CoCount + CE-130)."""
+"""Tool đọc dump của eval (không model): `cnll_outliers.py`, `plot_snapshots.py`, `plot_cnll_worst.py` (CE-CoCount + CE-130)."""
 
 import json
 import os
@@ -29,6 +29,33 @@ def test_cnll_outliers_tool(tmp_path, monkeypatch):
     r = json.load(open(os.path.join(out, "summary.json")))
     assert r["outliers_in_all_models"] == ["im0|1", "im1|1"] and r["overlap_matrix"][0][1] == 2 / 3
     assert sorted(os.listdir(out)) == ["outliers_heatmap.png", "sorted_sel.png", "summary.json", "trimmed_mean.png"]
+
+
+def test_plot_snapshots_tool(tmp_path, monkeypatch):
+    """Mỗi run / epoch (tên epNNN): TB / trung vị / bỏ 1 % của C-NLL box thấp nhất mỗi ảnh, mốc GT, hit50 từ JSON chỉ số; ghi hình."""
+    from ce_localization.tools import plot_snapshots as ps
+    rng = np.random.default_rng(1)
+    specs = []
+    for name in ("A", "B"):
+        d = tmp_path / name
+        d.mkdir()
+        for ep, bump in ((10, 1000.0), (20, 0.0)):
+            rows = [{"image_id": f"im{i}", "t": 1, "n_obj": 6, "cnll": (rng.gamma(1.0, 1.0, 3) + (bump if i == 0 else 0)).tolist(),
+                     "cnll_gt": [0.5]} for i in range(100)]
+            (d / f"ep{ep:03d}_boxes.json").write_text(json.dumps({"results": {"inpainted": rows}}))
+            (d / f"ep{ep:03d}.json").write_text(json.dumps({"n_samples": 3, "results": {"inpainted": {"hit50@3_any": ep / 100,
+                                                                                                    "mean_iou_any": 0.1}}}))
+            if ep == 10:
+                sel = np.sort([min(r["cnll"]) for r in rows])
+        specs.append(f"{name}={d}")
+    out = str(tmp_path / "o")
+    monkeypatch.setattr(sys, "argv", ["plot_snapshots.py", *sum([["--run", x] for x in specs], []), "--out", out])
+    ps.main()
+    r = json.load(open(os.path.join(out, "summary.json")))
+    e10 = r["B"][0]
+    assert [x["epoch"] for x in r["A"]] == [10, 20] and e10["n"] == 100 and e10["gt"] == 0.5 and e10["hit50"] == 0.1
+    assert np.isclose(e10["mean"], sel.mean()) and np.isclose(e10["median"], np.median(sel)) and np.isclose(e10["trim1"], sel[:-1].mean())
+    assert e10["mean"] > r["B"][1]["mean"] and sorted(os.listdir(out)) == ["snapshots.png", "summary.json"]
 
 
 def _rows(rng, items):

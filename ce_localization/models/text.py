@@ -5,6 +5,8 @@ tính MỘT lần lúc khởi động rồi giải phóng CLIP (không vào mode
 
 import torch
 
+from ce_localization.utils.device import to_device
+
 __all__ = ["encode_class_names", "encode_class_tokens", "TextTable"]
 
 
@@ -70,7 +72,7 @@ class TextTable:
         missing = [n for n in names if n not in self.table]
         if missing:
             raise KeyError(f"thiếu embedding text cho {missing[:5]}")
-        return torch.stack([self.table[n] for n in names]).to(device)
+        return to_device(torch.stack([self.table[n] for n in names]), device)
 
     def tokens(self, names, device):
         """-> (token [B, L_max, H] float32 đệm 0 bên phải, mask [B, L_max] bool True = token thật) trên `device`."""
@@ -86,4 +88,4 @@ class TextTable:
         for i, s in enumerate(seqs):
             pad[i, :s.shape[0]] = s
             mask[i, :s.shape[0]] = True
-        return pad.to(device), mask.to(device)
+        return to_device(pad, device), to_device(mask, device)

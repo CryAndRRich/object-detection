@@ -20,9 +20,10 @@ import torch.nn.functional as F
 import torchvision
 
 import ce_localization.models.clip_refiner as clip_refiner
-from ce_localization.models.unet1d import ConditionalUnet1D
+from ce_localization.models.unet1d import ConditionalUnet1D, ObjKV
 from ce_localization.utils.box_coder import (box_coder_config, encode_rel, generalized_box_iou_cxcywh, is_log, to_linear_unit,
                                              unit_fraction)
+from ce_localization.utils.device import to_device
 from ce_localization.utils.diffusion_math import linear_alphas_cumprod, q_sample
 
 __all__ = ["BoxPolicy", "PaperVisionEncoder", "boxes_to_unit", "unit_to_boxes", "mock_sample", "ddim_sample", "paper_spatial_softmax",
@@ -129,8 +130,9 @@ class PaperVisionEncoder(nn.Module):
         return self.projection(paper_spatial_softmax(c5, valid))
 
 
-def pad_objects(objects, dev, min_m=1):
-    """list B tensor [Mᵢ,C] -> (objs [B,M,C] float32, mask [B,M] bool), M = max(max Mᵢ, min_m)."""
+def pad_objects(objects, dev, min_m=1, with_index=False):
+    """list B tensor [Mᵢ,C] -> (objs [B,M,C] float32, mask [B,M] bool), M = max(max Mᵢ, min_m); `with_index`: thêm
+    `mask.nonzero(as_tuple=True)` tính trên CPU (`ConditionalUnet1D.encode_objects`)."""
     M = max([len(o) for o in objects] + [min_m])
     C = objects[0].shape[-1] if objects else 4
     objs = torch.zeros(len(objects), M, C)
@@ -139,7 +141,8 @@ def pad_objects(objects, dev, min_m=1):
         o = torch.as_tensor(o, dtype=torch.float32).reshape(-1, C)
         objs[i, :len(o)] = o
         mask[i, :len(o)] = True
-    return objs.to(dev, non_blocking=True), mask.to(dev, non_blocking=True)
+    out = (to_device(objs, dev), to_device(mask, dev))
+    return out + (tuple(to_device(i, dev) for i in mask.nonzero(as_tuple=True)),) if with_index else out
 
 
 class BoxPolicy(nn.Module):
@@ -206,18 +209,18 @@ class BoxPolicy(nn.Module):
                 self.clip_sha[r] = cur[r]
 
     # ------------------------------------------------------------------ khử nhiễu
-    def refiner_context(self, images, text_tokens):
-        """Ngữ cảnh refiner (một lần mỗi ảnh): RGB = 3 kênh đầu, density = kênh 4."""
+    def refiner_context(self, images, text_tokens, clip_feats=None):
+        """Ngữ cảnh refiner (một lần mỗi ảnh): RGB = 3 kênh đầu, density = kênh 4; `clip_feats` = token CLIP tính sẵn (cache train)."""
         if text_tokens is None:
             raise ValueError("refiner cần `text_tokens` (token chữ CLIP, TextTable.tokens)")
-        return self.refiner.encode_context(images[:, :3], images[:, 3:4], *text_tokens)
+        return self.refiner.encode_context(images[:, :3], images[:, 3:4], *text_tokens, img_feats=clip_feats)
 
     def predict_noise(self, x, t, cond, ctx=None, ctx_index=None, obj=None):
         """x [R,4], t [R], cond [R,D], ctx (`refiner_context`, C hàng) + ctx_index [R] | None (eval `_norefine`: refined = x_t),
-        obj (token, mask) của `object_tokens` | None (eval `_noobj`) -> (ε̂ [R,4], refined [R,4])."""
+        obj (token, mask) của `object_tokens` | `ObjKV` (lấy mẫu) | None (eval `_noobj`) -> (ε̂ [R,4], refined [R,4])."""
         refined = self.refiner(x, t, ctx, ctx_index) if ctx is not None else x
         unet_in = torch.cat([x, refined.to(x.dtype)], dim=-1)
-        eps = self.noise_net(unet_in.unsqueeze(1), t, cond, *(obj or (None, None))).squeeze(1)
+        eps = self.noise_net(unet_in.unsqueeze(1), t, cond, *((obj, None) if isinstance(obj, ObjKV) else obj or (None, None))).squeeze(1)
         return eps, refined
 
     def pop_stats(self):
@@ -225,9 +228,10 @@ class BoxPolicy(nn.Module):
         st, self._stats = self._stats, {}
         return st
 
-    def object_tokens(self, objects, canvas, cond, generator=None, cap=False):
+    def object_tokens(self, objects, canvas, cond, obj_generator=None, cap=False):
         """objects: list B tensor [Mᵢ,4] xyxy pixel canvas -> (token 6 tầng, mask). Box vật mã hoá như đích, vào U-Net dạng gương
-        [o ; o] (refined của box sạch = chính nó). `cap` (train): > obj_max vật thì lấy ngẫu nhiên obj_max theo `generator`."""
+        [o ; o] (refined của box sạch = chính nó). `cap` (train): > obj_max vật thì lấy ngẫu nhiên obj_max theo `obj_generator` (CPU;
+        None = seed 0) — không rút từ generator CUDA (ép CPU chờ GPU, và xê dịch dãy t / nhiễu)."""
         if objects is None:
             raise ValueError("BoxPolicy cần `objects` (box các vật đang có)")
         whwh = torch.full((4,), float(canvas))
@@ -235,21 +239,24 @@ class BoxPolicy(nn.Module):
         for o in objects:
             o = torch.as_tensor(o, dtype=torch.float32).reshape(-1, 4).cpu()
             if cap and len(o) > self.obj_max:
-                seed = int(torch.randint(0, 2 ** 31 - 1, (1,), generator=generator, device=generator.device)) if generator \
-                    is not None else 0
-                o = o[torch.randperm(len(o), generator=torch.Generator().manual_seed(seed))[: self.obj_max]]
+                if obj_generator is None:
+                    obj_generator = torch.Generator().manual_seed(0)
+                o = o[torch.randperm(len(o), generator=obj_generator)[: self.obj_max]]
             units.append(boxes_to_unit(o, whwh, self.box_coder))
-        objs, mask = pad_objects(units, cond.device)
-        return self.noise_net.encode_objects(torch.cat([objs, objs], -1), mask, cond), mask
+        objs, mask, index = pad_objects(units, cond.device, with_index=True)
+        return self.noise_net.encode_objects(torch.cat([objs, objs], -1), mask, cond, index), mask
 
-    def encode(self, images, text_raw, valid_hw, objects, text_tokens, generator=None, cap=False):
+    def encode(self, images, text_raw, valid_hw, objects, text_tokens, obj_generator=None, cap=False, clip_feats=None):
         """Phần không phụ thuộc t, một lần mỗi ảnh -> (cond, obj, ctx)."""
         cond = self.condition(images, text_raw, valid_hw)
-        return cond, self.object_tokens(objects, images.shape[-1], cond, generator, cap), self.refiner_context(images, text_tokens)
+        return (cond, self.object_tokens(objects, images.shape[-1], cond, obj_generator, cap),
+                self.refiner_context(images, text_tokens, clip_feats))
 
-    def forward(self, images, text_raw, valid_hw, x0, k=1, generator=None, objects=None, text_tokens=None):
-        """Loss train, k bộ (t, ε) mỗi ảnh. x0 [B,4] mã hoá; `objects` list B box vật xyxy pixel canvas; `text_tokens` (token, mask)."""
-        cond, obj, ctx = self.encode(images, text_raw, valid_hw, objects, text_tokens, generator, cap=True)
+    def forward(self, images, text_raw, valid_hw, x0, k=1, generator=None, objects=None, text_tokens=None, clip_feats=None,
+                obj_generator=None):
+        """Loss train, k bộ (t, ε) mỗi ảnh theo `generator`. x0 [B,4] mã hoá; `objects` list B box vật xyxy pixel canvas (> obj_max vật:
+        lấy ngẫu nhiên theo `obj_generator` CPU); `text_tokens` (token, mask); `clip_feats` token CLIP tính sẵn (`data/clip_cache.py`)."""
+        cond, obj, ctx = self.encode(images, text_raw, valid_hw, objects, text_tokens, obj_generator, cap=True, clip_feats=clip_feats)
         return self.eps_loss(cond, x0, k, generator, obj, ctx)
 
     @staticmethod
@@ -299,12 +306,13 @@ class BoxPolicy(nn.Module):
     @torch.no_grad()
     def sample_from_cond(self, cond, n_samples, generator=None, sampler="mock", obj=None, ctx=None, ddim_steps=None, eta=1.0,
                          clip_sample=True):
-        """Như `sample` từ phần đã mã hoá (`encode`). Mọi hàng cùng t ở mỗi bước ⇒ refiner tính luồng ngữ cảnh một lần mỗi ảnh."""
+        """Như `sample` từ phần đã mã hoá (`encode`). Mọi hàng cùng t ở mỗi bước ⇒ refiner tính luồng ngữ cảnh một lần mỗi ảnh; K / V token
+        vật tính một lần mỗi ảnh cho mọi bước và mọi mẫu (`ObjKV`)."""
         if sampler not in SAMPLERS:
             raise ValueError(f"sampler {sampler!r} không thuộc {SAMPLERS}")
         B = cond.shape[0]
         cond = cond.repeat_interleave(n_samples, dim=0)
-        obj = self._repeat_obj(obj, n_samples)
+        obj = None if obj is None else self.noise_net.object_kv(*obj, n_samples)
         ci = None if ctx is None else torch.arange(B, device=cond.device).repeat_interleave(n_samples)
 
         def fn(x, t):

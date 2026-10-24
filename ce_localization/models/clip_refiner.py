@@ -256,16 +256,24 @@ class ClipBoxRefiner(nn.Module):
                              "không phụ thuộc box)")
         self.register_buffer('group_allow', allow.to(device), persistent=False)
 
-    def encode_context(self, rgb, density, text_tokens, text_mask):
+    @torch.no_grad()
+    def clip_features(self, rgb):
+        """rgb [B,3,T,T] in [0, 1] -> token CLIP ViT frozen [B, g*g, C] (hidden_states[vision_layer], bỏ CLS). Theo autocast ngoài (fp16
+        khi AMP). Ảnh train không augment ⇒ tính sẵn được (`data/clip_cache.py`)."""
+        dt = self.type_emb.dtype
+        pixels = F.interpolate(rgb.to(dt).contiguous(), size=(self.clip_res, self.clip_res), mode='bicubic',
+                               align_corners=False, antialias=True)
+        pixels = (pixels.clamp(0, 1) - self.clip_mean) / self.clip_std
+        vis_out = self.vision_backbone(pixel_values=pixels, output_hidden_states=True)
+        return vis_out.hidden_states[self.vision_layer][:, 1:]  # drop CLS -> [B, g*g, C]
+
+    def encode_context(self, rgb, density, text_tokens, text_mask, img_feats=None):
         """Timestep-independent context, compute once per image. rgb [B,3,T,T] / density [B,1,T,T] in [0, 1];
-        text_tokens [B, L, text_hidden] (`last_hidden_state` CLIP text, đệm phải), text_mask [B, L] bool (True = token thật)."""
+        text_tokens [B, L, text_hidden] (`last_hidden_state` CLIP text, đệm phải), text_mask [B, L] bool (True = token thật);
+        img_feats: `clip_features(rgb)` tính sẵn (cache train) | None = tính."""
         dt = self.type_emb.dtype                                              # fp32 (train / AMP); float64 trong test
-        with torch.no_grad():                                                 # CLIP frozen: theo autocast ngoài (fp16 khi AMP)
-            pixels = F.interpolate(rgb.to(dt).contiguous(), size=(self.clip_res, self.clip_res), mode='bicubic',
-                                   align_corners=False, antialias=True)
-            pixels = (pixels.clamp(0, 1) - self.clip_mean) / self.clip_std
-            vis_out = self.vision_backbone(pixel_values=pixels, output_hidden_states=True)
-            img_feats = vis_out.hidden_states[self.vision_layer][:, 1:]  # drop CLS -> [B, g*g, C]
+        if img_feats is None:
+            img_feats = self.clip_features(rgb)
         B, g = rgb.shape[0], self.grid
         with torch.autocast(device_type=rgb.device.type, enabled=False):     # phần train được: fp32
             img_tok = self.image_proj(img_feats.to(dt))

@@ -6,6 +6,10 @@ Chọn `best.pth` theo `eval.select_metric`:
   mean_iou_any (DELTA4 / 5.x) — mỗi `eval_every` iter sinh box thật từ nhiễu thuần trên `eval.limit` mẫu val cố định
   train_loss   (DELTA6+, như CE-Loc gốc; `eval.split: null`) — không val; cuối mỗi epoch TRỌN lấy loss train TB của epoch (mọi bước
                hữu hạn, cộng qua mọi GPU), thấp nhất = best; tổng dở dang lưu trong `last.pth` ⇒ `--resume` giữa epoch khớp từng số
+`training.snapshot_every_epochs` N: cuối mỗi N epoch ghi weight (không optimizer) `snapshots/ep<E>.pth` — eval sau trên server
+(`eval.py --ckpt`, `tools/plot_snapshots.py`) để xem độ ổn định theo epoch; không chọn best.
+`data.clip_cache` / `--clip-cache`: token CLIP ảnh train tính sẵn (`tools/build_clip_cache.py`) thay CLIP forward mỗi iter.
+Vòng lặp không ép CPU chờ GPU (loss / thống kê cộng dồn trên GPU, đọc về mỗi `log_every`; AMP: GradScaler tự bỏ bước grad inf / NaN).
 Mỗi `ckpt_every` iter: `last.pth` ghi nguyên tử, đủ để `--resume` tái lập (thứ tự dữ liệu seed theo (seed, epoch), t / nhiễu theo
 (seed, iter, rank)). Lịch lr cosine theo iter (+ warmup `cosine_warmup_iters`); AMP fp16 (`training.amp`, chỉ CUDA; refiner + cross-attn
 box vật tự giữ fp32); bước NaN / inf bị bỏ (GradScaler dò thang ở vài bước đầu là bình thường).
@@ -15,6 +19,7 @@ box vật tự giữ fp32); bước NaN / inf bị bỏ (GradScaler dò thang �
 """
 
 import argparse
+import copy
 import json
 import os
 import sys
@@ -31,6 +36,7 @@ from torch.utils.data import DataLoader  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from ce_localization.data.clip_cache import ClipCache  # noqa: E402
 from ce_localization.data.turns import AddCache, CE130AddDataset, TurnIndex, collate_add, to_device_add  # noqa: E402
 from ce_localization.engine.add_eval import add_metrics, predict_add  # noqa: E402
 from ce_localization.engine.train_utils import (EpochBatches, PthCheckpoints, fmt_gpu_peak, gpu_peak, lr_factor,  # noqa: E402
@@ -45,7 +51,7 @@ from ce_localization.utils.log import fmt_time, print_banner, run_env  # noqa: E
 # nhánh config quyết định kiến trúc: khác checkpoint thì KHÔNG resume (`training` / `eval` chỉ cảnh báo); khoá đường dẫn / số worker
 # của `data` không ảnh hưởng phép toán (Kaggle gắn dataset ở đường dẫn khác nhau giữa các phiên)
 MUST_MATCH = ("model", "diffusion", "data")
-DATA_FREE = ("num_workers", "root", "density_root", "density_index", "samples_root", "turn_index", "cache_dir")
+DATA_FREE = ("num_workers", "root", "density_root", "density_index", "samples_root", "turn_index", "cache_dir", "clip_cache")
 # thống kê refiner trên dòng log (TB cửa sổ) và trong history — `BoxPolicy.pop_stats`
 EXTRA_LOG = {"loss_eps": "ε", "loss_aux": "aux", "delta_abs": "|Δ|", "aux_ratio": "aux/x_t", "loss_giou": "1−GIoU"}
 
@@ -65,32 +71,51 @@ def build_text_table(names, cfg, dev):
     return TextTable(encode_class_names(names, m["clip_text"], device=str(dev)), tokens, sha)
 
 
-def add_datasets(cfg, eval_split, limit=None):
-    """-> (ds_tr, ds_ev | None). ds_ev = `eval.limit` mẫu CỐ ĐỊNH của `eval_split` (hoán vị seed 12345) — chỉ để chọn checkpoint."""
-    d = cfg["data"]
+def add_datasets(cfg, limit=None):
+    """-> (ds_tr, ds_ev | None). ds_ev = `eval.limit` mẫu CỐ ĐỊNH của `eval.split` (hoán vị seed 12345) — chỉ để chọn checkpoint.
+    ds_tr kèm cache token CLIP nếu có `data.clip_cache`."""
+    d, ev = cfg["data"], cfg["eval"]
     try:
         index = TurnIndex(d["turn_index"])
     except FileNotFoundError as e:
         sys.exit(str(e))
     cache = AddCache(d["cache_dir"]) if d.get("cache_dir") else None          # Kaggle: ảnh train đã letterbox
-    mk = lambda split: CE130AddDataset(index, d["root"], d["samples_root"], split, d["image_size"], cache=cache)  # noqa: E731
+
+    def mk(split, n=None):
+        ds = CE130AddDataset(index, d["root"], d["samples_root"], split, d["image_size"], cache=cache)
+        if n:
+            perm = np.random.default_rng(12345).permutation(len(ds.keys))[:n]
+            ds.keys = [ds.keys[i] for i in sorted(perm.tolist())]
+        return ds
+
     ds_tr = mk("train")
     if limit:
         ds_tr.keys = ds_tr.keys[:limit]
-    if eval_split is None:
-        return ds_tr, None
-    ds_ev = mk(eval_split)
-    if cfg["eval"].get("limit"):
-        perm = np.random.default_rng(12345).permutation(len(ds_ev.keys))[: cfg["eval"]["limit"]]
-        ds_ev.keys = [ds_ev.keys[i] for i in sorted(perm.tolist())]
-    return ds_tr, ds_ev
+    if d.get("clip_cache"):
+        ds_tr.clip_cache = ClipCache(d["clip_cache"])
+    return ds_tr, mk(ev["split"], ev.get("limit")) if ev["split"] else None
 
 
-def run_val(model, loader, text_table, cfg, log):
+def eval_loader(ds, cfg, rank, world, nw):
+    """DataLoader phần `rank::world` của `ds` (mọi GPU cùng sinh box); generator riêng ⇒ không rút RNG toàn cục."""
+    sh = copy.copy(ds)
+    sh.keys = ds.keys[rank::world]
+    return DataLoader(sh, batch_size=cfg["eval"]["batch_size"], shuffle=False, num_workers=nw, collate_fn=collate_add,
+                      pin_memory=torch.cuda.is_available(), generator=torch.Generator())
+
+
+def run_eval(model, loader, text_table, cfg, log, rank=0, world=1):
+    """Mỗi GPU sinh `n_samples` box / ảnh cho phần của mình (seed = rank), gom record về rank 0 chấm -> dict chỉ số (rank 0) | None."""
     t0 = time.time()
     ev = cfg["eval"]
-    rec = predict_add(model, loader, text_table, ev["n_samples"], seed=0, variants=(("", ev["sample_kw"]),),
+    rec = predict_add(model, loader, text_table, ev["n_samples"], seed=rank, variants=(("", ev["sample_kw"]),),
                       amp=bool(cfg["training"].get("amp")), log_every=max(len(loader) // 4, 1), log=log)[""]
+    if world > 1:
+        parts = [None] * world if rank == 0 else None
+        dist.gather_object(rec, parts, dst=0)
+        rec = [r for p in parts for r in p] if rank == 0 else None
+    if rank:
+        return None
     res = add_metrics(rec)
     res["eval_sec"] = time.time() - t0
     return res
@@ -105,10 +130,11 @@ def advance_lr(sched):
     sched._last_lr = lrs
 
 
-def step_loss(net, batch, text_table, cfg, model, gen, dev):
+def step_loss(net, batch, text_table, cfg, model, gen, dev, obj_gen=None):
     x0 = boxes_to_unit(batch["target"], torch.full_like(batch["whwh"], float(batch["images"].shape[-1])), model.box_coder)
     loss = net(batch["images"], text_table(batch["text"], dev), batch["valid_hw"], x0, k=cfg["diffusion"]["noise_per_image"],
-               generator=gen, objects=batch["objects"], text_tokens=text_table.tokens(batch["text"], dev))
+               generator=gen, objects=batch["objects"], text_tokens=text_table.tokens(batch["text"], dev), clip_feats=batch.get("clip"),
+               obj_generator=obj_gen)
     return loss, {"loss": loss.detach(), **model.pop_stats()}
 
 
@@ -123,7 +149,7 @@ def main():
     ap.add_argument("--eval-every", type=int, default=None)
     ap.add_argument("--limit", type=int, default=None, help="chỉ lấy N mẫu train đầu")
     ap.add_argument("--num-workers", type=int, default=None)
-    for k in ("data-root", "samples-root", "turn-index", "cache-dir"):
+    for k in ("data-root", "samples-root", "turn-index", "cache-dir", "clip-cache"):
         ap.add_argument(f"--{k}", default=None, help=f"ghi đè data.{k.replace('-', '_')}")
     ap.add_argument("--max-hours", type=float, default=0.0, help="dừng sạch (ghi last.pth) nếu đoạn kế tiếp có thể vượt N giờ; 0 = tắt")
     ap.add_argument("--device", default=None)
@@ -135,7 +161,7 @@ def main():
         if v:
             tr[k] = v
     for k, v in (("limit", a.limit), ("root", a.data_root), ("samples_root", a.samples_root), ("turn_index", a.turn_index),
-                 ("cache_dir", a.cache_dir)):
+                 ("cache_dir", a.cache_dir), ("clip_cache", a.clip_cache)):
         if v:
             d[k] = v
     nw = d["num_workers"] if a.num_workers is None else a.num_workers
@@ -162,17 +188,18 @@ def main():
         print_banner(f"TRAIN — {cfg['experiment']}", env)
 
     # ------------------------------------------------------------------ dữ liệu
-    ev_split = cfg["eval"]["split"]
+    ev_split, snap_every = cfg["eval"]["split"], tr.get("snapshot_every_epochs")
     train_select = cfg["eval"]["select_metric"] == "train_loss"
     if train_select != (ev_split is None):
         sys.exit("eval.select_metric 'train_loss' đi cùng eval.split null (không val) — và ngược lại")
-    ds_tr, ds_ev = add_datasets(cfg, ev_split, d.get("limit"))
+    ds_tr, ds_ev = add_datasets(cfg, d.get("limit"))
     ipe = len(ds_tr) // tr["batch_size"]
     if ipe == 0:
         sys.exit(f"train chỉ có {len(ds_tr)} mẫu < batch_size {tr['batch_size']}")
     log(f"[data] train {len(ds_tr)} mẫu ({ipe} iter/epoch, batch {bpr}/GPU × {world})"
         + (" | KHÔNG val: best = loss train TB / epoch thấp nhất" if train_select else f" | eval {ev_split} {len(ds_ev)} mẫu")
-        + f" | cache {d.get('cache_dir')} | {fmt_time(time.time() - t_boot)}")
+        + (f" | snapshot weight mỗi {snap_every} epoch" if snap_every else "")
+        + f" | cache ảnh {d.get('cache_dir')} | cache CLIP {d.get('clip_cache')} | {fmt_time(time.time() - t_boot)}")
     sampler = EpochBatches(len(ds_tr), bpr, rank, world, tr["seed"])
     # worker BỀN (không dựng lại mỗi epoch); generator riêng: base_seed của worker không rút từ RNG toàn cục
     loader = DataLoader(ds_tr, batch_sampler=sampler, num_workers=nw, collate_fn=collate_add, pin_memory=dev.type == "cuda",
@@ -180,7 +207,7 @@ def main():
 
     # ------------------------------------------------------------------ text
     t = time.time()
-    names = sorted(set(ds_tr.classes()) | (set() if ds_ev is None else set(ds_ev.classes())))
+    names = sorted(set().union(*(ds.classes() for ds in (ds_tr, ds_ev) if ds is not None)))
     if main_proc:
         text_table = build_text_table(names, cfg, dev)          # rank 0 tải CLIP trước
     if world > 1:
@@ -194,6 +221,8 @@ def main():
     model = build_model(cfg).to(dev)
     model.set_text_fingerprint(text_table.token_sha)           # vân tay CLIP text vào clip_sha TRƯỚC khi resume (nạp tự kiểm)
     amp = bool(tr.get("amp")) and dev.type == "cuda"            # Kaggle T4: tensor core chỉ chạy fp16
+    if ds_tr.clip_cache is not None:
+        ds_tr.clip_cache.check(model, cfg, ds_tr.keys)
     if amp:
         model = model.to(memory_format=torch.channels_last)
     # BN thường (`sync_bn: false`): batch / GPU 32 = batch BN của bài; SyncBN chậm hơn
@@ -237,10 +266,10 @@ def main():
     if start >= tr["max_iter"]:
         sys.exit(f"\nĐã train đủ {tr['max_iter']} iter; muốn thêm thì tăng --max-iter.\n")
 
-    ev_loader = (DataLoader(ds_ev, batch_size=cfg["eval"]["batch_size"], shuffle=False, num_workers=nw, collate_fn=collate_add)
-                 if main_proc and ds_ev is not None else None)
+    ev_loader = eval_loader(ds_ev, cfg, rank, world, nw) if ds_ev is not None else None
     gmon = GradMonitor(model, every=tr["log_every"])
     gen = torch.Generator(device=dev.type)
+    obj_gen = torch.Generator()                                 # CPU: chọn ngẫu nhiên `model.obj_max` box vật (ảnh nhiều vật hơn)
     sm = cfg["eval"]["select_metric"]
 
     def reduce_epoch_acc():
@@ -260,11 +289,17 @@ def main():
             json.dump({"config": cfg, "environment": env, "best": best, "history": history}, f, indent=1, ensure_ascii=False,
                       default=float)
 
+    def new_window():
+        """Cửa sổ log: tổng loss / thống kê / số bước bỏ là tensor TRÊN GPU (cộng float64 như tổng float Python trước đây) — chỉ đọc về
+        CPU khi in log."""
+        z = lambda dt: torch.zeros((), dtype=dt, device=dev)  # noqa: E731
+        return {"loss": z(torch.float64), "n": 0, "gn": [], "data": 0.0, "skip": z(torch.long), "extra": {}}
+
     log(f"[boot ] khởi động xong {fmt_time(time.time() - t_boot)} — bắt đầu iter {start}/{tr['max_iter']}")
 
     # ------------------------------------------------------------------ vòng train
     t_train, t_last, it = time.time(), time.time(), start
-    win = {"loss": 0.0, "n": 0, "gn": [], "data": 0.0, "skip": 0, "extra": {}}
+    win = new_window()
     slowest_chunk, chunk_t0 = 0.0, time.time()
     model.train()
     done = False
@@ -277,34 +312,41 @@ def main():
             if amp:
                 batch["images"] = batch["images"].contiguous(memory_format=torch.channels_last)
             gen.manual_seed(noise_seed(tr["seed"], it, rank))
+            obj_gen.manual_seed(noise_seed(tr["seed"], it, rank))
             with torch.autocast(device_type=dev.type, dtype=torch.float16, enabled=amp):
-                loss, st = step_loss(net, batch, text_table, cfg, model, gen, dev)
+                loss, st = step_loss(net, batch, text_table, cfg, model, gen, dev, obj_gen)
             opt.zero_grad(set_to_none=world == 1)
             scaler.scale(loss).backward()
             scaler.unscale_(opt)                        # grad về thang thật trước khi đo / clip
             gmon.maybe_record(it)
             # grad_clip null = KHÔNG clip (CE-Loc gốc), vẫn đo norm để log
             gn = torch.nn.utils.clip_grad_norm_(model.parameters(), tr["grad_clip"] or float("inf"))
-            finite = bool(torch.isfinite(gn)) and bool(torch.isfinite(loss))
-            if not finite:                              # bước NaN / inf sẽ ghi NaN vào weight: bỏ (GradScaler giảm thang ở update)
-                win["skip"] += 1
-                opt.zero_grad(set_to_none=world == 1)
-            else:
+            ok = torch.isfinite(gn) & torch.isfinite(st["loss"])        # trên GPU, không đồng bộ
+            # bước NaN / inf sẽ ghi NaN vào weight: bỏ. AMP: GradScaler tự bỏ (found_inf của unscale_ đưa thẳng vào AdamW fused, CPU
+            # không chờ; loss NaN ⇒ grad NaN ⇒ cũng bị bỏ) rồi giảm thang ở update. Không AMP (CPU / test): kiểm trên CPU.
+            if amp or bool(ok):
                 scaler.step(opt)
+            else:
+                opt.zero_grad(set_to_none=world == 1)
             scaler.update()
             advance_lr(sched)
-            if train_select and finite:
-                ep_acc[0] += float(st["loss"])
-                ep_acc[1] += 1
-            win["loss"] += float(st["loss"])
+            loss_d = st["loss"].double()
+            if train_select:
+                ep_acc[0] += torch.where(ok, loss_d, 0.0)
+                ep_acc[1] += ok.double()
+            win["skip"] += (~ok).long()
+            win["loss"] += loss_d
             for k_ in EXTRA_LOG:
                 if k_ in st:
-                    win["extra"][k_] = win["extra"].get(k_, 0.0) + float(st[k_])
+                    win["extra"][k_] = win["extra"].get(k_, 0.0) + st[k_].double()
             win["n"] += 1
-            win["gn"].append(float(gn))
+            win["gn"].append(gn.detach().double())
             it += 1
 
             if it % tr["log_every"] == 0 or it == tr["max_iter"]:
+                # đọc cửa sổ về CPU (đồng bộ duy nhất của cửa sổ)
+                win.update(loss=float(win["loss"]), skip=int(win["skip"]), gn=torch.stack(win["gn"]).cpu().numpy(),
+                           extra={k_: float(v) for k_, v in win["extra"].items()})
                 el = time.time() - t_train
                 spi = (time.time() - t_last) / max(win["n"], 1)
                 peak = gpu_peak(dev)                    # đỉnh bộ nhớ GPU của cửa sổ log này (rank 0)
@@ -325,7 +367,7 @@ def main():
                                 "grad_norm_p50": float(np.median(win["gn"])), "s_per_iter": spi, "skipped": win["skip"],
                                 "elapsed_sec": el, **({} if peak is None else {"gpu_peak_gb": peak[0], "gpu_reserved_gb": peak[1]}),
                                 **{k_: v / win["n"] for k_, v in win["extra"].items()}, "refiner_gates": gates})
-                win = {"loss": 0.0, "n": 0, "gn": [], "data": 0.0, "skip": 0, "extra": {}}
+                win = new_window()
                 t_last = time.time()
 
             # train_loss: chỉ epoch TRỌN (như tác giả) — phần lẻ cuối không chấm, tổng dở dang vẫn vào last.pth
@@ -345,10 +387,10 @@ def main():
                     history.append({"iter": it, "epoch": -(-it // ipe), "epoch_train_loss": ep_loss, "epoch_steps": int(ep_acc[1])})
                 ep_acc.zero_()
             elif is_eval:
+                gpu_peak(dev)                                           # cửa sổ đo riêng cho val
+                res = run_eval(model, ev_loader, text_table, cfg, log, rank, world)
+                model.train()
                 if main_proc:
-                    gpu_peak(dev)                                       # cửa sổ đo riêng cho val
-                    res = run_val(model, ev_loader, text_table, cfg, log)
-                    model.train()
                     vpeak = gpu_peak(dev)
                     if vpeak is not None:
                         res["gpu_peak_gb"], res["gpu_reserved_gb"] = vpeak
@@ -363,6 +405,11 @@ def main():
                     history.append({"iter": it, "eval": res})
                 if world > 1:
                     dist.barrier()
+            if snap_every and it % ipe == 0 and (it // ipe) % snap_every == 0 and main_proc:
+                t = time.time()
+                path = ckm.save_snapshot({"model": model.state_dict(), "iter": it, "epoch": it // ipe, "config": cfg, "env": env},
+                                         f"ep{it // ipe:03d}.pth")
+                log(f"          📸 {os.path.relpath(path, a.save_dir)} ({fmt_time(time.time() - t)})")
             if is_ckpt:
                 t = time.time()
                 save(it, is_eval and main_proc and is_best)

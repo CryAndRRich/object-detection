@@ -62,22 +62,35 @@ def test_flow_val_select_resume_eval(tmp_path, monkeypatch):
 
 def test_flow_train_loss_select_resume(tmp_path, monkeypatch):
     """DELTA6 (giao thức CE-Loc gốc): không dựng / chạy val; mỗi epoch TRỌN một dòng loss train TB = TB đúng các bước (log mỗi bước), phần
-    lẻ cuối không chấm; best.pth = epoch thấp nhất; resume GIỮA epoch == train liền; eval --split test_all."""
+    lẻ cuối không chấm; best.pth = epoch thấp nhất; resume GIỮA epoch == train liền với cache token CLIP + snapshot mỗi epoch (b: cache /
+    snapshot không đổi train); snapshot nạp + eval được; eval --split test_all."""
     import ce_localization.train as ta
+    from ce_localization.tools import build_clip_cache as bc
+    from tests.ce_localization.helpers import _patch_clip
     base = str(tmp_path / "d")
     os.makedirs(base)
     _fake_turn_index(base)
     c_path, cfg = run_cfg(tmp_path, base, "delta6")
-    assert cfg["eval"]["split"] is None and cfg["eval"]["select_metric"] == "train_loss"
-    monkeypatch.setattr(ta, "run_val", lambda *x, **k: (_ for _ in ()).throw(AssertionError("không được chạy val")))
+    assert cfg["eval"]["split"] is None and cfg["eval"]["select_metric"] == "train_loss" and cfg["training"]["snapshot_every_epochs"] == 10
+    c_snap, _ = run_cfg(tmp_path, base, "delta6", name="snap", snapshot_every_epochs=1)
+    monkeypatch.setattr(ta, "run_eval", lambda *x, **k: (_ for _ in ()).throw(AssertionError("không được chạy val")))
+    clip_dir = str(tmp_path / "clip")
+    _patch_clip(monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["build_clip_cache.py", "--config", c_path, "--turn-index", os.path.join(base, "turn_index.json"),
+                                      "--samples", os.path.join(base, "samples"), "--data-root", os.path.join(base, "all_phase2_V2"),
+                                      "--batch-size", "4", "--workers", "0", "--device", "cpu", "--out", clip_dir])
+    bc.main()
     ipe = len(ta.TurnIndex(os.path.join(base, "turn_index.json")).keys("train")) // 6
     n_it = 2 * ipe + 1
     a, b = str(tmp_path / "a"), str(tmp_path / "b")
-    run = lambda d, n, *x: _run_train(monkeypatch, ["--config", c_path, "--save-dir", d, "--batch-size", "6", "--max-iter", str(n), *x])  # noqa: E731
-    run(a, ipe + 1)                                                   # dừng giữa epoch 2
-    run(a, n_it, "--resume")
-    run(b, n_it)
+    run = lambda c, d, n, *x: _run_train(monkeypatch, ["--config", c, "--save-dir", d, "--batch-size", "6", "--max-iter", str(n), *x])  # noqa: E731
+    run(c_path, a, ipe + 1)                                           # dừng giữa epoch 2
+    run(c_path, a, n_it, "--resume")
+    run(c_snap, b, n_it, "--clip-cache", clip_dir)
     ka, kb = _same_state(a, b)
+    assert sorted(os.listdir(os.path.join(b, "snapshots"))) == ["ep001.pth", "ep002.pth"] and not os.path.exists(os.path.join(a, "snapshots"))
+    sn = torch.load(os.path.join(b, "snapshots", "ep002.pth"), weights_only=False)
+    assert (sn["iter"], sn["epoch"], set(sn)) == (2 * ipe, 2, {"model", "iter", "epoch", "config", "env"})
     ep = [h for h in kb["history"] if "epoch_train_loss" in h]
     steps = [h["loss"] for h in kb["history"] if "loss" in h]
     assert [h["iter"] for h in ep] == [ipe, 2 * ipe] and [h["epoch_steps"] for h in ep] == [ipe, ipe] and len(steps) == n_it
@@ -86,8 +99,9 @@ def test_flow_train_loss_select_resume(tmp_path, monkeypatch):
     i = int(np.argmin([h["epoch_train_loss"] for h in ep]))
     assert kb["best"] == {"iter": ep[i]["iter"], "epoch": ep[i]["epoch"], "train_loss": ep[i]["epoch_train_loss"]} and ka["best"] == kb["best"]
     assert torch.load(os.path.join(b, "best.pth"), weights_only=False)["iter"] == ep[i]["iter"]
-    res, _ = _run_eval(monkeypatch, ["--ckpt", os.path.join(b, "best.pth"), "--split", "test_all", "--out", str(tmp_path / "r.json")])
-    assert res["split"] == "test_all" and res["results"]["inpainted"]["n"] == len(ta.TurnIndex(os.path.join(base, "turn_index.json")).keys("test_all"))
+    res, _ = _run_eval(monkeypatch, ["--ckpt", os.path.join(b, "snapshots", "ep002.pth"), "--split", "test_all", "--out",
+                                     str(tmp_path / "r.json")])
+    assert res["iter"] == 2 * ipe and res["split"] == "test_all" and res["results"]["inpainted"]["n"] == len(ta.TurnIndex(os.path.join(base, "turn_index.json")).keys("test_all"))
 
 
 def _ddp_worker(rank, world, port, argv):

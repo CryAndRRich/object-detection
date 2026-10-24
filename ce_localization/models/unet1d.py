@@ -4,15 +4,18 @@ global_cond]` vào mọi khối residual. `output_dim` (bản cập nhật của
 
 Box attention (GAMMA4): box nhiễu cross-attend tới box CÁC VẬT ĐANG CÓ ở 6 vị trí (sau cặp ResBlock mỗi tầng: down × 3, mid, up × 2).
 Token vật mã hoá GƯƠNG (`encode_objects`): box vật đi qua CHÍNH các ResBlock đó với t = 0, lấy feature ở 6 vị trí. `ObjCrossAttn`:
-`h + out_proj(MHA(LN(h) -> LN(token)))`, out_proj khởi tạo 0, tính fp32.
+`h + out_proj(MHA(LN(h) -> LN(token)))`, out_proj khởi tạo 0, tính fp32. Lấy mẫu (`ObjKV`): K / V của token vật tính MỘT lần mỗi ảnh
+cho mọi bước và mọi mẫu (cùng phép toán, không nhân token theo số mẫu).
 """
 
 import math
+from typing import NamedTuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-__all__ = ["SinusoidalPosEmb", "ConditionalResidualBlock1D", "ObjCrossAttn", "ConditionalUnet1D"]
+__all__ = ["SinusoidalPosEmb", "ConditionalResidualBlock1D", "ObjCrossAttn", "ObjKV", "ConditionalUnet1D"]
 
 
 class SinusoidalPosEmb(nn.Module):
@@ -109,6 +112,36 @@ class ObjCrossAttn(nn.Module):
             a = a * (~none).float()[:, None]
         return h + a.to(h.dtype)[..., None]
 
+    def kv(self, tok):
+        """Token vật [N, M, d] -> (K, V) [N, heads, M, dh] fp32 — phần chiếu K / V của `attn` (không đổi qua các bước lấy mẫu)."""
+        with torch.autocast(device_type=tok.device.type, enabled=False):
+            N, M, d = tok.shape
+            H = self.attn.num_heads
+            w, b = self.attn.in_proj_weight, self.attn.in_proj_bias
+            kv = F.linear(self.ln_kv(tok.float()), w[d:], b[d:]).view(N, M, 2, H, d // H).permute(2, 0, 3, 1, 4)
+            return kv[0], kv[1]
+
+    def forward_kv(self, h, kv, mask, n):
+        """= `forward` với token mỗi ảnh nhân `n` lần (hàng i·n .. i·n + n − 1 thuộc ảnh i), dùng K / V của `kv`: h [N·n, d, 1]."""
+        with torch.autocast(device_type=h.device.type, enabled=False):
+            k, v = kv
+            N, H, _, dh = k.shape
+            d = H * dh
+            q = F.linear(self.ln_q(h[..., 0].float()), self.attn.in_proj_weight[:d], self.attn.in_proj_bias[:d])
+            q = q.view(N, n, H, dh).transpose(1, 2)                                              # [N, H, n, dh]
+            none = ~mask.any(1)
+            ok = mask | (none[:, None] & (torch.arange(mask.shape[1], device=mask.device) == 0))
+            a = F.scaled_dot_product_attention(q, k, v, attn_mask=ok[:, None, None, :])          # [N, H, n, dh]
+            a = self.attn.out_proj(a.transpose(1, 2).reshape(N, n, d)) * (~none).float()[:, None, None]
+        return h + a.reshape(N * n, d).to(h.dtype)[..., None]
+
+
+class ObjKV(NamedTuple):
+    """Token vật đã chiếu K / V (`ConditionalUnet1D.object_kv`) cho N ảnh, mỗi ảnh `n` hàng box liền nhau."""
+    kv: list
+    mask: torch.Tensor
+    n: int
+
 
 class ConditionalUnet1D(nn.Module):
     def __init__(self, input_dim, global_cond_dim, diffusion_step_embed_dim=256, down_dims=(64, 128, 256), kernel_size=3, n_groups=8,
@@ -165,12 +198,13 @@ class ConditionalUnet1D(nn.Module):
             i += 1
         return x
 
-    def encode_objects(self, objs, mask, global_cond):
+    def encode_objects(self, objs, mask, global_cond, index=None):
         """Mã hoá GƯƠNG box vật: objs [N, M, C] (cùng chuẩn hoá với đầu vào U-Net), mask [N, M], global_cond [N, G] -> list 6 token
         [N, M, d_ℓ] (ô đệm = 0). Chỉ tính hàng có vật; số hàng làm tròn lên bội `obj_bucket` bằng hàng đệm (Conv1d dài 1 + GroupNorm
-        tính độc lập từng hàng ⇒ hàng thật không đổi) để `cudnn.benchmark` chỉ dò thuật toán cho vài cỡ (Kaggle T4: 1,56 -> 0,33 s / iter)."""
+        tính độc lập từng hàng ⇒ hàng thật không đổi) để `cudnn.benchmark` chỉ dò thuật toán cho vài cỡ (Kaggle T4: 1,56 -> 0,33 s / iter).
+        `index` = `mask.nonzero(as_tuple=True)` tính sẵn (nonzero trên GPU ép CPU chờ GPU)."""
         N, M = mask.shape
-        bi, mi = mask.nonzero(as_tuple=True)
+        bi, mi = mask.nonzero(as_tuple=True) if index is None else index
         if bi.numel() == 0:                                  # cả batch không có vật: token 0 (XAttn tự cộng 0)
             return [objs.new_zeros(N, M, x.ln_q.normalized_shape[0]) for x in self.obj_xattn]
         t0 = self.diffusion_step_encoder(torch.zeros(N, dtype=torch.long, device=objs.device))
@@ -189,14 +223,22 @@ class ConditionalUnet1D(nn.Module):
         self._trunk(x[..., None], g, collect)
         return [f.new_zeros(N, M, f.shape[-1]).index_put((bi, mi), f) for f in feats]
 
+    def object_kv(self, obj_tokens, obj_mask, n):
+        """Token vật của N ảnh (`encode_objects`) -> `ObjKV` cho N·n hàng (n mẫu / ảnh): K / V chiếu một lần."""
+        return ObjKV([x.kv(t) for x, t in zip(self.obj_xattn, obj_tokens)], obj_mask, n)
+
     def forward(self, sample, timestep, global_cond, obj_tokens=None, obj_mask=None):
         """sample [B, 1, C] (horizon 1), timestep [B] long, global_cond [B, G] -> [B, 1, out]. obj_tokens (list 6 của `encode_objects`)
-        + obj_mask [B, M]: cross-attend box vật; None = tắt (eval `_noobj`)."""
+        + obj_mask [B, M]: cross-attend box vật; `ObjKV` (lấy mẫu, obj_mask bỏ qua); None = tắt (eval `_noobj`)."""
         x = sample.permute(0, 2, 1)                          # b h t -> b t h
         timesteps = timestep.expand(sample.shape[0])
         g = torch.cat([self.diffusion_step_encoder(timesteps), global_cond], dim=-1)
 
         def site(i, x_):
-            return x_ if obj_tokens is None else self.obj_xattn[i](x_, obj_tokens[i], obj_mask)
+            if obj_tokens is None:
+                return x_
+            if isinstance(obj_tokens, ObjKV):
+                return self.obj_xattn[i].forward_kv(x_, obj_tokens.kv[i], obj_tokens.mask, obj_tokens.n)
+            return self.obj_xattn[i](x_, obj_tokens[i], obj_mask)
         x = self._trunk(x, g, site)
         return self.final_conv(x).permute(0, 2, 1)

@@ -73,6 +73,7 @@ training:
   seed: 0
   log_every: 50
   ckpt_every: 1000
+  snapshot_every_epochs: null       # N: weight `snapshots/epNNN.pth` mỗi N epoch (eval sau trên server)
   eval_every: 2500
 
 eval:                               # val định kỳ chọn best.pth

@@ -310,9 +310,21 @@ def test_box_policy_loss_formula_grads_and_identity():
         m(x, text, vhw, x0, objects=objs)
 
 
-def test_unet_object_tokens_zero_init_and_bucket():
-    """Cross-attn box vật out_proj = 0 ⇒ lúc khởi tạo = U-Net không box vật; token vật không đổi khi đệm hàng (`obj_bucket`); ảnh 0 vật
-    cộng 0."""
+def test_object_cap_random_cpu_generator():
+    """Train (`cap`): > obj_max vật -> lấy NGẪU NHIÊN obj_max theo `obj_generator` CPU (cùng seed = cùng tập, khác seed = khác tập);
+    eval giữ hết."""
+    m = small_policy(obj_max=3)
+    objs = [torch.tensor([[i * 5.0, 0.0, i * 5.0 + 4, 4.0] for i in range(10)]), torch.tensor([[0.0, 0.0, 4.0, 4.0]])]
+    cond = torch.randn(2, m.cond_dim)
+    tok = lambda seed, cap=True: m.object_tokens(objs, 64, cond, torch.Generator().manual_seed(seed), cap)  # noqa: E731
+    (t1, m1), (t2, _), (t3, _) = tok(1), tok(1), tok(2)
+    assert m1.sum(1).tolist() == [3, 1] and torch.equal(t1[0], t2[0]) and not torch.equal(t1[0], t3[0])
+    assert tok(1, cap=False)[1].sum(1).tolist() == [10, 1]
+
+
+def test_unet_object_tokens_zero_init_bucket_and_kv():
+    """Cross-attn box vật out_proj = 0 ⇒ lúc khởi tạo = U-Net không box vật; token vật không đổi khi đệm hàng (`obj_bucket`) hay khi
+    truyền sẵn chỉ số nonzero; ảnh 0 vật cộng 0; `ObjKV` (lấy mẫu: K / V mỗi ảnh một lần) == token nhân theo số mẫu."""
     from ce_localization.models.unet1d import ConditionalUnet1D
     torch.manual_seed(0)
     u = ConditionalUnet1D(8, 16, 32, (16, 32, 64), 3, 4, obj_bucket=1)
@@ -328,6 +340,12 @@ def test_unet_object_tokens_zero_init_and_bucket():
         nn.init.normal_(xa.attn.out_proj.weight, std=0.1)
     out = u(x, t, cond, tok1, mask)
     assert not torch.allclose(out[:2], u(x, t, cond)[:2]) and torch.allclose(out[2], u(x, t, cond)[2])
+    tok3 = u.encode_objects(objs, mask, cond, mask.nonzero(as_tuple=True))
+    assert all(torch.equal(a, b) for a, b in zip(tok2, tok3))
+    n = 4
+    x4, t4, c4 = torch.randn(3 * n, 1, 8), torch.randint(0, 100, (3 * n,)), cond.repeat_interleave(n, 0)
+    rep = u(x4, t4, c4, [tk.repeat_interleave(n, 0) for tk in tok1], mask.repeat_interleave(n, 0))
+    assert torch.allclose(u(x4, t4, c4, u.object_kv(tok1, mask, n)), rep, atol=1e-5)
 
 
 def test_clip_out_of_state_dict_and_fingerprint(monkeypatch):
@@ -353,6 +371,30 @@ def test_clip_out_of_state_dict_and_fingerprint(monkeypatch):
     c.check_text_fingerprint(FAKE_TEXT_SHA)
     with pytest.raises(RuntimeError, match="CLIP text"):
         c.check_text_fingerprint(b"\x01" * 32)
+
+
+def test_clip_cache_lazy_memmap_and_check(tmp_path):
+    """`ClipCache`: đọc lười memmap (pickle sang worker KHÔNG kèm mảng), đúng hàng theo khoá; `check` từ chối cache khác CLIP / lớp ViT /
+    AMP hoặc thiếu khoá."""
+    import json
+    import pickle
+    from ce_localization.data.clip_cache import ClipCache
+    m = small_policy()
+    feats = np.random.default_rng(0).standard_normal((3, 49, 32)).astype(np.float32)
+    np.save(tmp_path / "feats.npy", feats)
+    cfg = {"data": {"image_size": 128}, "training": {"amp": True}}
+    meta = {"clip_sha": bytes(m.clip_sha[0].tolist()).hex(), "vision_layer": m.refiner.vision_layer, "image_size": 128, "amp": False,
+            "rows": {"a": 0, "b": 1, "c": 2}}
+    (tmp_path / "meta.json").write_text(json.dumps(meta))
+    c = ClipCache(str(tmp_path))
+    assert torch.equal(c.get("b"), torch.from_numpy(feats[1])) and c._arr is not None
+    assert len(pickle.dumps(c)) < feats.nbytes / 4 and pickle.loads(pickle.dumps(c))._arr is None
+    c.check(m, cfg, ["a", "c"])                                          # CPU: AMP không bật
+    with pytest.raises(ValueError, match="thiếu"):
+        c.check(m, cfg, ["a", "z"])
+    m.refiner.vision_layer = -1
+    with pytest.raises(ValueError, match="vision_layer"):
+        c.check(m, cfg, ["a"])
 
 
 def test_predict_add_shared_encoding_equals_separate_runs():
