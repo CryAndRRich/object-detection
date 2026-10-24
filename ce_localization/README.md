@@ -27,7 +27,7 @@ U-Net 1D nhận [x_t ; refined] -> ε̂ ;  loss = ε-MSE + aux_loss_weight · [M
 |---|---|---|
 | `delta4` | — (box linear, val mock, best theo val `mean_iou_any`) | mục 10 |
 | `delta5` / `5_1` / `5_3` / `5_2` / `5_4` / `5_5` | box log (`model.box_coder`), val ddim; `aux_giou_weight` 0 / 0,1 / 0,25 / 0,5 / 0,75 / 1,0 | mục 11 |
-| `delta6` / `6_1` / `6_2` | `delta4` / `5_2` / `5_4` + `protocol_celoc.yaml`: không val, best = loss train TB / epoch thấp nhất, 120 epoch, lr 1e-4 cosine về 0, train lấy ngẫu nhiên 30 vật / ảnh; snapshot weight mỗi 10 epoch (`snapshots/`, eval sau để xem độ ổn định) | mục 12 |
+| `delta6` / `6_1` / `6_2` | `delta4` / `5_1` / `5_4` (GIoU 0,1 / 0,75) + `protocol_celoc.yaml`: không val, best = loss train TB / epoch thấp nhất, 120 epoch, lr 1e-4 cosine về 0, train lấy ngẫu nhiên 30 vật / ảnh; snapshot weight mỗi 10 epoch (`snapshots/`, eval sau để xem độ ổn định) | mục 12 |
 
 ## Chạy (server, trong `object-detection/ce_localization/`)
 

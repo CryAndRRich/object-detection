@@ -1,3 +1,3 @@
 base: [delta5_4.yaml, protocol_celoc.yaml]
 experiment: "delta6_2"
-description: "DELTA5.4 train theo giao thức CE-Loc gốc (không val, best theo loss train TB / epoch, lr 1e-4 cosine về 0)"
+description: "DELTA5.4 (GIoU 0.75) train theo giao thức CE-Loc gốc (không val, best theo loss train TB / epoch, lr 1e-4 cosine về 0)"
