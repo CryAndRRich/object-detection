@@ -61,18 +61,19 @@ def test_flow_val_select_resume_eval(tmp_path, monkeypatch):
 
 
 def test_flow_train_loss_select_resume(tmp_path, monkeypatch):
-    """DELTA6 (giao thức CE-Loc gốc): không dựng / chạy val; mỗi epoch TRỌN một dòng loss train TB = TB đúng các bước (log mỗi bước), phần
+    """DELTA7 (= DELTA6, giao thức CE-Loc gốc, + đích train = box positive ngẫu nhiên): không dựng / chạy val; mỗi epoch TRỌN một dòng loss train TB = TB đúng các bước (log mỗi bước), phần
     lẻ cuối không chấm; best.pth = epoch thấp nhất; resume GIỮA epoch == train liền với cache token CLIP + snapshot mỗi epoch (b: cache /
-    snapshot không đổi train); snapshot nạp + eval được; eval --split test_all."""
+    snapshot không đổi train; rút đích positive theo (seed, iter, rank) nên resume vẫn khớp); snapshot nạp + eval được; eval --split
+    test_all; file positive có id ngoài samples/train -> dừng."""
     import ce_localization.train as ta
     from ce_localization.tools import build_clip_cache as bc
     from tests.ce_localization.helpers import _patch_clip
     base = str(tmp_path / "d")
     os.makedirs(base)
     _fake_turn_index(base)
-    c_path, cfg = run_cfg(tmp_path, base, "delta6")
-    assert cfg["eval"]["split"] is None and cfg["eval"]["select_metric"] == "train_loss" and cfg["training"]["snapshot_every_epochs"] == 10
-    c_snap, _ = run_cfg(tmp_path, base, "delta6", name="snap", snapshot_every_epochs=1)
+    c_path, cfg = run_cfg(tmp_path, base, "delta7")
+    assert cfg["data"]["train_target"] == "positive" and cfg["eval"]["split"] is None and cfg["eval"]["select_metric"] == "train_loss" and cfg["training"]["snapshot_every_epochs"] == 10
+    c_snap, _ = run_cfg(tmp_path, base, "delta7", name="snap", snapshot_every_epochs=1)
     monkeypatch.setattr(ta, "run_eval", lambda *x, **k: (_ for _ in ()).throw(AssertionError("không được chạy val")))
     clip_dir = str(tmp_path / "clip")
     _patch_clip(monkeypatch)
@@ -102,6 +103,11 @@ def test_flow_train_loss_select_resume(tmp_path, monkeypatch):
     res, _ = _run_eval(monkeypatch, ["--ckpt", os.path.join(b, "snapshots", "ep002.pth"), "--split", "test_all", "--out",
                                      str(tmp_path / "r.json")])
     assert res["iter"] == 2 * ipe and res["split"] == "test_all" and res["results"]["inpainted"]["n"] == len(ta.TurnIndex(os.path.join(base, "turn_index.json")).keys("test_all"))
+    bad = str(tmp_path / "bad.jsonl")
+    with open(bad, "w") as f:
+        f.write('{"id": "9999_1", "positive": [[0, 0, 5, 5]]}\n')
+    with pytest.raises(SystemExit, match="9999_1"):
+        run(c_path, str(tmp_path / "c"), 1, "--positive-file", bad)
 
 
 def _ddp_worker(rank, world, port, argv):

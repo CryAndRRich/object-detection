@@ -15,7 +15,7 @@ from ce_localization.data.density import JET, build_index
 from ce_localization.models.text import TextTable
 
 CFG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "ce_localization", "config", "delta")
-RUNS = ("delta4", "delta5", "delta5_1", "delta5_2", "delta5_3", "delta5_4", "delta5_5", "delta6", "delta6_1", "delta6_2")
+RUNS = ("delta4", "delta5", "delta5_1", "delta5_2", "delta5_3", "delta5_4", "delta5_5", "delta6", "delta6_1", "delta6_2", "delta7")
 COCOUNT_NAMES = ("INTRA_FOO_TOM1_TOM2_00008_00006_0_200", "INTER_OFF_PEN0_PNC0_00007_00005_0_40")
 FAKE_TEXT_SHA = hashlib.sha256(b"fake CLIP text").digest()
 # ViT thật -> (ảnh, patch, hidden giả): cùng lưới g = ảnh / patch như bản thật
@@ -131,6 +131,24 @@ def _fake_turn_index(base):
     return root, samples, p, TurnIndex(p), idx["report"]
 
 
+def _fake_positives(base, path):
+    """Bản gán box positive giả (khuôn `box_review/ce130_train.jsonl`): mẫu train của nhánh 1001_b1 = mọi lỗ tới lượt t + 1 box trùng
+    lỗ mới nhất (lệch 2 px, phải bị lọc) + 1 chỗ trống dưới đáy ảnh (vật y2 <= 135, riêng từng lượt); mẫu khác không có trong file.
+    -> {id: box}."""
+    from ce_localization.data.turns import TurnIndex
+    idx = TurnIndex(os.path.join(base, "turn_index.json"))
+    out = {}
+    for k, v in idx.turns.items():
+        if v["branch"] == "train/1001_b1":
+            sid = os.path.splitext(os.path.basename(v["sample"]))[0]
+            holes = idx.branches[v["branch"]]["holes"][:v["t"]]
+            out[sid] = holes + [[c + 2.0 for c in holes[-1]], [10.0 * v["t"], 137.0, 10.0 * v["t"] + 40, 149.0]]
+    with open(path, "w") as f:
+        for sid, pos in sorted(out.items()):
+            f.write(json.dumps({"id": sid, "class": "apple", "positive": pos, "negative": [], "neutral": [], "meta": {}}) + "\n")
+    return out
+
+
 # ----------------------------------------------------------------------------- CE-CoCount giả
 
 def _fake_cocount(root, seed=0):
@@ -173,6 +191,9 @@ def run_cfg(tmp_path, base, run, name="", **training):
     cfg["data"].update(root=os.path.join(base, "all_phase2_V2"), samples_root=os.path.join(base, "samples"),
                        turn_index=os.path.join(base, "turn_index.json"), density_index=os.path.join(base, "density_index.json"),
                        density_root=os.path.join(base, "samples"), image_size=128, num_workers=0)
+    if cfg["data"].get("train_target") == "positive":
+        cfg["data"]["positive_file"] = os.path.join(base, "ce130_train.jsonl")
+        _fake_positives(base, cfg["data"]["positive_file"])
     cfg["model"]["pretrained_backbone"] = False
     cfg["diffusion"].update(num_timesteps=100, noise_per_image=2)
     cfg["training"].update(batch_size=2, max_iter=4, log_every=1, ckpt_every=2, cosine_t_max=100,

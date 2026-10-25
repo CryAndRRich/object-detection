@@ -1,4 +1,5 @@
-"""Dữ liệu: letterbox kiểu bài, chỉ mục (nhánh, lượt), dataset CE-130 (inpaint / gốc), cache uint8, CE-CoCount (lọc box, bản rà tay)."""
+"""Dữ liệu: letterbox kiểu bài, chỉ mục (nhánh, lượt), dataset CE-130 (inpaint / gốc, box positive làm đích train), cache uint8,
+CE-CoCount (lọc box, bản rà tay)."""
 
 import json
 import os
@@ -10,8 +11,9 @@ from PIL import Image
 
 from ce_localization.data.density import JET, DensityIndex, decode_jet
 from ce_localization.data.turns import (AddCache, CE130AddDataset, build_add_cache, build_turn_index, collate_add, convert_add_cache,
-                                        letterbox, paper_to_float, scale_boxes, to_device_add)
-from tests.ce_localization.helpers import COCOUNT_NAMES, _fake_ce130_turns, _fake_cocount, _fake_review, _fake_turn_index
+                                        letterbox, load_positives, paper_to_float, scale_boxes, to_device_add)
+from tests.ce_localization.helpers import (COCOUNT_NAMES, _fake_ce130_turns, _fake_cocount, _fake_positives, _fake_review,
+                                           _fake_turn_index)
 
 
 def _paper_resize_and_pad(img, density, target=512):
@@ -88,6 +90,45 @@ def test_add_dataset_item_paper_inputs(ce130, image):
     assert bt["whwh"][0].tolist() == [128, 96, 128, 96] and len(bt["holes"]) == 2
     assert torch.equal(paper_to_float(torch.arange(256, dtype=torch.uint8)),
                        torch.from_numpy(np.arange(256, dtype=np.uint8).astype(np.float32) / 255.0))
+
+
+def test_positive_targets(ce130, tmp_path):
+    """`positives`: mẫu có trong file = mọi lỗ tới lượt t + box tay không trùng lỗ (box lệch lỗ 2 px bị lọc, pixel canvas), mẫu khác = chỉ
+    các lỗ; `target` / `holes` không đổi; collate giữ list; thiếu `positive_hole_iou` -> lỗi. `train.step_loss` rút MỘT box / ảnh bằng `obj_gen` (cùng seed = cùng box, đủ mọi box qua nhiều seed)."""
+    import ce_localization.train as ta
+    base, root, samples, _, index, _ = ce130
+    raw = _fake_positives(base, str(tmp_path / "pos.jsonl"))
+    pos = load_positives(str(tmp_path / "pos.jsonl"))
+    assert set(pos) == set(raw) and all(np.array_equal(pos[k], np.asarray(raw[k])) for k in raw)
+    plain = CE130AddDataset(index, root, samples, "train", 128)
+    ds = CE130AddDataset(index, root, samples, "train", 128, positives=pos, positive_hole_iou=0.3)
+    with pytest.raises(ValueError, match="positive_hole_iou"):
+        CE130AddDataset(index, root, samples, "train", 128, positives=pos)
+    stem = lambda k: os.path.splitext(os.path.basename(index.turns[k]["sample"]))[0]  # noqa: E731
+    k_in = "1001_b1_t2"
+    k_out = next(k for k in ds.keys if stem(k) not in pos)
+    a, a0 = ds[ds.keys.index(k_in)], plain[ds.keys.index(k_in)]
+    want = raw[stem(k_in)][:2] + raw[stem(k_in)][3:]                 # 2 lỗ + chỗ trống; bỏ box lệch lỗ mới nhất 2 px
+    assert torch.allclose(a["positives"], torch.tensor(want, dtype=torch.float32) * 0.64, atol=1e-4) and len(a["positives"]) == 3
+    assert torch.equal(a["target"], a0["target"]) and torch.equal(a["holes"], a0["holes"]) and "positives" not in a0
+    b = ds[ds.keys.index(k_out)]
+    assert torch.equal(b["positives"], b["holes"])
+    bt = collate_add([a, b])
+    assert [len(p) for p in bt["positives"]] == [3, b["t"]]
+
+    seen = []
+    model = type("M", (), {"box_coder": None, "pop_stats": lambda self: {}})()
+    import unittest.mock as um
+    with um.patch.object(ta, "boxes_to_unit", lambda boxes, whwh, coder: boxes):
+        net = lambda images, text, vhw, x0, **kw: seen.append(x0) or x0.sum()  # noqa: E731
+        tt = type("T", (), {"__call__": lambda self, t, d: None, "tokens": lambda self, t, d: None})()
+        for sd in list(range(30)) + [0]:
+            ta.step_loss(net, {**bt, "images": torch.zeros(2, 4, 128, 128)}, tt, {"diffusion": {"noise_per_image": 1}}, model, None,
+                         "cpu", torch.Generator().manual_seed(sd))
+    for i, p in enumerate(bt["positives"]):
+        got = {tuple(x[i].tolist()) for x in seen}
+        assert got == {tuple(r.tolist()) for r in p}
+    assert torch.equal(seen[0], seen[-1])
 
 
 def test_uint8_cache_bitwise(ce130, tmp_path):

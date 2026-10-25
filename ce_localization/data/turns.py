@@ -29,7 +29,7 @@ from ce_localization.utils.box_ops_np import box_iou, filter_degenerate
 
 __all__ = ["SPLITS", "IMAGE_KINDS", "letterbox", "scale_boxes", "read_annotation", "pixel_hash", "assign_removed", "build_turn_index",
            "TurnIndex", "AddCache", "build_add_cache", "convert_add_cache", "CE130AddDataset", "collate_add", "to_device_add",
-           "paper_to_float"]
+           "paper_to_float", "load_positives", "hand_positives"]
 
 SPLITS = ("train", "val", "test")
 IMAGE_KINDS = ("inpainted", "original")
@@ -53,6 +53,27 @@ def scale_boxes(boxes_xyxy_px, scale, nw, nh):
     b[:, [1, 3]] = b[:, [1, 3]].clip(0, nh)
     keep = (b[:, 2] > b[:, 0]) & (b[:, 3] > b[:, 1])
     return b[keep]
+
+
+def load_positives(path):
+    """`box_review/ce130_train.jsonl` (một dòng một mẫu `samples/train`: `id` = tên file, `positive` = box xyxy pixel ảnh gốc người gán
+    nhãn chấm đặt được vật — đề xuất của model, gồm cả chính các lỗ; `negative` / `neutral` không dùng) -> {id: mảng [P,4]}."""
+    out = {}
+    with open(path) as f:
+        for line in f:
+            if line.strip():
+                r = json.loads(line)
+                out[r["id"]] = np.asarray(r["positive"], dtype=np.float64).reshape(-1, 4)
+    return out
+
+
+def hand_positives(boxes, holes, hole_iou):
+    """Box positive gán tay KHÔNG trùng lỗ nào (IoU với mọi lỗ <= `hole_iou`): box trùng lỗ là chính lỗ đó (model đề xuất lại) — giữ
+    thì lỗ bị tính nhiều lần khi rút đích."""
+    boxes = np.asarray(boxes, dtype=np.float64).reshape(-1, 4)
+    if not len(boxes) or not len(holes):
+        return boxes
+    return boxes[box_iou(boxes, holes)[0].max(1) <= hole_iou]
 
 
 def read_annotation(branch_dir):
@@ -350,10 +371,12 @@ def convert_add_cache(src_dir, out_dir, workers=4, log=print):
 
 class CE130AddDataset(Dataset):
     """Một phần tử = một (nhánh, lượt): ảnh uint8 [4,T,T] (RGB + density kiểu bài), box xyxy PIXEL CANVAS. Density: ảnh inpaint =
-    density của chính mẫu; ảnh gốc = bản `full` của ảnh gốc (`density_index`, `data/density.py`)."""
+    density của chính mẫu; ảnh gốc = bản `full` của ảnh gốc (`density_index`, `data/density.py`). `positives` ({tên file samples:
+    box}, `load_positives`): thêm khoá `positives` = mọi lỗ tới lượt t + box gán tay không trùng lỗ (`hand_positives`,
+    `positive_hole_iou`); mẫu không có trong file = chỉ các lỗ."""
 
     def __init__(self, index, ce130_root, samples_root, split, image_size=512, image="inpainted", density_index=None, cache=None,
-                 clip_cache=None):
+                 clip_cache=None, positives=None, positive_hole_iou=None):
         if image not in IMAGE_KINDS:
             raise ValueError(f"image {image!r} không thuộc {IMAGE_KINDS}")
         if image == "original" and density_index is None:
@@ -365,6 +388,10 @@ class CE130AddDataset(Dataset):
             raise ValueError(f"cache image_size {cache.size} != {image_size}")
         self.cache = cache if image == "inpainted" else None          # cache = ảnh inpaint + density của mẫu
         self.clip_cache = clip_cache                                   # token CLIP tính sẵn (`data/clip_cache.py`, chỉ train)
+        self.positives = positives                                     # đích train = 1 box ngẫu nhiên trong đây (`train.step_loss`)
+        self.positive_hole_iou = positive_hole_iou
+        if positives is not None and positive_hole_iou is None:
+            raise ValueError("positives cần positive_hole_iou")
 
     def __len__(self):
         return len(self.keys)
@@ -394,6 +421,12 @@ class CE130AddDataset(Dataset):
         objs = np.asarray(b["objects"], dtype=np.float64).reshape(-1, 4)
         if self.image == "inpainted":                    # vật còn trong ảnh lượt t: chưa bị xoá tới lượt t
             objs = objs[(removed == 0) | (removed > t)]
+        if self.positives is not None:
+            hand = hand_positives(self.positives.get(os.path.splitext(os.path.basename(e["sample"]))[0], ()), b["holes"][:t],
+                                  self.positive_hole_iou)
+            pos = scale_boxes(np.concatenate([np.asarray(b["holes"][:t], dtype=np.float64).reshape(-1, 4), hand]), scale, nw, nh)
+            if not len(pos):
+                raise ValueError(f"{key}: không còn box positive nào trong vùng ảnh thật sau letterbox")
         return {
             # [C,T,T] uint8 là VIEW permute của mảng HWC liền (= bố cục channels_last), `collate_add` gom HWC
             "image": torch.from_numpy(np.ascontiguousarray(x, dtype=np.uint8)).permute(2, 0, 1),
@@ -405,6 +438,7 @@ class CE130AddDataset(Dataset):
             "image_id": key,
             "t": t,
             **({"clip": self.clip_cache.get(key)} if self.clip_cache is not None else {}),
+            **({"positives": torch.from_numpy(pos).float()} if self.positives is not None else {}),
         }
 
 
@@ -426,6 +460,7 @@ def collate_add(batch):
         **({"objects_all": [b["objects_all"] for b in batch]} if "objects_all" in batch[0] else {}),   # CE-CoCount: cả hai lớp
         **({"exemplars": [b["exemplars"] for b in batch]} if "exemplars" in batch[0] else {}),         # CE-CoCount: 3 box mẫu gán tay
         **({"clip": torch.stack([b["clip"] for b in batch])} if "clip" in batch[0] else {}),          # token CLIP tính sẵn (train)
+        **({"positives": [b["positives"] for b in batch]} if "positives" in batch[0] else {}),       # đích train ngẫu nhiên (DELTA7)
     }
 
 

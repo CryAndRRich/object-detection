@@ -128,7 +128,7 @@ def test_lr_schedule_and_epoch_batches():
 def test_configs_inherit_only_intended_keys(tmp_path):
     """Config kế thừa (`base`, gộp sâu): delta5 = delta4 + box log + GIoU 0 + val ddim; delta5_k chỉ đổi `aux_giou_weight`; delta6 /
     6_1 / 6_2 = delta4 / 5_1 / 5_4 + giao thức CE-Loc gốc (không val, best theo loss train, 120 epoch = 37.440 iter, lr 1e-4 cosine về 0,
-    train lấy ngẫu nhiên 30 vật)."""
+    train lấy ngẫu nhiên 30 vật); delta7 = delta6 + đích train = box positive ngẫu nhiên."""
     from ce_localization.utils.config import load_config, merge
     from tests.ce_localization.helpers import CFG_DIR
     L = lambda r: load_config(os.path.join(CFG_DIR, f"{r}.yaml"))  # noqa: E731
@@ -143,6 +143,8 @@ def test_configs_inherit_only_intended_keys(tmp_path):
     assert (d4["model"]["obj_max"], proto["model"]) == (300, {"obj_max": 30})
     for run, src in (("delta6", "delta4"), ("delta6_1", "delta5_1"), ("delta6_2", "delta5_4")):
         assert L(run) == merge(merge(L(src), proto), {"experiment": run, "description": L(run)["description"]})
+    assert L("delta7") == merge(L("delta6"), {"experiment": "delta7", "description": L("delta7")["description"], "data": {
+        "train_target": "positive", "positive_file": "../../output/add/box_review/ce130_train.jsonl", "positive_hole_iou": 0.3}})
     (tmp_path / "a.yaml").write_text("x: {y: 1, z: [1]}\nk: 1\n")
     (tmp_path / "b.yaml").write_text("base: a.yaml\nx: {z: [2]}\n")
     assert load_config(str(tmp_path / "b.yaml")) == {"x": {"y": 1, "z": [2]}, "k": 1}

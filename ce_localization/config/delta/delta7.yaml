@@ -1,0 +1,11 @@
+# DELTA7 (docs/EXPERIMENT_DELTA.md mục 13) = DELTA6 nhưng đích train KHÔNG chỉ là lỗ mới nhất: mỗi iter lấy NGẪU NHIÊN đều một box trong
+# {mọi lỗ tới lượt t} ∪ {box positive gán tay KHÔNG trùng lỗ} (box_review/ce130_train.jsonl, 17.454 / 19.998 mẫu train; box tay trùng lỗ
+# = chính lỗ đó do model đề xuất lại -> bỏ, mỗi lỗ tính một lần; mẫu không có trong file = chỉ các lỗ). Giả thuyết: chỉ học lỗ GT làm
+# 30 mẫu co cụm (DELTA6, mục 12.1) — nhiều đích hợp lệ giữ độ phủ.
+base: [delta6.yaml]
+experiment: "delta7"
+description: "DELTA6 + đích train = 1 box ngẫu nhiên / ảnh trong mọi lỗ + chỗ trống gán tay không trùng lỗ, thay vì lỗ mới nhất"
+data:
+  train_target: "positive"
+  positive_file: "../../output/add/box_review/ce130_train.jsonl"   # Kaggle: --positive-file (notebook tự tìm trong /kaggle/input)
+  positive_hole_iou: 0.3            # box tay IoU > 0,3 với một lỗ = chính lỗ đó -> bỏ
