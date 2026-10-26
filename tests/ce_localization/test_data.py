@@ -93,8 +93,10 @@ def test_add_dataset_item_paper_inputs(ce130, image):
 
 
 def test_positive_targets(ce130, tmp_path):
-    """`positives`: mẫu có trong file = mọi lỗ tới lượt t + box tay không trùng lỗ (box lệch lỗ 2 px bị lọc, pixel canvas), mẫu khác = chỉ
-    các lỗ; `target` / `holes` không đổi; collate giữ list; thiếu `positive_hole_iou` -> lỗi. `train.step_loss` rút MỘT box / ảnh bằng `obj_gen` (cùng seed = cùng box, đủ mọi box qua nhiều seed)."""
+    """Box positive: mẫu có trong file = mọi lỗ tới lượt t + box tay không trùng lỗ (box lệch lỗ 2 px bị lọc, pixel canvas), mẫu khác = chỉ
+    các lỗ; `target` / `holes` không đổi; collate giữ list; thiếu `positive_hole_iou` / chế độ lạ -> lỗi. `train.step_loss`: `random`
+    rút MỘT box / ảnh bằng `obj_gen` (cùng seed = cùng box, đủ mọi box qua nhiều seed); `all` đưa MỌI box + chỉ số ảnh của từng hàng.
+    `pair`: mỗi phần tử = một cặp (mẫu, box), `target` = đúng box đó, đủ mọi cặp, không khoá `positives`."""
     import ce_localization.train as ta
     base, root, samples, _, index, _ = ce130
     raw = _fake_positives(base, str(tmp_path / "pos.jsonl"))
@@ -104,6 +106,8 @@ def test_positive_targets(ce130, tmp_path):
     ds = CE130AddDataset(index, root, samples, "train", 128, positives=pos, positive_hole_iou=0.3)
     with pytest.raises(ValueError, match="positive_hole_iou"):
         CE130AddDataset(index, root, samples, "train", 128, positives=pos)
+    with pytest.raises(ValueError, match="positive_sampling"):
+        CE130AddDataset(index, root, samples, "train", 128, positives=pos, positive_hole_iou=0.3, positive_sampling="every")
     stem = lambda k: os.path.splitext(os.path.basename(index.turns[k]["sample"]))[0]  # noqa: E731
     k_in = "1001_b1_t2"
     k_out = next(k for k in ds.keys if stem(k) not in pos)
@@ -116,19 +120,30 @@ def test_positive_targets(ce130, tmp_path):
     bt = collate_add([a, b])
     assert [len(p) for p in bt["positives"]] == [3, b["t"]]
 
-    seen = []
-    model = type("M", (), {"box_coder": None, "pop_stats": lambda self: {}})()
     import unittest.mock as um
+    model = type("M", (), {"box_coder": None, "pop_stats": lambda self: {}})()
+    tt = type("T", (), {"__call__": lambda self, t, d: None, "tokens": lambda self, t, d: None})()
+    seen = []
+    net = lambda images, text, vhw, x0, **kw: seen.append((x0, kw.get("x0_index"))) or x0.sum()  # noqa: E731
+    run = lambda mode, sd: ta.step_loss(net, {**bt, "images": torch.zeros(2, 4, 128, 128)}, tt,  # noqa: E731
+                                        {"diffusion": {"noise_per_image": 1}, "data": {"positive_sampling": mode}}, model, None, "cpu",
+                                        torch.Generator().manual_seed(sd))
     with um.patch.object(ta, "boxes_to_unit", lambda boxes, whwh, coder: boxes):
-        net = lambda images, text, vhw, x0, **kw: seen.append(x0) or x0.sum()  # noqa: E731
-        tt = type("T", (), {"__call__": lambda self, t, d: None, "tokens": lambda self, t, d: None})()
         for sd in list(range(30)) + [0]:
-            ta.step_loss(net, {**bt, "images": torch.zeros(2, 4, 128, 128)}, tt, {"diffusion": {"noise_per_image": 1}}, model, None,
-                         "cpu", torch.Generator().manual_seed(sd))
+            run("random", sd)
+        rand, seen[:] = list(seen), []
+        run("all", 0)
     for i, p in enumerate(bt["positives"]):
-        got = {tuple(x[i].tolist()) for x in seen}
-        assert got == {tuple(r.tolist()) for r in p}
-    assert torch.equal(seen[0], seen[-1])
+        assert {tuple(x[i].tolist()) for x, _ in rand} == {tuple(r.tolist()) for r in p} and all(ix is None for _, ix in rand)
+    assert torch.equal(rand[0][0], rand[-1][0])
+    x0, ix = seen[0]
+    assert torch.equal(x0, torch.cat(bt["positives"])) and ix.tolist() == [0] * 3 + [1] * b["t"]
+
+    pr = CE130AddDataset(index, root, samples, "train", 128, positives=pos, positive_hole_iou=0.3, positive_sampling="pair")
+    assert len(pr) == sum(len(ds[i]["positives"]) for i in range(len(ds.keys))) and len(pr) > len(ds.keys)
+    got = [pr[i] for i in range(len(pr)) if pr[i]["image_id"] == k_in]
+    assert all("positives" not in g for g in got)
+    assert torch.equal(torch.stack([g["target"] for g in got]), a["positives"])
 
 
 def test_uint8_cache_bitwise(ce130, tmp_path):

@@ -9,3 +9,4 @@ data:
   train_target: "positive"
   positive_file: "../../output/add/box_review/ce130_train.jsonl"   # Kaggle: --positive-file (notebook tự tìm trong /kaggle/input)
   positive_hole_iou: 0.3            # box tay IoU > 0,3 với một lỗ = chính lỗ đó -> bỏ
+  positive_sampling: "random"       # 1 box ngẫu nhiên / ảnh / iter (7.0.1: all, 7.0.2: pair)

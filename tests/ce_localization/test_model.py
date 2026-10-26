@@ -310,6 +310,46 @@ def test_box_policy_loss_formula_grads_and_identity():
         m(x, text, vhw, x0, objects=objs)
 
 
+def test_eps_loss_all_targets_per_image():
+    """`x0_index` (DELTA7.0.1): một đích / ảnh == đường cũ; nhiều đích / ảnh: mỗi hàng bộ (t, ε) riêng, chung cond / box vật / ngữ cảnh
+    refiner của ảnh, loss (ε, aux, GIoU) = TB trong ảnh rồi TB trên ảnh; mọi tham số có grad; ảnh không có đích -> lỗi."""
+    from ce_localization.utils.box_coder import generalized_box_iou_cxcywh, unit_fraction
+    from ce_localization.utils.diffusion_math import q_sample
+    m = small_policy(refiner={"aux_giou_weight": 0.5}, box_coder=LOG).train()
+    x, text, vhw, x0, tok, objs = small_batch()
+    for blk in m.refiner.stages[0]:
+        nn.init.normal_(blk.ada[-1].weight, std=0.02)
+    nn.init.normal_(m.refiner.heads[0][-1].weight, std=0.02)
+    cond, obj, ctx = m.encode(x, text, vhw, objs, tok)
+    g = lambda: torch.Generator().manual_seed(5)  # noqa: E731
+    old = m.eps_loss(cond, x0, 2, g(), obj, ctx)
+    st_old = m.pop_stats()
+    new = m.eps_loss(cond, x0, 2, g(), obj, ctx, x0_index=torch.arange(2))
+    st_new = m.pop_stats()
+    assert torch.allclose(old, new, atol=1e-6) and all(torch.allclose(st_old[k], st_new[k], atol=1e-6) for k in st_old)
+
+    x0r, idx = torch.rand(3, 4, generator=torch.Generator().manual_seed(1)) * 2 - 1, torch.tensor([0, 0, 1])
+    loss = m.eps_loss(cond, x0r, 1, g(), obj, ctx, x0_index=idx)
+    st = m.pop_stats()
+    gg = g()
+    t = torch.randint(0, m.num_timesteps, (3,), generator=gg)
+    noise = torch.randn((3, 4), generator=gg)
+    noisy = q_sample(x0r, t, noise, m.alphas_cumprod)
+    with torch.no_grad():
+        pred, refined = m.predict_noise(noisy, t, cond[idx], m.refiner.index_context(ctx, idx), None,
+                                        ([v[idx] for v in obj[0]], obj[1][idx]))
+    img_mean = lambda v: (v[0] + v[1]) / 4 + v[2] / 2  # noqa: E731   ảnh 0: 2 đích, ảnh 1: 1 đích
+    giou = 1 - generalized_box_iou_cxcywh(unit_fraction(refined, LOG), unit_fraction(x0r, LOG))
+    assert torch.allclose(st["loss_eps"], img_mean(((pred - noise) ** 2).mean(1)), atol=1e-6)
+    assert torch.allclose(st["loss_aux"], img_mean(((refined - x0r) ** 2).mean(1)), atol=1e-6)
+    assert torch.allclose(st["loss_giou"], img_mean(giou), atol=1e-6)
+    assert torch.allclose(loss, st["loss_eps"] + 0.1 * (st["loss_aux"] + 0.5 * st["loss_giou"]), atol=1e-6)
+    loss.backward()
+    assert [n for n, p in m.named_parameters() if p.requires_grad and p.grad is None] == []
+    with pytest.raises(ValueError, match="x0_index"):
+        m.eps_loss(cond, x0r, 1, g(), obj, ctx, x0_index=torch.tensor([0, 0, 0]))
+
+
 def test_object_cap_random_cpu_generator():
     """Train (`cap`): > obj_max vật -> lấy NGẪU NHIÊN obj_max theo `obj_generator` CPU (cùng seed = cùng tập, khác seed = khác tập);
     eval giữ hết."""

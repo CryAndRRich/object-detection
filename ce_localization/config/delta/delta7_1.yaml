@@ -1,0 +1,5 @@
+# DELTA7.1 (docs/EXPERIMENT_DELTA.md mục 13.3) = DELTA7 (đích = 1 box ngẫu nhiên trong lỗ + box tay không trùng lỗ) + box mã hoá log + GIoU
+# 0,1 trong loss phụ refiner (= DELTA6.1 + đích positive). Gộp: base delta7 rồi delta6_1 đè (model / eval của 6.1, giữ khoá data của 7).
+base: [delta7.yaml, delta6_1.yaml]
+experiment: "delta7_1"
+description: "DELTA7 + box log + GIoU 0,1 (= DELTA6.1 + đích 1 box ngẫu nhiên trong lỗ + box tay không trùng lỗ)"

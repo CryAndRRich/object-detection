@@ -9,9 +9,12 @@ Chọn `best.pth` theo `eval.select_metric`:
 `training.snapshot_every_epochs` N: cuối mỗi N epoch ghi weight (không optimizer) `snapshots/ep<E>.pth` — eval sau trên server
 (`eval.py --ckpt`, `tools/plot_snapshots.py`) để xem độ ổn định theo epoch; không chọn best.
 `data.clip_cache` / `--clip-cache`: token CLIP ảnh train tính sẵn (`tools/build_clip_cache.py`) thay CLIP forward mỗi iter.
-`data.train_target`: `latest_hole` (mặc định, như CE-Loc gốc) | `positive` (DELTA7+) — mỗi iter đích = MỘT box ngẫu nhiên đều trong
-{mọi lỗ tới lượt t} ∪ {box positive gán tay của `data.positive_file` / `--positive-file` (`box_review/ce130_train.jsonl`) có IoU với
-mọi lỗ <= `data.positive_hole_iou`} (box trùng lỗ = chính lỗ đó, bỏ), rút bằng generator seed theo (seed, iter, rank) như t / nhiễu.
+`data.train_target`: `latest_hole` (mặc định, như CE-Loc gốc) | `positive` (DELTA7+) — tập đích của mẫu = {mọi lỗ tới lượt t} ∪ {box
+positive gán tay của `data.positive_file` / `--positive-file` (`box_review/ce130_train.jsonl`) có IoU với mọi lỗ <=
+`data.positive_hole_iou`} (box trùng lỗ = chính lỗ đó, bỏ). `data.positive_sampling`: `random` (DELTA7, vắng = random) — mỗi iter MỘT box
+ngẫu nhiên đều / ảnh, rút bằng generator seed theo (seed, iter, rank) như t / nhiễu; `all` (DELTA7.0.1) — mọi box của ảnh trong cùng
+iter, mỗi box bộ (t, ε) riêng, chung phần mã hoá ảnh, loss TB trong ảnh rồi TB trên ảnh (`BoxPolicy.eps_loss` x0_index); `pair`
+(DELTA7.0.2) — mỗi cặp (mẫu, box) là một phần tử dataset (epoch = mọi cặp).
 Vòng lặp không ép CPU chờ GPU (loss / thống kê cộng dồn trên GPU, đọc về mỗi `log_every`; AMP: GradScaler tự bỏ bước grad inf / NaN).
 Mỗi `ckpt_every` iter: `last.pth` ghi nguyên tử, đủ để `--resume` tái lập (thứ tự dữ liệu seed theo (seed, epoch), t / nhiễu theo
 (seed, iter, rank)). Lịch lr cosine theo iter (+ warmup `cosine_warmup_iters`); AMP fp16 (`training.amp`, chỉ CUDA; refiner + cross-attn
@@ -40,8 +43,8 @@ from torch.utils.data import DataLoader  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ce_localization.data.clip_cache import ClipCache  # noqa: E402
-from ce_localization.data.turns import (AddCache, CE130AddDataset, TurnIndex, collate_add, hand_positives,  # noqa: E402
-                                        load_positives, to_device_add)
+from ce_localization.data.turns import (AddCache, CE130AddDataset, TurnIndex, collate_add, load_positives,  # noqa: E402
+                                        to_device_add)
 from ce_localization.engine.add_eval import add_metrics, predict_add  # noqa: E402
 from ce_localization.engine.train_utils import (EpochBatches, PthCheckpoints, fmt_gpu_peak, gpu_peak, lr_factor,  # noqa: E402
                                                noise_seed, setup_dist)
@@ -102,7 +105,7 @@ def add_datasets(cfg, limit=None):
     if target not in ("latest_hole", "positive"):
         sys.exit(f"data.train_target {target!r} không thuộc ('latest_hole', 'positive')")
     if target == "positive":
-        ds_tr.positives, ds_tr.positive_hole_iou = load_positives(d["positive_file"]), float(d["positive_hole_iou"])
+        ds_tr.set_positives(load_positives(d["positive_file"]), d["positive_hole_iou"], d.get("positive_sampling", "random"))
         train_stems = {os.path.splitext(os.path.basename(v["sample"]))[0] for k, v in index.turns.items() if v["sample"].startswith("train/")}
         unknown = sorted(set(ds_tr.positives) - train_stems)
         if unknown:
@@ -145,13 +148,18 @@ def advance_lr(sched):
 
 
 def step_loss(net, batch, text_table, cfg, model, gen, dev, obj_gen=None):
-    if "positives" in batch:                    # data.train_target positive: đích = MỘT box positive ngẫu nhiên / ảnh
-        pick = [p[torch.randint(len(p), (), generator=obj_gen)] for p in batch["positives"]]
-        batch = {**batch, "target": torch.stack(pick).to(batch["target"].device)}
-    x0 = boxes_to_unit(batch["target"], torch.full_like(batch["whwh"], float(batch["images"].shape[-1])), model.box_coder)
+    target, x0_index = batch["target"], None
+    if "positives" in batch:                    # data.train_target positive (`pair`: dataset đã trả đúng box trong `target`)
+        if cfg["data"].get("positive_sampling", "random") == "all":     # mọi box của ảnh, hàng r thuộc ảnh x0_index[r]
+            target = torch.cat(batch["positives"]).to(target.device)
+            x0_index = torch.repeat_interleave(torch.arange(len(batch["positives"])),        # CPU (`eps_loss` tự đưa lên)
+                                               torch.tensor([len(p) for p in batch["positives"]]))
+        else:                                   # random: MỘT box ngẫu nhiên / ảnh
+            target = torch.stack([p[torch.randint(len(p), (), generator=obj_gen)] for p in batch["positives"]]).to(target.device)
+    x0 = boxes_to_unit(target, torch.full_like(target, float(batch["images"].shape[-1])), model.box_coder)
     loss = net(batch["images"], text_table(batch["text"], dev), batch["valid_hw"], x0, k=cfg["diffusion"]["noise_per_image"],
                generator=gen, objects=batch["objects"], text_tokens=text_table.tokens(batch["text"], dev), clip_feats=batch.get("clip"),
-               obj_generator=obj_gen)
+               obj_generator=obj_gen, **({"x0_index": x0_index} if x0_index is not None else {}))
     return loss, {"loss": loss.detach(), **model.pop_stats()}
 
 
@@ -218,17 +226,13 @@ def main():
         + (f" | snapshot weight mỗi {snap_every} epoch" if snap_every else "")
         + f" | cache ảnh {d.get('cache_dir')} | cache CLIP {d.get('clip_cache')} | {fmt_time(time.time() - t_boot)}")
     if ds_tr.positives is not None:
-        n_hole, n_hand = [], []
-        for k in ds_tr.keys:
-            e = ds_tr.index.turns[k]
-            holes = ds_tr.index.branches[e["branch"]]["holes"][:e["t"]]
-            n_hole.append(len(holes))
-            n_hand.append(len(hand_positives(ds_tr.positives.get(os.path.splitext(os.path.basename(e["sample"]))[0], ()), holes,
-                                             ds_tr.positive_hole_iou)))
-        n_hole, n_hand = np.asarray(n_hole), np.asarray(n_hand)
-        log(f"[data] đích = 1 box ngẫu nhiên / ảnh trong lỗ ∪ box tay không trùng lỗ (IoU <= {ds_tr.positive_hole_iou}, "
-            f"{d['positive_file']}): TB {n_hole.mean():.2f} lỗ + {n_hand.mean():.2f} box tay, {(n_hand > 0).mean():.1%} mẫu có box tay | "
-            f"P(đích là lỗ) {np.mean(n_hole / (n_hole + n_hand)):.3f}")
+        n_hole = np.asarray([ds_tr.index.turns[k]["t"] for k in ds_tr.keys])
+        n_hand = np.asarray([len(ds_tr.positive_boxes(k)) for k in ds_tr.keys]) - n_hole
+        mode = {"random": "1 box ngẫu nhiên / ảnh / iter", "all": "mọi box của ảnh trong cùng iter (loss TB trong ảnh)",
+                "pair": f"mỗi cặp (mẫu, box) một phần tử: {len(ds_tr)} cặp"}[ds_tr.positive_sampling]
+        p_hole = n_hole.sum() / (n_hole + n_hand).sum() if ds_tr.positive_sampling == "pair" else np.mean(n_hole / (n_hole + n_hand))
+        log(f"[data] đích trong lỗ ∪ box tay không trùng lỗ (IoU <= {ds_tr.positive_hole_iou}, {d['positive_file']}) — {mode}: "
+            f"TB {n_hole.mean():.2f} lỗ + {n_hand.mean():.2f} box tay, {(n_hand > 0).mean():.1%} mẫu có box tay | P(đích là lỗ) {p_hole:.3f}")
     sampler = EpochBatches(len(ds_tr), bpr, rank, world, tr["seed"])
     # worker BỀN (không dựng lại mỗi epoch); generator riêng: base_seed của worker không rút từ RNG toàn cục
     loader = DataLoader(ds_tr, batch_sampler=sampler, num_workers=nw, collate_fn=collate_add, pin_memory=dev.type == "cuda",

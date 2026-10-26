@@ -29,6 +29,8 @@ U-Net 1D nhận [x_t ; refined] -> ε̂ ;  loss = ε-MSE + aux_loss_weight · [M
 | `delta5` / `5_1` / `5_3` / `5_2` / `5_4` / `5_5` | box log (`model.box_coder`), val ddim; `aux_giou_weight` 0 / 0,1 / 0,25 / 0,5 / 0,75 / 1,0 | mục 11 |
 | `delta6` / `6_1` / `6_2` | `delta4` / `5_1` / `5_4` (GIoU 0,1 / 0,75) + `protocol_celoc.yaml`: không val, best = loss train TB / epoch thấp nhất, 120 epoch, lr 1e-4 cosine về 0, train lấy ngẫu nhiên 30 vật / ảnh; snapshot weight mỗi 10 epoch (`snapshots/`, eval sau để xem độ ổn định) | mục 12 |
 | `delta7` | `delta6` + `data.train_target: positive`: mỗi iter đích = 1 box ngẫu nhiên đều trong mọi lỗ tới lượt t + box `positive` gán tay của `output/add/box_review/ce130_train.jsonl` không trùng lỗ (IoU <= `positive_hole_iou` 0,3), `--positive-file` khi chạy nơi khác | mục 13 |
+| `delta7_0_1` / `7_0_2` | `delta7` + `data.positive_sampling` `all` (mọi box đích / ảnh mỗi iter, mỗi box (t, ε) riêng, loss TB trong ảnh) / `pair` (mỗi cặp (ảnh, box) một mẫu, 120 epoch theo cặp = 132.240 iter) | mục 13.2 |
+| `delta7_1` | `delta7` + box log + GIoU 0,1 (`base: [delta7.yaml, delta6_1.yaml]` = `delta6_1` + đích positive) | mục 13.3 |
 
 ## Chạy (server, trong `object-detection/ce_localization/`)
 

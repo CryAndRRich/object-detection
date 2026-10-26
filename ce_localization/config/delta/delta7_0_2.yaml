@@ -1,0 +1,13 @@
+# DELTA7.0.2 (docs/EXPERIMENT_DELTA.md mục 13.2) = DELTA7 nhưng KHÔNG rút ngẫu nhiên: mỗi cặp (mẫu, box đích) là một phần tử dataset
+# (70.567 cặp = 3,53 × 19.998 mẫu) — epoch đi qua mọi cặp đúng một lần; mỗi cặp cùng trọng số (ảnh nhiều box nặng hơn). 120 epoch như
+# DELTA6 / 7 nhưng epoch dài 3,53× (người dùng chốt 2026-10-26): 1.102 iter / epoch -> 132.240 iter (~14,3 giờ T4×2, 2 phiên Kaggle nối
+# `last.pth`), warmup 1 epoch, cosine về 0; snapshot mỗi 10 epoch (= 11.020 iter).
+base: [delta7.yaml]
+experiment: "delta7_0_2"
+description: "DELTA7 + mỗi cặp (ảnh, box đích) là một mẫu, 120 epoch theo cặp (132.240 iter)"
+data:
+  positive_sampling: "pair"
+training:
+  cosine_warmup_iters: 1102         # 1 epoch theo cặp (⌊70.567 / 64⌋)
+  cosine_t_max: 132240
+  max_iter: 132240                  # 120 epoch × 1.102 iter

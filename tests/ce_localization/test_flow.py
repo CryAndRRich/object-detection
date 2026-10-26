@@ -110,6 +110,35 @@ def test_flow_train_loss_select_resume(tmp_path, monkeypatch):
         run(c_path, str(tmp_path / "c"), 1, "--positive-file", bad)
 
 
+@pytest.mark.parametrize("run", ["delta7_0_1", "delta7_0_2"])
+def test_flow_positive_all_pair_resume(tmp_path, monkeypatch, run):
+    """DELTA7.0.1 (mọi box / ảnh mỗi iter) / 7.0.2 (mỗi cặp (mẫu, box) một mẫu): train 2 + resume tới 4 == train liền 4; 7.0.2: dataset
+    = mọi cặp (epoch theo cặp); checkpoint nạp + eval được."""
+    import ce_localization.train as ta
+    from tests.ce_localization.helpers import _fake_positives
+    base = str(tmp_path / "d")
+    os.makedirs(base)
+    _fake_turn_index(base)
+    c_path, cfg = run_cfg(tmp_path, base, run)
+    a, b = str(tmp_path / "a"), str(tmp_path / "b")
+    _run_train(monkeypatch, ["--config", c_path, "--save-dir", a, "--max-iter", "2"])
+    _run_train(monkeypatch, ["--config", c_path, "--save-dir", a, "--resume"])
+    _run_train(monkeypatch, ["--config", c_path, "--save-dir", b])
+    _, kb = _same_state(a, b)
+    logs = [h for h in kb["history"] if "loss" in h]
+    assert len(logs) == 4 and all(np.isfinite(h["loss"]) for h in logs)
+    n = len(ta.TurnIndex(os.path.join(base, "turn_index.json")).keys("train"))
+    if run == "delta7_0_2":                        # 1001_b1: mỗi lượt t lỗ + 1 chỗ trống; mẫu khác: t lỗ
+        idx = ta.TurnIndex(os.path.join(base, "turn_index.json"))
+        pos = _fake_positives(base, cfg["data"]["positive_file"])
+        n = sum(v["t"] + (os.path.splitext(os.path.basename(v["sample"]))[0] in pos) for k, v in idx.turns.items()
+                if k in idx.keys("train"))
+    ds_tr, ds_ev = ta.add_datasets(cfg)
+    assert len(ds_tr) == n and ds_ev is None and ds_tr.positive_sampling == cfg["data"]["positive_sampling"]
+    res, _ = _run_eval(monkeypatch, ["--ckpt", os.path.join(b, "last.pth"), "--split", "test_all", "--out", str(tmp_path / "r.json")])
+    assert res["results"]["inpainted"]["n"] > 0
+
+
 def _ddp_worker(rank, world, port, argv):
     import warnings
     import ce_localization.models.clip_refiner as cr
@@ -124,12 +153,12 @@ def _ddp_worker(rank, world, port, argv):
 
 def test_ddp_two_processes(tmp_path):
     """2 tiến trình gloo, DDP không find_unused + gradient_as_bucket_view (tham số thiếu grad / lệch stride -> lỗi); loss train TB của epoch
-    cộng qua cả hai rank; chỉ rank 0 ghi."""
+    cộng qua cả hai rank; chỉ rank 0 ghi. Config DELTA7.0.1 (mọi box đích / ảnh, `x0_index`)."""
     import torch.multiprocessing as tmp
     base = str(tmp_path / "d")
     os.makedirs(base)
     _fake_turn_index(base)
-    c_path, _ = run_cfg(tmp_path, base, "delta6")
+    c_path, _ = run_cfg(tmp_path, base, "delta7_0_1")           # mọi box / ảnh: số hàng đích khác nhau giữa 2 rank
     save = str(tmp_path / "ddp")
     with socket.socket() as so:
         so.bind(("127.0.0.1", 0))

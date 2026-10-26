@@ -253,39 +253,64 @@ class BoxPolicy(nn.Module):
                 self.refiner_context(images, text_tokens, clip_feats))
 
     def forward(self, images, text_raw, valid_hw, x0, k=1, generator=None, objects=None, text_tokens=None, clip_feats=None,
-                obj_generator=None):
-        """Loss train, k bộ (t, ε) mỗi ảnh theo `generator`. x0 [B,4] mã hoá; `objects` list B box vật xyxy pixel canvas (> obj_max vật:
-        lấy ngẫu nhiên theo `obj_generator` CPU); `text_tokens` (token, mask); `clip_feats` token CLIP tính sẵn (`data/clip_cache.py`)."""
+                obj_generator=None, x0_index=None):
+        """Loss train, k bộ (t, ε) mỗi đích theo `generator`. x0 [B,4] mã hoá (hoặc [R,4] + `x0_index`, xem `eps_loss`); `objects` list B
+        box vật xyxy pixel canvas (> obj_max vật: lấy ngẫu nhiên theo `obj_generator` CPU); `text_tokens` (token, mask); `clip_feats`
+        token CLIP tính sẵn (`data/clip_cache.py`)."""
         cond, obj, ctx = self.encode(images, text_raw, valid_hw, objects, text_tokens, obj_generator, cap=True, clip_feats=clip_feats)
-        return self.eps_loss(cond, x0, k, generator, obj, ctx)
+        return self.eps_loss(cond, x0, k, generator, obj, ctx, x0_index)
 
     @staticmethod
     def _repeat_obj(obj, n):
         return None if obj is None else ([t.repeat_interleave(n, 0) for t in obj[0]], obj[1].repeat_interleave(n, 0))
 
-    def eps_loss(self, cond, x0, k=1, generator=None, obj=None, ctx=None):
-        """Loss từ phần đã mã hoá (B ảnh): k bộ (t, ε) / ảnh có t khác nhau nên ngữ cảnh refiner nhân thành B·k hàng."""
-        obj = self._repeat_obj(obj, k)
+    @staticmethod
+    def _wmean(v, w):
+        """TB theo hàng: v [R, ...] -> vô hướng; w [R] (tổng 1) | None (TB thường, như F.mse_loss / .mean())."""
+        return v.mean() if w is None else (v.reshape(v.shape[0], -1).mean(1) * w.to(v.dtype)).sum()
+
+    def _wmse(self, a, b, w):
+        return F.mse_loss(a, b) if w is None else self._wmean((a - b) ** 2, w)
+
+    def eps_loss(self, cond, x0, k=1, generator=None, obj=None, ctx=None, x0_index=None):
+        """Loss từ phần đã mã hoá (B ảnh): k bộ (t, ε) / đích có t khác nhau nên ngữ cảnh refiner nhân theo hàng. `x0_index` None: x0
+        [B,4], một đích / ảnh. `x0_index` [R] (DELTA7.0.1, mọi box positive của ảnh trong cùng bước): x0 [R,4], hàng r là đích của ảnh
+        x0_index[r] — mỗi đích bộ (t, ε) riêng, chung phần mã hoá ảnh; loss TB các đích TRONG ảnh rồi TB trên ảnh (mọi ảnh cùng trọng số,
+        ảnh nhiều đích không lấn ảnh ít đích)."""
         B = cond.shape[0]
-        cond = cond.repeat_interleave(k, dim=0)
-        x0 = x0.repeat_interleave(k, dim=0)
         dev = x0.device
-        if k > 1:
-            ctx = self.refiner.index_context(ctx, torch.arange(B, device=dev).repeat_interleave(k))
+        w = None
+        if x0_index is None:
+            obj = self._repeat_obj(obj, k)
+            cond = cond.repeat_interleave(k, dim=0)
+            x0 = x0.repeat_interleave(k, dim=0)
+            if k > 1:
+                ctx = self.refiner.index_context(ctx, torch.arange(B, device=dev).repeat_interleave(k))
+        else:                                   # chỉ số + trọng số tính trên CPU (`x0_index` CPU: không ép CPU chờ GPU), rồi mới lên thiết bị
+            idx = x0_index.cpu().long().repeat_interleave(k)
+            cnt = torch.bincount(idx, minlength=B)
+            if idx.shape[0] != x0.shape[0] * k or len(cnt) != B or bool(cnt.eq(0).any()):
+                raise ValueError("x0_index phải gán mỗi hàng x0 cho một ảnh và mỗi ảnh có ít nhất một đích")
+            w = (1.0 / (cnt[idx].float() * B)).to(dev, non_blocking=True)    # tổng 1: TB trong ảnh, rồi TB trên ảnh
+            idx = idx.to(dev, non_blocking=True)
+            obj = None if obj is None else ([v.index_select(0, idx) for v in obj[0]], obj[1].index_select(0, idx))
+            cond = cond.index_select(0, idx)
+            x0 = x0.repeat_interleave(k, dim=0)
+            ctx = None if ctx is None else self.refiner.index_context(ctx, idx)
         t = torch.randint(0, self.num_timesteps, (x0.shape[0],), device=dev, generator=generator)
         noise = torch.randn(x0.shape, device=dev, generator=generator)
         noisy = q_sample(x0, t, noise, self.alphas_cumprod)
         pred, refined = self.predict_noise(noisy, t, cond, ctx, None, obj)
-        loss = F.mse_loss(pred, noise)
+        loss = self._wmse(pred, noise, w)
         with torch.autocast(device_type=dev.type, enabled=False):          # refined fp32 (refiner tắt autocast)
-            aux = F.mse_loss(refined, x0.to(refined.dtype))
+            aux = self._wmse(refined, x0.to(refined.dtype), w)
             giou = None
             if self.aux_giou_weight > 0:                                   # DELTA5.x: GIoU trên box giải mã (tỉ lệ canvas)
-                giou = (1 - generalized_box_iou_cxcywh(unit_fraction(refined, self.box_coder),
-                                                       unit_fraction(x0.to(refined.dtype), self.box_coder))).mean()
+                giou = self._wmean(1 - generalized_box_iou_cxcywh(unit_fraction(refined, self.box_coder),
+                                                                  unit_fraction(x0.to(refined.dtype), self.box_coder)), w)
             self._stats = {"loss_eps": loss.detach().float(), "loss_aux": aux.detach().float(),
-                           "delta_abs": (refined - noisy.to(refined.dtype)).abs().mean().detach().float(),
-                           "aux_ratio": (aux / F.mse_loss(noisy.to(refined.dtype), x0.to(refined.dtype)).clamp_min(1e-12))
+                           "delta_abs": self._wmean((refined - noisy.to(refined.dtype)).abs(), w).detach().float(),
+                           "aux_ratio": (aux / self._wmse(noisy.to(refined.dtype), x0.to(refined.dtype), w).clamp_min(1e-12))
                            .detach().float()}
             if giou is not None:
                 self._stats["loss_giou"] = giou.detach()

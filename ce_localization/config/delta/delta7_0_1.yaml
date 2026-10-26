@@ -1,0 +1,8 @@
+# DELTA7.0.1 (docs/EXPERIMENT_DELTA.md mục 13.2) = DELTA7 nhưng KHÔNG rút ngẫu nhiên: mỗi iter học MỌI box đích của ảnh (TB 3,53 box / ảnh
+# ~ 226 đích / batch 64) — mỗi box bộ (t, ε) riêng, chung phần mã hoá ảnh (ResNet, CLIP, box vật); loss TB các box trong ảnh rồi TB trên
+# ảnh (mọi ảnh cùng trọng số). Cùng mục tiêu kỳ vọng với DELTA7, gradient ít nhiễu hơn; cùng 120 epoch = 37.440 iter.
+base: [delta7.yaml]
+experiment: "delta7_0_1"
+description: "DELTA7 + mỗi iter học mọi box đích của ảnh (loss TB trong ảnh) thay vì 1 box ngẫu nhiên"
+data:
+  positive_sampling: "all"
