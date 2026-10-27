@@ -114,7 +114,8 @@ def _rows(rng, items):
 def test_plot_cnll_worst_cocount_and_ce130(tmp_path, monkeypatch):
     """Hình học dựng lại (CE-CoCount qua bản rà tay; CE-130 từ turn_index) == dataset lúc eval; C-NLL từng box == dump (`record_cnll`,
     F1all với lớp kia); xếp theo box tốt nhất giảm dần; `--top-pct` vẽ đúng số mẫu, mỗi mẫu một hình + rank.json; box vẽ = <= 5 box C-NLL
-    thấp nhất không trùng nhau (IoU <= 0,5); nhiều dump: vẽ đúng giao top p % của mọi dump (lưới GT + từng setting) + intersect.json."""
+    thấp nhất không trùng nhau (IoU <= 0,5); nhiều dump: vẽ đúng giao top p % của mọi dump (lưới GT + từng setting) + intersect.json; `--trend`: xếp theo C-NLL dump cuối −
+    dump đầu giảm dần, vẽ đúng `--top` mẫu + trend.json."""
     from ce_localization.utils.box_ops_np import box_iou
     from ce_localization.data.cocount import CoCountAddDataset, load_review
     from ce_localization.data.turns import CE130AddDataset
@@ -170,3 +171,17 @@ def test_plot_cnll_worst_cocount_and_ce130(tmp_path, monkeypatch):
         want = set(sorted(ref, key=ref.get, reverse=True)[:k]) & set(sorted(ref2, key=ref2.get, reverse=True)[:k])
         got = json.load(open(os.path.join(out2, "intersect.json")))["samples"]
         assert {x["image_id"] for x in got} == want and len(os.listdir(out2)) == len(want) + 1
+        rows3 = _rows(rng, items if name == "cocount" else items_ce)
+        dump3 = str(tmp_path / f"{name}_boxes3.json")
+        json.dump({"results": {name: rows3}}, open(dump3, "w"))
+        out3 = str(tmp_path / f"trend_{name}")
+        monkeypatch.setattr(sys, "argv", ["plot_cnll_worst.py", "--trend", f"ep010={dump}", f"ep020={dump2}", f"ep030={dump3}", *extra,
+                                          "--image-size", "128", "--top", "2", "--select", "30", "--out", out3])
+        pw.main()
+        ref3 = {x["image_id"]: min(x["cnll"]) for x in rows3 if "cnll" in x}
+        tr = json.load(open(os.path.join(out3, "trend.json")))["samples"]
+        ids = sorted(set(ref) & set(ref2) & set(ref3))
+        rise = {i: ref3[i] - ref[i] for i in ids}
+        assert [x["image_id"] for x in tr] == sorted(ids, key=lambda i: -rise[i]) and all(np.isclose(x["rise"], rise[x["image_id"]]) for x in tr)
+        assert all(np.isclose(x["min"]["ep020"], ref2[x["image_id"]]) and -1 <= x["rho"] <= 1 for x in tr)
+        assert sorted(os.listdir(out3)) == sorted(["trend.json"] + [f"trend_{j:02d}_{x['image_id']}.png" for j, x in enumerate(tr[:2], 1)])
