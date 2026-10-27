@@ -7,7 +7,8 @@ Chọn `best.pth` theo `eval.select_metric`:
   train_loss   (DELTA6+, như CE-Loc gốc; `eval.split: null`) — không val; cuối mỗi epoch TRỌN lấy loss train TB của epoch (mọi bước
                hữu hạn, cộng qua mọi GPU), thấp nhất = best; tổng dở dang lưu trong `last.pth` ⇒ `--resume` giữa epoch khớp từng số
 `training.snapshot_every_epochs` N: cuối mỗi N epoch ghi weight (không optimizer) `snapshots/ep<E>.pth` — eval sau trên server
-(`eval.py --ckpt`, `tools/plot_snapshots.py`) để xem độ ổn định theo epoch; không chọn best.
+(`eval.py --ckpt`, `tools/plot_snapshots.py`) để xem độ ổn định theo epoch; không chọn best. `training.snapshot_initial`: thêm
+`ep000.pth` = weight khởi tạo, ghi trước iter 0 (run mới, không ghi lại khi `--resume`).
 `data.clip_cache` / `--clip-cache`: token CLIP ảnh train tính sẵn (`tools/build_clip_cache.py`) thay CLIP forward mỗi iter.
 `data.train_target`: `latest_hole` (mặc định, như CE-Loc gốc) | `positive` (DELTA7+) — tập đích của mẫu = {mọi lỗ tới lượt t} ∪ {box
 positive gán tay của `data.positive_file` / `--positive-file` (`box_review/ce130_train.jsonl`) có IoU với mọi lỗ <=
@@ -329,6 +330,9 @@ def main():
         return {"loss": z(torch.float64), "n": 0, "gn": [], "data": 0.0, "skip": z(torch.long), "extra": {}}
 
     log(f"[boot ] khởi động xong {fmt_time(time.time() - t_boot)} — bắt đầu iter {start}/{tr['max_iter']}")
+    if tr.get("snapshot_initial") and start == 0 and main_proc:
+        path = ckm.save_snapshot({"model": model.state_dict(), "iter": 0, "epoch": 0, "config": cfg, "env": env}, "ep000.pth")
+        log(f"          📸 {os.path.relpath(path, a.save_dir)} (weight khởi tạo)")
 
     # ------------------------------------------------------------------ vòng train
     t_train, t_last, it = time.time(), time.time(), start

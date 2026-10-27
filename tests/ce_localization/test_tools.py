@@ -1,4 +1,4 @@
-"""Tool đọc dump của eval (không model): `cnll_outliers.py`, `plot_snapshots.py`, `plot_cnll_worst.py` (CE-CoCount + CE-130)."""
+"""Tool đọc dump của eval (không model): `cnll_outliers.py`, `plot_snapshots.py`, `plot_snapshot_compare.py`, `plot_cnll_worst.py` (CE-CoCount + CE-130)."""
 
 import json
 import os
@@ -56,6 +56,44 @@ def test_plot_snapshots_tool(tmp_path, monkeypatch):
     assert [x["epoch"] for x in r["A"]] == [10, 20] and e10["n"] == 100 and e10["gt"] == 0.5 and e10["hit50"] == 0.1
     assert np.isclose(e10["mean"], sel.mean()) and np.isclose(e10["median"], np.median(sel)) and np.isclose(e10["trim1"], sel[:-1].mean())
     assert e10["mean"] > r["B"][1]["mean"] and sorted(os.listdir(out)) == ["snapshots.png", "summary.json"]
+
+
+def test_plot_snapshot_compare_tool(tmp_path, monkeypatch):
+    """history.json có resume (elapsed đặt lại) -> thời lượng = tổng các phiên, iter trùng giữ bản sau; đọc cả khoá `<key>_mock` (DELTA6);
+    run thiếu snapshot / dump vẫn vẽ; ghi đủ 2 hình."""
+    from ce_localization.tools import plot_snapshot_compare as pc
+    rng = np.random.default_rng(2)
+    W, S = tmp_path / "w", tmp_path / "s"
+    for run, ipe, mock in (("a", 10, True), ("b", 20, False)):
+        hist, el = [], 0.0
+        for it in range(5, 41 * ipe // 10 + 1, 5):
+            el = 0.0 if it == 20 * ipe // 10 + 5 else el + 3.0          # phiên 2 bắt đầu sau iter 2 epoch
+            hist.append({"iter": it, "loss": 1 / it, "loss_eps": 0.5 / it, "loss_aux": 0.2 / it, "aux_ratio": 0.9, "elapsed_sec": el})
+            if it % ipe == 0:
+                hist.append({"iter": it, "epoch": it // ipe, "epoch_train_loss": 1 / it})
+        hist.append({**hist[0], "loss": 99.0})                          # iter trùng sau resume
+        (W / run).mkdir(parents=True)
+        (W / run / "history.json").write_text(json.dumps({"config": {"training": {"batch_size": 8, "lr": 1e-4}}, "history": hist}))
+        for sub, key in (("ce130_test_all", "inpainted"), ("cocount_review5", "cocount")):
+            (S / run / sub).mkdir(parents=True)
+            k = key + "_mock" if mock else key
+            for ep in ((1, 2, 4) if run == "a" else (2, 4)):
+                rows = [{"image_id": f"im{i}", "cnll": (rng.gamma(1.0, 2.0, 30) - 1).tolist()} for i in range(20)]
+                (S / run / sub / f"ep{ep:03d}_boxes.json").write_text(json.dumps({"results": {k: rows}}))
+                (S / run / sub / f"ep{ep:03d}.json").write_text(json.dumps({"results": {k: {"cnll": 1.0 + ep, "cnll_gt": 2.0}}}))
+    ep, ipe, h, sec, sess, _ = pc.load_history(str(W / "a" / "history.json"))
+    assert ipe == 10 and sess == 2 and h["loss"][0] == 99.0 and len(ep) == len(set(ep)) == 8
+    assert sec == 3.0 * 4 + 3.0 * 3                                       # phiên 1: iter 5..20, phiên 2: 25..40 (đặt lại ở 25)
+    assert pc.result(str(S / "a" / "ce130_test_all" / "ep001.json"), "inpainted")["cnll"] == 2.0
+    out = tmp_path / "o" / "cmp"
+    monkeypatch.setattr(sys, "argv", ["plot_snapshot_compare.py", "--out-prefix", str(out), "--weights-root", str(W), "--snap-root", str(S),
+                                      "--run", "a=Base", "--run", "b=+ More", "--epochs", "1", "2", "4", "--density-epochs", "2", "4",
+                                      "--smooth-iters", "10"])
+    pc.main()
+    assert sorted(os.listdir(tmp_path / "o")) == ["cmp_cnll_all_boxes_density.png", "cmp_overview.png"]
+    monkeypatch.setattr(sys, "argv", ["plot_snapshot_compare.py", "--out-prefix", str(out), "--run", "a"])
+    with __import__("pytest").raises(SystemExit):
+        pc.main()
 
 
 def _rows(rng, items):

@@ -16,7 +16,7 @@ from ce_localization.models.text import TextTable
 
 CFG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "ce_localization", "config", "delta")
 RUNS = ("delta4", "delta5", "delta5_1", "delta5_2", "delta5_3", "delta5_4", "delta5_5", "delta6", "delta6_1", "delta6_2", "delta7",
-        "delta7_0_1", "delta7_0_2", "delta7_1")
+        "delta7_0_1", "delta7_0_2", "delta7_1", "delta8")
 COCOUNT_NAMES = ("INTRA_FOO_TOM1_TOM2_00008_00006_0_200", "INTER_OFF_PEN0_PNC0_00007_00005_0_40")
 FAKE_TEXT_SHA = hashlib.sha256(b"fake CLIP text").digest()
 # ViT thật -> (ảnh, patch, hidden giả): cùng lưới g = ảnh / patch như bản thật

@@ -19,7 +19,7 @@ U-Net 1D nhận [x_t ; refined] -> ε̂ ;  loss = ε-MSE + aux_loss_weight · [M
 | `models/` | `box_policy` (BoxPolicy, sampler mock / ddim, `build_model` / `load_checkpoint`), `unet1d`, `clip_refiner` (port `refs/CE-Loc-update/`), `text` |
 | `data/` | `turns` (CE-130 theo (nhánh, lượt), split như CE-Loc gốc, cache uint8), `density` (bản `full` cho ảnh gốc), `cocount` (CE-CoCount, lọc box) |
 | `engine/` | `add_eval` (suy luận K mẫu, IoU, on_object, C-NLL), `train_utils` (DDP, lịch lr, checkpoint nguyên tử) |
-| `tools/` | `build_turn_index`, `build_density_index`, `build_add_cache`, `build_clip_cache` (dữ liệu / cache, một lần); `cnll_outliers`, `plot_cnll_worst`, `plot_snapshots` (đọc dump eval) |
+| `tools/` | `build_turn_index`, `build_density_index`, `build_add_cache`, `build_clip_cache` (dữ liệu / cache, một lần); `cnll_outliers`, `plot_cnll_worst`, `plot_snapshots`, `plot_snapshot_compare` (đọc dump eval / `history.json`) |
 | `box_review/` | web Gradio rà box dữ liệu bằng tay (local) — docstring `box_review/app.py` |
 | `notebooks/add_kaggle.ipynb` | train một run trên Kaggle T4×2 (gitignore, chỉ ở local; tự clone branch `delta`) |
 
@@ -31,6 +31,7 @@ U-Net 1D nhận [x_t ; refined] -> ε̂ ;  loss = ε-MSE + aux_loss_weight · [M
 | `delta7` | `delta6` + `data.train_target: positive`: mỗi iter đích = 1 box ngẫu nhiên đều trong mọi lỗ tới lượt t + box `positive` gán tay của `output/add/box_review/ce130_train.jsonl` không trùng lỗ (IoU <= `positive_hole_iou` 0,3), `--positive-file` khi chạy nơi khác | mục 13 |
 | `delta7_0_1` / `7_0_2` | `delta7` + `data.positive_sampling` `all` (mọi box đích / ảnh mỗi iter, mỗi box (t, ε) riêng, loss TB trong ảnh) / `pair` (mỗi cặp (ảnh, box) một mẫu, 120 epoch theo cặp = 132.240 iter) | mục 13.2 |
 | `delta7_1` | `delta7` + box log + GIoU 0,1 (`base: [delta7.yaml, delta6_1.yaml]` = `delta6_1` + đích positive) | mục 13.3 |
+| `delta8` | `delta7_0_2` chỉ 10 epoch đầu (11.020 iter, giữ lịch lr 7.0.2), snapshot mọi epoch + `ep000` (`training.snapshot_initial`) | mục 14 |
 
 ## Chạy (server, trong `object-detection/ce_localization/`)
 
@@ -51,6 +52,8 @@ python ../tools/run_on_free_gpu.py -- eval.py --ckpt ../weights/add/delta6/best.
 python ../tools/run_on_free_gpu.py -- eval.py --ckpt ../weights/add/delta6/snapshots/ep010.pth --split test_all \
     --out /mnt/disk1/aiotlab/haitn/output/add/snapshots/delta6/ep010.json
 python tools/plot_snapshots.py --run DELTA6=../../output/add/snapshots/delta6 --out ../../output/add/viz/snapshots
+python tools/plot_snapshot_compare.py --out-prefix ../../output/add/viz/snapshots/<tên> --run "delta6=CE-Loc + Box Obj + Refiner" \
+  --run "delta7_1=+ Positive targets + LogScale, GIoU weight 0.10"   # overview loss + C-NLL / snapshot, density C-NLL mọi box
 ```
 
 Đo 2026-10-23 (A30, batch 16 ảnh × 30 box, mock, bản trước `ObjKV`): CE-130 test 4.948 mẫu 11 phút (GPU rảnh) – 23 phút (GPU dùng

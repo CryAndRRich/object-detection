@@ -63,7 +63,7 @@ def test_flow_val_select_resume_eval(tmp_path, monkeypatch):
 def test_flow_train_loss_select_resume(tmp_path, monkeypatch):
     """DELTA7 (= DELTA6, giao thức CE-Loc gốc, + đích train = box positive ngẫu nhiên): không dựng / chạy val; mỗi epoch TRỌN một dòng loss train TB = TB đúng các bước (log mỗi bước), phần
     lẻ cuối không chấm; best.pth = epoch thấp nhất; resume GIỮA epoch == train liền với cache token CLIP + snapshot mỗi epoch (b: cache /
-    snapshot không đổi train; rút đích positive theo (seed, iter, rank) nên resume vẫn khớp); snapshot nạp + eval được; eval --split
+    snapshot không đổi train; `snapshot_initial` ghi ep000 = weight trước iter 0; rút đích positive theo (seed, iter, rank) nên resume vẫn khớp); snapshot nạp + eval được; eval --split
     test_all; file positive có id ngoài samples/train -> dừng."""
     import ce_localization.train as ta
     from ce_localization.tools import build_clip_cache as bc
@@ -73,7 +73,7 @@ def test_flow_train_loss_select_resume(tmp_path, monkeypatch):
     _fake_turn_index(base)
     c_path, cfg = run_cfg(tmp_path, base, "delta7")
     assert cfg["data"]["train_target"] == "positive" and cfg["eval"]["split"] is None and cfg["eval"]["select_metric"] == "train_loss" and cfg["training"]["snapshot_every_epochs"] == 10
-    c_snap, _ = run_cfg(tmp_path, base, "delta7", name="snap", snapshot_every_epochs=1)
+    c_snap, _ = run_cfg(tmp_path, base, "delta7", name="snap", snapshot_every_epochs=1, snapshot_initial=True)
     monkeypatch.setattr(ta, "run_eval", lambda *x, **k: (_ for _ in ()).throw(AssertionError("không được chạy val")))
     clip_dir = str(tmp_path / "clip")
     _patch_clip(monkeypatch)
@@ -89,9 +89,11 @@ def test_flow_train_loss_select_resume(tmp_path, monkeypatch):
     run(c_path, a, n_it, "--resume")
     run(c_snap, b, n_it, "--clip-cache", clip_dir)
     ka, kb = _same_state(a, b)
-    assert sorted(os.listdir(os.path.join(b, "snapshots"))) == ["ep001.pth", "ep002.pth"] and not os.path.exists(os.path.join(a, "snapshots"))
+    assert sorted(os.listdir(os.path.join(b, "snapshots"))) == ["ep000.pth", "ep001.pth", "ep002.pth"] and not os.path.exists(os.path.join(a, "snapshots"))
     sn = torch.load(os.path.join(b, "snapshots", "ep002.pth"), weights_only=False)
     assert (sn["iter"], sn["epoch"], set(sn)) == (2 * ipe, 2, {"model", "iter", "epoch", "config", "env"})
+    s0, s1 = (torch.load(os.path.join(b, "snapshots", f"ep00{e}.pth"), weights_only=False) for e in (0, 1))
+    assert (s0["iter"], s0["epoch"]) == (0, 0) and any(not torch.equal(s0["model"][k], s1["model"][k]) for k in s0["model"])
     ep = [h for h in kb["history"] if "epoch_train_loss" in h]
     steps = [h["loss"] for h in kb["history"] if "loss" in h]
     assert [h["iter"] for h in ep] == [ipe, 2 * ipe] and [h["epoch_steps"] for h in ep] == [ipe, ipe] and len(steps) == n_it
