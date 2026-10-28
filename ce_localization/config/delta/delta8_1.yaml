@@ -1,0 +1,9 @@
+# DELTA8.1 (docs/EXPERIMENT_DELTA.md mục 14) = DELTA8 (DELTA7.0.2 15 epoch đầu, snapshot mọi epoch + ep000) + box mã hoá log + GIoU 0,1
+# trong loss phụ refiner — đúng 2 khoá model DELTA7.1 thêm vào DELTA7 (người dùng chốt 2026-10-28). Giữ eval mock của DELTA8.
+base: [delta8.yaml]
+experiment: "delta8_1"
+description: "DELTA8 + box log + GIoU 0,1 (15 epoch, snapshot mọi epoch + weight khởi tạo)"
+model:
+  box_coder: {type: log, min_size_ratio: 0.0078125}   # cạnh nhỏ nhất 1/128 canvas, như tác giả (= delta5.yaml)
+  refiner:
+    aux_giou_weight: 0.1

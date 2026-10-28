@@ -157,8 +157,10 @@ def test_configs_inherit_only_intended_keys(tmp_path):
                                                   "data": {"positive_sampling": "pair"}, "training": {
                                                       "cosine_warmup_iters": ipe, "cosine_t_max": 120 * ipe, "max_iter": 120 * ipe}})
     assert L("delta8") == merge(L("delta7_0_2"), {"experiment": "delta8", "description": L("delta8")["description"], "training": {
-        "max_iter": 10 * ipe, "snapshot_every_epochs": 1, "snapshot_initial": True}})
+        "max_iter": 15 * ipe, "snapshot_every_epochs": 1, "snapshot_initial": True}})
     assert L("delta8")["training"]["cosine_t_max"] == 120 * ipe and L("delta7_0_2")["training"]["snapshot_initial"] is False
+    assert L("delta8_1") == merge(L("delta8"), {"experiment": "delta8_1", "description": L("delta8_1")["description"],   # = 2 khoá model 7 -> 7.1
+                                                "model": {k: L("delta7_1")["model"][k] for k in ("box_coder", "refiner")}})
     (tmp_path / "a.yaml").write_text("x: {y: 1, z: [1]}\nk: 1\n")
     (tmp_path / "b.yaml").write_text("base: a.yaml\nx: {z: [2]}\n")
     assert load_config(str(tmp_path / "b.yaml")) == {"x": {"y": 1, "z": [2]}, "k": 1}

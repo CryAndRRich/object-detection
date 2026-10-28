@@ -1,5 +1,6 @@
 """Tool đọc dump của eval (không model): `cnll_outliers.py`, `plot_snapshots.py`, `plot_snapshot_compare.py`, `plot_cnll_worst.py` (CE-CoCount + CE-130)."""
 
+import argparse
 import json
 import os
 import sys
@@ -60,7 +61,7 @@ def test_plot_snapshots_tool(tmp_path, monkeypatch):
 
 def test_plot_snapshot_compare_tool(tmp_path, monkeypatch):
     """history.json có resume (elapsed đặt lại) -> thời lượng = tổng các phiên, iter trùng giữ bản sau; đọc cả khoá `<key>_mock` (DELTA6);
-    run thiếu snapshot / dump vẫn vẽ; ghi đủ 2 hình."""
+    run thiếu snapshot / dump vẫn vẽ; tập (CE-130 train) chỉ một run có vẫn thành ô / hàng, không run nào có thì bỏ; ghi đủ 2 hình."""
     from ce_localization.tools import plot_snapshot_compare as pc
     rng = np.random.default_rng(2)
     W, S = tmp_path / "w", tmp_path / "s"
@@ -74,7 +75,7 @@ def test_plot_snapshot_compare_tool(tmp_path, monkeypatch):
         hist.append({**hist[0], "loss": 99.0})                          # iter trùng sau resume
         (W / run).mkdir(parents=True)
         (W / run / "history.json").write_text(json.dumps({"config": {"training": {"batch_size": 8, "lr": 1e-4}}, "history": hist}))
-        for sub, key in (("ce130_test_all", "inpainted"), ("cocount_review5", "cocount")):
+        for sub, key in (("ce130_test_all", "inpainted"), ("cocount_review5", "cocount")) + ((("ce130_train", "inpainted"),) if run == "b" else ()):
             (S / run / sub).mkdir(parents=True)
             k = key + "_mock" if mock else key
             for ep in ((1, 2, 4) if run == "a" else (2, 4)):
@@ -85,6 +86,10 @@ def test_plot_snapshot_compare_tool(tmp_path, monkeypatch):
     assert ipe == 10 and sess == 2 and h["loss"][0] == 99.0 and len(ep) == len(set(ep)) == 8
     assert sec == 3.0 * 4 + 3.0 * 3                                       # phiên 1: iter 5..20, phiên 2: 25..40 (đặt lại ở 25)
     assert pc.result(str(S / "a" / "ce130_test_all" / "ep001.json"), "inpainted")["cnll"] == 2.0
+    ns = argparse.Namespace(snap_root=str(S), epochs=[1, 2, 4], density_epochs=[2, 4])
+    names = lambda runs: [st[0] for st in pc.present_sets([{"run": r} for r in runs], ns)]
+    assert names(["a", "b"]) == ["ce130_train", "ce130_test_all", "cocount_review5"]
+    assert names(["a"]) == ["ce130_test_all", "cocount_review5"]
     out = tmp_path / "o" / "cmp"
     monkeypatch.setattr(sys, "argv", ["plot_snapshot_compare.py", "--out-prefix", str(out), "--weights-root", str(W), "--snap-root", str(S),
                                       "--run", "a=Base", "--run", "b=+ More", "--epochs", "1", "2", "4", "--density-epochs", "2", "4",

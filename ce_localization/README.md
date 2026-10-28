@@ -31,7 +31,8 @@ U-Net 1D nhận [x_t ; refined] -> ε̂ ;  loss = ε-MSE + aux_loss_weight · [M
 | `delta7` | `delta6` + `data.train_target: positive`: mỗi iter đích = 1 box ngẫu nhiên đều trong mọi lỗ tới lượt t + box `positive` gán tay của `output/add/box_review/ce130_train.jsonl` không trùng lỗ (IoU <= `positive_hole_iou` 0,3), `--positive-file` khi chạy nơi khác | mục 13 |
 | `delta7_0_1` / `7_0_2` | `delta7` + `data.positive_sampling` `all` (mọi box đích / ảnh mỗi iter, mỗi box (t, ε) riêng, loss TB trong ảnh) / `pair` (mỗi cặp (ảnh, box) một mẫu, 120 epoch theo cặp = 132.240 iter) | mục 13.2 |
 | `delta7_1` | `delta7` + box log + GIoU 0,1 (`base: [delta7.yaml, delta6_1.yaml]` = `delta6_1` + đích positive) | mục 13.3 |
-| `delta8` | `delta7_0_2` chỉ 10 epoch đầu (11.020 iter, giữ lịch lr 7.0.2), snapshot mọi epoch + `ep000` (`training.snapshot_initial`) | mục 14 |
+| `delta8` | `delta7_0_2` chỉ 15 epoch đầu (16.530 iter, giữ lịch lr 7.0.2), snapshot mọi epoch + `ep000` (`training.snapshot_initial`) | mục 14 |
+| `delta8_1` | `delta8` + box log + GIoU 0,1 (2 khoá model của `delta7_1`) | mục 14 |
 
 ## Chạy (server, trong `object-detection/ce_localization/`)
 

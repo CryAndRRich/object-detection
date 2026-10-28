@@ -1,11 +1,12 @@
-# DELTA8 (docs/EXPERIMENT_DELTA.md mục 14) = DELTA7.0.2 (mỗi cặp (mẫu, box đích) một phần tử) nhưng CHỈ 10 epoch đầu (11.020 iter), soi
+# DELTA8 (docs/EXPERIMENT_DELTA.md mục 14) = DELTA7.0.2 (mỗi cặp (mẫu, box đích) một phần tử) nhưng CHỈ 15 epoch đầu (16.530 iter), soi
 # chi tiết: mọi run CE-CoCount đẹp nhất ở ep 10 rồi xấu dần (7.0.2: 2,3 -> 54) và loss giảm mạnh nhất tới ep 10 (người dùng chốt
-# 2026-10-27). Giữ NGUYÊN lịch lr 7.0.2 (warmup 1.102 iter, cosine tới 132.240) rồi dừng ở 11.020 ⇒ lr ~1e-4 suốt run, đúng đoạn đầu của
-# 7.0.2 (ep010 ≈ ep010 của 7.0.2). Snapshot MỌI epoch + ep000 = weight khởi tạo -> 11 checkpoint eval trên server.
+# 2026-10-27: 10 epoch; 2026-10-28 nâng 15 epoch — nối `last.pth` 11.020 iter của lần chạy 10 epoch, `training` chỉ khác `max_iter`).
+# Giữ NGUYÊN lịch lr 7.0.2 (warmup 1.102 iter, cosine tới 132.240) ⇒ lr ~1e-4 suốt run, đúng đoạn đầu của 7.0.2 (ep010 ≈ ep010 của
+# 7.0.2). Snapshot MỌI epoch + ep000 = weight khởi tạo -> 16 checkpoint eval trên server.
 base: [delta7_0_2.yaml]
 experiment: "delta8"
-description: "DELTA7.0.2 chỉ 10 epoch đầu (11.020 iter, lịch lr 7.0.2), snapshot mọi epoch + weight khởi tạo"
+description: "DELTA7.0.2 chỉ 15 epoch đầu (16.530 iter, lịch lr 7.0.2), snapshot mọi epoch + weight khởi tạo"
 training:
-  max_iter: 11020                   # 10 epoch × 1.102 iter; cosine_t_max giữ 132.240 (không về 0)
+  max_iter: 16530                   # 15 epoch × 1.102 iter; cosine_t_max giữ 132.240 (không về 0)
   snapshot_every_epochs: 1
   snapshot_initial: true
