@@ -19,20 +19,20 @@ U-Net 1D nhận [x_t ; refined] -> ε̂ ;  loss = ε-MSE + aux_loss_weight · [M
 | `models/` | `box_policy` (BoxPolicy, sampler mock / ddim, `build_model` / `load_checkpoint`), `unet1d`, `clip_refiner` (port `refs/CE-Loc-update/`), `text` |
 | `data/` | `turns` (CE-130 theo (nhánh, lượt), split như CE-Loc gốc, cache uint8), `density` (bản `full` cho ảnh gốc), `cocount` (CE-CoCount, lọc box) |
 | `engine/` | `add_eval` (suy luận K mẫu, IoU, on_object, C-NLL), `train_utils` (DDP, lịch lr, checkpoint nguyên tử) |
-| `tools/` | `build_turn_index`, `build_density_index`, `build_add_cache`, `build_clip_cache` (dữ liệu / cache, một lần); `cnll_outliers`, `plot_cnll_worst`, `plot_snapshots`, `plot_snapshot_compare` (đọc dump eval / `history.json`) |
+| `tools/` | `build_turn_index`, `build_density_index`, `build_add_cache`, `build_clip_cache` (dữ liệu / cache, một lần); `cnll_outliers`, `plot_cnll_worst`, `plot_snapshots`, `plot_snapshot_compare`, `rescore_cnll` (đọc / đổi dump eval, `history.json`) |
 | `box_review/` | web Gradio rà box dữ liệu bằng tay (local) — docstring `box_review/app.py` |
-| `notebooks/add_kaggle.ipynb` | train một run trên Kaggle T4×2 (gitignore, chỉ ở local; tự clone branch `delta`) |
+| `../notebooks/add_kaggle.ipynb` | train một run trên Kaggle T4×2 (`object-detection/notebooks/`, gitignore, chỉ ở local; tự clone branch `delta`) |
 
 | config | khác | |
 |---|---|---|
-| `delta4` | — (box linear, val mock, best theo val `mean_iou_any`) | mục 10 |
-| `delta5` / `5_1` / `5_3` / `5_2` / `5_4` / `5_5` | box log (`model.box_coder`), val ddim; `aux_giou_weight` 0 / 0,1 / 0,25 / 0,5 / 0,75 / 1,0 | mục 11 |
-| `delta6` / `6_1` / `6_2` | `delta4` / `5_1` / `5_4` (GIoU 0,1 / 0,75) + `protocol_celoc.yaml`: không val, best = loss train TB / epoch thấp nhất, 120 epoch, lr 1e-4 cosine về 0, train lấy ngẫu nhiên 30 vật / ảnh; snapshot weight mỗi 10 epoch (`snapshots/`, eval sau để xem độ ổn định) | mục 12 |
-| `delta7` | `delta6` + `data.train_target: positive`: mỗi iter đích = 1 box ngẫu nhiên đều trong mọi lỗ tới lượt t + box `positive` gán tay của `output/add/box_review/ce130_train.jsonl` không trùng lỗ (IoU <= `positive_hole_iou` 0,3), `--positive-file` khi chạy nơi khác | mục 13 |
-| `delta7_0_1` / `7_0_2` | `delta7` + `data.positive_sampling` `all` (mọi box đích / ảnh mỗi iter, mỗi box (t, ε) riêng, loss TB trong ảnh) / `pair` (mỗi cặp (ảnh, box) một mẫu, 120 epoch theo cặp = 132.240 iter) | mục 13.2 |
-| `delta7_1` | `delta7` + box log + GIoU 0,1 (`base: [delta7.yaml, delta6_1.yaml]` = `delta6_1` + đích positive) | mục 13.3 |
-| `delta8` | `delta7_0_2` chỉ 15 epoch đầu (16.530 iter, giữ lịch lr 7.0.2), snapshot mọi epoch + `ep000` (`training.snapshot_initial`) | mục 14 |
-| `delta8_1` | `delta8` + box log + GIoU 0,1 (2 khoá model của `delta7_1`) | mục 14 |
+| `delta4` | — (box linear, val mock, best theo val `mean_iou_any`) | mục 3 |
+| `delta5` / `5_1` / `5_3` / `5_2` / `5_4` / `5_5` | box log (`model.box_coder`), val ddim; `aux_giou_weight` 0 / 0,1 / 0,25 / 0,5 / 0,75 / 1,0 | mục 3 |
+| `delta6` / `6_1` / `6_2` | `delta4` / `5_1` / `5_4` (GIoU 0,1 / 0,75) + `protocol_celoc.yaml`: không val, best = loss train TB / epoch thấp nhất, 120 epoch, lr 1e-4 cosine về 0, train lấy ngẫu nhiên 30 vật / ảnh; snapshot weight mỗi 10 epoch (`snapshots/`, eval sau để xem độ ổn định) | mục 4 |
+| `delta7` | `delta6` + `data.train_target: positive`: mỗi iter đích = 1 box ngẫu nhiên đều trong mọi lỗ tới lượt t + box `positive` gán tay của `output/add/box_review/ce130_train.jsonl` không trùng lỗ (IoU <= `positive_hole_iou` 0,3), `--positive-file` khi chạy nơi khác | mục 5 |
+| `delta7_0_1` / `7_0_2` | `delta7` + `data.positive_sampling` `all` (mọi box đích / ảnh mỗi iter, mỗi box (t, ε) riêng, loss TB trong ảnh) / `pair` (mỗi cặp (ảnh, box) một mẫu, 120 epoch theo cặp = 132.240 iter) | mục 5 |
+| `delta7_1` | `delta7` + box log + GIoU 0,1 (`base: [delta7.yaml, delta6_1.yaml]` = `delta6_1` + đích positive) | mục 5 |
+| `delta8` | `delta7_0_2` chỉ 15 epoch đầu (16.530 iter, giữ lịch lr 7.0.2), snapshot mọi epoch + `ep000` (`training.snapshot_initial`) | mục 6 |
+| `delta8_1` | `delta8` + box log + GIoU 0,1 (2 khoá model của `delta7_1`) | mục 6 |
 
 ## Chạy (server, trong `object-detection/ce_localization/`)
 
@@ -65,7 +65,7 @@ chung), đỉnh 1,2 GB; tập train 19.998 mẫu 47 phút – 1h41m, đỉnh 5,4
 
 | chỉ số | đo gì |
 |---|---|
-| `cnll` | **C-NLL như bài Add One Take One**: mỗi ảnh lấy box C-NLL thấp nhất trong 30, TB trên ảnh (>= 5 vật cùng lớp). Đặc trưng [w, h, IoU lớn nhất với vật, TB khoảng cách 3 tâm gần nhất], quan hệ tính với vật cả hai lớp (CE-CoCount). `cnll_gt` = cùng cách trên lỗ GT |
+| `cnll` | **C-NLL như bài Add One Take One**: mỗi ảnh lấy box C-NLL thấp nhất trong 30, TB trên ảnh (>= 5 vật cùng lớp). Đặc trưng [w, h, IoU lớn nhất với vật, TB khoảng cách 3 tâm gần nhất], quan hệ tính với vật cả hai lớp (CE-CoCount). Từ 2026-10-29 trừ NLL tại tâm μ (= ½ Mahalanobis², >= 0) thay vì min trên vật; JSON cũ đổi bằng `tools/rescore_cnll.py`. `cnll_gt` = cùng cách trên lỗ GT |
 | `best_iou@30_*` / `hit50@30_*` | oracle best-of-30 với lỗ bất kỳ (`any`) / lỗ mới nhất (`latest`, chỉ CE-130) |
 | `mean_iou_any` / `box_hit50_any` | IoU từng box (không oracle) — chọn best.pth theo val (DELTA4 / 5.x) |
 | `hole_cover`, `on_object`, `in_image`, `degenerate` | độ phủ nhiều lỗ; box đè vật (IoA >= 0,5); box trong ảnh; box suy biến |

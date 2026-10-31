@@ -62,7 +62,7 @@ def smooth(y, n):
 
 
 def signed_log(x):
-    """Trục log có dấu: C-NLL âm vẫn vẽ được (-1 / 1 đối xứng quanh 0)."""
+    """Trục log có dấu: dump cũ (C-NLL trừ min trên vật, chưa `tools/rescore_cnll.py`) có giá trị âm vẫn vẽ được."""
     return np.sign(x) * np.log10(1 + np.abs(x))
 
 
@@ -140,7 +140,7 @@ def density(plt, runs, a, path):
     sets = present_sets(runs, a)
     fh = 1.3 + 5 * len(sets)   # cao hình (inch): lề trên / dưới cố định theo inch, không theo tỉ lệ
     fig, axs = plt.subplots(len(sets), len(a.density_epochs), figsize=(5 * len(a.density_epochs), fh), squeeze=False)
-    grid = np.linspace(signed_log(-1.5), signed_log(15000), 600)
+    grid = np.linspace(0.0, signed_log(15000), 600)                  # C-NLL >= 0 (trừ NLL tại μ, từ 2026-10-29)
     base = runs[0]["label"]
     for row, (sub, key, name) in enumerate(sets):
         for col, e in enumerate(a.density_epochs):
@@ -158,7 +158,7 @@ def density(plt, runs, a, path):
             ax.set_ylim(bottom=0)
             ax.spines["left"].set_visible(False)
             ax.grid(axis="y", visible=False)
-            ticks = np.array([-1, 1, 10, 100, 1000, 10000], float)
+            ticks = np.array([0, 1, 10, 100, 1000, 10000], float)
             ax.set_xticks(signed_log(ticks), [f"{t:g}" for t in ticks])
             if col == 0:
                 ax.set_ylabel("share of boxes")
@@ -199,7 +199,7 @@ def main():
     setup_style(plt)
     os.makedirs(os.path.dirname(os.path.abspath(a.out_prefix)), exist_ok=True)
     for kind, fn in (("overview", overview), ("cnll_all_boxes_density", density)):
-        if a.only and not kind.startswith(a.only):
+        if a.only and a.only not in kind:                                 # "density" nằm cuối tên hình
             continue
         p = f"{a.out_prefix}_{kind}.png"
         fn(plt, runs, a, p)

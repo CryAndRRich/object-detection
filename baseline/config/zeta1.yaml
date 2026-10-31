@@ -1,0 +1,44 @@
+# ZETA1 = BootPlace (CVPR 2025) — finetune CE-130 train theo bản tác giả bài (refs/BOOTPLACE/finetune.py) từ weight BOOTPLACE_Cityscapes:
+# bỏ class_embed + query_embed của checkpoint (khởi tạo lại), không loss lớp. Batch 64 như CE-Loc; lr tác giả (batch 1) × √64.
+# docs/EXPERIMENT_ZETA.md mục 8–10.
+method: bootplace
+model:
+  backbone: resnet50
+  dilation: false
+  hidden_dim: 256
+  dropout: 0.1
+  nheads: 8
+  dim_feedforward: 2048
+  enc_layers: 6
+  dec_layers: 6
+  num_queries: 120             # ghi đè bằng số query của checkpoint (bbox_embed.loc_proj)
+loss:
+  set_cost_class: 0
+  set_cost_bbox: 5
+  set_cost_giou: 2
+  ce_loss_coef: 0
+  bbox_loss_coef: 5
+  giou_loss_coef: 2
+  clip_loss_coef: 1
+  eos_coef: 0.1
+finetune:
+  init: ../weights/add/zeta1/pretrained/bootplace_cityscapes.pth
+  drop_keys: [class_embed.weight, class_embed.bias, query_embed.weight]
+  epochs: 10
+  batch_size: 64               # toàn cục; 2 GPU × 32, cộng dồn micro_batch ảnh / lượt
+  micro_batch: 4
+  lr: 8.0e-5                   # 1e-5 × √(64 / 1)
+  lr_backbone: 8.0e-6          # 1e-6 × √64; > 0 ⇒ train layer2–4
+  weight_decay: 1.0e-4
+  grad_clip: 0.1
+  amp: true
+  train_scales: [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
+  train_max_size: 1333
+  num_workers: 2
+  log_every: 20
+  seed: 42
+predict:
+  k: 30
+  test_size: 800
+  test_max_size: 960
+  fg_select: median

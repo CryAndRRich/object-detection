@@ -1,5 +1,7 @@
 """Web rà box tay (`ce_localization/box_review/`): nguồn CE-CoCount theo file + CE-130 theo nhánh trên dữ liệu giả, SVG (box đã loại
-biến mất), phiên rà (loại box, lưu một dòng mỗi màn, nháp, hoàn tác cả lần lưu, điền sẵn box vật giữa các nhánh cùng ảnh), dựng giao diện."""
+biến mất), phiên rà (loại box, lưu một dòng mỗi màn, nháp, hoàn tác cả lần lưu, điền sẵn box vật giữa các nhánh cùng ảnh), dựng giao diện;
+chế độ CHỌN box model sinh (`ce130_pred` / `cocount_pred`: dump eval -> pixel ảnh gốc, bấm bật / tắt, ghi `good` + `positive`), chia
+việc giữa người rà theo ảnh (`split_screens`), một app chọn Data + User trên giao diện (`PredHub`)."""
 
 import json
 import os
@@ -7,8 +9,9 @@ import os
 import pytest
 from PIL import Image
 
-from ce_localization.box_review.app import ReviewStore, Session, box_svg, build_ui
-from ce_localization.box_review.sources import ce130_screens, cocount_screens, dedup_boxes
+from ce_localization.box_review.app import PredHub, ReviewStore, Session, box_svg, build_ui, split_screens
+from ce_localization.box_review.sources import (ce130_pred_screens, ce130_screens, cocount_pred_screens, cocount_screens,
+                                               dedup_boxes, preselect)
 
 
 def _fake_cocount(root):
@@ -178,3 +181,146 @@ def test_build_ui(tmp_path):
     sc = cocount_screens(_fake_cocount(str(tmp_path / "cc")))
     demo, launch_kw = build_ui(Session(sc, str(tmp_path / "r.jsonl"), "CE-CoCount"), gr)
     assert demo is not None and isinstance(launch_kw, dict)
+
+
+def _fake_pred(tmp_path):
+    """Một nhánh ảnh 200×100 (canvas 512: s = 2,56, vùng 512×256), 3 vật, vật 1 bị xoá ở lượt 1; dump 4 box (box 2 / 3 trùng)."""
+    idx = {"branches": {"test/9_b1": {"split": "test", "wh": [200, 100], "class": "apple", "removed": [0, 1, 0],
+                                      "objects": [[0, 0, 10, 10], [20, 20, 40, 40], [50, 50, 70, 70]], "holes": [[20, 20, 40, 40]]}},
+           "turns": {"9_b1_t1": {"branch": "test/9_b1", "t": 1, "sample": "test/images/9_1.png", "density": "test/density/9_1.png"}}}
+    (tmp_path / "ti.json").write_text(json.dumps(idx))
+    os.makedirs(tmp_path / "samples" / "test" / "images")
+    Image.new("RGB", (200, 100)).save(tmp_path / "samples" / "test" / "images" / "9_1.png")
+    boxes = [[51.2, 51.2, 102.4, 102.4], [0, 0, 600, 300], [256, 128, 307.2, 179.2], [256, 128, 307.2, 179.4]]
+    (tmp_path / "d_boxes.json").write_text(json.dumps({"results": {"inpainted": [
+        {"image_id": "9_b1_t1", "t": 1, "wh": [512.0, 256.0], "boxes": boxes, "n_obj": 2, "cnll": None, "cnll_gt": None}]}}))
+    return ce130_pred_screens(str(tmp_path / "d_boxes.json"), str(tmp_path / "ti.json"), str(tmp_path / "samples"))
+
+
+def test_ce130_pred_screens_and_select_mode(tmp_path):
+    sc = _fake_pred(tmp_path)
+    assert len(sc) == 1 and sc[0]["id"] == "9_b1_t1" and sc[0]["wh"] == [200, 100]
+    obj, model = sc[0]["groups"]
+    assert obj["boxes"] == [[0, 0, 10, 10], [50, 50, 70, 70]] and obj["click"] is False          # vật còn ở lượt 1
+    assert model["boxes"][0] == pytest.approx([20, 20, 40, 40]) and model["boxes"][1] == [0, 0, 200, 100]   # canvas -> ảnh gốc, kẹp
+    assert sc[0]["views"][0][1].endswith("samples/test/images/9_1.png") and sc[0]["meta"]["sample"] == "9_1"
+    out = str(tmp_path / "sel.jsonl")
+    s = Session(sc, out, dedup=True, mode="select")
+    assert s.auto_cur == {"objects": set(), "model": {3}}                                         # box 2 / 3 trùng: giữ box 2
+    h = s.html()
+    assert 'data-b="1:0"' in h and 'data-b="0:' not in h and 'data-b="1:3"' not in h and 'data-w="1|3.5"' in h
+    s.click("1:2|1")
+    s.click("1:0|2")
+    s.click("1:2|3")                                        # bấm lần nữa: bỏ chọn
+    s.click("0:0|4")                                        # vật: không bấm được
+    s.click("1:3|5")                                        # box đã lọc trùng: bỏ qua
+    assert s.marks == {"objects": set(), "model": {0}} and 'stroke-width="3.5"' in s.html()
+    s.undo()                                                # hoàn tác lần bỏ chọn: box 2 chọn lại
+    assert s.marks["model"] == {0, 2} and "selected 2" in s.header()
+    s.save()
+    rec = ReviewStore(out).get("9_b1_t1")
+    assert rec["good"] == {"objects": [], "model": [0, 2]} and "bad" not in rec and rec["class"] == "apple" and rec["t"] == 1
+    assert rec["positive"] == [[20.0, 20.0, 40.0, 40.0], [100.0, 50.0, 120.0, 70.0]] and rec["auto"] == {"objects": [], "model": [3]}
+    assert Session(sc, out, dedup=True, mode="select").marks["model"] == {0, 2}                 # mở lại: đọc `good`
+
+
+def test_cocount_pred_screens(tmp_path):
+    """Ảnh 100×80 (canvas 512: s = 5,12, vùng 512×409); box vật = bản rà (loại box 1 + lọc trùng box 2), box model chia về ảnh gốc."""
+    root = _fake_cocount(str(tmp_path / "cc"))
+    rev = tmp_path / "rev.jsonl"
+    rev.write_text("".join(json.dumps(r) + "\n" for r in (
+        {"id": "INTRA_A_1_2_0_0_positive", "bad": {"INTRA_A_1_2_0_0_positive": [1]}, "auto": {"INTRA_A_1_2_0_0_positive": [2]},
+         "n": {"INTRA_A_1_2_0_0_positive": 4}},
+        {"id": "INTRA_A_1_2_0_0_negative", "bad": {}, "n": {"INTRA_A_1_2_0_0_negative": 1}})))
+    rows = [{"image_id": n, "t": 0, "wh": [512.0, 409.0], "boxes": [[51.2, 51.2, 102.4, 102.4], [0, 0, 600, 600]]}
+            for n in ("INTRA_A_1_2_0_0_positive", "INTRA_A_1_2_0_0_negative")]
+    (tmp_path / "d_boxes.json").write_text(json.dumps({"results": {"cocount_mock": rows, "cocount_mock_objsize": []}}))
+    sc = cocount_pred_screens(str(tmp_path / "d_boxes.json"), root, str(rev))
+    assert [s["id"] for s in sc] == ["INTRA_A_1_2_0_0_positive", "INTRA_A_1_2_0_0_negative"] and sc[0]["wh"] == [100, 80]
+    obj, model = sc[0]["groups"]
+    assert obj["boxes"] == [[0, 0, 10, 10], [0, 40, 45, 80]] and obj["click"] is False
+    assert model["boxes"][0] == pytest.approx([10, 10, 20, 20]) and model["boxes"][1] == [0, 0, 100, 80]
+    assert sc[0]["meta"] == {"image_id": "INTRA_A_1_2_0_0_positive", "class": "apple"} and sc[0]["views"][0][1].endswith(".jpg")
+    assert sc[0]["group"] == sc[1]["group"] == "INTRA_A_1_2_0_0"                                 # hai lớp một frame: một người
+    out = str(tmp_path / "sel.jsonl")
+    s = Session(sc, out, dedup=True, mode="select")
+    s.click("1:0|1")
+    s.save()
+    assert ReviewStore(out).get("INTRA_A_1_2_0_0_positive")["positive"] == [[10.0, 10.0, 20.0, 20.0]]
+
+
+def test_split_screens_by_group():
+    sc = [{"id": i, "group": g} for i, g in (("1a", "1"), ("1b", "1"), ("2a", "2"), ("3a", "3"), ("1c", "1"), ("4a", "4"))]
+    u1, u2 = split_screens(sc, 1), split_screens(sc, 2)
+    assert [s["id"] for s in u1] == ["1a", "1b", "3a", "1c"] and [s["id"] for s in u2] == ["2a", "4a"]
+    assert [s["id"] for s in split_screens([{"id": "x"}, {"id": "y"}, {"id": "z"}], 3, 3)] == ["z"]  # không group: theo id
+    with pytest.raises(ValueError):
+        split_screens(sc, 3)
+
+
+def test_pred_hub_choose_data_user(tmp_path):
+    """Chưa đủ Data + User: không phiên; mỗi (Data, User) một phiên trên phần việc của User, file `_user_k`; đổi qua lại giữ nháp."""
+    one = _fake_pred(tmp_path)
+    two = [dict(one[0], id="9_b1_t2"), dict(one[0], id="8_b1_t1", group="8")]                    # ảnh 9 (2 màn), ảnh 8
+    calls = []
+    hub = PredHub({"CE-130": (lambda: calls.append(1) or two, str(tmp_path / "p_ce.jsonl")),
+                   "CE-CoCount": (lambda: one, str(tmp_path / "p_cc.jsonl"))})
+    hub.choose(data="CE-130")
+    assert hub.sess is None
+    hub.choose(user="user_2")
+    assert [sc["id"] for sc in hub.sess.screens] == ["8_b1_t1"] and hub.sess.store.path.endswith("p_ce_user_2.jsonl")
+    assert "CE-130 · user_2" in hub.sess.header()
+    hub.sess.click("1:0|1")
+    s2 = hub.sess
+    hub.choose(user="user_1")
+    assert [sc["id"] for sc in hub.sess.screens] == ["9_b1_t2"] and hub.sess.store.path.endswith("p_ce_user_1.jsonl")
+    hub.choose(data="CE-CoCount")
+    assert hub.sess.store.path.endswith("p_cc_user_1.jsonl")
+    hub.choose(data="CE-130", user="user_2")
+    assert hub.sess is s2 and hub.sess.marks["model"] == {0} and calls == [1]                  # màn đọc một lần, nháp còn
+    hub.choose(user="nobody")
+    assert hub.sess is None
+    pre = PredHub({"CE-130": (lambda: two, str(tmp_path / "q.jsonl"))}, preload=True)          # đọc nền khi mở app
+    pre.choose(data="CE-130", user="user_1")
+    assert [sc["id"] for sc in pre.sess.screens] == ["9_b1_t2"]
+
+
+def test_build_ui_pred_hub(tmp_path):
+    gr = pytest.importorskip("gradio")
+    one = _fake_pred(tmp_path)
+    demo, _ = build_ui(PredHub({"CE-130": (lambda: one, str(tmp_path / "p.jsonl"))}), gr)
+    assert demo is not None
+
+
+def test_preselect_matches_eval_nms():
+    """Chọn sẵn = `add_eval.select_nms` (top k C-NLL sau NMS) trên box kẹp; bỏ box lọc trùng; C-NLL None -> không chọn."""
+    import numpy as np
+    from ce_localization.engine.add_eval import clip_boxes, select_nms
+    rng = np.random.default_rng(0)
+    for _ in range(20):
+        xy = rng.uniform(0, 80, (30, 2))
+        b = np.concatenate([xy, xy + rng.uniform(-5, 30, (30, 2))], 1)                   # có box suy biến (w / h âm)
+        c = rng.uniform(0, 5, 30)
+        assert preselect(b.tolist(), c.tolist()) == set(select_nms(clip_boxes(b)[0], c, 5, 0.5))
+    b = [[0, 0, 10, 10], [0, 0, 10, 10.5], [50, 50, 60, 60], [20, 20, 30, 30]]
+    assert preselect(b, [0.1, 0.2, 0.3, 0.4], k=2) == {0, 2}                                 # box 1 trùng box 0: NMS bỏ
+    assert preselect(b, [0.1, 0.2, 0.3, 0.4], hidden={0}, k=2) == {1, 2}                     # box 0 đã lọc trùng: không hiện
+    assert preselect(b, None) == set() and preselect(b, [None, 0.5, None, None]) == {1}
+
+
+def test_session_select_preselect_and_prefetch(tmp_path):
+    """Màn chưa lưu mở ra đã chọn sẵn top-k; bỏ một box rồi lưu: `good` = phần còn lại, `pre` = chọn sẵn; ảnh màn kế nằm ở `data-pre`."""
+    sc = _fake_pred(tmp_path)
+    sc[0]["groups"][1]["scores"] = [0.3, 0.1, 0.2, 0.0]                                       # box 3 trùng box 2 (lọc trùng)
+    sc.append(dict(sc[0], id="9_b1_t9", views=[("turn 9", str(tmp_path / "next.png"))]))
+    out = str(tmp_path / "sel.jsonl")
+    s = Session(sc, out, dedup=True, mode="select")
+    assert s.marks["model"] == {0, 1, 2} and "= preselect" in s.header()
+    assert "next.png" in s.html().split('data-pre="')[1].split('"')[0] and "display:none" not in s.html()
+    s.click("1:1|1")                                                                           # bỏ box chọn sẵn
+    assert "= preselect" not in s.header()
+    s.save()
+    rec = ReviewStore(out).get("9_b1_t1")
+    assert rec["good"]["model"] == [0, 2] and rec["pre"] == {"model": [0, 1, 2]}
+    s.prev()
+    assert s.marks["model"] == {0, 2}                                                          # màn đã lưu: đọc `good`, không chọn sẵn lại

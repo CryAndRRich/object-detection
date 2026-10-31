@@ -13,7 +13,10 @@ chỗ trống / lỗ GT, đỏ = `--select` box model C-NLL thấp nhất sau NM
       --cocount-review ../../output/add/box_review/cocount.jsonl --out ../../output/add/viz/cnll_worst/delta6_2_review5_mock
   python tools/plot_cnll_worst.py ../../output/add/ce130_test_all/test_delta6_2_boxes.json --dataset ce130 --key inpainted_mock \\
       --top-pct 1 --out ../../output/add/viz/cnll_worst/delta6_2_ce130_mock
-  -> worst_01_<mẫu>.png … + rank.json (mọi mẫu: trung vị / min C-NLL K box, trung vị box GT, số vật, box đã chọn + C-NLL của chúng)
+  -> worst_01_<mẫu>.png … + rank.json (mọi mẫu: trung vị / min C-NLL K box, trung vị / min box GT, số vật, box đã chọn + C-NLL của chúng)
+`--rank-by gt_gap --pair`: mẫu model hơn GT nhiều nhất (C-NLL lỗ GT tốt nhất − box model tốt nhất), mỗi mẫu một hàng: box GT | K box model
+  python tools/plot_cnll_worst.py ../../output/add/snapshots/delta8/ce130_test_all/ep010_boxes.json --dataset ce130 --rank-by gt_gap \\
+      --pair --top 20 --min-obj 20 --out ../../output/add/viz/cnll_vs_gt/delta8_ep010_ce130_test
 Nhiều dump `TÊN=đường dẫn` (cùng tập mẫu, vd các model): vẽ mẫu nằm trong `--intersect-pct` % tệ nhất của MỌI dump, mỗi mẫu một lưới
 (Ground truth + từng setting) -> worst_01_<mẫu>.png … + intersect.json.
 `--trend` + nhiều dump theo thứ tự thời gian (vd snapshot `ep010=… ep020=…`): xếp mẫu theo C-NLL box tốt nhất tăng từ dump đầu tới dump
@@ -74,7 +77,8 @@ def score_samples(rows, geo, k=5, nms_iou=0.5):
         sel = select_nms(b, c, k, nms_iou)
         sel_c = [float(c[i]) for i in sel]
         out.append({"image_id": x["image_id"], "boxes": b, "c": c, "median": float(np.median(c)), "min": float(c.min()),
-                    "gt_median": float(np.median(gt)), "n_obj": len(g["objects"]), "sel": sel, "sel_cnll": sel_c})
+                    "gt_median": float(np.median(gt)), "gt_min": float(gt.min()), "gt_gap": float(gt.min() - c.min()),
+                    "n_obj": len(g["objects"]), "sel": sel, "sel_cnll": sel_c})
     return out
 
 
@@ -89,8 +93,8 @@ def _image(g):
         return np.asarray(im.convert("RGB").resize((nw, nh), resample=Image.BILINEAR))
 
 
-def _draw(ax, g, img, boxes=(), faint=()):
-    """Ảnh + box vật (+ lớp kia, cam) + chỗ trống / lỗ GT (xanh lá nét đứt) + `boxes` của model (đỏ) + `faint` (đỏ nhạt, mảnh)."""
+def _draw(ax, g, img, boxes=(), faint=(), holes=True):
+    """Ảnh + box vật (+ lớp kia, cam) + chỗ trống / lỗ GT (xanh lá nét đứt, `holes`) + `boxes` của model (đỏ) + `faint` (đỏ nhạt, mảnh)."""
     nw, nh = g["wh"]
     ax.imshow(img)
     _rect(ax, (0, 0, nw, nh), "#333333", lw=1.2)                         # viền ảnh (ảnh nền trắng đặt cạnh nhau)
@@ -98,7 +102,7 @@ def _draw(ax, g, img, boxes=(), faint=()):
         _rect(ax, b, "orange", lw=1.0)
     for b in g["objects"]:
         _rect(ax, b, "cyan", lw=1.2)
-    for b in g["holes"]:
+    for b in g["holes"] if holes else ():
         _rect(ax, b, "lime", lw=1.6, ls="--")
     for b in faint:
         _rect(ax, b, (1.0, 0.25, 0.25, 0.45), lw=0.8)
@@ -122,6 +126,27 @@ def plot_sample(it, g, path):
     for k, (txt, col) in enumerate(g["labels"] + [(f"model: add {g['cls']}", "red")]):      # dòng cách 30 pt
         ax.text(0.015, 0.985 - k * 30 / (9 * nh / nw * 72), txt, color=col, fontsize=14, fontweight="bold", va="top",
                 transform=ax.transAxes, bbox=box)
+    fig.savefig(path, dpi=110)
+    plt.close(fig)
+
+
+def plot_pair(g, gt_min, settings, path):
+    """MỘT mẫu -> một hàng: panel đầu = box vật + lỗ GT (C-NLL lỗ GT tốt nhất), mỗi panel sau = một model: box vật + K box model (đỏ
+    nhạt, mảnh) với box C-NLL thấp nhất đỏ đậm (C-NLL của nó). settings = [(tên, item của `score_samples`)]."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    nw, nh = g["wh"]
+    pw = 6.0
+    fig, axes = plt.subplots(1, 1 + len(settings), figsize=((1 + len(settings)) * pw, pw * nh / nw + 0.5))
+    img = _image(g)
+    _draw(axes[0], g, img)
+    axes[0].set_title(f"Box Groundtruth  |  best CNLL {gt_min:.2f}", fontsize=12.5)
+    for ax, (name, it) in zip(axes[1:], settings):
+        best = int(np.argmin(it["c"]))
+        _draw(ax, g, img, [it["boxes"][best]], [b for i, b in enumerate(it["boxes"]) if i != best], holes=False)
+        ax.set_title(f"{name}  |  best CNLL {it['min']:.2f}", fontsize=12.5)
+    fig.tight_layout(w_pad=1.5)
     fig.savefig(path, dpi=110)
     plt.close(fig)
 
@@ -207,7 +232,13 @@ def main():
     ap.add_argument("--turn-index", default="../data/turn_index.json", help="CE-130")
     ap.add_argument("--samples-root", default="../data/samples", help="CE-130: ảnh inpaint của mẫu")
     ap.add_argument("--image-size", type=int, default=512)
-    ap.add_argument("--rank-by", default="min", choices=["min", "median"], help="min = box tốt nhất (số của bảng) | median = trung vị K box")
+    ap.add_argument("--rank-by", default="min", choices=["min", "median", "gt_gap"],
+                    help="min = box tốt nhất (số của bảng) | median = trung vị K box | gt_gap = C-NLL lỗ GT tốt nhất − box model tốt nhất "
+                         "(--order worst = model hơn GT nhiều nhất)")
+    ap.add_argument("--min-obj", type=int, default=0, help="chỉ xếp / vẽ mẫu có >= N vật (Gaussian C-NLL fit trên nhiều vật hơn)")
+    ap.add_argument("--seed", type=int, default=0, help="nhiều dump + --pair: seed rút --top mẫu ngẫu nhiên")
+    ap.add_argument("--most-different", action="store_true", help="nhiều dump + --pair: mẫu chênh C-NLL giữa 2 dump đầu lớn nhất")
+    ap.add_argument("--pair", action="store_true", help="mỗi mẫu một hàng 2 panel: box GT | K box model (box tốt nhất đậm)")
     ap.add_argument("--order", default="worst", choices=["worst", "best"])
     ap.add_argument("--top", type=int, default=24, help="số mẫu vẽ (mỗi mẫu một hình)")
     ap.add_argument("--top-pct", type=float, default=None, help="thay --top: vẽ p %% số mẫu có C-NLL (làm tròn lên)")
@@ -227,9 +258,10 @@ def main():
         name, path = spec.split("=", 1) if "=" in spec else (os.path.basename(spec), spec)
         with open(path) as f:
             res = json.load(f)["results"]
-        if a.key not in res:
+        key = a.key if a.key in res else a.key + "_mock"                    # dump DELTA6 cũ: eval nhiều sampler
+        if key not in res:
             sys.exit(f"{path}: không có khoá {a.key} (có: {sorted(res)})")
-        dumps.append((name, path, res[a.key]))
+        dumps.append((name, path, res[key]))
     rows = dumps[0][2]
     if a.dataset == "ce130":
         index = TurnIndex(a.turn_index)
@@ -249,8 +281,8 @@ def main():
     if a.trend:
         return trend(a, dumps, geo, meta)
     if len(dumps) > 1:
-        return intersect(a, dumps, geo, meta)
-    items = score_samples(rows, geo, a.select, a.nms_iou)
+        return (compare if a.pair else intersect)(a, dumps, geo, meta)
+    items = [it for it in score_samples(rows, geo, a.select, a.nms_iou) if it["n_obj"] >= a.min_obj]
     items.sort(key=lambda d: d[a.rank_by], reverse=a.order == "worst")
     for r, it in enumerate(items, 1):
         it["rank"] = r
@@ -258,12 +290,17 @@ def main():
           f"trung vị {np.median([d['min'] for d in items]):.3f}")
     with open(os.path.join(a.out, "rank.json"), "w") as f:
         json.dump({"dump": dumps[0][1], **meta,
-                   "samples": [{k: it[k] for k in ("rank", "image_id", "median", "min", "gt_median", "n_obj", "sel", "sel_cnll")}
+                   "samples": [{k: it[k] for k in ("rank", "image_id", "median", "min", "gt_median", "gt_min", "gt_gap", "n_obj", "sel",
+                                                   "sel_cnll")}
                                for it in items]}, f, indent=1)
     top = math.ceil(len(items) * a.top_pct / 100) if a.top_pct is not None else a.top
     w = max(2, len(str(top)))
     for it in items[:top]:
-        plot_sample(it, geo[it["image_id"]], os.path.join(a.out, f"{a.order}_{it['rank']:0{w}d}_{it['image_id']}.png"))
+        path = os.path.join(a.out, f"{a.order}_{it['rank']:0{w}d}_{it['image_id']}.png")
+        if a.pair:
+            plot_pair(geo[it["image_id"]], it["gt_min"], [("Box Model", it)], path)
+        else:
+            plot_sample(it, geo[it["image_id"]], path)
     print(f"-> {min(top, len(items))} hình + rank.json trong {a.out}")
 
 
@@ -294,6 +331,32 @@ def intersect(a, dumps, geo, meta):
                    "samples": out}, f, indent=1)
     print(f"-> {len(common)} hình + intersect.json trong {a.out}")
 
+
+def compare(a, dumps, geo, meta):
+    """Nhiều dump + `--pair`: `--top` mẫu (>= `--min-obj` vật) có C-NLL ở mọi dump — rút ngẫu nhiên (seed `--seed`) hoặc
+    `--most-different` (C-NLL tốt nhất dump 1 − dump 2 lớn nhất mỗi chiều, nửa / nửa: compare_a_* = dump 1 tệ hơn, compare_b_* = dump 2)
+    -> mỗi mẫu một hàng (box GT + K box của từng dump) -> compare_*.png + compare.json."""
+    scored = [(name, {it["image_id"]: it for it in score_samples(rows, geo, a.select, a.nms_iou)}) for name, _, rows in dumps]
+    ids = sorted(i for i in set.intersection(*(set(items) for _, items in scored)) if scored[0][1][i]["n_obj"] >= a.min_obj)
+    if a.most_different:                                                   # C-NLL tốt nhất dump 1 − dump 2: nửa mỗi chiều
+        gap = {i: scored[0][1][i]["min"] - scored[1][1][i]["min"] for i in ids}
+        srt = sorted(ids, key=gap.get)
+        pick = [(f"{scored[0][0]} worse", i) for i in srt[::-1][:a.top - a.top // 2]] + \
+               [(f"{scored[1][0]} worse", i) for i in srt[:a.top // 2]]
+    else:
+        pick = [("random", ids[j]) for j in np.random.default_rng(a.seed).choice(len(ids), min(a.top, len(ids)), replace=False)]
+    out = []
+    for j, (why, iid) in enumerate(pick, 1):
+        it0 = scored[0][1][iid]
+        tag = "" if why == "random" else ("a_" if why.startswith(scored[0][0]) else "b_")
+        plot_pair(geo[iid], it0["gt_min"], [(name, items[iid]) for name, items in scored],
+                  os.path.join(a.out, f"compare_{tag}{j:02d}_{iid}.png"))
+        out.append({"image_id": iid, "pick": why, "n_obj": it0["n_obj"], "gt_min": it0["gt_min"], "min": {n: items[iid]["min"] for n, items in scored}})
+    with open(os.path.join(a.out, "compare.json"), "w") as f:
+        json.dump({"dumps": {name: path for name, path, _ in dumps}, **meta, "seed": a.seed, "min_obj": a.min_obj,
+                   "most_different": a.most_different, "samples": out}, f,
+                  indent=1)
+    print(f"-> {len(pick)} / {len(ids)} mẫu + compare.json trong {a.out}")
 
 
 def trend(a, dumps, geo, meta):

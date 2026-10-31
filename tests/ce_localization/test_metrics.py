@@ -37,7 +37,7 @@ def test_add_metrics_hand_computed():
 
 
 def test_cnll_definition_f1all_and_paper_aggregate():
-    """C-NLL = −log N(x) − min_i(−log N(z_i)), z = [w, h, IoU lớn nhất, TB khoảng cách 3 tâm gần nhất] của vật cùng lớp (bỏ chính nó);
+    """C-NLL = −log N(x) − (−log N(μ)) >= 0 (tâm phân phối, không phải min trên vật), z = [w, h, IoU lớn nhất, TB khoảng cách 3 tâm gần nhất] của vật cùng lớp (bỏ chính nó);
     chiều quan hệ tính với MỌI vật (lớp kia = `objects_all` [cùng lớp ; lớp kia]); `cnll` = TB trên ảnh của box THẤP nhất trong K,
     `cnll_gt` cùng cách trên lỗ GT; < 5 vật cùng lớp -> bỏ ảnh; `record_cnll` (dump) khớp."""
     from scipy.stats import multivariate_normal
@@ -56,7 +56,8 @@ def test_cnll_definition_f1all_and_paper_aggregate():
     x = np.stack([np.full(2, 10 / 120), np.full(2, 10 / 100), np.zeros(2),
                   np.sort(np.linalg.norm(bc[:, None] - c[None], axis=-1), 1)[:, :3].mean(1) / np.sqrt(120 * 100)], 1)
     f1 = cnll(box, objs, wh)
-    assert np.allclose(f1, -mvn.logpdf(x) - (-mvn.logpdf(z)).min())
+    assert np.allclose(f1, -mvn.logpdf(x) - (-mvn.logpdf(z.mean(0))))
+    assert (f1 >= 0).all() and (-mvn.logpdf(x)).min() - (-mvn.logpdf(z)).min() < f1.min()   # bản min trên vật thấp hơn đúng ½·min D²
     fa = cnll(box, objs, wh, others=others)
     assert fa[0] > f1[0] + 1.0 and np.allclose(cnll(box, objs, wh, others=np.zeros((0, 4))), f1)
     assert cnll(box, objs[:4], wh, others=others) is None

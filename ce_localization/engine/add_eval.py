@@ -10,7 +10,9 @@ số trong log train). Chấm bằng numpy trên box xyxy PIXEL CANVAS (IoU khô
   on_object / in_image / degenerate    box có IoA >= 0,5 với một vật (CE-CoCount: vật cả hai lớp) / nằm trọn trong ảnh / suy biến
   cnll                                 C-NLL như bài Add One Take One: mỗi ảnh lấy box C-NLL THẤP nhất trong K (= q cao nhất),
                                        TRUNG BÌNH trên các ảnh có >= 5 vật cùng lớp (n_cnll). cnll_gt: cùng cách trên lỗ GT (mốc).
-C-NLL(x) = −log q(x) − min_i(−log q(z_i)), q = Gaussian 4-D fit trên vật CÙNG lớp z_i, đặc trưng [w, h, IoU lớn nhất với vật, TB khoảng
+C-NLL(x) = −log q(x) − (−log q(μ)) = ½ (x − μ)ᵀ Σ⁻¹ (x − μ) >= 0 (người dùng chốt 2026-10-29: trừ NLL tại TÂM phân phối,
+không phải min trên vật như phụ lục bài — bản đó âm khi box gần μ hơn mọi vật; chênh = ½·min_i D²(z_i) ∈ [0, 2] / ảnh, chỉ phụ thuộc ảnh),
+q = Gaussian 4-D fit trên vật CÙNG lớp z_i, đặc trưng [w, h, IoU lớn nhất với vật, TB khoảng
 cách tới tâm 3 vật gần nhất] (w, h chia (nw, nh), khoảng cách chia √(nw·nh)). Hai chiều quan hệ tính với MỌI vật trong ảnh (CE-CoCount:
 cả lớp kia — "F1all", box đè / sát vật lớp kia bị phạt; CE-130 một lớp / ảnh). Trung bình bị vài ảnh vật xếp hàng đều chi phối (Gaussian
 suy biến) — C-NLL TỪNG box mọi ảnh nằm trong dump (`record_cnll`) để tính biến thể khác (trung vị, bỏ 1 %…, `tools/cnll_outliers.py`).
@@ -155,9 +157,9 @@ def cnll(boxes, objects, wh, others=None):
     if len(objects) < CNLL_MIN_OBJ:
         return None
     ref = objects if others is None or not len(others) else np.concatenate([objects, others])
-    mu, inv, logdet, zmin = _cnll_fit(objects, ref, wh)
+    mu, inv = _cnll_fit(objects, ref, wh)
     d = _features(boxes, ref, wh) - mu
-    return 0.5 * (np.einsum("ni,ij,nj->n", d, inv, d) + logdet + 4 * np.log(2 * np.pi)) - zmin
+    return 0.5 * np.einsum("ni,ij,nj->n", d, inv, d)                 # −log q(x) − (−log q(μ)): logdet / 2π triệt tiêu
 
 
 _FIT, _FIT_MAX = {}, 4096
@@ -165,7 +167,7 @@ _FIT, _FIT_MAX = {}, 4096
 
 def _cnll_fit(objects, ref, wh):
     """Gaussian của C-NLL trên box vật (chỉ phụ thuộc ảnh) — nhớ theo nội dung (mỗi ảnh chấm nhiều lần: model / prior / box GT / đổi
-    cỡ). -> (mu, inv, logdet, min NLL của chính vật)."""
+    cỡ). -> (mu, Σ⁻¹)."""
     objects, ref = np.ascontiguousarray(objects), np.ascontiguousarray(ref)
     h = hashlib.blake2b(digest_size=16)
     for a in (objects, ref):
@@ -178,13 +180,9 @@ def _cnll_fit(objects, ref, wh):
     z = _features(objects, ref, wh, is_objects=True)                # objects = ref[:M] ⇒ bỏ chính nó = đường chéo
     mu = z.mean(0)
     cov = np.cov(z.T, bias=True) + CNLL_RIDGE * np.eye(4)
-    inv = np.linalg.inv(cov)
-    _, logdet = np.linalg.slogdet(cov)
-    d = z - mu
-    zmin = (0.5 * (np.einsum("ni,ij,nj->n", d, inv, d) + logdet + 4 * np.log(2 * np.pi))).min()
     if len(_FIT) >= _FIT_MAX:
         _FIT.clear()
-    _FIT[key] = (mu, inv, logdet, zmin)
+    _FIT[key] = (mu, np.linalg.inv(cov))
     return _FIT[key]
 
 

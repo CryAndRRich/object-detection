@@ -1,0 +1,26 @@
+# ZETA2 = CSANet (BMVC 2024) — finetune CE-130 train theo bản tác giả bài (refs/CSANet/finetune.py) từ weight công bố (OPA, 18.pth).
+# Batch 64 như CE-Loc; lr tác giả (batch 16) × √(64 / 16). docs/EXPERIMENT_ZETA.md mục 8–10.
+method: csanet
+model:
+  img_size: 256
+  d_noise: 1024
+  d_model: 512
+  d_k: 64
+  d_v: 64
+  n_heads: 8
+finetune:
+  init: ../weights/add/zeta2/pretrained/csanet_opa_ep18.pth
+  epochs: 10
+  batch_size: 64               # toàn cục; 2 GPU × 32
+  micro_batch: 16
+  lr: 2.0e-5                   # 1e-5 × √(64 / 16); phần ngoài VGG × 10
+  b1: 0.5
+  b2: 0.999
+  amp: true
+  num_workers: 2
+  log_every: 20
+  seed: 42
+predict:
+  k: 30
+  fg_select: random
+  batch_images: 4
