@@ -12,11 +12,11 @@ finetune:
   init: ../weights/add/zeta2/pretrained/csanet_opa_ep18.pth
   epochs: 10
   batch_size: 64               # toàn cục; 2 GPU × 32
-  micro_batch: 16
+  micro_batch: 8                # fp32: 8 ảnh / lượt ~ bộ nhớ của 16 ở fp16 (13,5 GB / T4)
   lr: 2.0e-5                   # 1e-5 × √(64 / 16); phần ngoài VGG × 10
   b1: 0.5
   b2: 0.999
-  amp: true
+  amp: false                   # fp32 như bản gốc: fp16 tràn số (AMP scale 32768 -> 16 sau 60 bước, rồi NaN) — Kaggle 2026-10-31
   num_workers: 2
   log_every: 20
   seed: 42

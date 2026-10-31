@@ -12,7 +12,7 @@ import torch.multiprocessing as mp
 
 from baseline.data import train_items
 from baseline.methods import load_model, make_trainer, split_batch
-from baseline.models.csanet import gan_losses
+from baseline.models.csanet import _bce, gan_losses
 from ce_localization.data.turns import TurnIndex
 from tests.baseline.helpers import fake_ce130, fake_ckpt, fake_cocount, tiny_cfg
 
@@ -100,6 +100,12 @@ def test_csanet_generator_loss_not_in_discriminator(tmp_path):
     _, d_loss, _ = gan_losses(tr.G, tr.D, f("bg"), f("fg"), f("msk"), batch["fg_bbox"], f("comp"), f("comp_msk"), batch["trans"])
     for a, b in zip(got, torch.autograd.grad(d_loss, tr.d_params)):
         torch.testing.assert_close(a, b, rtol=1e-4, atol=1e-7)
+
+
+def test_csanet_bce_matches_torch_and_passes_nan():
+    p, y = torch.tensor([1e-50, 0.2, 0.7, 1.0], dtype=torch.float64), torch.tensor([1.0, 0.0, 1.0, 0.0], dtype=torch.float64)
+    torch.testing.assert_close(_bce(p, y), torch.nn.functional.binary_cross_entropy(p, y))
+    assert torch.isnan(_bce(torch.tensor([float("nan")]), torch.ones(1)))         # F.binary_cross_entropy: device assert trên CUDA
 
 
 def test_sync_grads_two_processes(tmp_path):

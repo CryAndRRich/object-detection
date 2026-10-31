@@ -172,6 +172,12 @@ class Discriminator(nn.Module):
         return self.model(torch.cat((_norm(img), mask), 1)).mean((2, 3)).flatten()
 
 
+def _bce(p, y):
+    """= F.binary_cross_entropy (log kẹp >= -100) nhưng KHÔNG assert p ∈ [0, 1] trên CUDA: p NaN -> loss NaN (bước bị GradScaler bỏ)
+    thay vì device assert giết cả tiến trình."""
+    return -(y * torch.log(p).clamp(min=-100) + (1 - y) * torch.log1p(-p).clamp(min=-100)).mean()
+
+
 def gan_losses(G, D, bg, fg, msk, fg_bbox, comp, comp_msk, trans_label, amp=False):
     """Một lượt `train_disc_gen` bản gốc (mọi mẫu nhãn dương) -> (g_loss, d_loss, thành phần). G forward trong autocast (`amp`); D + loss
     ở fp32: D kết thúc bằng sigmoid rồi BCE trên xác suất — ở fp16 sigmoid bão hoà sớm (|logit| > ~8) và đạo hàm 1/x của BCE tràn số khi
@@ -189,7 +195,7 @@ def gan_losses(G, D, bg, fg, msk, fg_bbox, comp, comp_msk, trans_label, amp=Fals
     d1, d1_det, d2, d2_det = D(g1, m1), D(g1.detach(), m1.detach()), D(g2, m2), D(g2.detach(), m2.detach())
     d_real = D(comp.float(), comp_msk.float())
     one, zero = torch.ones_like(d_real), torch.zeros_like(d_real)
-    bce = F.binary_cross_entropy
+    bce = _bce
     w = torch.cat((torch.sin(t2[:, :1] * np.pi / 2), torch.cos(t2[:, :1] * np.pi / 2), torch.cos(t2[:, :1] * np.pi / 2)), 1).detach()
     parts = {"g_gan1": bce(d1, one), "g_gan2": bce(d2, one), "g_rec": ((t2 - trans_label) ** 2 * w).mean(1).mean(),
              "g_kld": (-0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).sum(1)).mean(),
