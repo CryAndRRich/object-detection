@@ -61,6 +61,7 @@ def main():
     rank, world, dev = setup_dist(a.device)
     main_proc = rank == 0
     log = (lambda *x: print(*x, flush=True)) if main_proc else (lambda *x: None)
+    log(f"[boot] {world} tiến trình | {dev} | {cfg['method']} | {fmt_time(time.time() - t0)}")
     if f["batch_size"] % world:
         sys.exit(f"batch_size {f['batch_size']} không chia hết cho {world} GPU")
     bpr = f["batch_size"] // world
@@ -72,10 +73,13 @@ def main():
     torch.manual_seed(f["seed"] * 1000 + rank)
 
     items = train_items(TurnIndex(a.turn_index), a.samples_root, a.gt_root)[: a.limit]
+    log(f"[data] {len(items)} mẫu train | {fmt_time(time.time() - t0)}")
     ck = PthCheckpoints(a.save_dir)
     state = ck.load_last() if a.resume and ck.has_last() else None
     init = a.init or f["init"]
+    log(f"[model] nạp {init} …")
     model = load_model(cfg, init, dev, drop_keys=f.get("drop_keys", ()), train=True)
+    log(f"[model] xong | {fmt_time(time.time() - t0)}")
     if amp:
         for m in model if isinstance(model, tuple) else (model,):
             m.to(memory_format=torch.channels_last)
@@ -125,6 +129,7 @@ def main():
     win = {"loss": torch.zeros((), dtype=torch.float64, device=dev), "n": 0, "data": 0.0, "t": time.time()}
     it0, t_run, stop = it, time.time(), False
     gpu_peak(dev)
+    log(f"[data] {nw} worker / GPU, chờ batch đầu …")
     while epoch < epochs and not stop:
         sampler.set(epoch, step)
         t_data = time.time()
@@ -152,7 +157,7 @@ def main():
             win["loss"] += torch.where(ok, loss, 0.0)
             win["n"] += 1
             step, it = step + 1, it + 1
-            if it % f["log_every"] == 0 or it == it0 + 1:
+            if it % f["log_every"] == 0 or it == it0 + 1 or time.time() - win["t"] > 60:      # >= 1 dòng / phút
                 el, dt = time.time() - t_run, time.time() - win["t"]
                 log(f"  [ep {epoch + 1}/{epochs} | bước {it}/{n_iter}] loss {win['loss'].item() / win['n']:.4f} | {dt / win['n']:.2f} s/bước "
                     f"(chờ dữ liệu {win['data'] / win['n']:.2f}) | {fmt_time(time.time() - t0)} | còn ~{fmt_time(el / (it - it0) * (n_iter - it))}"
