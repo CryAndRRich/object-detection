@@ -2,6 +2,7 @@
 
 Mẫu TEST — cùng tập, cùng thứ tự với `ce_localization/eval.py`:
   image_id   CE-130 `<iid>_b<k>_t<t>` (khoá `turns` của turn_index.json); CE-CoCount: tên file không đuôi
+  class      tên lớp (CE-130 `class` của nhánh; CoCount `class_name` đã làm sạch) — chỉ HiddenObjects đọc (BootPlace / CSANet dùng ảnh vật)
   image      CE-130 `samples/test/images/…` (ảnh đã inpaint xoá vật 1..t, như CE-Loc); CE-CoCount `Image/<tên>.jpg` (ảnh gốc)
   objects    vật CÙNG lớp đang có (CE-130: `removed == 0` hoặc `> t`; CoCount: `exam_bbox` sau rà tay) — nguồn ảnh vật mẫu
   holes      lỗ GT `holes[:t]` | 10 `loc_bbox` — chỉ để chấm, baseline KHÔNG đọc
@@ -47,7 +48,7 @@ def load_samples(dataset, *, turn_index=None, samples_root=None, split="test_all
             e = index.turns[key]
             b = index.branches[e["branch"]]
             out.append({"dataset": "ce130", "image_id": key, "t": e["t"], "image": os.path.join(samples_root, e["sample"]),
-                        "wh": tuple(int(v) for v in b["wh"]), "objects": _present(b, e["t"]),
+                        "class": b["class"], "wh": tuple(int(v) for v in b["wh"]), "objects": _present(b, e["t"]),
                         "holes": np.asarray(b["holes"][:e["t"]], dtype=np.float64).reshape(-1, 4)})
     else:
         for key in CoCountAddDataset(cocount_root, review=review, min_obj=min_obj).keys:
@@ -55,7 +56,7 @@ def load_samples(dataset, *, turn_index=None, samples_root=None, split="test_all
             path = os.path.join(cocount_root, "Image", key + ".jpg")
             with Image.open(path) as im:
                 wh = im.size
-            out.append({"dataset": "cocount", "image_id": key, "t": 0, "image": path, "wh": tuple(int(v) for v in wh),
+            out.append({"dataset": "cocount", "image_id": key, "t": 0, "image": path, "class": r["class"], "wh": tuple(int(v) for v in wh),
                         "objects": r["objects"], "holes": r["loc"]})
     return (out[:limit] if limit else out), index
 
@@ -81,7 +82,7 @@ def train_items(index, samples_root, gt_root, split="train"):
         t = e["t"]
         gt = os.path.join(gt_root, e["branch"], "ground_truth.jpg")
         before = gt if t == 1 else os.path.join(samples_root, index.turns[f"{key.rsplit('_t', 1)[0]}_t{t - 1}"]["sample"])
-        out.append({"image_id": key, "t": t, "image": os.path.join(samples_root, e["sample"]), "before": before, "gt": gt,
+        out.append({"image_id": key, "t": t, "class": b["class"], "image": os.path.join(samples_root, e["sample"]), "before": before, "gt": gt,
                     "wh": tuple(int(v) for v in b["wh"]), "objects": _present(b, t),
                     "holes": np.asarray(b["holes"][:t], dtype=np.float64).reshape(-1, 4)})
     return out

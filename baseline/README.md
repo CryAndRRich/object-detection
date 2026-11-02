@@ -1,22 +1,23 @@
 # baseline — EXPERIMENT ZETA: baseline định vị cho bài ADD
 
-Finetune BootPlace / CSANet (bản tác giả bài Add One Take One, `refs/BOOTPLACE`, `refs/CSANet` — chỉ tham khảo, viết lại đúng logic) trên
+Finetune BootPlace / CSANet (bản tác giả bài Add One Take One, `refs/BOOTPLACE`, `refs/CSANet`) và HiddenObjects (`refs/repos/HiddenObjects`)
+— chỉ tham khảo, viết lại đúng logic — trên
 CE-130 train, chấm CE-130 `test_all` + CE-CoCount `review5` bằng **đúng code chấm của CE-Loc** (`ce_localization/engine/add_eval.py`) ⇒
 số so thẳng với DELTA. Quyết định, siêu tham số, lệnh, kết quả: `docs/EXPERIMENT_ZETA.md` (gốc `multi_condition/`). Thư mục riêng của
 ZETA (người dùng chốt 2026-10-30), dùng lại (không sửa) dữ liệu / chấm / tiện ích train của `ce_localization`.
 
 | | |
 |---|---|
-| `finetune.py` | finetune một baseline (1 GPU hoặc `torchrun`): batch toàn cục 64, cộng dồn micro-batch, AMP, `--max-hours` + `--resume` giữa epoch |
+| `finetune.py` | finetune một baseline (1 GPU hoặc `torchrun`): batch toàn cục 64, cộng dồn micro-batch, AMP, `--max-hours` + `--resume` giữa epoch; `--cache-dir` (HiddenObjects: memmap ảnh letterbox) |
 | `predict.py` | K box / ảnh (mặc định 30) -> `<out>_raw.jsonl`, rồi chấm như `score.py` |
 | `score.py` | chấm jsonl box pixel ảnh gốc -> `<out>.json` + `<out>_boxes.json` (định dạng `eval.py`); `--first 1` = box chính |
-| `config/` | `zeta1.yaml` (ZETA1 = BootPlace), `zeta2.yaml` (ZETA2 = CSANet) — một run một config |
+| `config/` | `zeta1.yaml` (ZETA1 = BootPlace), `zeta2.yaml` (ZETA2 = CSANet), `zeta3.yaml` (ZETA3 = HiddenObjects) — một run một config |
 | `data.py` | mẫu test (cùng tập / thứ tự với eval CE-Loc) + hình học canvas, mẫu train, chọn ảnh vật mẫu |
 | `scoring.py`, `dist.py` | box gốc -> record canvas -> `add_metrics` / prior / dump; tổng + TB grad qua GPU |
-| `models/` | `detr`, `bootplace`, `csanet` — tên tham số như bản gốc ⇒ nạp checkpoint công bố |
-| `methods/` | mỗi baseline: tiền xử lý, dataset finetune, `Trainer`, suy luận; `__init__` nạp checkpoint |
+| `models/` | `detr`, `bootplace`, `csanet`, `hiddenobjects` — tên tham số như bản gốc ⇒ nạp checkpoint công bố |
+| `methods/` | mỗi baseline: tiền xử lý, dataset finetune, `Trainer`, suy luận; `__init__` nạp checkpoint (HiddenObjects: `class_embed` công bố -> `text_proj` trên CLIP text bằng lstsq) |
 
-Test: `python -m pytest tests/baseline -q` từ `object-detection/` (~35 s CPU). Kaggle: `object-detection/notebooks/baseline_kaggle.ipynb`
+Test: `python -m pytest tests/baseline -q` từ `object-detection/` (~80 s CPU; CLIP giả, không tải HF). Kaggle: `object-detection/notebooks/baseline_kaggle.ipynb`
 (gitignore; mỗi Save & Run All một baseline). Eval trên server:
 
 ```bash

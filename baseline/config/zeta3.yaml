@@ -1,0 +1,37 @@
+# ZETA3 = HiddenObjects (WACV 2027) — finetune CE-130 train từ `placement_detr_ho.pth` (refs/repos/HiddenObjects/distilled_model).
+# Khác tác giả: ảnh letterbox 512 của CE-Loc (thay center crop), class_embed -> Linear trên CLIP text (khởi tạo lstsq ra đúng nhúng
+# cũ), reward = 1 (CE-130 không có), train trên ảnh (không cache feature), đích plausibility detach. Batch 64 như CE-Loc; lr bài
+# (1e-4, batch 128) × √(64 / 128). docs/EXPERIMENT_ZETA.md mục 12.
+method: hiddenobjects
+model:
+  hidden_dim: 256
+  nheads: 8
+  enc_layers: 6
+  dec_layers: 6
+  dim_feedforward: 2048
+  dropout: 0.1
+  num_queries: 50              # ghi đè bằng số query của checkpoint (query_offsets)
+  image_size: 512
+  text_dim: 512
+  backbone_weights: DEFAULT    # torchvision ResNet50_Weights.DEFAULT (checkpoint không chứa backbone)
+  clip_text: openai/clip-vit-base-patch32
+loss:
+  l1: 5.0
+  giou: 2.0
+  plaus: 0.5
+finetune:
+  init: ../weights/add/zeta3/pretrained/placement_detr_ho.pth
+  epochs: 10
+  batch_size: 64               # toàn cục; 2 GPU × 32, cộng dồn micro_batch ảnh / lượt (không đổi kết quả: phần train không có BN)
+  micro_batch: 16
+  lr: 7.0e-5                   # 1e-4 × √(64 / 128)
+  weight_decay: 1.0e-4
+  grad_clip: 0.1
+  amp: true
+  num_workers: 2
+  log_every: 20
+  seed: 42
+predict:
+  k: 30
+  batch_images: 32
+  num_workers: 4

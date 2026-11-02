@@ -97,6 +97,7 @@ class Trainer:
     ảnh ghép thật — phần có giám sát của loss), KHÔNG theo `g_loss` (loss đối kháng, lên xuống theo độ mạnh của D)."""
 
     select = "g_rec"
+    fixed_size = True
 
     def __init__(self, cfg, dev, model):
         f = cfg["finetune"]
@@ -112,7 +113,7 @@ class Trainer:
                            torch.optim.AdamW(self.d_params, lr=f["lr"], betas=betas, weight_decay=0.0, fused=fused)]
         self.clip = 0.0
 
-    def dataset(self, items):
+    def dataset(self, items, **_):
         return CSANetTrain(items, self.cfg["model"]["img_size"]), None
 
     def train(self):

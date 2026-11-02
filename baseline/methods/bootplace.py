@@ -131,7 +131,7 @@ class Trainer:
                                              weight_decay=f["weight_decay"], fused=fused)]
         self.clip = f.get("grad_clip") or 0.0
 
-    def dataset(self, items):
+    def dataset(self, items, **_):
         f = self.cfg["finetune"]
         return BootPlaceTrain(items, self.model.num_queries, f["train_scales"], f["train_max_size"]), collate
 

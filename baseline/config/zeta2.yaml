@@ -23,4 +23,4 @@ finetune:
 predict:
   k: 30
   fg_select: random
-  batch_images: 4
+  batch_images: 2              # 2 ảnh × 30 lần rút = 60 ảnh 256² qua VGG fp32 (~2–3 GB); không đổi kết quả (nhiễu seed theo mẫu)

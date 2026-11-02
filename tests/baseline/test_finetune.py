@@ -22,9 +22,9 @@ def _run(monkeypatch, mod, argv):
     mod.main()
 
 
-@pytest.mark.parametrize("run", ["zeta1", "zeta2"])
+@pytest.mark.parametrize("run", ["zeta1", "zeta2", "zeta3"])
 def test_finetune_resume_predict(tmp_path, monkeypatch, run):
-    """BootPlace: dừng giữa epoch -> resume -> hết 2 epoch -> predict CE-130 + CoCount. CSANet (vòng lặp chung đã test ở trên): 1 bước ->
+    """BootPlace / HiddenObjects: dừng giữa epoch -> resume -> hết 2 epoch -> predict CE-130 + CoCount. CSANet (vòng lặp chung đã test ở trên): 1 bước ->
     predict CE-130 từ `last.pth`."""
     import baseline.finetune as finetune
     import baseline.predict as predict
@@ -38,9 +38,9 @@ def test_finetune_resume_predict(tmp_path, monkeypatch, run):
     _run(monkeypatch, finetune, common + ["--max-steps", 1])        # 2 bước / epoch: dừng giữa epoch 1
     st = torch.load(w / "last.pth", weights_only=False)
     assert (st["epoch"], st["step"], st["iter"]) == (0, 1, 1) and st["ep_acc"][1] == 1
-    ckpt, sets = w / "last.pth", [("ce130", "inpainted", 4)]
-    if cfg["method"] == "bootplace":
-        m = load_model(cfg, init, drop_keys=cfg["finetune"]["drop_keys"])     # bỏ query_embed: Q vẫn lấy từ loc_proj
+    sets = [("ce130", "inpainted", 4, w / "last.pth")]
+    if cfg["method"] != "csanet":
+        m = load_model(cfg, init, drop_keys=cfg["finetune"].get("drop_keys", ()))   # BootPlace: bỏ query_embed, Q vẫn lấy từ loc_proj
         assert m.num_queries == cfg["model"]["num_queries"]
         _run(monkeypatch, finetune, common + ["--resume"])
         st = torch.load(w / "last.pth", weights_only=False)
@@ -48,11 +48,14 @@ def test_finetune_resume_predict(tmp_path, monkeypatch, run):
         assert (st["epoch"], st["step"], st["iter"]) == (2, 0, 4) and [h["epoch"] for h in hist] == [1, 2] and hist[0]["steps_ok"] == 2 \
             and hist[0]["select_by"] == "loss"
         assert sorted(os.listdir(w / "snapshots")) == ["ep000.pth", "ep001.pth", "ep002.pth"] and (w / "best.pth").exists()
-        ckpt, sets = w / "snapshots" / "ep002.pth", sets + [("cocount", "cocount_objsize_exemplar", 3)]
+        if cfg["method"] == "hiddenobjects":                                     # checkpoint không mang backbone đóng băng
+            assert not any(k.startswith("backbone.") for k in torch.load(w / "snapshots" / "ep002.pth", weights_only=False)["model"])
+        # best.pth lồng {"model": {"model": sd}} (lỗi eval server 2026-11-02), snapshot một lớp — predict phải nạp được cả hai
+        sets = [("ce130", "inpainted", 4, w / "best.pth"), ("cocount", "cocount_objsize_exemplar", 3, w / "snapshots" / "ep002.pth")]
     data = ["--turn-index", ti, "--samples-root", samples, "--cocount-root", tmp_path / "data" / "cocount", "--cocount-review", review,
             "--device", "cpu"]
     K = cfg["predict"]["k"]
-    for ds, key, n in sets:
+    for ds, key, n, ckpt in sets:
         out = tmp_path / "o" / ds / "test.json"
         _run(monkeypatch, predict, ["--config", cfg_path, "--ckpt", ckpt, "--dataset", ds, "--out", out] + data)
         d = json.load(open(out))
@@ -111,3 +114,20 @@ def test_csanet_bce_matches_torch_and_passes_nan():
 def test_sync_grads_two_processes(tmp_path):
     from tests.baseline._dist_worker import sync_worker
     mp.spawn(sync_worker, args=(str(tmp_path / "store"),), nprocs=2, join=True)
+
+
+def test_csanet_predict_batch_invariant(tmp_path):
+    """`predict.batch_images` chỉ là nút bộ nhớ: nhiễu + ảnh vật mẫu seed theo mẫu, BN ở eval ⇒ cùng box ở mọi cỡ batch."""
+    from baseline.data import load_samples
+    from baseline.methods import predict
+    _, cfg = tiny_cfg(tmp_path, "zeta2")
+    root, samples, ti = fake_ce130(str(tmp_path / "data"))
+    test, _ = load_samples("ce130", turn_index=ti, samples_root=samples)
+    model = load_model(cfg, fake_ckpt(cfg, tmp_path / "init.pth"))
+    rows = []
+    for b in (1, 3):
+        cfg["predict"]["batch_images"] = b
+        rows.append(predict(cfg, model, test, seed=0))
+    for a, b in zip(*rows):
+        assert a["image_id"] == b["image_id"] and a["fg"] == b["fg"]
+        torch.testing.assert_close(torch.tensor(a["boxes"]), torch.tensor(b["boxes"]), rtol=1e-4, atol=1e-3)

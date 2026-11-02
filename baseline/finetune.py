@@ -4,7 +4,7 @@
 Batch toàn cục `finetune.batch_size` (64 như CE-Loc) chia đều các GPU; mỗi GPU cộng dồn grad qua micro-batch `finetune.micro_batch`
 (nút chỉnh bộ nhớ: không đổi kết quả, trừ thống kê BN của CSANet); grad TB qua các GPU MỘT lần mỗi bước (`dist.sync_grads`). AMP fp16
 + channels_last + GradScaler (`finetune.amp`, như CE-Loc trên T4), loss tính ở fp32. Như giao thức CE-Loc gốc: không val; `best.pth` =
-epoch có chỉ số `Trainer.select` TB thấp nhất (cộng qua mọi GPU; BootPlace = loss train, CSANet = `g_rec`); `last.pth` mỗi epoch + khi dừng (`--max-hours`, đủ để `--resume` giữa epoch);
+epoch có chỉ số `Trainer.select` TB thấp nhất (cộng qua mọi GPU; BootPlace / HiddenObjects = loss train, CSANet = `g_rec`); `last.pth` mỗi epoch + khi dừng (`--max-hours`, đủ để `--resume` giữa epoch);
 `snapshots/epNNN.pth` chỉ weight mỗi epoch + `ep000` (weight khởi tạo); `history.json`.
 
   cd object-detection/baseline
@@ -46,6 +46,7 @@ def main():
     ap.add_argument("--turn-index", default="../data/turn_index.json")
     ap.add_argument("--samples-root", default="../data/samples")
     ap.add_argument("--gt-root", default="../data/all_phase2_V2", help="thư mục <split>/<nhánh>/ground_truth.jpg")
+    ap.add_argument("--cache-dir", default=None, help="thư mục cache ảnh của trainer (HiddenObjects: memmap letterbox; khác: bỏ qua)")
     ap.add_argument("--micro-batch", type=int, default=None, help="ghi đè finetune.micro_batch (OOM thì hạ)")
     ap.add_argument("--num-workers", type=int, default=None)
     ap.add_argument("--max-hours", type=float, default=None, help="dừng sạch (ghi last.pth) sau N giờ")
@@ -67,7 +68,6 @@ def main():
     bpr = f["batch_size"] // world
     micro = min(f["micro_batch"], bpr)
     amp = bool(f.get("amp")) and dev.type == "cuda"
-    torch.backends.cudnn.benchmark = dev.type == "cuda" and cfg["method"] == "csanet"       # CSANet: mọi ảnh 256²
     random.seed(f["seed"] * 1000 + rank)
     np.random.seed((f["seed"] * 1000 + rank) % 2 ** 32)
     torch.manual_seed(f["seed"] * 1000 + rank)
@@ -84,6 +84,7 @@ def main():
         for m in model if isinstance(model, tuple) else (model,):
             m.to(memory_format=torch.channels_last)
     tr = make_trainer(cfg, dev, model)
+    torch.backends.cudnn.benchmark = dev.type == "cuda" and getattr(tr, "fixed_size", False)  # CSANet 256², HiddenObjects 512²
     # GradScaler bật cả khi fp32 (thang 1, không tăng): unscale_ kiểm grad NaN / inf ⇒ bỏ bước thay vì ghi NaN vào weight
     sc = dict(init_scale=2.0 ** 16 if amp else 1.0, growth_interval=2000 if amp else 10 ** 9, enabled=dev.type == "cuda")
     scaler = torch.amp.GradScaler("cuda", **sc) if hasattr(torch.amp, "GradScaler") else torch.cuda.amp.GradScaler(**sc)
@@ -105,7 +106,7 @@ def main():
             ep_acc += torch.tensor(state["ep_acc"], dtype=torch.float64, device=dev)
     elif a.resume:
         log(f"[finetune] --resume nhưng chưa có {ck.last_path}: train từ đầu")
-    ds, collate = tr.dataset(items)
+    ds, collate = tr.dataset(items, cache_dir=a.cache_dir, rank=rank, log=log)
     ipe = len(ds) // f["batch_size"]
     if ipe == 0:
         sys.exit(f"{len(ds)} mẫu < batch_size {f['batch_size']}")

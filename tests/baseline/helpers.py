@@ -16,7 +16,20 @@ TINY = {
     "zeta2": {"model": {"img_size": 32, "d_noise": 16, "mid": 16},
                "finetune": {"batch_size": 2, "micro_batch": 1, "epochs": 2, "num_workers": 0, "log_every": 1, "amp": False},
                "predict": {"k": 4, "batch_images": 3}},
+    "zeta3": {"model": {"hidden_dim": 32, "nheads": 2, "enc_layers": 1, "dec_layers": 1, "dim_feedforward": 64, "dropout": 0.0,
+                        "num_queries": 8, "image_size": 64, "backbone_weights": None},
+              "finetune": {"batch_size": 2, "micro_batch": 1, "epochs": 2, "num_workers": 0, "log_every": 1, "amp": False},
+              "predict": {"k": 5, "batch_images": 3, "num_workers": 0}},
 }
+HO_CLASSES = ["apple", "cup", "dog"]
+
+
+def fake_clip(names, model_name=None, device="cpu", **_):
+    """Thay `encode_class_names` (không tải HF): vector 512-d tất định theo tên."""
+    import hashlib
+    import torch
+    return {n: torch.randn(512, generator=torch.Generator().manual_seed(int(hashlib.md5(n.encode()).hexdigest()[:8], 16)))
+            for n in names}
 
 
 # ----------------------------------------------------------------------------- CE-130 giả
@@ -93,7 +106,7 @@ CFG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "
 
 
 def tiny_cfg(tmp_path, run):
-    """Config `<run>.yaml` thật (zeta1 = BootPlace, zeta2 = CSANet) + model / batch tí hon -> (đường dẫn yaml, cfg đã gộp)."""
+    """Config `<run>.yaml` thật (zeta1 = BootPlace, zeta2 = CSANet, zeta3 = HiddenObjects) + model / batch tí hon -> (đường dẫn yaml, cfg đã gộp)."""
     import yaml
     from ce_localization.utils.config import load_config
     p = os.path.join(str(tmp_path), f"{run}_tiny.yaml")
@@ -108,6 +121,11 @@ def fake_ckpt(cfg, path, seed=0):
     from baseline.methods import METHODS
     torch.manual_seed(seed)
     m = METHODS[cfg["method"]].build(cfg)
+    if cfg["method"] == "hiddenobjects":
+        sd = {k: v for k, v in m.state_dict().items() if not k.startswith(("backbone.", "text_proj."))}
+        sd.update({"class_embed.weight": torch.randn(len(HO_CLASSES), cfg["model"]["hidden_dim"]), "input_proj.weight": torch.zeros(1)})
+        torch.save({"model": sd, "classes": HO_CLASSES, "num_queries": cfg["model"]["num_queries"]}, path)
+        return path
     if cfg["method"] == "bootplace":
         sd = {**m.state_dict(), "transformer.patch_decoder.deconv1.weight": torch.zeros(1)}
     else:

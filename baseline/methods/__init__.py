@@ -1,12 +1,14 @@
-"""Baseline ZETA theo `cfg["method"]` (bootplace | csanet): nạp checkpoint, suy luận K box, trainer finetune, chia micro-batch."""
+"""Baseline ZETA theo `cfg["method"]` (bootplace | csanet | hiddenobjects): nạp checkpoint, suy luận K box, trainer finetune, chia
+micro-batch."""
 
 import torch
 
-from baseline.methods import bootplace, csanet
+from baseline.methods import bootplace, csanet, hiddenobjects
+from baseline.models.hiddenobjects import lstsq_text_proj
 
 __all__ = ["METHODS", "load_model", "predict", "make_trainer", "split_batch", "batch_len"]
 
-METHODS = {"bootplace": bootplace, "csanet": csanet}
+METHODS = {"bootplace": bootplace, "csanet": csanet, "hiddenobjects": hiddenobjects}
 
 
 def _load(module, sd, what, drop=()):
@@ -19,10 +21,20 @@ def _load(module, sd, what, drop=()):
         print(f"[nạp] {what}: bỏ {len(unexpected)} khoá không dùng (vd {unexpected[:3]})", flush=True)
 
 
+def model_state(ck):
+    """Checkpoint -> state dict model. `best.pth` / `last.pth` của finetune lưu `{"model": Trainer.state_dict()}`, mà BootPlace /
+    HiddenObjects tự bọc `{"model": sd}` ⇒ lồng hai lớp; snapshot và checkpoint công bố chỉ một lớp. CSANet: `{"generator", ...}`."""
+    sd = ck["model"]
+    return sd["model"] if isinstance(sd.get("model"), dict) else sd
+
+
 def load_model(cfg, path, dev="cpu", drop_keys=(), train=False):
-    """-> BootPlace: `BOOTPLACE`; CSANet: (G, D). `path`: checkpoint công bố hay của ZETA (khoá `model`). `drop_keys`: bỏ trước khi nạp
+    """-> BootPlace: `BOOTPLACE`; CSANet: (G, D); HiddenObjects: `PlacementDETR` (`_load_hiddenobjects`). `path`: checkpoint công bố hay của ZETA (khoá `model`). `drop_keys`: bỏ trước khi nạp
     (khởi tạo lại). BootPlace: num_queries lấy từ checkpoint (`bbox_embed.loc_proj` [Q, 4Q]); `train` ⇒ train layer2–4 của ResNet."""
-    sd = torch.load(path, map_location="cpu", weights_only=False)["model"]
+    ck = torch.load(path, map_location="cpu", weights_only=False)
+    sd = model_state(ck)
+    if cfg["method"] == "hiddenobjects":
+        return _load_hiddenobjects(cfg, ck, path, dev)
     if cfg["method"] == "bootplace":
         sd = {k: v for k, v in sd.items() if k not in drop_keys}
         q = int(sd["bbox_embed.loc_proj.0.weight"].shape[0])
@@ -39,9 +51,28 @@ def load_model(cfg, path, dev="cpu", drop_keys=(), train=False):
     return G.to(dev), D.to(dev)
 
 
+def _load_hiddenobjects(cfg, ck, path, dev):
+    """Checkpoint công bố (`class_embed` + `classes`): `text_proj` = nghiệm lstsq trên CLIP text của `classes` (ra đúng nhúng cũ ⇒ model
+    như bản tác giả trên các lớp đó = hàng zero-shot). Checkpoint ZETA (`text_proj.*`): nạp thẳng. Q lấy từ `query_offsets`; backbone
+    không có trong checkpoint (dựng từ torchvision)."""
+    sd = dict(model_state(ck))
+    model = hiddenobjects.build({**cfg, "model": {**cfg["model"], "num_queries": int(sd["query_offsets"].shape[0])}})
+    if "text_proj.weight" not in sd:
+        classes, emb = list(ck["classes"]), sd.pop("class_embed.weight")
+        if len(classes) != len(emb):
+            raise RuntimeError(f"{path}: {len(classes)} lớp nhưng class_embed {tuple(emb.shape)}")
+        _, text = hiddenobjects.class_texts(classes, model.clip_text, "cpu")
+        order = sorted(range(len(classes)), key=lambda i: classes[i])                  # class_texts sắp theo tên
+        sd["text_proj.weight"], sd["text_proj.bias"] = lstsq_text_proj(text, emb[order])
+        err = (text.double() @ sd["text_proj.weight"].T.double() + sd["text_proj.bias"].double() - emb[order].double()).abs().max().item()
+        print(f"[nạp] HiddenObjects {path}: class_embed {len(classes)} lớp -> text_proj (lstsq, sai số max {err:.2e})", flush=True)
+    _load(model, sd, f"HiddenObjects {path}", drop=tuple(k for k in model.state_dict() if k.startswith("backbone.")))
+    return model.to(dev)
+
+
 def predict(cfg, model, samples, dev="cpu", seed=0, log=print):
     p = cfg["predict"]
-    m = model if cfg["method"] == "bootplace" else model[0]
+    m = model[0] if cfg["method"] == "csanet" else model
     return METHODS[cfg["method"]].predict(m, samples, p["k"], p, seed=seed, dev=dev, log=log)
 
 
