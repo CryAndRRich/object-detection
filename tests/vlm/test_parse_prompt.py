@@ -133,7 +133,8 @@ def test_author_icl_turns(fmt):
     assert t[2]["text"].startswith("Your seashell boxes are too small")
     assert ("as boxes [x1,y1,x2,y2]." in t[0]["text"]) == (fmt == "json_pixel")
     fix = parse_boxes(t[3]["text"], _cfg(fmt), (633, 384), (633, 384))
-    np.testing.assert_allclose(fix, [[380, 154, 454, 234], [424, 137, 522, 233], [360, 290, 430, 405]], atol=1)   # đã sửa khoá chair
+    y2 = 405 if fmt == "json_pixel" else 384                                  # 0–1000: kẹp box vượt canvas của tác giả
+    np.testing.assert_allclose(fix, [[380, 154, 454, 234], [424, 137, 522, 233], [360, 290, 430, y2]], atol=1)    # đã sửa khoá chair
     car = parse_boxes(t[5]["text"], _cfg(fmt), (576, 384), (576, 384))
     np.testing.assert_allclose(car, [[53, 180, 210, 305], [292, 61, 402, 112], [238, 118, 319, 194]], atol=1)
     if fmt == "json_pixel":

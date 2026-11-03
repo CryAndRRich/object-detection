@@ -155,7 +155,8 @@ def answer_text(boxes, fmt, cls, canvas_wh, scores=None, extra=None):
         cands = [{"name": cls, "box": [round(v) for v in b], "score": s, **((extra or [{}] * len(boxes))[i])}
                  for i, (b, s) in enumerate(zip(boxes, scores))]
         return json.dumps({"candidates": cands}, ensure_ascii=False)
-    bs = [[round(b[0] * 1000 / W), round(b[1] * 1000 / H), round(b[2] * 1000 / W), round(b[3] * 1000 / H)] for b in boxes]
+    bs = [[min(1000, max(0, round(v))) for v in (b[0] * 1000 / W, b[1] * 1000 / H, b[2] * 1000 / W, b[3] * 1000 / H)]
+          for b in boxes]                      # kẹp 0–1000 (2 box few-shot của tác giả vượt canvas: y2 410 / 405 > 384)
     if fmt == "json_norm":
         return json.dumps(bs)
     if fmt == "qwen":

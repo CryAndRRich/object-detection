@@ -6,6 +6,8 @@ name: qwen3.8-27b
 backend: openrouter
 model: qwen/qwen3.8-27b
 reasoning: none
+icl: 0                                 # pilot 2026-11-03: few-shot tác giả ("top 3", 3 box) -> Qwen chép, chỉ trả ~3 box (15 / 20 ảnh)
+                                       # -> zero-shot (lệch tác giả, người dùng bảo sửa 2026-11-03)
 price: {in: 0.15, out: 1.875}          # USD / 1M (dự phòng — OpenRouter trả usage.cost thật)
 openrouter:
   concurrency: 8

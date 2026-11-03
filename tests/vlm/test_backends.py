@@ -87,9 +87,14 @@ def test_openrouter_unsupported_params_dropped_schema_prompt_and_fatal(monkeypat
     assert "response_format" not in sess.sent[0][2] and sess.sent[0][2]["provider"] == {"data_collection": "deny"}
     with pytest.raises(Fatal, match="schema: prompt"):
         _or(monkeypatch, [], supported=("temperature",))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-proj-abcdefghijklmnop")                    # key OpenAI dán nhầm
+    with pytest.raises(Fatal, match="không phải key OpenRouter"):
+        OpenRouter({"model": "x", "openrouter": {}}, log=lambda *a: None, session=Session([], []))
     be, _, _, _ = _or(monkeypatch, [Resp(402, {"error": "credits"})])
     with pytest.raises(Fatal, match="402"):
         be.batch([JOB])
+    be, sess, _, sleeps = _or(monkeypatch, [Resp(402, {"error": {"metadata": {"reason": "in_flight_budget_exhausted"}}}), Resp(200, OK)])
+    assert be.batch([JOB])[0]["cost"] == 0.00042 and len(sleeps) == 1                        # 402 in-flight: chờ rồi thử lại
     be, _, _, sleeps = _or(monkeypatch, [Resp(503, {})] * 7)
     r = be.batch([JOB])[0]
     assert r["error"] and not r["text"] and len(sleeps) == 6
@@ -135,6 +140,10 @@ def test_env_loader(tmp_path, monkeypatch):
     with pytest.raises(SystemExit, match="EMPTY") as e:
         require_key("EMPTY")
     assert "sk-" not in str(e.value) and mask("sk-env-zzzzzz") == "…zzzz" and load_env(str(tmp_path / "none")) == []
+    monkeypatch.setenv("BAD_KEY", "sk-or-v1-abc def\u200bghij")                          # dán lỗi: dấu cách + ký tự vô hình
+    with pytest.raises(SystemExit, match=r"vị trí \[\(12, 'U\+0020'\), \(16, 'U\+200B'\)\]") as e:
+        require_key("BAD_KEY")
+    assert "abc" not in str(e.value) and "biến môi trường" in str(e.value)
 
 
 def test_vllm_memory_utilization():

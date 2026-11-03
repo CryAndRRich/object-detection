@@ -6,6 +6,7 @@ import os
 __all__ = ["ENV_PATH", "load_env", "require_key", "mask"]
 
 ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+_from_file = {}                     # tên biến -> True nếu giá trị lấy từ .env (không phải biến export sẵn)
 
 
 def load_env(path=ENV_PATH):
@@ -25,8 +26,9 @@ def load_env(path=ENV_PATH):
                 v = v[1:-1]
             if k:
                 names.append(k)
-                if v:
-                    os.environ.setdefault(k, v)
+                if v and k not in os.environ:
+                    os.environ[k] = v
+                    _from_file[k] = True
     return names
 
 
@@ -35,7 +37,14 @@ def mask(value):
 
 
 def require_key(name):
+    """-> key; thiếu / có ký tự trắng hay ngoài ASCII bên trong (dán lỗi; OpenRouter trả 401 "Missing Authentication header") -> dừng,
+    chỉ báo vị trí + mã ký tự, không in key."""
     v = os.environ.get(name, "").strip()
     if not v:
         raise SystemExit(f"thiếu {name}: điền vào {ENV_PATH} (cấu trúc xem .env.example) hoặc export trước khi chạy")
+    bad = [(i, f"U+{ord(c):04X}") for i, c in enumerate(v) if c.isspace() or not 33 <= ord(c) <= 126]
+    if bad:
+        src = "biến môi trường đã export (được ưu tiên hơn .env)" if name in os.environ and not _from_file.get(name) else ENV_PATH
+        raise SystemExit(f"{name} (dài {len(v)}, nguồn: {src}) có ký tự trắng / lạ ở vị trí {bad[:5]} — key phải viết liền một dòng, "
+                         f"không dấu cách, không chú thích cùng dòng")
     return v

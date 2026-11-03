@@ -26,6 +26,9 @@ class OpenRouter:
         self.cfg, self.log, self.sleep = cfg, log, sleep
         self.o = cfg.get("openrouter") or {}
         self.key = require_key("OPENROUTER_API_KEY")
+        if not self.key.startswith("sk-or-"):          # key OpenRouter: sk-or-v1-…; sk-proj- / sk- = key OpenAI -> 401 khó hiểu
+            raise Fatal(f"OPENROUTER_API_KEY không phải key OpenRouter (phải bắt đầu bằng sk-or-, đang là {self.key[:8]}…) — tạo key ở "
+                        f"https://openrouter.ai/settings/keys; key OpenAI (sk-proj-…) không dùng được cho OpenRouter")
         self.http = session or requests.Session()
         self.headers = {"Authorization": f"Bearer {self.key}", "Content-Type": "application/json",
                         "X-OpenRouter-Title": "multi_condition ZETA-VLM"}
@@ -51,14 +54,26 @@ class OpenRouter:
         raise Fatal(f"OpenRouter không có model {self.cfg['model']!r} (sửa `model` trong config)")
 
     def _print_credits(self):
+        """In hạn mức key (`/key`) + số dư tài khoản (`/credits`). OpenRouter TẠM GIỮ credit cho mỗi request đang bay theo trần
+        (token vào + `max_tokens` × giá ra) ⇒ số dư < concurrency × trần thì bị 402 `in_flight_budget_exhausted`."""
         try:
             r = self.http.get(f"{API}/key", headers=self.headers, timeout=30)
             if r.status_code in FATAL_STATUS:
                 raise Fatal(f"OpenRouter từ chối key ({r.status_code}): {r.text[:200]}")
             d = r.json().get("data", {})
-            self.log(f"[openrouter] key: đã dùng ${d.get('usage') or 0:.4f}, hạn mức còn {d.get('limit_remaining')}")
+            self.log(f"[openrouter] key: đã dùng ${d.get('usage') or 0:.4f}, hạn mức KEY còn {d.get('limit_remaining')} (không phải số dư)")
+            r = self.http.get(f"{API}/credits", headers=self.headers, timeout=30)
+            if r.status_code == 200:
+                c = r.json().get("data", {})
+                bal = float(c.get("total_credits") or 0) - float(c.get("total_usage") or 0)
+                p = self.model_info.get("pricing", {})
+                hold = (12000 * float(p.get("prompt", 0)) + int(self.cfg["max_tokens"]) * float(p.get("completion", 0))) * self.concurrency
+                self.log(f"[openrouter] số dư tài khoản ${bal:.4f} | tạm giữ ước ~${hold:.3f} cho {self.concurrency} request song song")
+                if bal < hold:
+                    self.log(f"[openrouter] ⚠️ số dư < tạm giữ -> sẽ bị 402 in-flight (code chờ + thử lại); nạp credit hoặc giảm "
+                             f"`openrouter.concurrency`")
         except requests.RequestException as e:
-            self.log(f"[openrouter] không đọc được /key ({e}) — chạy tiếp")
+            self.log(f"[openrouter] không đọc được /key, /credits ({e}) — chạy tiếp")
 
     def payload(self, job):
         msgs = []
@@ -102,6 +117,11 @@ class OpenRouter:
                 err = f"{type(e).__name__}: {e}"
                 if i < tries:
                     self.sleep(backoff(i))
+                continue
+            if r.status_code == 402 and "in_flight" in r.text:      # tạm giữ credit cho request đang bay: chờ rồi thử lại
+                err = f"HTTP 402 in-flight: {r.text[:200]}"
+                if i < tries:
+                    self.sleep(backoff(i + 2))
                 continue
             if r.status_code in FATAL_STATUS:
                 raise Fatal(f"OpenRouter {r.status_code} cho {self.cfg['model']}: {r.text[:300]}")

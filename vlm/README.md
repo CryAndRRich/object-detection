@@ -28,9 +28,9 @@ Quyết định, đối chiếu code tác giả, lý do chọn model, kết qu�
 
 | nhóm | config | model | ghi chú |
 |---|---|---|---|
-| **OpenRouter** (4) | `config/openrouter/qwen3.8-27b.yaml` | `qwen/qwen3.8-27b` | open weight; tắt suy nghĩ |
+| **OpenRouter** (4) | `config/openrouter/qwen3.8-27b.yaml` | `qwen/qwen3.8-27b` | open weight; tắt suy nghĩ; **`icl: 0`** (few-shot "top 3" làm model chỉ ra 3 box, từ 2026-11-03) |
 | | `config/openrouter/glm-5.3-flash.yaml` | `z-ai/glm-5.3-flash` | open weight; suy nghĩ `low` (không tắt được) |
-| | `config/openrouter/perceptron-mk1.5.yaml` | `perceptron/perceptron-mk1.5` | thương mại, "physical AI"; tắt suy nghĩ |
+| | `config/openrouter/perceptron-mk1.5.yaml` | `perceptron/perceptron-mk1.5` | thương mại, "physical AI"; tắt suy nghĩ; **`format: perceptron`** (`<point_box>` 0–1000, từ 2026-11-03) |
 | | `config/openrouter/gpt-6-luna.yaml` | `openai/gpt-6-luna` | thương mại, họ OpenAI; tắt suy nghĩ; không nhận temperature |
 | **Server A30** (2, vLLM) | `config/server/internvl3.5-8b.yaml` | `OpenGVLab/InternVL3_5-8B` | open weight; FP8 chỉ weight; schema bằng structured outputs của vLLM |
 | | `config/server/llava-ov2-8b.yaml` | `lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct` | open weight; docs không nói có ra box ⇒ pilot quyết định |

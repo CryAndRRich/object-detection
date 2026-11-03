@@ -16,6 +16,7 @@ from vlm.runner import run_dataset, select
 from tests.baseline.helpers import fake_ce130, fake_cocount
 
 CFG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "vlm", "config", "openrouter", "qwen3.8-27b.yaml")
+LUNA = os.path.join(os.path.dirname(CFG), "gpt-6-luna.yaml")                    # few-shot tác giả (Qwen: icl 0 từ 2026-11-03)
 
 
 class FakeBackend:
@@ -143,7 +144,7 @@ def test_cli_dry_run_needs_no_key(env, capsys, monkeypatch):
     cfg, ns, out = env
     n = ns()
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    vlm_run.main(["--config", CFG, "--pilot", "2", "--dataset", "ce130", "--dry-run", "--turn-index", n.turn_index, "--samples-root",
+    vlm_run.main(["--config", LUNA, "--pilot", "2", "--dataset", "ce130", "--dry-run", "--turn-index", n.turn_index, "--samples-root",
                   n.samples_root, "--out-root", str(out)])
     txt = capsys.readouterr().out
     assert "--- SYSTEM" in txt and "Canvas size: " in txt and "Object(s) to insert: cup" in txt

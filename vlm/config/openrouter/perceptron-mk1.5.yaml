@@ -5,6 +5,9 @@ name: perceptron-mk1.5
 backend: openrouter
 model: perceptron/perceptron-mk1.5
 reasoning: none
+format: perceptron                     # pilot 2026-11-03: json_pixel ra lẫn pixel / 0–1000 + box lưới máy móc (39 % box trong ảnh CE-130)
+                                       # -> định dạng gốc <point_box> (x1,y1) (x2,y2) lưới 0–1000 (không gửi schema; few-shot tác giả đổi
+                                       # sang <point_box>). Lệch tác giả, người dùng bảo sửa 2026-11-03
 price: {in: 0.15, out: 1.5}
 openrouter:
   concurrency: 8
