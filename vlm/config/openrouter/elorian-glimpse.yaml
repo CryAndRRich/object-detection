@@ -1,0 +1,15 @@
+# Elorian Glimpse (ra 16/10/2026, research preview) qua OpenRouter (provider duy nhất: Together), cách chạy của tác giả (base.yaml).
+# Model suy luận thị giác "physical world" (cắt vùng / đo bằng code trong lúc suy luận; post-train từ một model open weight). Nhận
+# structured_outputs, reasoning, temperature (kiểm /api/v1/models 2026-11-03). Thử thay Perceptron (người dùng 2026-11-03: pilot thử).
+# reasoning low (thấp nhất chắc có; tắt hẳn có thể mất điểm mạnh của model) -> max_tokens 16384 để phần suy luận không cắt câu trả lời.
+# Giá $0,6 / $3 (gấp 6 Luna) — token suy nghĩ tính như token ra.
+base: ../base.yaml
+name: elorian-glimpse
+backend: openrouter
+model: elorian/glimpse
+reasoning: low
+max_tokens: 16384
+price: {in: 0.6, out: 3.0}
+openrouter:
+  concurrency: 8
+  provider: {data_collection: deny}    # Together phải nhận chính sách này; không thì OpenRouter báo 404 -> xem log
