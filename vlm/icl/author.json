@@ -1,0 +1,39 @@
+{
+  "source": "refs/example4.py (few-shot của tác giả cho gpt-4.1-mini, refs/inference_layout.py). Ảnh: đường dẫn server tác giả /mnt/disk1/aiotlab/hachi/data/OBJ_INS_FSC/<split>/<branch>/... = data/all_phase2_V2/<split>/<branch>/... của repo. Sửa duy nhất: candidate thứ 2 lượt sửa của ví dụ 1 bản gốc là {\"name\": \"chair\", \"seashell\": [...]} (sai khoá) -> {\"name\": \"seashell\", \"box\": [...]}. Giữ nguyên box vượt canvas (y2 410 / 405 > 384) của tác giả. Ví dụ 1 là ảnh GT nhánh TEST 2_b1 (4 mẫu test_all 2_b1_t1..t4 cùng cảnh).",
+  "examples": [
+    {
+      "image": "data/all_phase2_V2/test/2_b1/ground_truth.jpg",
+      "canvas": [633, 384],
+      "class": "seashell",
+      "leaks_test": ["2_b1_t1", "2_b1_t2", "2_b1_t3", "2_b1_t4"],
+      "turns": [
+        {"role": "user", "text": "Canvas size: 633x384.\nObject(s) to insert: seashell\nReturn top 3 placement candidates as boxes [x1,y1,x2,y2].\nNo reference boxes are given. Infer seashell size from seashells already visible in the image and match that size (±15%)."},
+        {"role": "assistant", "candidates": [
+          {"name": "seashell", "box": [425, 280, 470, 325], "score": 0.86, "placement_type": "empty_ground", "reason": "Inferred typical seashell size from visible seashells; matched w/h within ±15% and placed on empty region."},
+          {"name": "seashell", "box": [295, 240, 380, 375], "score": 0.72, "placement_type": "empty_ground", "reason": "Matched seashell scale to nearby visible seashells at similar y-level; avoids salient objects."},
+          {"name": "seashell", "box": [350, 275, 435, 410], "score": 0.63, "placement_type": "empty_ground", "reason": "Same scale as seashells in scene; corner placement minimizes overlap."}
+        ]},
+        {"role": "user", "text": "Your seashell boxes are too small compared to the seashells already in the image (same class). Increase them to match the visible seashell size more closely (±10%). Keep them in empty regions."},
+        {"role": "assistant", "candidates": [
+          {"name": "seashell", "box": [380, 154, 454, 234], "score": 0.88, "placement_type": "empty_ground", "reason": "Rescaled to match visible seashell size more tightly (±10%); placed in low-saliency background area."},
+          {"name": "seashell", "box": [424, 137, 522, 233], "score": 0.74, "placement_type": "empty_ground", "reason": "Adjusted size to match existing seashells; minimal overlap."},
+          {"name": "seashell", "box": [360, 290, 430, 405], "score": 0.62, "placement_type": "corner_floor", "reason": "Rescaled to consistent seashell size; corner floor region."}
+        ]}
+      ]
+    },
+    {
+      "image": "data/all_phase2_V2/train/6123_b1/inpainted_turn_3.png",
+      "canvas": [576, 384],
+      "class": "car",
+      "leaks_test": [],
+      "turns": [
+        {"role": "user", "text": "Canvas size: 576x384.\nObject(s) to insert: car\nReturn top 3 placement candidates.\nNo reference boxes are given. Infer car size from cars already visible in the image and match that size (±15%)."},
+        {"role": "assistant", "candidates": [
+          {"name": "car", "box": [53, 180, 210, 305], "score": 0.82, "placement_type": "road_empty", "reason": "Inferred typical car size from visible cars; matched scale and placed on empty road."},
+          {"name": "car", "box": [292, 61, 402, 112], "score": 0.68, "placement_type": "road_side", "reason": "Matched car width/height to scene cars; avoids overlap."},
+          {"name": "car", "box": [238, 118, 319, 194], "score": 0.60, "placement_type": "road_center", "reason": "Consistent scale with existing cars; centered on low-saliency road area."}
+        ]}
+      ]
+    }
+  ]
+}

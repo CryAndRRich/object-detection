@@ -1,0 +1,11 @@
+# gpt-4.1-mini = ĐÚNG model tác giả chạy (bài: C-NLL 10,10, giao thức cũ) — tái hiện cách chạy của tác giả, để đối chiếu pipeline
+# (không thuộc 7 model đã chốt; chạy khi người dùng muốn). Còn trên OpenRouter (kiểm 2026-11-03): $0,4 / $1,6, có structured_outputs,
+# không có reasoning.
+base: ../base.yaml
+name: gpt-4.1-mini
+backend: openrouter
+model: openai/gpt-4.1-mini
+price: {in: 0.4, out: 1.6}
+openrouter:
+  concurrency: 8
+  provider: {data_collection: deny}

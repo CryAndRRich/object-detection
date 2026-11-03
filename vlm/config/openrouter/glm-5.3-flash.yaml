@@ -1,0 +1,11 @@
+# GLM-5.3-Flash (open weight, MIT, 26/08/2026, MoE 320B A18B) qua OpenRouter, cách chạy của tác giả (base.yaml). Có structured_outputs.
+# Không tắt được suy nghĩ (z.ai: "disabling reasoning is not supported") -> low. Pilot hỏng toạ độ pixel thì thử `format: json_norm`.
+base: ../base.yaml
+name: glm-5.3-flash
+backend: openrouter
+model: z-ai/glm-5.3-flash
+reasoning: low
+price: {in: 0.0285, out: 0.0923}
+openrouter:
+  concurrency: 8
+  provider: {data_collection: deny}

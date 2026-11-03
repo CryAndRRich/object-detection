@@ -1,0 +1,18 @@
+# ZETA-VLM — mặc định chung (docs/EXPERIMENT_ZETA.md mục 13). Một config model = `base: ../base.yaml` + phần riêng.
+# Người dùng chốt 2026-11-03: làm GIỐNG code GPT của tác giả nhất có thể (refs/inference_layout.py + refs/example4.py): prompt
+# nguyên văn, canvas = ảnh gốc, ảnh gửi nguyên file, schema `candidates` qua API, few-shot 2 hội thoại của tác giả, sampling mặc định
+# của model. Chỉ khác: k 30 (tác giả 3; chấm K = 30 và K = 1 = score cao nhất), thử lại khi 0 box (tác giả không có).
+k: 30
+format: json_pixel     # đúng tác giả; định dạng box gốc từng model (qwen | gemini | perceptron | json_norm) chỉ để dự phòng
+schema: api            # api = gửi schema tác giả qua API (như tác giả) | prompt = chép schema vào cuối system (backend không nhận)
+icl: author            # author = 2 hội thoại mẫu của tác giả (vlm/icl/author.json) | 0 = zero-shot | N = N mẫu CE-130 train
+seed: 0                # chọn ảnh pilot (+ mẫu few-shot khi icl = N)
+image:
+  max_side: null       # null = gửi nguyên file như tác giả; đặt số thì ảnh có cạnh dài lớn hơn bị thu (JPEG)
+  jpeg_quality: 95
+max_tokens: 4096       # 30 candidate kèm reason ~2k token
+retries: 2             # thử lại khi trả lời không có box hợp lệ nào
+retry_temperature: 0.7
+log_sec: 60            # in tiến độ mỗi ~60 s
+max_api_errors: 20     # số lỗi API liên tiếp thì dừng (hết quota / mạng)
+sampling: {}           # tác giả không đặt -> mặc định của model / provider

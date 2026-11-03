@@ -1,0 +1,11 @@
+# Perceptron Mk1.5 ("physical AI") qua OpenRouter, cách chạy của tác giả (base.yaml). Có structured_outputs. reasoning none. Context
+# 36.864, ra tối đa 8.192 token. Pilot hỏng toạ độ pixel thì thử `format: perceptron` (thẻ <point_box> 0–1000, kiểu gốc).
+base: ../base.yaml
+name: perceptron-mk1.5
+backend: openrouter
+model: perceptron/perceptron-mk1.5
+reasoning: none
+price: {in: 0.15, out: 1.5}
+openrouter:
+  concurrency: 8
+  provider: {data_collection: deny}
