@@ -4,7 +4,6 @@
 
 experiment: "delta4"
 description: "GAMMA4 (box attention tới mọi vật) + BoxRefiner của tác giả (CLIP ViT-B/32, text B/16) trước U-Net"
-task: "add"
 
 data:
   root: "../data/all_phase2_V2"

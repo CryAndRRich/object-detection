@@ -1,4 +1,4 @@
-"""ZETA-VLM backend với HTTP giả (không mạng): OpenRouter payload (reasoning / provider / ảnh data URL / schema tác giả + require_parameters,
+"""ZETA5 / ZETA6 backend với HTTP giả (không mạng): OpenRouter payload (reasoning / provider / ảnh data URL / schema tác giả + require_parameters,
 bỏ tham số model không nhận, model không có structured_outputs = Fatal),
 đọc usage.cost + token suy nghĩ, thử lại 429 theo Retry-After, 402 = Fatal; Gemini payload (inlineData, thinkingLevel, key ở header),
 bỏ phần thought, token suy nghĩ cộng vào token ra, giãn RPM; `.env` (env var ưu tiên, không in giá trị); bộ nhớ vLLM."""
@@ -47,9 +47,9 @@ class Session:
 ALL = ("structured_outputs", "temperature", "reasoning")
 
 
-def _or(monkeypatch, posts, supported=ALL, schema="api", **o):
+def _or(monkeypatch, posts, supported=ALL, **o):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test-1234567890")
-    cfg = {"model": "openai/gpt-6-luna", "format": "json_pixel", "k": 30, "schema": schema, "max_tokens": 100, "reasoning": "none", "sampling": {"temperature": 0.2},
+    cfg = {"model": "openai/gpt-6-luna", "k": 30, "max_tokens": 100, "reasoning": "none", "sampling": {"temperature": 0.2},
            "openrouter": {"concurrency": 2, "provider": {"data_collection": "deny"}, **o}}
     sess = Session(posts, [{"id": "openai/gpt-6-luna", "supported_parameters": list(supported), "pricing": {"prompt": "1e-7",
                                                                                                              "completion": "5e-7"}}])
@@ -78,14 +78,11 @@ def test_openrouter_payload_usage_and_retry(monkeypatch):
     assert not any("sk-or-test-1234567890" in m for m in logs) and any("…7890" in m for m in logs)
 
 
-def test_openrouter_unsupported_params_dropped_schema_prompt_and_fatal(monkeypatch):
+def test_openrouter_unsupported_params_dropped_and_fatal(monkeypatch):
     be, sess, logs, _ = _or(monkeypatch, [Resp(200, OK)], supported=("structured_outputs", "reasoning"))   # Luna: không temperature
     be.batch([{**JOB, "temperature": 0.7}])
     assert "temperature" not in sess.sent[0][2] and any("không nhận `temperature`" in m for m in logs)
-    be, sess, _, _ = _or(monkeypatch, [Resp(200, OK)], supported=("temperature",), schema="prompt")
-    be.batch([JOB])
-    assert "response_format" not in sess.sent[0][2] and sess.sent[0][2]["provider"] == {"data_collection": "deny"}
-    with pytest.raises(Fatal, match="schema: prompt"):
+    with pytest.raises(Fatal, match="không có structured_outputs"):
         _or(monkeypatch, [], supported=("temperature",))
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-proj-abcdefghijklmnop")                    # key OpenAI dán nhầm
     with pytest.raises(Fatal, match="không phải key OpenRouter"):
@@ -110,7 +107,7 @@ def test_gemini_payload_thoughts_and_rpm(monkeypatch):
     sess = Session([Resp(200, body), Resp(200, body)])
     now = [0.0]
     sleeps = []
-    cfg = {"model": "gemini-robotics-er-2-preview", "format": "json_pixel", "k": 30, "max_tokens": 50, "sampling": {"temperature": 1.0},
+    cfg = {"model": "gemini-robotics-er-2-preview", "k": 30, "max_tokens": 50, "sampling": {"temperature": 1.0},
            "gemini": {"thinking_level": "medium", "rpm": 30, "concurrency": 1}}
     be = Gemini(cfg, log=lambda *a: None, sleep=sleeps.append, session=sess, clock=lambda: now[0])
     job = {**JOB, "messages": [{"role": "system", "text": "SYS", "image": None}, {**JOB["messages"][0], "mime": "image/png"}]}
@@ -125,7 +122,7 @@ def test_gemini_payload_thoughts_and_rpm(monkeypatch):
     assert b["generationConfig"]["responseMimeType"] == "application/json"
     assert b["generationConfig"]["responseJsonSchema"]["properties"]["candidates"]["maxItems"] == 30          # schema tác giả qua API
     sess.posts = [Resp(400, {"error": {"message": "Invalid JSON payload: responseJsonSchema ..."}})]
-    with pytest.raises(Fatal, match="schema: prompt"):
+    with pytest.raises(Fatal, match="400 với responseJsonSchema"):
         be.batch([job])
 
 

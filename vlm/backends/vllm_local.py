@@ -2,7 +2,8 @@
 - vLLM báo lỗi khi tổng × `gpu_memory_utilization` > bộ nhớ ĐANG trống ⇒ đọc bộ nhớ trống (nvidia-smi, GPU mà `run_on_free_gpu.py` đặt
   trong CUDA_VISIBLE_DEVICES) rồi đặt utilization = `vllm.gpu_mem_gib` / tổng; trống không đủ thì dừng NGAY với thông báo rõ;
 - `kv_cache_memory_bytes` cố định KV cache (bỏ qua utilization); `quantization: fp8_per_tensor` = FP8 chỉ weight (Marlin) trên Ampere;
-- `LLM.chat` nhận ảnh base64 data URL (chỉ base64); `schema: api` -> structured outputs JSON theo schema tác giả. Tiền = 0; `sec` = thời gian khối / số prompt."""
+- `LLM.chat` nhận ảnh base64 data URL (chỉ base64); structured outputs JSON theo schema tác giả. Tiền = 0; `sec` = thời gian khối /
+  số prompt."""
 
 import os
 import subprocess
@@ -51,9 +52,7 @@ class VLLMLocal:
         log(f"[vllm] nạp model {time.time() - t0:.0f} s | GPU bị chiếm thêm {(free - free2) / 1024:.1f} GiB (mọi tiến trình trên GPU)")
 
     def _structured(self):
-        """`schema: api` -> ràng buộc JSON theo schema tác giả lúc sinh (structured outputs của vLLM; tên lớp đổi theo bản)."""
-        if self.cfg.get("format") != "json_pixel" or self.cfg.get("schema", "api") != "api":
-            return {}
+        """Ràng buộc JSON theo schema tác giả lúc sinh (structured outputs của vLLM; tên lớp đổi theo bản)."""
         schema = box_schema(self.cfg["k"])["schema"]
         try:
             from vllm.sampling_params import StructuredOutputsParams
@@ -64,7 +63,8 @@ class VLLMLocal:
             from vllm.sampling_params import GuidedDecodingParams
             return {"guided_decoding": GuidedDecodingParams(json=schema)}
         except ImportError:
-            raise Fatal("bản vLLM này không có StructuredOutputsParams / GuidedDecodingParams -> đặt `schema: prompt`")
+            raise Fatal("bản vLLM này không có StructuredOutputsParams / GuidedDecodingParams -> không ràng buộc được schema tác giả, "
+                        "cài bản vLLM có structured outputs")
 
     def params(self, job):
         from vllm import SamplingParams

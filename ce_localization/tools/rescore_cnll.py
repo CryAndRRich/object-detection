@@ -5,11 +5,11 @@ C-NLL mới = C-NLL cũ + ½·min_i D²(z_i) (D² = Mahalanobis² của vật z_
 Mỗi `<x>.json` của `eval.py` cần `<x>_boxes.json` cạnh nó (để biết ảnh nào có C-NLL): dump cộng lượng của ảnh vào `cnll` từng box +
 `cnll_gt`; file tổng cộng TB lượng đó trên đúng tập ảnh có C-NLL vào mọi khoá `cnll` / `cnll_gt` (cả `prior`, `*_objsize*` — cùng tập
 ảnh, kiểm `n_cnll`). Ghi `cnll_calib: "mu"` vào cả hai file; file đã có thì bỏ qua. Dựng lại hình học như lúc eval (CE-130 ảnh inpaint:
-`ce130_geometry`; CE-CoCount: `--cocount-review` / `--cocount-obj-filter` PHẢI giống lúc eval, kiểm số vật với `n_obj` của dump).
+`data/turns.ce130_geometry`; CE-CoCount: `--cocount-review` / `--cocount-obj-filter` PHẢI giống lúc eval, kiểm số vật với `n_obj` của dump).
 Khoá ảnh gốc CE-130 (`original*`) chưa hỗ trợ -> báo lỗi.
 
   cd object-detection/ce_localization
-  python tools/rescore_cnll.py ../../output/add/snapshots/delta8/*/ep0??.json --cocount-review ../../output/add/box_review/cocount.jsonl
+  python tools/rescore_cnll.py ../../output/add/delta8/*/ep0??.json --cocount-review ../data/cocount_review.jsonl
 """
 
 import argparse
@@ -22,11 +22,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from ce_localization.data.cocount import cocount_geometry, load_review  # noqa: E402
-from ce_localization.data.turns import TurnIndex  # noqa: E402
+from ce_localization.data.turns import TurnIndex, ce130_geometry  # noqa: E402
 from ce_localization.engine.add_eval import CNLL_MIN_OBJ, _cnll_fit, _features, other_class  # noqa: E402
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from plot_cnll_worst import ce130_geometry  # noqa: E402
 
 __all__ = ["calib_shift", "shift_for"]
 

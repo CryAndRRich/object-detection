@@ -1,8 +1,7 @@
 # Gemini Robotics-ER 2 qua Google AI Studio (REST generateContent; không có trên OpenRouter), cách chạy của tác giả (base.yaml): schema
-# qua `responseJsonSchema` (400 vì schema -> đặt `schema: prompt`). thinkingLevel minimal (gần gpt-4.1-mini không suy nghĩ; docs ER-2
-# khuyên medium). Giá trả phí $1 / $5 tới 31/12/2026 (token suy nghĩ tính như ra). Free tier: $0 nhưng Google dùng dữ liệu để cải
-# thiện sản phẩm; RPM free không công bố -> đặt `rpm` theo AI Studio (aistudio.google.com/rate-limit). Pilot hỏng toạ độ pixel thì
-# thử `format: gemini` (y/x/y2/x2 0–1000, kiểu gốc của ER).
+# qua `responseJsonSchema`. thinkingLevel minimal (gần gpt-4.1-mini không suy nghĩ; docs ER-2 khuyên medium). Giá trả phí $1 / $5 tới
+# 31/12/2026 (token suy nghĩ tính như ra). Free tier: $0 nhưng Google dùng dữ liệu để cải thiện sản phẩm; RPM free không công bố ->
+# đặt `rpm` theo AI Studio (aistudio.google.com/rate-limit). ZETA5 (thương mại).
 base: ../base.yaml
 name: robotics-er-2
 backend: gemini

@@ -15,7 +15,8 @@ canvas, 2 số lẻ), `n_obj`, `cnll` [K] (C-NLL từng box), `cnll_gt` (từng 
 
   cd /mnt/disk1/aiotlab/haitn/object-detection/ce_localization
   nohup python ../tools/run_on_free_gpu.py -- eval.py --ckpt ../weights/add/delta6/best.pth --split test_all \\
-      --add-samplers mock ddim --out /mnt/disk1/aiotlab/haitn/output/add/delta6/test_all.json > $LOG 2>&1 &
+      --add-samplers mock ddim --out /mnt/disk1/aiotlab/haitn/output/add/delta6/ce130_test_all/best.json > $LOG 2>&1 &
+Bố cục kết quả: `output/add/<run>/<tập>/best.json` (best.pth) | `epNNN.json` (snapshot), <tập> = ce130_test_all | cocount_review5 | …
 """
 
 import argparse
@@ -101,7 +102,7 @@ def main():
     ap.add_argument("--obj-size", nargs="+", default=None, choices=SIZE_STATS)
     ap.add_argument("--cocount-root", default="../data/cocount")
     ap.add_argument("--cocount-obj-filter", type=float, default=None, help="filt3: 3")
-    ap.add_argument("--cocount-review", default=None, help="review5: ../../output/add/box_review/cocount.jsonl (+ --cocount-min-obj 5)")
+    ap.add_argument("--cocount-review", default=None, help="review5: ../data/cocount_review.jsonl (+ --cocount-min-obj 5)")
     ap.add_argument("--cocount-min-obj", type=int, default=None)
     for k in ("data-root", "samples-root", "turn-index", "density-root", "density-index"):
         ap.add_argument(f"--{k}", default=None, help=f"ghi đè data.{k.replace('-', '_')} (mặc định: config trong checkpoint)")

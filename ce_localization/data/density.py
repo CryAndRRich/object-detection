@@ -95,8 +95,5 @@ class DensityIndex:
             self.variants = json.load(f)["variants"]
         self.root = samples_root
 
-    def __contains__(self, iid):
-        return iid in self.variants
-
     def full(self, iid):
         return os.path.join(self.root, self.variants[iid][0][0])

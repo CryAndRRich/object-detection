@@ -7,7 +7,7 @@ import sys
 import numpy as np
 import pytest
 
-from baseline.data import canvas_scale, geometry, load_samples
+from baseline.data import geometry, load_samples
 from baseline.scoring import records_from_boxes, score_records
 from ce_localization.data.cocount import CoCountAddDataset, load_review
 from ce_localization.data.turns import CE130AddDataset, collate_add

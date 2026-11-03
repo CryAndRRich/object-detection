@@ -22,18 +22,12 @@ import numpy as np
 from PIL import Image
 
 from ce_localization.data.cocount import CoCountAddDataset, cocount_geometry, read_cocount
-from ce_localization.data.turns import TurnIndex
-from ce_localization.tools.plot_cnll_worst import ce130_geometry
+from ce_localization.data.turns import TurnIndex, ce130_geometry, present_objects
 
-__all__ = ["DATASETS", "FG_SELECT", "load_samples", "canvas_scale", "geometry", "train_items", "sample_rng", "pick_objects", "int_box"]
+__all__ = ["DATASETS", "FG_SELECT", "load_samples", "geometry", "train_items", "sample_rng", "pick_objects", "int_box"]
 
 DATASETS = ("ce130", "cocount")
 FG_SELECT = ("median", "random")
-
-
-def _present(b, t):
-    removed = np.asarray(b["removed"], dtype=int)
-    return np.asarray(b["objects"], dtype=np.float64).reshape(-1, 4)[(removed == 0) | (removed > t)]
 
 
 def load_samples(dataset, *, turn_index=None, samples_root=None, split="test_all", cocount_root=None, review=None, min_obj=None,
@@ -48,7 +42,7 @@ def load_samples(dataset, *, turn_index=None, samples_root=None, split="test_all
             e = index.turns[key]
             b = index.branches[e["branch"]]
             out.append({"dataset": "ce130", "image_id": key, "t": e["t"], "image": os.path.join(samples_root, e["sample"]),
-                        "class": b["class"], "wh": tuple(int(v) for v in b["wh"]), "objects": _present(b, e["t"]),
+                        "class": b["class"], "wh": tuple(int(v) for v in b["wh"]), "objects": present_objects(b, e["t"]),
                         "holes": np.asarray(b["holes"][:e["t"]], dtype=np.float64).reshape(-1, 4)})
     else:
         for key in CoCountAddDataset(cocount_root, review=review, min_obj=min_obj).keys:
@@ -59,11 +53,6 @@ def load_samples(dataset, *, turn_index=None, samples_root=None, split="test_all
             out.append({"dataset": "cocount", "image_id": key, "t": 0, "image": path, "class": r["class"], "wh": tuple(int(v) for v in wh),
                         "objects": r["objects"], "holes": r["loc"]})
     return (out[:limit] if limit else out), index
-
-
-def canvas_scale(wh, image_size=512):
-    """Ảnh gốc -> canvas letterbox (neo góc trên trái) của CE-Loc: s = min(T / W, T / H)."""
-    return min(image_size / wh[0], image_size / wh[1])
 
 
 def geometry(sample, *, index=None, samples_root=None, cocount_root=None, review=None, image_size=512):
@@ -83,7 +72,7 @@ def train_items(index, samples_root, gt_root, split="train"):
         gt = os.path.join(gt_root, e["branch"], "ground_truth.jpg")
         before = gt if t == 1 else os.path.join(samples_root, index.turns[f"{key.rsplit('_t', 1)[0]}_t{t - 1}"]["sample"])
         out.append({"image_id": key, "t": t, "class": b["class"], "image": os.path.join(samples_root, e["sample"]), "before": before, "gt": gt,
-                    "wh": tuple(int(v) for v in b["wh"]), "objects": _present(b, t),
+                    "wh": tuple(int(v) for v in b["wh"]), "objects": present_objects(b, t),
                     "holes": np.asarray(b["holes"][:t], dtype=np.float64).reshape(-1, 4)})
     return out
 

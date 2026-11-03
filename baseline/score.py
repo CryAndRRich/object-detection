@@ -30,7 +30,7 @@ def add_data_args(ap):
     ap.add_argument("--turn-index", default="../data/turn_index.json", help="CE-130; cũng là nguồn mốc `prior` (lỗ train)")
     ap.add_argument("--samples-root", default="../data/samples")
     ap.add_argument("--cocount-root", default="../data/cocount")
-    ap.add_argument("--cocount-review", default="../../output/add/box_review/cocount.jsonl")
+    ap.add_argument("--cocount-review", default="../data/cocount_review.jsonl")
     ap.add_argument("--cocount-min-obj", type=int, default=5)
     ap.add_argument("--obj-size", nargs="+", default=["mean", "exemplar"], choices=["mean", "exemplar"], help="CoCount: chấm thêm sau đổi cỡ")
     ap.add_argument("--seed", type=int, default=0, help="seed (mốc prior: 0 như eval CE-Loc)")

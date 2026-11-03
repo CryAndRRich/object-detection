@@ -11,7 +11,7 @@ Chọn `best.pth` theo `eval.select_metric`:
 `ep000.pth` = weight khởi tạo, ghi trước iter 0 (run mới, không ghi lại khi `--resume`).
 `data.clip_cache` / `--clip-cache`: token CLIP ảnh train tính sẵn (`tools/build_clip_cache.py`) thay CLIP forward mỗi iter.
 `data.train_target`: `latest_hole` (mặc định, như CE-Loc gốc) | `positive` (DELTA7+) — tập đích của mẫu = {mọi lỗ tới lượt t} ∪ {box
-positive gán tay của `data.positive_file` / `--positive-file` (`box_review/ce130_train.jsonl`) có IoU với mọi lỗ <=
+positive gán tay của `data.positive_file` / `--positive-file` (`data/ce130_train.jsonl`) có IoU với mọi lỗ <=
 `data.positive_hole_iou`} (box trùng lỗ = chính lỗ đó, bỏ). `data.positive_sampling`: `random` (DELTA7, vắng = random) — mỗi iter MỘT box
 ngẫu nhiên đều / ảnh, rút bằng generator seed theo (seed, iter, rank) như t / nhiễu; `all` (DELTA7.0.1) — mọi box của ảnh trong cùng
 iter, mỗi box bộ (t, ε) riêng, chung phần mã hoá ảnh, loss TB trong ảnh rồi TB trên ảnh (`BoxPolicy.eps_loss` x0_index); `pair`

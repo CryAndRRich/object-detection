@@ -16,6 +16,7 @@ import glob
 import hashlib
 import json
 import os
+import time
 import zlib
 from collections import defaultdict
 from multiprocessing import get_context
@@ -27,7 +28,8 @@ from torch.utils.data import Dataset
 
 from ce_localization.utils.box_ops_np import box_iou, filter_degenerate
 
-__all__ = ["SPLITS", "IMAGE_KINDS", "letterbox", "scale_boxes", "read_annotation", "pixel_hash", "assign_removed", "build_turn_index",
+__all__ = ["SPLITS", "IMAGE_KINDS", "letterbox_size", "letterbox", "scale_boxes", "present_objects", "ce130_geometry", "iter_jsonl",
+           "read_annotation", "pixel_hash", "assign_removed", "build_turn_index",
            "TurnIndex", "AddCache", "build_add_cache", "convert_add_cache", "CE130AddDataset", "collate_add", "to_device_add",
            "paper_to_float", "load_positives", "hand_positives", "POSITIVE_SAMPLING"]
 
@@ -39,11 +41,17 @@ POSITIVE_SAMPLING = ("random", "all", "pair")
 TARGET_TOL_PX = 1.0                             # target_bbox (cxcywh, làm tròn) vs inpainted_bboxes (xyxy)
 
 
+def letterbox_size(wh, target=512):
+    """(W, H) ảnh gốc -> (scale, nw, nh) của canvas letterbox kiểu bài (neo góc trên trái): scale = min(T / W, T / H), vùng ảnh thật
+    nw × nh = int(W·scale) × int(H·scale)."""
+    w, h = wh
+    scale = min(target / w, target / h)
+    return scale, int(w * scale), int(h * scale)
+
+
 def letterbox(img, target=512):
     """PIL RGB -> (canvas uint8 [T,T,3], scale, nw, nh). Y như `resize_and_pad` của CE-Loc gốc."""
-    w, h = img.size
-    scale = min(target / w, target / h)
-    nw, nh = int(w * scale), int(h * scale)
+    scale, nw, nh = letterbox_size(img.size, target)
     canvas = np.zeros((target, target, 3), dtype=np.uint8)            # đệm ĐEN như bản gốc
     canvas[:nh, :nw] = np.asarray(img.resize((nw, nh), resample=Image.BILINEAR), dtype=np.uint8)
     return canvas, scale, nw, nh
@@ -58,16 +66,36 @@ def scale_boxes(boxes_xyxy_px, scale, nw, nh):
     return b[keep]
 
 
-def load_positives(path):
-    """`box_review/ce130_train.jsonl` (một dòng một mẫu `samples/train`: `id` = tên file, `positive` = box xyxy pixel ảnh gốc người gán
-    nhãn chấm đặt được vật — đề xuất của model, gồm cả chính các lỗ; `negative` / `neutral` không dùng) -> {id: mảng [P,4]}."""
-    out = {}
+def present_objects(branch, t):
+    """Box vật (xyxy pixel ảnh gốc, float64 [M,4]) còn trong ảnh lượt t của nhánh: chưa bị xoá tới lượt t (`removed` 0 = không bị xoá)."""
+    removed = np.asarray(branch["removed"], dtype=int)
+    return np.asarray(branch["objects"], dtype=np.float64).reshape(-1, 4)[(removed == 0) | (removed > t)]
+
+
+def ce130_geometry(index, samples_root, key, image_size=512):
+    """Mẫu CE-130 (nhánh, lượt) ảnh inpaint -> hình học như `CE130AddDataset` (pixel canvas, float32 như lúc eval) + ảnh + chú thích."""
+    e = index.turns[key]
+    b = index.branches[e["branch"]]
+    t = e["t"]
+    s, nw, nh = letterbox_size(b["wh"], image_size)
+    sb = lambda x: scale_boxes(x, s, nw, nh).astype(np.float32).astype(np.float64)  # noqa: E731
+    return {"wh": np.array([nw, nh], dtype=np.float64), "objects": sb(present_objects(b, t)), "holes": sb(b["holes"][:t]),
+            "image": os.path.join(samples_root, e["sample"]), "cls": b["class"],
+            "labels": [(b["class"], "cyan"), (f"GT holes ({b['class']})", "lime")]}
+
+
+def iter_jsonl(path):
+    """Từng dòng (bỏ dòng trống) của file jsonl -> dict."""
     with open(path) as f:
         for line in f:
             if line.strip():
-                r = json.loads(line)
-                out[r["id"]] = np.asarray(r["positive"], dtype=np.float64).reshape(-1, 4)
-    return out
+                yield json.loads(line)
+
+
+def load_positives(path):
+    """`data/ce130_train.jsonl` (một dòng một mẫu `samples/train`: `id` = tên file, `positive` = box xyxy pixel ảnh gốc người gán
+    nhãn chấm đặt được vật — đề xuất của model, gồm cả chính các lỗ; `negative` / `neutral` không dùng) -> {id: mảng [P,4]}."""
+    return {r["id"]: np.asarray(r["positive"], dtype=np.float64).reshape(-1, 4) for r in iter_jsonl(path)}
 
 
 def hand_positives(boxes, holes, hole_iou):
@@ -305,7 +333,7 @@ def build_add_cache(index, samples_root, keys, out_dir, image_size=512, workers=
     rows, geom, off = {}, {}, 0
     pool = _pool(workers) if workers > 0 else None
     it = pool.imap(_cache_one, jobs, chunksize=16) if pool else map(_cache_one, jobs)
-    t0 = __import__("time").time()
+    t0 = time.time()
     for i, (k, data, g) in enumerate(it):
         if fmt == "raw":
             sink[i] = data
@@ -316,7 +344,7 @@ def build_add_cache(index, samples_root, keys, out_dir, image_size=512, workers=
             off += len(data)
         geom[k] = g
         if (i + 1) % 2000 == 0 or i + 1 == len(jobs):
-            el = __import__("time").time() - t0
+            el = time.time() - t0
             log(f"  [cache] {i + 1}/{len(jobs)} | {el:.0f}s | còn ~{el / (i + 1) * (len(jobs) - i - 1):.0f}s"
                 + ("" if fmt == "raw" else f" | {off / 2 ** 30:.2f} GB"))
     if pool:
@@ -357,12 +385,12 @@ def convert_add_cache(src_dir, out_dir, workers=4, log=print):
     items = list(enumerate(keys))
     chunk = max(1, -(-n // max(workers * 8, 1)))
     jobs = [(src_dir, dst_path, n, size, items[j:j + chunk]) for j in range(0, n, chunk)]
-    t0, done = __import__("time").time(), 0
+    t0, done = time.time(), 0
     pool = _pool(workers) if workers > 0 else None
     for m in (pool.imap_unordered(_unzip_rows, jobs) if pool else map(_unzip_rows, jobs)):
         done += m
         if done == n or done // 4000 != (done - m) // 4000:
-            el = __import__("time").time() - t0
+            el = time.time() - t0
             log(f"  [cache raw] {done}/{n} | {el:.0f}s | còn ~{el / done * (n - done):.0f}s")
     if pool:
         pool.close()
@@ -379,7 +407,7 @@ class CE130AddDataset(Dataset):
     `pair`: mỗi phần tử = một cặp (mẫu, box), `target` = box đó."""
 
     def __init__(self, index, ce130_root, samples_root, split, image_size=512, image="inpainted", density_index=None, cache=None,
-                 clip_cache=None, positives=None, positive_hole_iou=None, positive_sampling="random"):
+                 positives=None, positive_hole_iou=None, positive_sampling="random"):
         if image not in IMAGE_KINDS:
             raise ValueError(f"image {image!r} không thuộc {IMAGE_KINDS}")
         if image == "original" and density_index is None:
@@ -390,7 +418,7 @@ class CE130AddDataset(Dataset):
         if cache is not None and cache.size != image_size:
             raise ValueError(f"cache image_size {cache.size} != {image_size}")
         self.cache = cache if image == "inpainted" else None          # cache = ảnh inpaint + density của mẫu
-        self.clip_cache = clip_cache                                   # token CLIP tính sẵn (`data/clip_cache.py`, chỉ train)
+        self.clip_cache = None                                         # token CLIP tính sẵn (`data/clip_cache.py`, train gán sau)
         self.positives = self.positive_hole_iou = self.positive_sampling = self.pairs = None
         if positives is not None:
             self.set_positives(positives, positive_hole_iou, positive_sampling)
@@ -438,10 +466,8 @@ class CE130AddDataset(Dataset):
         holes = scale_boxes(b["holes"][:t], scale, nw, nh)
         if len(holes) != t:
             raise ValueError(f"{key}: lỗ rơi ra ngoài vùng ảnh thật sau letterbox")
-        removed = np.asarray(b["removed"], dtype=int)
-        objs = np.asarray(b["objects"], dtype=np.float64).reshape(-1, 4)
-        if self.image == "inpainted":                    # vật còn trong ảnh lượt t: chưa bị xoá tới lượt t
-            objs = objs[(removed == 0) | (removed > t)]
+        objs = (present_objects(b, t) if self.image == "inpainted"           # vật còn trong ảnh lượt t: chưa bị xoá tới lượt t
+                else np.asarray(b["objects"], dtype=np.float64).reshape(-1, 4))
         target = holes[-1]                               # lỗ MỚI NHẤT = đích train (mặc định)
         if self.positives is not None:
             raw = self.positive_boxes(key)

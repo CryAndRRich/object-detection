@@ -1,7 +1,7 @@
 # LLaVA-OneVision-2-8B-Instruct (lmms-lab, 05/2026; nền Qwen3-8B) — vLLM >= 0.25.0 (`LlavaOnevision2ForConditionalGeneration`), cách
 # chạy của tác giả (base.yaml): schema qua structured outputs của vLLM, sampling = generation_config. Docs KHÔNG nói có ra box
 # (grounding 2D trong bài báo ra điểm pixel); pilot hỏng thì hạ về llava-hf/llava-onevision-qwen2-7b-ov-hf (bản HiddenObjects dùng).
-# Few-shot tác giả = 3 ảnh / prompt -> ảnh <= ~1 MP (processor Qwen2-VL, ≈ 1,3k token / ảnh), max_model_len 12288.
+# Few-shot tác giả = 3 ảnh / prompt -> ảnh <= ~1 MP (processor Qwen2-VL, ≈ 1,3k token / ảnh), max_model_len 12288. ZETA6 (open-source).
 base: ../base.yaml
 name: llava-ov2-8b
 backend: vllm

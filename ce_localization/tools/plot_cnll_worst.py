@@ -3,19 +3,19 @@
 (`--dataset ce130`) — KHÔNG model, KHÔNG GPU.
 
 Dựng lại hình học từng mẫu như lúc eval (CE-CoCount: `data/cocount.cocount_geometry`, cùng `--cocount-review` / `--cocount-obj-filter`;
-CE-130: `ce130_geometry` = `CE130AddDataset` ảnh inpaint), tính C-NLL TỪNG box bằng `engine/add_eval.cnll` (như eval: quan hệ với vật cả
-hai lớp ở CE-CoCount) rồi xếp mẫu theo `--rank-by`: `min` = C-NLL box tốt nhất (số của bảng) | `median` = trung vị K box.
+CE-130: `data/turns.ce130_geometry` = `CE130AddDataset` ảnh inpaint), tính C-NLL TỪNG box bằng `engine/add_eval.cnll` (như eval:
+quan hệ với vật cả hai lớp ở CE-CoCount) rồi xếp mẫu theo `--rank-by`: `min` = C-NLL box tốt nhất (số của bảng) | `median` = trung vị K box.
 Mỗi mẫu một hình: ảnh + box + vài dòng chữ cùng màu box — cyan = vật lớp cần thêm, cam = vật lớp kia (CE-CoCount), xanh lá nét đứt =
 chỗ trống / lỗ GT, đỏ = `--select` box model C-NLL thấp nhất sau NMS (`--nms-iou`, bỏ box trùng giữa K mẫu; `add_eval.select_nms`).
 
   cd object-detection/ce_localization
-  python tools/plot_cnll_worst.py ../../output/add/cocount/review5/test_delta6_2_boxes.json --key cocount_mock \\
-      --cocount-review ../../output/add/box_review/cocount.jsonl --out ../../output/add/viz/cnll_worst/delta6_2_review5_mock
-  python tools/plot_cnll_worst.py ../../output/add/ce130_test_all/test_delta6_2_boxes.json --dataset ce130 --key inpainted_mock \\
+  python tools/plot_cnll_worst.py ../../output/add/delta6_2/cocount_review5/best_boxes.json --key cocount_mock \\
+      --cocount-review ../data/cocount_review.jsonl --out ../../output/add/viz/cnll_worst/delta6_2_review5_mock
+  python tools/plot_cnll_worst.py ../../output/add/delta6_2/ce130_test_all/best_boxes.json --dataset ce130 --key inpainted_mock \\
       --top-pct 1 --out ../../output/add/viz/cnll_worst/delta6_2_ce130_mock
   -> worst_01_<mẫu>.png … + rank.json (mọi mẫu: trung vị / min C-NLL K box, trung vị / min box GT, số vật, box đã chọn + C-NLL của chúng)
 `--rank-by gt_gap --pair`: mẫu model hơn GT nhiều nhất (C-NLL lỗ GT tốt nhất − box model tốt nhất), mỗi mẫu một hàng: box GT | K box model
-  python tools/plot_cnll_worst.py ../../output/add/snapshots/delta8/ce130_test_all/ep010_boxes.json --dataset ce130 --rank-by gt_gap \\
+  python tools/plot_cnll_worst.py ../../output/add/delta8/ce130_test_all/ep010_boxes.json --dataset ce130 --rank-by gt_gap \\
       --pair --top 20 --min-obj 20 --out ../../output/add/viz/cnll_vs_gt/delta8_ep010_ce130_test
 Nhiều dump `TÊN=đường dẫn` (cùng tập mẫu, vd các model): vẽ mẫu nằm trong `--intersect-pct` % tệ nhất của MỌI dump, mỗi mẫu một lưới
 (Ground truth + từng setting) -> worst_01_<mẫu>.png … + intersect.json.
@@ -37,26 +37,10 @@ from PIL import Image
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from ce_localization.data.cocount import clean_class, cocount_geometry, load_review, twin_name  # noqa: E402
-from ce_localization.data.turns import TurnIndex, scale_boxes  # noqa: E402
+from ce_localization.data.turns import TurnIndex, ce130_geometry  # noqa: E402
 from ce_localization.engine.add_eval import clip_boxes, cnll, other_class, select_nms  # noqa: E402
 
-__all__ = ["ce130_geometry", "score_samples", "plot_sample", "plot_trend"]
-
-
-def ce130_geometry(index, samples_root, key, image_size=512):
-    """Mẫu CE-130 (nhánh, lượt) ảnh inpaint -> hình học như `CE130AddDataset` (pixel canvas, float32 như lúc eval) + ảnh + chú thích."""
-    e = index.turns[key]
-    b = index.branches[e["branch"]]
-    t = e["t"]
-    w, h = b["wh"]
-    s = min(image_size / w, image_size / h)
-    nw, nh = int(w * s), int(h * s)
-    removed = np.asarray(b["removed"], dtype=int)
-    objs = np.asarray(b["objects"], dtype=np.float64).reshape(-1, 4)[(removed == 0) | (removed > t)]
-    sb = lambda x: scale_boxes(x, s, nw, nh).astype(np.float32).astype(np.float64)  # noqa: E731
-    return {"wh": np.array([nw, nh], dtype=np.float64), "objects": sb(objs), "holes": sb(b["holes"][:t]),
-            "image": os.path.join(samples_root, e["sample"]), "cls": b["class"],
-            "labels": [(b["class"], "cyan"), (f"GT holes ({b['class']})", "lime")]}
+__all__ = ["score_samples", "plot_sample", "plot_trend"]
 
 
 def score_samples(rows, geo, k=5, nms_iou=0.5):

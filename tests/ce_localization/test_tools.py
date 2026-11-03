@@ -123,7 +123,7 @@ def test_plot_cnll_worst_cocount_and_ce130(tmp_path, monkeypatch):
     dump đầu giảm dần, vẽ đúng `--top` mẫu + trend.json."""
     from ce_localization.utils.box_ops_np import box_iou
     from ce_localization.data.cocount import CoCountAddDataset, load_review
-    from ce_localization.data.turns import CE130AddDataset
+    from ce_localization.data.turns import CE130AddDataset, ce130_geometry
     from ce_localization.tools import plot_cnll_worst as pw
     from tests.ce_localization.helpers import _fake_cocount, _fake_review, _fake_turn_index
     rng = np.random.default_rng(0)
@@ -142,7 +142,7 @@ def test_plot_cnll_worst_cocount_and_ce130(tmp_path, monkeypatch):
     items_ce = []
     for i in range(len(ce)):
         s = ce[i]
-        g = pw.ce130_geometry(index, samples, s["image_id"], 128)
+        g = ce130_geometry(index, samples, s["image_id"], 128)
         assert np.array_equal(g["objects"], s["objects"].double().numpy()) and np.array_equal(g["holes"], s["holes"].double().numpy())
         items_ce.append((s["image_id"], s["t"], s["valid_hw"][1], s["valid_hw"][0],
                          {k: s[k].numpy().astype(np.float64) for k in ("objects", "holes")}))

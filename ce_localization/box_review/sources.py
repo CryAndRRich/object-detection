@@ -21,8 +21,7 @@ import numpy as np
 from PIL import Image
 
 from ce_localization.data.cocount import clean_class, load_review, read_cocount
-from ce_localization.data.turns import read_annotation
-from ce_localization.data.turns import TurnIndex, assign_removed
+from ce_localization.data.turns import TurnIndex, assign_removed, letterbox_size, present_objects, read_annotation
 from ce_localization.utils.box_ops_np import box_iou
 
 __all__ = ["SOURCES", "COLORS", "DEDUP_IOU", "PRESELECT_K", "PRESELECT_IOU", "dedup_boxes", "preselect", "cocount_screens",
@@ -143,8 +142,7 @@ def ce130_pred_screens(dump, turn_index, samples_root, key="inpainted", image_si
         e = index.turns[x["image_id"]]
         b = index.branches[e["branch"]]
         t, (w, h) = e["t"], b["wh"]
-        removed = np.asarray(b["removed"], dtype=int)
-        objs = _boxes(b["objects"])[(removed == 0) | (removed > t)]
+        objs = present_objects(b, t)
         sample = os.path.splitext(os.path.basename(e["sample"]))[0]
         out.append(_pred_screen(x, (w, h), image_size, (f"turn {t}", os.path.join(samples_root, e["sample"])), objs,
                                 f"**{x['image_id']}** ({sample}) | class **{b['class']}** | turn {t} | {len(objs)} objects",
@@ -181,9 +179,9 @@ def _pred_screen(x, wh, image_size, view, objs, title, meta, group):
     """Màn chọn box của một dòng dump `x`: box canvas `image_size` -> pixel ảnh gốc (kẹp trong ảnh), vật xanh không bấm + K box đỏ
     (kèm C-NLL `cnll` của dump để chọn sẵn)."""
     w, h = wh
-    s = min(image_size / w, image_size / h)
-    if abs(int(w * s) - x["wh"][0]) > 1e-3 or abs(int(h * s) - x["wh"][1]) > 1e-3:
-        raise ValueError(f"{x['image_id']}: vùng ảnh dump {x['wh']} khác ({int(w * s)}, {int(h * s)}) — sai --image-size?")
+    s, nw, nh = letterbox_size(wh, image_size)
+    if abs(nw - x["wh"][0]) > 1e-3 or abs(nh - x["wh"][1]) > 1e-3:
+        raise ValueError(f"{x['image_id']}: vùng ảnh dump {x['wh']} khác ({nw}, {nh}) — sai --image-size?")
     model = _boxes(x["boxes"]) / s
     model[:, [0, 2]] = model[:, [0, 2]].clip(0, w)
     model[:, [1, 3]] = model[:, [1, 3]].clip(0, h)

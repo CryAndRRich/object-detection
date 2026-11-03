@@ -34,12 +34,13 @@ Ba cách dùng (chung code):
      CHỌN SẴN 5 box (`sources.preselect`: top 5 C-NLL thấp nhất sau NMS IoU 0,5, trong box còn hiện) — ổn thì Enter luôn. Bấm box =
      chọn / bỏ chọn (viền đậm); Enter lưu (kể cả không chọn box nào = ảnh không có box đẹp). Đổi Data / User giữa chừng: nháp +
      hoàn tác của từng (Data, User) giữ nguyên trong phiên. Mở app: màn của cả hai Data đọc sẵn ở luồng nền.
-     -> `output/add/box_review/pred_<run>_<epoch>_<tập>_user_k.jsonl`, mỗi dòng: "good" {"model": [chỉ số trong K box của dump]},
+     -> `output/add/review/<run>_<epoch>/pred_<run>_<epoch>_<tập>_user_k.jsonl`, mỗi dòng: "good" {"model": [chỉ số trong K box của dump]},
         "positive" [[x1, y1, x2, y2] pixel ẢNH GỐC của box đã chọn], "pre" {"model": [chỉ số chọn sẵn]}, "image_id", "class"
         (+ CE-130: "sample" tên file samples/, "t")
 
-Kết quả: `output/add/box_review/<nguồn>.jsonl` (cocount.jsonl, ce130_<split>.jsonl), MỘT dòng mỗi màn đã lưu, ghi đĩa ngay mỗi lần
-lưu ⇒ tắt mở lại tiếp từ màn chưa lưu đầu tiên:
+Kết quả: cách dùng 1 -> `object-detection/data/cocount_review.jsonl` (đầu vào eval review5, nằm cạnh dữ liệu); cách dùng 2 ->
+`output/add/review/ce130_<split>[_objects].jsonl` (KHÔNG ghi vào `data/`: `data/ce130_train.jsonl` là box positive train, khuôn khác).
+MỘT dòng mỗi màn đã lưu, ghi đĩa ngay mỗi lần lưu ⇒ tắt mở lại tiếp từ màn chưa lưu đầu tiên:
   {"id", "bad": {nhóm: [chỉ số box người rà loại]}, "auto": {nhóm: [chỉ số box lọc trùng tự động]} (chỉ khi lọc trùng),
    "n": {nhóm: số box}, "share": {nhóm: khoá}, "time", "sec"}
   CE-CoCount: id = nhóm = tên file (`..._positive` / `..._negative`), chỉ số = vị trí trong `exam_bbox` của `Anno_with_exam_bbox`;
@@ -66,13 +67,15 @@ OD = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, OD)
 
 from ce_localization.box_review.sources import SOURCES, dedup_boxes, preselect  # noqa: E402
+from ce_localization.data.turns import iter_jsonl  # noqa: E402
 
 __all__ = ["ReviewStore", "Session", "PredHub", "box_svg", "default_out", "split_screens", "pred_out", "build_ui"]
 
 ZOOMS = ("fit", "100%", "150%", "200%", "300%", "400%")
 PREFETCH = 8          # số màn kế tải trước (ảnh giải mã sẵn ở trình duyệt, `brPrefetch`)
 FILE_ROUTE = "/gradio_api/file="
-OUT_DIR = os.path.join(os.path.dirname(OD), "output", "add", "box_review")
+DATA_DIR = os.path.join(OD, "data")                                                  # bản rà box vật CE-CoCount (cách dùng 1): đầu vào eval
+REVIEW_DIR = os.path.join(os.path.dirname(OD), "output", "add", "review")            # soi box GT CE-130 (2) + chọn box model (3)
 
 KEYS_JS = """<script>
 window.__brScroll = window.__brScroll || {};
@@ -171,8 +174,9 @@ CSS = (".br_hidden {display: none !important;} #br_head p {margin: 0.15em 0;} "
 
 
 def default_out(source, split=None, objects_only=False):
-    name = source + (f"_{split}" if source == "ce130" else "") + ("_objects" if objects_only else "")
-    return os.path.join(OUT_DIR, name + ".jsonl")
+    if source == "cocount":
+        return os.path.join(DATA_DIR, "cocount_review.jsonl")
+    return os.path.join(REVIEW_DIR, f"ce130_{split}" + ("_objects" if objects_only else "") + ".jsonl")
 
 
 def split_screens(screens, user, n_users=2):
@@ -193,11 +197,8 @@ class ReviewStore:
     def __init__(self, path):
         self.path, self.latest = path, {}
         if os.path.exists(path):
-            with open(path) as f:
-                for line in f:
-                    if line.strip():
-                        rec = json.loads(line)
-                        self.latest[rec["id"]] = rec
+            for rec in iter_jsonl(path):
+                self.latest[rec["id"]] = rec
 
     def get(self, sid):
         return self.latest.get(sid)
@@ -281,7 +282,7 @@ class Session:
         self.drafts, self.undo_stack, self.auto = {}, [], {}
         if dedup:
             self._dedup_saved()
-        self.zoom, self.msg = "fit", ""
+        self.zoom = "fit"
         self.show = {f"g{i}" for i in range(max(len(sc["groups"]) for sc in screens))}
         self._rebuild_share()
         self.first_unsaved()
@@ -345,7 +346,7 @@ class Session:
         old = getattr(self, "pos", None)
         self.pos = min(max(pos, 0), len(self.screens) - 1)
         sc = self.sc()
-        rec, self.prefill = self.store.get(sc["id"]), ""
+        rec = self.store.get(sc["id"])
         if sc["id"] in self.drafts:
             self.marks = copy.deepcopy(self.drafts[sc["id"]])
         elif rec:
@@ -355,7 +356,6 @@ class Session:
             for g in sc["groups"]:
                 if g["share"] in self.share and self.share[g["share"]][1] != sc["id"]:
                     self.marks[g["key"]] = set(self.share[g["share"]][2])
-                    self.prefill = self.share[g["share"]][1]
         self.auto_cur = self._auto_for(sc, self.marks)
         self.pre_cur = ({g["key"]: preselect(g["boxes"], g.get("scores"), self.auto_cur.get(g["key"], set()))
                          for g in sc["groups"] if g.get("click", True)} if self.mode == "select" else {})
@@ -372,11 +372,9 @@ class Session:
         self.go(p)
 
     def next(self):
-        self.msg = ""
         self.go(self.pos + 1)
 
     def prev(self):
-        self.msg = ""
         self.go(self.pos - 1)
 
     def next_view(self):
@@ -403,7 +401,6 @@ class Session:
         self.marks[key] ^= {i}
         self.drafts[sc["id"]] = copy.deepcopy(self.marks)
         self.undo_stack.append(("mark", sc["id"], key, i))
-        self.msg = ""
 
     def click(self, code):
         """Mã từ trình duyệt: "gi:i|thời điểm"."""
@@ -431,13 +428,11 @@ class Session:
         self.store.put(rec)
         self.drafts.pop(sc["id"], None)
         self._rebuild_share()
-        self.msg = f"saved {sc['id']}"
         if self.pos < len(self.screens) - 1:
             self.go(self.pos + 1)
 
     def undo(self):
         if not self.undo_stack:
-            self.msg = "nothing to undo"
             return
         kind, sid, *rest = self.undo_stack.pop()
         if kind == "mark":
@@ -445,7 +440,6 @@ class Session:
             self.go(self.index[sid])
             self.marks[key] ^= {i}                  # loại: trả box lại | chọn: đảo lại lần bấm
             self.drafts[sid] = copy.deepcopy(self.marks)
-            self.msg = f"undid click on {sid}"
         else:
             saved = self.store.get(sid)
             if rest[0] is None:
@@ -456,11 +450,10 @@ class Session:
             self.go(self.index[sid])
             self.marks = {g["key"]: set(saved[self.field].get(g["key"], [])) for g in self.sc()["groups"]}
             self.drafts[sid] = copy.deepcopy(self.marks)
-            self.msg = f"undid save of {sid}"
 
     # ---- hiển thị
-    def wh(self, sc=None):
-        sc = sc or self.sc()
+    def wh(self):
+        sc = self.sc()
         if "wh" not in sc:
             with Image.open(sc["views"][0][1]) as im:
                 sc["wh"] = list(im.size)
@@ -632,19 +625,22 @@ def build_ui(sess, gr):
 
 
 def pred_out(dump):
-    """File kết quả gốc của chế độ chọn theo đường dẫn dump `…/snapshots/<run>/<tập>/<epoch>_boxes.json`."""
+    """File kết quả gốc của chế độ chọn theo đường dẫn dump `…/<run>/<tập>/<epoch>_boxes.json` ->
+    `output/add/review/<run>_<epoch>/pred_<run>_<epoch>_<tập>.jsonl`."""
     parts = os.path.abspath(dump).split(os.sep)
-    return os.path.join(OUT_DIR, f"pred_{parts[-3]}_{parts[-1].replace('_boxes.json', '')}_{parts[-2]}.jsonl")
+    tag = f"{parts[-3]}_{parts[-1].replace('_boxes.json', '')}"
+    return os.path.join(REVIEW_DIR, tag, f"pred_{tag}_{parts[-2]}.jsonl")
 
 
 def main():
-    snap = os.path.join(os.path.dirname(OD), "output", "add", "snapshots", "delta8")
+    snap = os.path.join(os.path.dirname(OD), "output", "add", "delta8")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("source", nargs="?", default="cocount", choices=["cocount", "ce130", "pred"], help="mặc định cocount")
     ap.add_argument("--root", default=None, help="mặc định object-detection/data/cocount | object-detection/data/all_phase2_V2")
     ap.add_argument("--split", default="train", choices=["train", "val", "test"], help="ce130")
     ap.add_argument("--objects-only", action="store_true", help="ce130: chỉ rà box vật (không hiện box lỗ)")
-    ap.add_argument("--out", default=None, help="cocount / ce130: file kết quả .jsonl (mặc định output/add/box_review/<nguồn>.jsonl)")
+    ap.add_argument("--out", default=None,
+                    help="cocount / ce130: file kết quả .jsonl (mặc định: `default_out` — xem đầu file)")
     ap.add_argument("--port", type=int, default=7861)
     ap.add_argument("--no-browser", action="store_true", help="không tự mở trình duyệt")
     ap.add_argument("--no-dedup", action="store_true", help="cocount / pred: tắt lọc trùng tự động (mặc định bật; ce130 luôn tắt)")
@@ -652,7 +648,7 @@ def main():
     ap.add_argument("--cocount-dump", default=os.path.join(snap, "cocount_review5", "ep010_boxes.json"), help="pred: dump CE-CoCount")
     ap.add_argument("--turn-index", default=os.path.join(OD, "data", "turn_index.json"), help="pred: CE-130")
     ap.add_argument("--samples-root", default=os.path.join(OD, "data", "samples"), help="pred: CE-130")
-    ap.add_argument("--review", default=os.path.join(OUT_DIR, "cocount.jsonl"), help="pred: bản rà box vật CE-CoCount (review5)")
+    ap.add_argument("--review", default=os.path.join(DATA_DIR, "cocount_review.jsonl"), help="pred: bản rà box vật CE-CoCount (review5)")
     ap.add_argument("--n-users", type=int, default=2, help="pred: số người chia việc (user_1 … user_n)")
     a = ap.parse_args()
     t0 = time.time()

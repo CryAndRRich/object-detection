@@ -10,8 +10,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torchvision.ops import generalized_box_iou
 
-from baseline.models.detr import HungarianMatcher, box_cxcywh_to_xyxy, build_backbone, build_transformer, generalized_box_iou
+from baseline.models.detr import HungarianMatcher, box_cxcywh_to_xyxy, build_backbone, build_transformer
 
 __all__ = ["NUM_CLASSES", "BOOTPLACE", "SetCriterion", "build_bootplace", "build_criterion"]
 

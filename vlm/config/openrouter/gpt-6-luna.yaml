@@ -1,5 +1,5 @@
 # GPT-6 Luna qua OpenRouter, cách chạy của tác giả (base.yaml) — cùng họ OpenAI với gpt-4.1-mini của tác giả. reasoning none. Model
-# không nhận temperature -> backend tự bỏ (cả lần thử lại).
+# không nhận temperature -> backend tự bỏ (cả lần thử lại). ZETA5 (thương mại).
 base: ../base.yaml
 name: gpt-6-luna
 backend: openrouter

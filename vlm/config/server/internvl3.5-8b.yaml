@@ -2,7 +2,7 @@
 # (base.yaml): schema qua structured outputs của vLLM, sampling = generation_config của model. bf16 15,9 GiB không vừa GPU trống
 # ~9–10 GiB -> FP8 chỉ weight (W8A16 Marlin trên Ampere) ~8 GiB + KV cố định. Few-shot tác giả = 3 ảnh / prompt -> max_model_len
 # 12288 (KV ~1,7 GiB cho 1 chuỗi đủ dài), max_dynamic_patch 4 (<= 5 ô 448 ≈ 1,3k token / ảnh). Không đủ chỗ thì hạ: InternVL3_5-4B.
-# Pilot hỏng toạ độ pixel thì thử `format: json_norm` (eval grounding chính thức: [[x1,y1,x2,y2]] / 1000).
+# ZETA6 (open-source).
 base: ../base.yaml
 name: internvl3.5-8b
 backend: vllm

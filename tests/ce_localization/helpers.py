@@ -133,7 +133,7 @@ def _fake_turn_index(base):
 
 
 def _fake_positives(base, path):
-    """Bản gán box positive giả (khuôn `box_review/ce130_train.jsonl`): mẫu train của nhánh 1001_b1 = mọi lỗ tới lượt t + 1 box trùng
+    """Bản gán box positive giả (khuôn `data/ce130_train.jsonl`): mẫu train của nhánh 1001_b1 = mọi lỗ tới lượt t + 1 box trùng
     lỗ mới nhất (lệch 2 px, phải bị lọc) + 1 chỗ trống dưới đáy ảnh (vật y2 <= 135, riêng từng lượt); mẫu khác không có trong file.
     -> {id: box}."""
     from ce_localization.data.turns import TurnIndex

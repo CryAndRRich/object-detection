@@ -23,7 +23,10 @@ Test: `python -m pytest tests/baseline -q` từ `object-detection/` (~80 s CPU; 
 ```bash
 cd /mnt/disk1/aiotlab/haitn/object-detection/baseline
 python ../tools/run_on_free_gpu.py -- predict.py --config config/zeta1.yaml --ckpt ../weights/add/zeta1/best.pth \
-    --dataset ce130 --out /mnt/disk1/aiotlab/haitn/output/add/zeta1/ce130_test_all/test.json
+    --dataset ce130 --out /mnt/disk1/aiotlab/haitn/output/add/zeta1/ce130_test_all/best.json
 ```
+
+Kết quả: `output/add/<run>/<tập>/best.json` (best.pth) | `epNNN.json` (snapshot), mỗi file kèm `*_boxes.json` + `*_raw.jsonl`;
+`score.py` mặc định đọc bản rà box vật CE-CoCount `../data/cocount_review.jsonl`.
 
 Đọc số như `ce_localization/README.md` mục "Đọc số", thêm `cnll_median`, `cnll_mean_trim1` (TB bỏ 1 % ảnh tệ nhất), `cnll_gt_median`.

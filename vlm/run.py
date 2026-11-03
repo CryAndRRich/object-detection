@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ZETA-VLM: một VLM zero-shot trả 30 box chỗ thêm vật / ảnh trên CE-130 `test_all` + CE-CoCount `review5`, chấm bằng code chấm CE-Loc
+"""ZETA5 / ZETA6: một VLM trả 30 box chỗ thêm vật / ảnh trên CE-130 `test_all` + CE-CoCount `review5`, chấm bằng code chấm CE-Loc
 (`baseline/score.py`). Một config = một model (`config/{openrouter,server,gemini}/`). Key: `vlm/.env` (mẫu `.env.example`).
 
   cd /mnt/disk1/aiotlab/haitn/object-detection/vlm
@@ -48,7 +48,7 @@ def parse_args(argv=None):
     ap.add_argument("--turn-index", default="../data/turn_index.json")
     ap.add_argument("--samples-root", default="../data/samples")
     ap.add_argument("--cocount-root", default="../data/cocount")
-    ap.add_argument("--cocount-review", default="../../output/add/box_review/cocount.jsonl")
+    ap.add_argument("--cocount-review", default="../data/cocount_review.jsonl")
     ap.add_argument("--cocount-min-obj", type=int, default=5)
     ap.add_argument("--obj-size", nargs="+", default=["mean", "exemplar"], choices=["mean", "exemplar"])
     ap.add_argument("--seed", type=int, default=0, help="seed mốc prior khi chấm (0 như eval CE-Loc)")

@@ -12,9 +12,9 @@ import torchvision
 from scipy.optimize import linear_sum_assignment
 from torch import nn
 from torchvision.models._utils import IntermediateLayerGetter
-from torchvision.ops.boxes import box_area
+from torchvision.ops import generalized_box_iou
 
-__all__ = ["nested", "box_cxcywh_to_xyxy", "box_xyxy_to_cxcywh", "generalized_box_iou", "Joiner", "Transformer", "HungarianMatcher",
+__all__ = ["nested", "box_cxcywh_to_xyxy", "box_xyxy_to_cxcywh", "Joiner", "Transformer", "HungarianMatcher",
            "build_backbone", "build_transformer"]
 
 
@@ -38,14 +38,6 @@ def box_cxcywh_to_xyxy(x):
 def box_xyxy_to_cxcywh(x):
     x0, y0, x1, y1 = x.unbind(-1)
     return torch.stack([(x0 + x1) / 2, (y0 + y1) / 2, x1 - x0, y1 - y0], dim=-1)
-
-
-def generalized_box_iou(a, b):
-    area_a, area_b = box_area(a), box_area(b)
-    inter = (torch.min(a[:, None, 2:], b[:, 2:]) - torch.max(a[:, None, :2], b[:, :2])).clamp(min=0).prod(-1)
-    union = area_a[:, None] + area_b - inter
-    hull = (torch.max(a[:, None, 2:], b[:, 2:]) - torch.min(a[:, None, :2], b[:, :2])).clamp(min=0).prod(-1)
-    return inter / union - (hull - union) / hull
 
 
 # ----------------------------------------------------------------------------- backbone + mã hoá vị trí

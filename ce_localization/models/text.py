@@ -11,17 +11,12 @@ __all__ = ["encode_class_names", "encode_class_tokens", "TextTable"]
 
 
 @torch.no_grad()
-def _run_clip_text(names, model_name, device, batch, take, state_dict=None, fingerprint=False):
-    """Nạp CLIP text `model_name` (+ weight `state_dict` thay bản tải về), chạy theo batch (`padding=True, truncation=True`) trên các
-    tên khác nhau đã sắp xếp; `take(chunk, inp, out)` -> list (tên, tensor CPU). -> ({tên: tensor}, sha256 weight | None)."""
+def _run_clip_text(names, model_name, device, batch, take, fingerprint=False):
+    """Nạp CLIP text `model_name`, chạy theo batch (`padding=True, truncation=True`) trên các tên khác nhau đã sắp xếp;
+    `take(chunk, inp, out)` -> list (tên, tensor CPU). -> ({tên: tensor}, sha256 weight | None)."""
     from transformers import CLIPTextModel, CLIPTokenizer
     tok = CLIPTokenizer.from_pretrained(model_name)
     model = CLIPTextModel.from_pretrained(model_name)
-    if state_dict is not None:
-        missing, unexpected = model.load_state_dict(state_dict, strict=False)
-        bad = [k for k in list(missing) + list(unexpected) if not k.endswith("position_ids")]
-        if bad:
-            raise RuntimeError(f"state_dict CLIP text lệch {model_name}: {bad[:10]}")
     sha = None
     if fingerprint:
         from ce_localization.models.clip_refiner import weights_sha256
@@ -39,11 +34,9 @@ def _run_clip_text(names, model_name, device, batch, take, state_dict=None, fing
     return out, sha
 
 
-def encode_class_names(names, model_name="openai/clip-vit-base-patch32", device="cpu", batch=64, state_dict=None):
-    """list[str] -> {tên: tensor [512] float32 trên CPU} (`pooler_output`). `state_dict`: weight CLIP text thay cho bản tải về (vd.
-    CLIP lưu trong checkpoint CE-Loc gốc); chỉ tha `position_ids` (buffer, có / không tuỳ phiên bản transformers)."""
-    return _run_clip_text(names, model_name, device, batch, lambda chunk, inp, o: zip(chunk, o.pooler_output.float().cpu()),
-                          state_dict)[0]
+def encode_class_names(names, model_name="openai/clip-vit-base-patch32", device="cpu", batch=64):
+    """list[str] -> {tên: tensor [512] float32 trên CPU} (`pooler_output`)."""
+    return _run_clip_text(names, model_name, device, batch, lambda chunk, inp, o: zip(chunk, o.pooler_output.float().cpu()))[0]
 
 
 def encode_class_tokens(names, model_name="openai/clip-vit-base-patch16", device="cpu", batch=64):
@@ -65,7 +58,6 @@ class TextTable:
 
     def __init__(self, table, tokens=None, token_sha=None):
         self.table = table
-        self.dim = next(iter(table.values())).numel()
         self.token_table, self.token_sha = tokens, token_sha
 
     def __call__(self, names, device):

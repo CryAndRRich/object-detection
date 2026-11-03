@@ -130,10 +130,10 @@ class PaperVisionEncoder(nn.Module):
         return self.projection(paper_spatial_softmax(c5, valid))
 
 
-def pad_objects(objects, dev, min_m=1, with_index=False):
-    """list B tensor [Mᵢ,C] -> (objs [B,M,C] float32, mask [B,M] bool), M = max(max Mᵢ, min_m); `with_index`: thêm
-    `mask.nonzero(as_tuple=True)` tính trên CPU (`ConditionalUnet1D.encode_objects`)."""
-    M = max([len(o) for o in objects] + [min_m])
+def pad_objects(objects, dev):
+    """list B tensor [Mᵢ,C] -> (objs [B,M,C] float32, mask [B,M] bool, `mask.nonzero(as_tuple=True)` tính trên CPU
+    (`ConditionalUnet1D.encode_objects`)), M = max(max Mᵢ, 1)."""
+    M = max([len(o) for o in objects] + [1])
     C = objects[0].shape[-1] if objects else 4
     objs = torch.zeros(len(objects), M, C)
     mask = torch.zeros(len(objects), M, dtype=torch.bool)
@@ -141,8 +141,7 @@ def pad_objects(objects, dev, min_m=1, with_index=False):
         o = torch.as_tensor(o, dtype=torch.float32).reshape(-1, C)
         objs[i, :len(o)] = o
         mask[i, :len(o)] = True
-    out = (to_device(objs, dev), to_device(mask, dev))
-    return out + (tuple(to_device(i, dev) for i in mask.nonzero(as_tuple=True)),) if with_index else out
+    return to_device(objs, dev), to_device(mask, dev), tuple(to_device(i, dev) for i in mask.nonzero(as_tuple=True))
 
 
 class BoxPolicy(nn.Module):
@@ -243,7 +242,7 @@ class BoxPolicy(nn.Module):
                     obj_generator = torch.Generator().manual_seed(0)
                 o = o[torch.randperm(len(o), generator=obj_generator)[: self.obj_max]]
             units.append(boxes_to_unit(o, whwh, self.box_coder))
-        objs, mask, index = pad_objects(units, cond.device, with_index=True)
+        objs, mask, index = pad_objects(units, cond.device)
         return self.noise_net.encode_objects(torch.cat([objs, objs], -1), mask, cond, index), mask
 
     def encode(self, images, text_raw, valid_hw, objects, text_tokens, obj_generator=None, cap=False, clip_feats=None):
@@ -372,13 +371,12 @@ def build_model(cfg, pretrained_backbone=None):
                      obj_max=m.get("obj_max", 300), refiner=m["refiner"], box_coder=m.get("box_coder"))
 
 
-def load_checkpoint(ck, cfg=None):
-    """Checkpoint của train.py (đường dẫn | dict) -> (model CPU, cfg, iter); cfg mặc định = config lưu trong checkpoint."""
-    if not isinstance(ck, dict):
-        ck = torch.load(ck, map_location="cpu", weights_only=False)
+def load_checkpoint(path):
+    """Checkpoint của train.py (đường dẫn) -> (model CPU, cfg, iter); cfg = config lưu trong checkpoint."""
+    ck = torch.load(path, map_location="cpu", weights_only=False)
     if "model_state_dict" in ck:
         raise ValueError("checkpoint CE-Loc gốc của bài — eval ở branch `new`")
-    cfg = cfg or ck["config"]
+    cfg = ck["config"]
     model = build_model(cfg, pretrained_backbone=False)
     model.load_state_dict(ck["model"])
     return model, cfg, ck.get("iter")

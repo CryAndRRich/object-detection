@@ -28,9 +28,6 @@ class ClipCache:
     def __getstate__(self):                      # gửi sang worker DataLoader: KHÔNG kèm memmap (pickle memmap = chép cả file)
         return {**self.__dict__, "_arr": None}
 
-    def __contains__(self, key):
-        return key in self.rows
-
     def get(self, key):
         """-> tensor [g*g, C] (bản sao ghi được, ~75 KB fp16 với B/32)."""
         if self._arr is None:

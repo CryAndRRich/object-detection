@@ -10,8 +10,10 @@ Mỗi model, mỗi mẫu: `sel` = C-NLL thấp nhất trong K box (như bài: ch
 Ghi `<out>/summary.json` + 3 hình: `sorted_sel.png` (đuôi phân bố), `trimmed_mean.png` (trung bình theo % bỏ), `outliers_heatmap.png`.
 
   cd object-detection/ce_localization
-  O=../../output/add/ce130_test_all
-  python tools/cnll_outliers.py --dump DELTA6=$O/test_delta6_boxes.json DELTA6.2=$O/test_delta6_2_boxes.json … --key inpainted_mock \\
+  O=../../output/add
+  python tools/cnll_outliers.py --dump DELTA6=$O/delta6/ce130_test_all/best_boxes.json \\
+      DELTA6.2=$O/delta6_2/ce130_test_all/best_boxes.json … \\
+      --key inpainted_mock \\
       --out ../../output/add/viz/cnll_outliers/ce130_test_all_mock
 """
 

@@ -3,8 +3,7 @@ remains fully supported"). Key ở header `x-goog-api-key` (không nằm trong U
 - `thinkingConfig.thinkingLevel`: minimal | low | medium | high (mặc định high; docs khuyên medium);
 - `usageMetadata.{promptTokenCount, candidatesTokenCount, thoughtsTokenCount}` — token suy nghĩ tính tiền như token ra;
 - 429 RESOURCE_EXHAUSTED / 408 / 5xx: backoff + jitter; 400 / 403 không thử lại;
-- lượt system -> `systemInstruction`; `schema: api` -> `responseJsonSchema` = schema tác giả (400 vì schema -> `Fatal`, đổi
-  `schema: prompt`);
+- lượt system -> `systemInstruction`; `responseMimeType` JSON + `responseJsonSchema` = schema tác giả (400 vì schema -> `Fatal`);
 - free tier: không mất tiền nhưng Google dùng dữ liệu để cải thiện sản phẩm; số RPM / RPD free không công bố (xem trong AI Studio)
   ⇒ `gemini.rpm` trong config giới hạn tốc độ gửi."""
 
@@ -32,9 +31,8 @@ class Gemini:
         self.concurrency = int(self.g.get("concurrency", 4))
         self.rpm = float(self.g.get("rpm") or 0)
         self._lock, self._next = threading.Lock(), 0.0
-        self.schema = cfg.get("format") == "json_pixel" and cfg.get("schema", "api") == "api"
         log(f"[gemini] key {mask(self.key)} | {cfg['model']} | thinking {self.g.get('thinking_level')} | rpm {self.rpm or '∞'} | "
-            f"concurrency {self.concurrency} | schema qua API {self.schema} | free_tier {bool(self.g.get('free_tier'))}")
+            f"concurrency {self.concurrency} | free_tier {bool(self.g.get('free_tier'))}")
 
     def _throttle(self):
         """Giãn đều các lần gửi: cách nhau >= 60 / rpm giây (mọi luồng dùng chung)."""
@@ -62,10 +60,8 @@ class Gemini:
             gen["temperature"] = job["temperature"]
         if self.g.get("thinking_level"):
             gen["thinkingConfig"] = {"thinkingLevel": self.g["thinking_level"]}
-        if self.g.get("json", True) or self.schema:
-            gen["responseMimeType"] = "application/json"
-        if self.schema:
-            gen["responseJsonSchema"] = box_schema(self.cfg["k"])["schema"]
+        gen["responseMimeType"] = "application/json"
+        gen["responseJsonSchema"] = box_schema(self.cfg["k"])["schema"]
         body = {"contents": contents, "generationConfig": gen}
         if system:
             body["systemInstruction"] = {"parts": system}
@@ -94,8 +90,8 @@ class Gemini:
                 if i < tries:
                     self.sleep(backoff(i, r.headers.get("Retry-After")))
                 continue
-            if r.status_code == 400 and self.schema and "chema" in r.text:
-                raise Fatal(f"Gemini 400 với responseJsonSchema cho {self.cfg['model']} -> đặt `schema: prompt`: {r.text[:300]}")
+            if r.status_code == 400 and "chema" in r.text:
+                raise Fatal(f"Gemini 400 với responseJsonSchema (schema tác giả) cho {self.cfg['model']}: {r.text[:300]}")
             if r.status_code != 200:
                 return result(sec=time.time() - t0, error=f"HTTP {r.status_code}: {r.text[:300]}")
             d = r.json()

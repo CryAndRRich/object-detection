@@ -3,8 +3,8 @@
   `usage.completion_tokens_details.reasoning_tokens` (đã nằm trong `completion_tokens`).
 - `reasoning: {"effort": none | minimal | low | medium | high | xhigh | max}`; `provider: {"data_collection": "deny", "zdr": …}`.
 - 429 / 5xx: chờ (`Retry-After`) rồi thử lại; 401 / 402 / 403 / 404 = `Fatal`.
-- `schema: api` (mặc định): `response_format` json_schema = schema `insertion_layout` của tác giả (strict False) +
-  `provider.require_parameters`; model không có `structured_outputs` trong `supported_parameters` (`/api/v1/models`) -> `Fatal`.
+- `response_format` json_schema = schema `insertion_layout` của tác giả (strict False) + `provider.require_parameters`; model không có
+  `structured_outputs` trong `supported_parameters` (`/api/v1/models`) -> `Fatal`.
 - Lượt system / assistant = chuỗi; lượt user = text rồi ảnh data URL (như tác giả)."""
 
 import time
@@ -31,15 +31,14 @@ class OpenRouter:
                         f"https://openrouter.ai/settings/keys; key OpenAI (sk-proj-…) không dùng được cho OpenRouter")
         self.http = session or requests.Session()
         self.headers = {"Authorization": f"Bearer {self.key}", "Content-Type": "application/json",
-                        "X-OpenRouter-Title": "multi_condition ZETA-VLM"}
+                        "X-OpenRouter-Title": "multi_condition ZETA5 / ZETA6"}
         self.concurrency = int(self.o.get("concurrency", 8))
         self.model_info = self._model_info()
         self.supported, self._dropped = set(self.model_info.get("supported_parameters") or []), set()
-        self.structured = cfg["format"] == "json_pixel" and cfg.get("schema", "api") == "api"      # schema tác giả qua API
-        if self.structured and "structured_outputs" not in self.supported:
-            raise Fatal(f"{cfg['model']} không có structured_outputs trên OpenRouter -> đặt `schema: prompt` trong config")
-        log(f"[openrouter] key {mask(self.key)} | {cfg['model']} | concurrency {self.concurrency} | schema qua API {self.structured} | "
-            f"provider {self.o.get('provider')}")
+        if "structured_outputs" not in self.supported:                                         # schema tác giả qua API
+            raise Fatal(f"{cfg['model']} không có structured_outputs trên OpenRouter (`/api/v1/models`) -> không gửi được schema "
+                        "tác giả, chọn model khác")
+        log(f"[openrouter] key {mask(self.key)} | {cfg['model']} | concurrency {self.concurrency} | provider {self.o.get('provider')}")
         self._print_credits()
 
     def _model_info(self):
@@ -70,8 +69,8 @@ class OpenRouter:
                 hold = (12000 * float(p.get("prompt", 0)) + int(self.cfg["max_tokens"]) * float(p.get("completion", 0))) * self.concurrency
                 self.log(f"[openrouter] số dư tài khoản ${bal:.4f} | tạm giữ ước ~${hold:.3f} cho {self.concurrency} request song song")
                 if bal < hold:
-                    self.log(f"[openrouter] ⚠️ số dư < tạm giữ -> sẽ bị 402 in-flight (code chờ + thử lại); nạp credit hoặc giảm "
-                             f"`openrouter.concurrency`")
+                    self.log("[openrouter] ⚠️ số dư < tạm giữ -> sẽ bị 402 in-flight (code chờ + thử lại); nạp credit hoặc giảm "
+                             "`openrouter.concurrency`")
         except requests.RequestException as e:
             self.log(f"[openrouter] không đọc được /key, /credits ({e}) — chạy tiếp")
 
@@ -97,12 +96,8 @@ class OpenRouter:
             elif k not in self._dropped:
                 self._dropped.add(k)
                 self.log(f"[openrouter] {self.cfg['model']} không nhận `{k}` -> bỏ")
-        provider = dict(self.o.get("provider") or {})
-        if self.structured:
-            body["response_format"] = {"type": "json_schema", "json_schema": box_schema(self.cfg["k"])}
-            provider.setdefault("require_parameters", True)          # chỉ route tới provider thật sự nhận response_format
-        if provider:
-            body["provider"] = provider
+        body["response_format"] = {"type": "json_schema", "json_schema": box_schema(self.cfg["k"])}
+        body["provider"] = {"require_parameters": True, **(self.o.get("provider") or {})}  # chỉ route tới provider nhận response_format
         return body
 
     def call(self, job):

@@ -2,7 +2,7 @@
 """So box các VLM trên ảnh pilot: hình 2 × 3 / ảnh (chữ trong hình tiếng Anh).
 
   hàng 1: Original (ảnh model nhận + vật đang có xanh dương + box GT xanh lá nét đứt) | GPT-6 Luna | GLM-5.3-Flash
-  hàng 2: gpt-4.1-mini | Perceptron Mk1.5 | Qwen3.8-27B
+  hàng 2: gpt-4.1-mini | Perceptron Mk1.5 | Elorian Glimpse
 
 Ô model chỉ vẽ box dự đoán (đỏ mảnh) + box C-NLL thấp nhất (đỏ đậm). Tiêu đề "<tên>, CNLL = <C-NLL thấp nhất của ảnh>"; Original =
 C-NLL thấp nhất của box GT. VLM = `output/add/vlm/<model>/<tập>/<name>_boxes.json` (dump chấm K = 30; box lặp vòng khi thiếu được
@@ -31,9 +31,11 @@ from matplotlib.lines import Line2D  # noqa: E402
 from matplotlib.patches import Rectangle  # noqa: E402
 from PIL import Image  # noqa: E402
 
+from ce_localization.data.turns import TurnIndex, letterbox_size, present_objects  # noqa: E402
+
 OUT = os.path.join(ROOT, "..", "output", "add")
 MODELS = [("gpt-6-luna", "GPT-6 Luna"), ("glm-5.3-flash", "GLM-5.3-Flash"), ("gpt-4.1-mini", "gpt-4.1-mini"),
-          ("perceptron-mk1.5", "Perceptron Mk1.5"), ("qwen3.8-27b", "Qwen3.8-27B")]
+          ("perceptron-mk1.5", "Perceptron Mk1.5"), ("elorian-glimpse", "Elorian Glimpse")]
 DSET = {"ce130": ("ce130_test_all", "inpainted"), "cocount": ("cocount_review5", "cocount")}
 BLUE, GREEN, RED = "#1e6fff", "#00b050", "#e8000b"
 
@@ -47,14 +49,12 @@ def scene(dataset, image_id, a, cache={}):
     """-> (đường dẫn ảnh model nhận, cỡ ảnh gốc, vật đang có, box GT) pixel ảnh gốc."""
     if dataset == "ce130":
         if "ti" not in cache:
-            from ce_localization.data.turns import TurnIndex
             cache["ti"] = TurnIndex(a.turn_index)
         ti = cache["ti"]
         e = ti.turns[image_id]
         b = ti.branches[e["branch"]]
         t = e["t"]
-        removed = np.asarray(b["removed"], dtype=int)
-        objs = np.asarray(b["objects"], dtype=float).reshape(-1, 4)[(removed == 0) | (removed > t)]
+        objs = present_objects(b, t)
         holes = np.asarray(b["holes"][:t], dtype=float).reshape(-1, 4)
         return os.path.join(a.samples_root, e["sample"]), tuple(b["wh"]), objs, holes
     from ce_localization.data.cocount import load_review, read_cocount
@@ -68,7 +68,7 @@ def scene(dataset, image_id, a, cache={}):
 
 
 def to_orig(boxes, wh, image_size=512):
-    return np.asarray(boxes, dtype=float).reshape(-1, 4) / min(image_size / wh[0], image_size / wh[1])
+    return np.asarray(boxes, dtype=float).reshape(-1, 4) / letterbox_size(wh, image_size)[0]
 
 
 def unique(boxes, cnll):
@@ -137,7 +137,6 @@ def figure(dataset, image_id, a, vlm, out_path):
 
 def scene_class(dataset, image_id, a, cache={}):
     if dataset == "ce130":
-        from ce_localization.data.turns import TurnIndex
         if "ti" not in cache:
             cache["ti"] = TurnIndex(a.turn_index)
         return cache["ti"].branches[cache["ti"].turns[image_id]["branch"]]["class"]
@@ -156,7 +155,7 @@ def main(argv=None):
     ap.add_argument("--turn-index", default=os.path.join(ROOT, "data", "turn_index.json"))
     ap.add_argument("--samples-root", default=os.path.join(ROOT, "data", "samples"))
     ap.add_argument("--cocount-root", default=os.path.join(ROOT, "data", "cocount"))
-    ap.add_argument("--cocount-review", default=os.path.join(OUT, "box_review", "cocount.jsonl"))
+    ap.add_argument("--cocount-review", default=os.path.join(ROOT, "data", "cocount_review.jsonl"))
     a = ap.parse_args(argv)
     for dataset in (["ce130", "cocount"] if a.dataset == "all" else [a.dataset]):
         dset_dir, key = DSET[dataset]

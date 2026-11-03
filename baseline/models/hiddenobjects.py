@@ -110,7 +110,7 @@ def hungarian_loss(boxes, logits, targets, w_l1=5.0, w_giou=2.0, w_plaus=0.5):
     Như `hungarian_loss` bản gốc với reward = 1: ghép Hungarian theo cost L1 + (1 − GIoU); box = TB trên cặp khớp của 5·L1 + 2·(1 − GIoU);
     plausibility = MSE(sigmoid, clamp(max GIoU theo đích, 0, 1)) TB trên Q; loss = box + 0,5·plaus. Cost cả batch chép về CPU MỘT lần.
     """
-    B, Q, dev = boxes.shape[0], boxes.shape[1], boxes.device
+    B, dev = boxes.shape[0], boxes.device
     ms = [len(t) for t in targets]
     if min(ms) < 1:
         raise ValueError("mẫu không có đích")

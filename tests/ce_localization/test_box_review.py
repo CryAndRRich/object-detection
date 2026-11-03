@@ -117,8 +117,8 @@ def test_session_remove_save_undo_resume(tmp_path):
     for _ in range(3):                                      # lần loại 0, lần lưu đầu, lần loại 1
         s.undo()
     assert ReviewStore(out).get(key) is None and s.marks[key] == set()
-    s.undo()
-    assert s.msg == "nothing to undo"
+    s.undo()                                                # hết lịch sử hoàn tác: không làm gì
+    assert ReviewStore(out).get(key) is None and s.marks[key] == set()
     s.go(0)
     s.save()
     assert Session(sc, out).pos == 1                        # mở lại: tiếp từ màn chưa lưu đầu tiên
@@ -134,7 +134,7 @@ def test_session_ce130_share_prefill_and_view(tmp_path):
     assert s.view == 1                                      # vẫn màn cũ: giữ view
     s.save()
     assert s.pos == 1 and s.view == 0
-    assert s.marks == {"objects": {1}, "holes": set()} and s.prefill == "7_b1"      # box vật điền sẵn từ nhánh cùng ảnh
+    assert s.marks == {"objects": {1}, "holes": set()}                            # box vật điền sẵn từ nhánh cùng ảnh
     rec = ReviewStore(str(tmp_path / "r.jsonl")).get("7_b1")
     assert rec["bad"] == {"objects": [1], "holes": [1]} and rec["share"] == {"objects": "7"}
     s.set_view("turn 1")

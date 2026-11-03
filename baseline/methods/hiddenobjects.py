@@ -24,7 +24,7 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 
 from baseline.models.hiddenobjects import PlacementDETR, hungarian_loss, xywh_to_xyxy
-from ce_localization.data.turns import letterbox
+from ce_localization.data.turns import letterbox, letterbox_size
 from ce_localization.models.text import encode_class_names
 
 __all__ = ["build", "class_texts", "to_canvas", "to_orig", "ensure_cache", "HOTrain", "Trainer", "predict"]
@@ -49,13 +49,13 @@ def class_texts(names, model_name, dev):
 
 def to_canvas(boxes_xyxy, wh, S):
     """Box xyxy pixel gốc [m,4] -> xywh chuẩn hoá theo canvas S (float32)."""
-    b = np.asarray(boxes_xyxy, dtype=np.float64).reshape(-1, 4) * min(S / wh[0], S / wh[1]) / S
+    b = np.asarray(boxes_xyxy, dtype=np.float64).reshape(-1, 4) * letterbox_size(wh, S)[0] / S
     return torch.from_numpy(np.concatenate([b[:, :2], b[:, 2:] - b[:, :2]], 1)).float()
 
 
 def to_orig(xywh, wh, S):
     """xywh chuẩn hoá canvas [K,4] (tensor) -> xyxy pixel gốc (numpy float64)."""
-    return xywh_to_xyxy(xywh.double()).cpu().numpy() * S / min(S / wh[0], S / wh[1])
+    return xywh_to_xyxy(xywh.double()).cpu().numpy() * S / letterbox_size(wh, S)[0]
 
 
 def _canvas_u8(path, S):

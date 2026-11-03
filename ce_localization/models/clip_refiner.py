@@ -22,7 +22,7 @@ from torchvision.ops import roi_align
 from ce_localization.models.unet1d import SinusoidalPosEmb
 from ce_localization.utils.box_coder import to_linear_unit
 
-__all__ = ["GROUPS", "CLIP_MEAN", "CLIP_STD", "DEFAULT_ATTENTION_FLOW", "REFINER_DEFAULTS", "apply_rope_2d", "rope_cos_sin",
+__all__ = ["GROUPS", "CLIP_MEAN", "CLIP_STD", "DEFAULT_ATTENTION_FLOW", "REFINER_DEFAULTS", "rope_cos_sin",
            "rope_rotate", "BoxFourierEmb", "RefinerBlock", "ClipBoxRefiner", "load_clip", "weights_sha256", "refiner_config",
            "text_model_name"]
 
@@ -78,7 +78,8 @@ def load_clip(vision_name, text_name):
 
 
 def rope_cos_sin(pos, dh, theta, dtype):
-    """cos / sin [B, 1, N, Dh/2] của `apply_rope_2d` — tách ra để q, k và mọi block cùng vị trí dùng chung (cùng phép tính)."""
+    """cos / sin [B, 1, N, Dh/2] của RoPE 2D trục (x: [B, heads, N, Dh], pos: [B, N, 2] = (x, y) theo đơn vị patch;
+    1/4 cặp quay theo x, 1/4 theo y) — tách ra để q, k và mọi block cùng vị trí dùng chung (cùng phép tính)."""
     quarter = dh // 4
     freqs = theta ** (-torch.arange(quarter, device=pos.device, dtype=torch.float32) / quarter)
     angles = (pos.float()[..., None] * freqs).flatten(-2)  # [B, N, Dh/2]
@@ -90,15 +91,6 @@ def rope_rotate(x, cos_sin):
     dh = x.shape[-1]
     x1, x2 = x[..., :dh // 2], x[..., dh // 2:]
     return torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], dim=-1)
-
-
-def apply_rope_2d(x, pos, theta):
-    """
-    Axial 2D RoPE with continuous positions.
-    x: [B, heads, N, Dh], pos: [B, N, 2] as (x, y) in patch units.
-    A quarter of the rotation pairs use x, the other quarter use y.
-    """
-    return rope_rotate(x, rope_cos_sin(pos, x.shape[-1], theta, x.dtype))
 
 
 class BoxFourierEmb(nn.Module):

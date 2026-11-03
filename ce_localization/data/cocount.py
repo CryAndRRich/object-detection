@@ -20,7 +20,7 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from ce_localization.data.turns import _letterbox_l_u8, letterbox, scale_boxes
+from ce_localization.data.turns import _letterbox_l_u8, iter_jsonl, letterbox, letterbox_size, scale_boxes
 
 __all__ = ["clean_class", "twin_name", "filter_objects", "load_review", "read_cocount", "cocount_geometry", "CoCountAddDataset"]
 
@@ -51,12 +51,9 @@ def load_review(path):
     """File jsonl của `box_review/app.py cocount` -> {tên file: (số box gốc, set chỉ số box bị loại = `bad` ∪ `auto`)} (dòng sau đè dòng
     trước cùng tên)."""
     out = {}
-    with open(path) as f:
-        for line in f:
-            if line.strip():
-                r = json.loads(line)
-                for g, n in r["n"].items():
-                    out[g] = (int(n), set(r["bad"].get(g, [])) | set(r.get("auto", {}).get(g, [])))
+    for r in iter_jsonl(path):
+        for g, n in r["n"].items():
+            out[g] = (int(n), set(r["bad"].get(g, [])) | set(r.get("auto", {}).get(g, [])))
     return out
 
 
@@ -99,9 +96,7 @@ def cocount_geometry(root, name, image_size=512, max_obj_ratio=None, review=None
     """-> dict lỗ / box vật / box vật cả hai lớp / exemplar (pixel canvas, float32 như lúc eval) + (nw, nh) — y `CoCountAddDataset`."""
     r = read_cocount(root, name, max_obj_ratio, review)
     with Image.open(os.path.join(root, "Image", name + ".jpg")) as im:
-        w, h = im.size
-    scale = min(image_size / w, image_size / h)
-    nw, nh = int(w * scale), int(h * scale)
+        scale, nw, nh = letterbox_size(im.size, image_size)
     sb = lambda b: scale_boxes(b, scale, nw, nh).astype(np.float32).astype(np.float64)  # noqa: E731
     return {"holes": sb(r["loc"]), "objects": sb(r["objects"]), "objects_all": sb(r["objects_all"]),
             "exemplars": sb(r["exemplars"]), "wh": np.array([nw, nh], dtype=np.float64)}
@@ -110,7 +105,7 @@ def cocount_geometry(root, name, image_size=512, max_obj_ratio=None, review=None
 class CoCountAddDataset(Dataset):
     """Đầu vào kiểu bài như `CE130AddDataset`: uint8 HWC 4 kênh (density trống)."""
 
-    def __init__(self, root, image_size=512, limit=None, max_obj_ratio=None, review=None, min_obj=None):
+    def __init__(self, root, image_size=512, max_obj_ratio=None, review=None, min_obj=None):
         if max_obj_ratio is not None and review is not None:
             raise ValueError("CE-CoCount: chọn MỘT cách lọc box vật — max_obj_ratio hoặc review")
         self.root, self.image_size = root, image_size
@@ -119,8 +114,6 @@ class CoCountAddDataset(Dataset):
         self.n_all = len(self.keys)
         if min_obj:                                   # chỉ file còn >= min_obj box vật cùng lớp SAU lọc
             self.keys = [k for k in self.keys if len(read_cocount(root, k, max_obj_ratio, review)["objects"]) >= min_obj]
-        if limit:
-            self.keys = self.keys[:limit]
         self._cls = {}
 
     def __len__(self):

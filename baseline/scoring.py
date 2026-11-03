@@ -11,10 +11,9 @@ import os
 
 import numpy as np
 
+from ce_localization.data.turns import iter_jsonl, letterbox_size
 from ce_localization.engine.add_eval import SIZE_STATS, add_metrics, prior_records, prior_unit_boxes, resize_to_objects
-from ce_localization.eval import dump_rows
-
-from baseline.data import canvas_scale
+from ce_localization.eval import dump_rows, write_json
 
 __all__ = ["result_key", "records_from_boxes", "cnll_summary", "score_records", "read_boxes", "write_jsonl", "write_json",
            "write_outputs"]
@@ -36,7 +35,7 @@ def records_from_boxes(samples, boxes_by_id, geo_fn, image_size=512):
     for s in samples:
         g = geo_fn(s)
         r = {"image_id": s["image_id"], "t": s["t"], "wh": np.asarray(g["wh"], dtype=np.float64),
-             "boxes": np.asarray(boxes_by_id[s["image_id"]], dtype=np.float64).reshape(-1, 4) * canvas_scale(s["wh"], image_size)}
+             "boxes": np.asarray(boxes_by_id[s["image_id"]], dtype=np.float64).reshape(-1, 4) * letterbox_size(s["wh"], image_size)[0]}
         r.update({k: np.asarray(g[k], dtype=np.float64) for k in ("holes", "objects", "objects_all", "exemplars") if k in g})
         recs.append(r)
     return recs, ks.pop()
@@ -74,26 +73,13 @@ def score_records(recs, dataset, K, *, index=None, obj_size=None, seed=0):
 
 def read_boxes(path, first=None):
     """jsonl {"image_id", "boxes"} (pixel gốc) -> {image_id: boxes}; `first` N: chỉ N box đầu (box[0] = box chính của baseline)."""
-    out = {}
-    with open(path) as f:
-        for line in f:
-            if line.strip():
-                r = json.loads(line)
-                out[r["image_id"]] = r["boxes"][:first] if first else r["boxes"]
-    return out
+    return {r["image_id"]: r["boxes"][:first] if first else r["boxes"] for r in iter_jsonl(path)}
 
 
 def write_jsonl(path, rows):
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w") as f:
         f.writelines(json.dumps(r) + "\n" for r in rows)
-
-
-def write_json(path, obj, compact=False):
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(obj, f) if compact else json.dump(obj, f, indent=2, ensure_ascii=False, default=float)
-    print(f"  -> {path}", flush=True)
 
 
 def write_outputs(out_path, meta, results, prior, dump):

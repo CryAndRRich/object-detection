@@ -5,7 +5,7 @@ bỏ 1 %). `--ckpt` = `best.pth` / `snapshots/epNNN.pth` của finetune, hay wei
 
   cd /mnt/disk1/aiotlab/haitn/object-detection/baseline
   python ../tools/run_on_free_gpu.py -- predict.py --config config/zeta1.yaml --ckpt ../weights/add/zeta1/best.pth \\
-      --dataset ce130 --out /mnt/disk1/aiotlab/haitn/output/add/zeta1/ce130_test_all/test.json
+      --dataset ce130 --out /mnt/disk1/aiotlab/haitn/output/add/zeta1/ce130_test_all/best.json
 """
 
 import argparse

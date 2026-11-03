@@ -1,4 +1,4 @@
-"""ZETA-VLM trọn luồng với backend giả (dữ liệu giả, không mạng): pilot ổn định + là tập con của all (all dùng lại câu trả lời pilot),
+"""ZETA5 / ZETA6 trọn luồng với backend giả (dữ liệu giả, không mạng): pilot ổn định + là tập con của all (all dùng lại câu trả lời pilot),
 resume, đổi prompt ⇒ hỏi lại, thử lại khi 0 box rồi box cả ảnh, lỗi API không ghi + dừng sau N lỗi liên tiếp, --max-cost, chấm K = 30 /
 K = 1 bằng code chấm ZETA, --score-only, CLI --dry-run."""
 
@@ -15,12 +15,11 @@ from vlm.prompt import prompt_hash
 from vlm.runner import run_dataset, select
 from tests.baseline.helpers import fake_ce130, fake_cocount
 
-CFG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "vlm", "config", "openrouter", "qwen3.8-27b.yaml")
-LUNA = os.path.join(os.path.dirname(CFG), "gpt-6-luna.yaml")                    # few-shot tác giả (Qwen: icl 0 từ 2026-11-03)
+CFG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "vlm", "config", "openrouter", "gpt-6-luna.yaml")
 
 
 class FakeBackend:
-    """Trả `bbox_2d` 0–1000 (3 box) cho mọi ảnh, trừ ảnh trong `garbage` (không box) / `errors` (lỗi API); cost cố định / lần gọi."""
+    """Trả `candidates` pixel canvas (3 box) cho mọi ảnh, trừ ảnh trong `garbage` (không box) / `errors` (lỗi API); cost cố định / lần gọi."""
 
     def __init__(self, garbage=(), errors=(), cost=0.001, fatal=False):
         self.garbage, self.errors, self.cost, self.fatal = set(garbage), set(errors), cost, fatal
@@ -37,7 +36,8 @@ class FakeBackend:
             elif j["image_id"] in self.garbage:
                 out.append(result("sorry, no idea", 100, 5, 0, self.cost, 0.1))
             else:
-                text = json.dumps([{"bbox_2d": [100 * i, 100 * i, 100 * i + 200, 100 * i + 300], "label": "x"} for i in range(3)])
+                text = json.dumps({"candidates": [{"name": "x", "box": [10 * i, 10 * i, 10 * i + 20, 10 * i + 30], "score": 1 - i / 10}
+                                                  for i in range(3)]})
                 out.append(result(text, 1000, 80, 10, self.cost, 0.2))
         return out
 
@@ -141,10 +141,10 @@ def test_max_cost_stops_and_score_only(env):
 
 
 def test_cli_dry_run_needs_no_key(env, capsys, monkeypatch):
-    cfg, ns, out = env
+    _, ns, out = env
     n = ns()
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    vlm_run.main(["--config", LUNA, "--pilot", "2", "--dataset", "ce130", "--dry-run", "--turn-index", n.turn_index, "--samples-root",
+    vlm_run.main(["--config", CFG, "--pilot", "2", "--dataset", "ce130", "--dry-run", "--turn-index", n.turn_index, "--samples-root",
                   n.samples_root, "--out-root", str(out)])
     txt = capsys.readouterr().out
     assert "--- SYSTEM" in txt and "Canvas size: " in txt and "Object(s) to insert: cup" in txt

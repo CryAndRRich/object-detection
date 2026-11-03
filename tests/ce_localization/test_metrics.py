@@ -146,7 +146,7 @@ def test_configs_inherit_only_intended_keys(tmp_path):
     for run, src in (("delta6", "delta4"), ("delta6_1", "delta5_1"), ("delta6_2", "delta5_4")):
         assert L(run) == merge(merge(L(src), proto), {"experiment": run, "description": L(run)["description"]})
     assert L("delta7") == merge(L("delta6"), {"experiment": "delta7", "description": L("delta7")["description"], "data": {
-        "train_target": "positive", "positive_file": "../../output/add/box_review/ce130_train.jsonl", "positive_hole_iou": 0.3,
+        "train_target": "positive", "positive_file": "../data/ce130_train.jsonl", "positive_hole_iou": 0.3,
         "positive_sampling": "random"}})
     assert L("delta7_0_1") == merge(L("delta7"), {"experiment": "delta7_0_1", "description": L("delta7_0_1")["description"],
                                                   "data": {"positive_sampling": "all"}})

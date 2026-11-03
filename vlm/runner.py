@@ -14,9 +14,10 @@ import time
 
 import numpy as np
 
+from ce_localization.data.turns import iter_jsonl
 from vlm.backends import Fatal
 from vlm.parse import fill, parse_boxes
-from vlm.prompt import build_messages, encode_image
+from vlm.prompt import author_turns, build_messages, encode_image
 
 __all__ = ["dataset_dir", "select", "load_responses", "record_cost", "summarize", "run_dataset", "FULL_SIZES"]
 
@@ -40,15 +41,9 @@ def select(samples, seed, pilot=None):
 
 
 def load_responses(path, phash):
-    out = {}
-    if os.path.exists(path):
-        with open(path) as f:
-            for line in f:
-                if line.strip():
-                    r = json.loads(line)
-                    if r.get("prompt_hash") == phash:
-                        out[r["image_id"]] = r
-    return out
+    if not os.path.exists(path):
+        return {}
+    return {r["image_id"]: r for r in iter_jsonl(path) if r.get("prompt_hash") == phash}
 
 
 def record_cost(res, cfg):
@@ -69,27 +64,17 @@ def _k(n):
 
 
 def _icl_turns(cfg, ns, log=print):
-    """Lượt few-shot theo `icl`: "author" = 2 ví dụ của tác giả (`vlm/icl/author.json`); N > 0 = N mẫu CE-130 TRAIN cố định theo seed
-    (đáp án = lỗ GT `holes[:t]`); 0 = zero-shot."""
-    from vlm.prompt import author_turns, train_turns
+    """Lượt few-shot theo `icl`: "author" = 2 ví dụ của tác giả (`vlm/icl/author.json`); 0 = zero-shot."""
     icl = cfg.get("icl") or 0
-    img = cfg.get("image") or {}
-
-    def enc(path):
-        return encode_image(path, img.get("max_side"), img.get("jpeg_quality", 95))
-    if icl == "author":
-        if ns.dataset == "ce130":
-            log(f"[{ns.dataset}] ⚠️ icl author: ví dụ 1 là ảnh GT nhánh test 2_b1 -> 4 mẫu test_all 2_b1_t1..t4 cùng cảnh với ví dụ "
-                f"(như tác giả chạy; số của 4 mẫu này lạc quan)")
-        return author_turns(cfg["format"], enc)
-    n = int(icl)
-    if not n:
+    if icl == 0:
         return []
-    from baseline.data import train_items
-    from ce_localization.data.turns import TurnIndex
-    items = train_items(TurnIndex(ns.turn_index), ns.samples_root, gt_root="")
-    pick = sorted(items, key=lambda it: _rank(cfg.get("seed", 0), it["image_id"]))[:n]
-    return train_turns(cfg["format"], cfg["k"], [(it, enc(it["image"])) for it in pick])
+    if icl != "author":
+        raise ValueError(f"icl {icl!r} không thuộc author | 0")
+    img = cfg.get("image") or {}
+    if ns.dataset == "ce130":
+        log(f"[{ns.dataset}] ⚠️ icl author: ví dụ 1 là ảnh GT nhánh test 2_b1 -> 4 mẫu test_all 2_b1_t1..t4 cùng cảnh với ví dụ "
+            f"(như tác giả chạy; số của 4 mẫu này lạc quan)")
+    return author_turns(lambda path: encode_image(path, img.get("max_side"), img.get("jpeg_quality", 95)))
 
 
 def summarize(recs, cfg, n_full, par):
@@ -127,6 +112,7 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
     pending = [s for s in sel if s["image_id"] not in done]
     K, retries = cfg["k"], int(cfg.get("retries", 2))
     img_cfg = cfg.get("image") or {}
+    # mức song song để ước giờ; vLLM: 1 (`sec` đã chia theo khối)
     par = int(((cfg.get("openrouter") or {}).get("concurrency")) or ((cfg.get("gemini") or {}).get("concurrency")) or 1)
     rpm = float((cfg.get("gemini") or {}).get("rpm") or 0)
     log(f"{tag} {len(sel)} / {len(samples)} mẫu | đã có {len(sel) - len(pending)} (prompt_hash {phash}) | cần hỏi {len(pending)} | "
@@ -201,9 +187,8 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
 
     el = time.time() - t0
     recs = [done[s["image_id"]] for s in sel if s["image_id"] in done]
-    par_eff = par                                                      # vLLM: par 1, `sec` đã chia theo khối
-    sm = summarize(recs, cfg, len(sel), par_eff)
-    sm_full = summarize(recs, cfg, len(samples), par_eff)
+    sm = summarize(recs, cfg, len(sel), par)
+    sm_full = summarize(recs, cfg, len(samples), par)
     if rpm and recs:                                                   # Gemini: tốc độ bị chặn bởi RPM
         sm_full["est_full_hours"] = max(sm_full["est_full_hours"], len(samples) * float(np.mean([r["attempts"] for r in recs])) / rpm / 60)
     info = {"model": cfg["model"], "config": cfg.get("_path"), "prompt_hash": phash, "dataset": ns.dataset, "mode": name,
@@ -217,7 +202,7 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
         log(f"{tag} xong {len(recs)}/{len(sel)} ảnh, lần này {n_new} ảnh mới trong {_fmt_sec(el)}, ${spent:.4f}{free} | TB "
             f"${sm['cost_per_image_mean']:.5f}/ảnh (p90 ${sm['cost_per_image_p90']:.5f}) | 0 box {sm['n_fail']}, thiếu {sm['n_short']}")
         log(f"{tag} ƯỚC cả tập {len(samples)} ảnh: ${sm_full['est_full_cost']:.2f} (p90 ${sm_full['est_full_cost_p90']:.2f}){free}, "
-            f"~{sm_full['est_full_hours']:.1f} giờ ở song song {par_eff}")
+            f"~{sm_full['est_full_hours']:.1f} giờ ở song song {par}")
     if stopped:
         log(f"{tag} DỪNG: {stopped}")
     if len(recs) < len(sel):

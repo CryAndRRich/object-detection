@@ -5,8 +5,9 @@ TB bỏ 1 % ảnh lớn nhất (như `cnll_outliers.py`), mốc box GT, `hit50@K
 `<out>/summary.json`, in bảng.
 
   cd object-detection/ce_localization
-  S=../../output/add/snapshots
-  python tools/plot_snapshots.py --run DELTA6=$S/delta6 --run DELTA6.1=$S/delta6_1 --run DELTA6.2=$S/delta6_2 --out ../../output/add/viz/snapshots
+  S=../../output/add
+  python tools/plot_snapshots.py --run DELTA6=$S/delta6/ce130_test_all --run DELTA6.1=$S/delta6_1/ce130_test_all \\
+      --run DELTA6.2=$S/delta6_2/ce130_test_all --out ../../output/add/viz/snapshots/delta6
 """
 
 import argparse

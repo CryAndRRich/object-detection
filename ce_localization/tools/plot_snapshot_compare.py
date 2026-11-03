@@ -178,7 +178,7 @@ def main():
     ap.add_argument("--run", action="append", required=True, help="RUN=nhãn tiếng Anh (lặp được; run đầu = mốc)")
     ap.add_argument("--out-prefix", required=True, help="ghi <prefix>_overview.png + <prefix>_cnll_all_boxes_density.png")
     ap.add_argument("--weights-root", default="../weights/add")
-    ap.add_argument("--snap-root", default="../../output/add/snapshots")
+    ap.add_argument("--snap-root", default="../../output/add")
     ap.add_argument("--epochs", type=int, nargs="+", default=list(range(10, 130, 10)), help="snapshot vẽ C-NLL ở overview")
     ap.add_argument("--density-epochs", type=int, nargs="+", default=[10, 40, 80, 120])
     ap.add_argument("--smooth-iters", type=float, default=500, help="cửa sổ làm mượt loss, tính theo iter của run đầu")
