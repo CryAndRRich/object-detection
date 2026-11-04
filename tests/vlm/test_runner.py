@@ -1,6 +1,6 @@
 """ZETA5 / ZETA6 trọn luồng với backend giả (dữ liệu giả, không mạng): pilot ổn định + là tập con của all (all dùng lại câu trả lời pilot),
-resume, đổi prompt ⇒ hỏi lại, thử lại khi 0 box rồi box cả ảnh, lỗi API không ghi + dừng sau N lỗi liên tiếp, --max-cost, chấm K = 30 /
-K = 1 bằng code chấm ZETA, --score-only, CLI --dry-run."""
+resume, đổi prompt ⇒ hỏi lại, thử lại khi 0 box rồi box cả ảnh, lỗi API không ghi + dừng sau N lỗi liên tiếp, --max-cost, chấm box
+score cao nhất (chính) / min C-NLL trong K (tham khảo) bằng code chấm ZETA, --score-only, CLI --dry-run."""
 
 import argparse
 import json
@@ -19,7 +19,7 @@ CFG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "vlm"
 
 
 class FakeBackend:
-    """Trả `candidates` pixel canvas (3 box) cho mọi ảnh, trừ ảnh trong `garbage` (không box) / `errors` (lỗi API); cost cố định / lần gọi."""
+    """Trả `candidates` pixel canvas (3 box, score TĂNG dần ⇒ box cuối = confidence cao nhất) cho mọi ảnh, trừ ảnh trong `garbage` (không box) / `errors` (lỗi API); cost cố định / lần gọi."""
 
     def __init__(self, garbage=(), errors=(), cost=0.001, fatal=False):
         self.garbage, self.errors, self.cost, self.fatal = set(garbage), set(errors), cost, fatal
@@ -36,7 +36,7 @@ class FakeBackend:
             elif j["image_id"] in self.garbage:
                 out.append(result("sorry, no idea", 100, 5, 0, self.cost, 0.1))
             else:
-                text = json.dumps({"candidates": [{"name": "x", "box": [10 * i, 10 * i, 10 * i + 20, 10 * i + 30], "score": 1 - i / 10}
+                text = json.dumps({"candidates": [{"name": "x", "box": [10 * i, 10 * i, 10 * i + 20, 10 * i + 30], "score": 0.5 + i / 10}
                                                   for i in range(3)]})
                 out.append(result(text, 1000, 80, 10, self.cost, 0.2))
         return out
@@ -69,15 +69,26 @@ def test_pilot_then_all_reuses_answers_and_scores(env):
     info, spent = run_dataset(cfg, ns(), be, d, "pilot2", ph, pilot=2, log=lambda *a: None)
     first = [c[0] for c in be.calls]
     assert len(first) == 2 and spent == pytest.approx(0.002)
-    for f in ("pilot2.json", "pilot2_boxes.json", "pilot2_k1.json", "pilot2_run.json"):
-        assert os.path.exists(os.path.join(d, f)), f
-    raw = _lines(os.path.join(d, "pilot2_raw.jsonl"))
-    assert len(raw) == 2 and all(len(r["boxes"]) == 5 for r in raw)                       # 3 box hợp lệ -> lặp vòng đủ K
+    assert sorted(os.listdir(d)) == ["pilot2.json", "pilot2.jsonl", "responses.jsonl"]
+    rows = _lines(os.path.join(d, "pilot2.jsonl"))
+    resp = {r["image_id"]: r for r in _lines(os.path.join(d, "responses.jsonl"))}
+    assert len(rows) == 2
+    for r in rows:                                                         # 3 box (không lặp vòng), box[0] = score cao nhất (cuối model trả)
+        W, H = resp[r["image_id"]]["canvas_wh"]
+        sx, sy = r["orig_wh"][0] / W, r["orig_wh"][1] / H
+        b = r["boxes"]
+        assert r["n_valid"] == 3 and [c["score"] for c in b] == pytest.approx([0.7, 0.6, 0.5]) and b[0]["name"] == "x"
+        assert b[0]["box"] == pytest.approx([20 * sx, 20 * sy, 40 * sx, 50 * sy]) and len(b[0]["box_512"]) == 4
+        if "cnll" in b[0]:
+            assert r["cnll_top"] == b[0]["cnll"] and r["cnll_min"] == min(c["cnll"] for c in b)
+        assert r["text"] == resp[r["image_id"]]["text"] and r["cost"] == pytest.approx(0.001)
     with open(os.path.join(d, "pilot2.json")) as f:
         js = json.load(f)
-    assert js["n_short"] == 2 and js["n_fail"] == 0 and "cnll" in js["results"]["inpainted"]
-    with open(os.path.join(d, "pilot2_k1.json")) as f:
-        assert json.load(f)["n_samples"] == 1
+    assert js["main"] == "top_score" and js["n_noscore"] == 0 and js["selected"]["n_short"] == 2 and js["selected"]["n_fail"] == 0
+    assert js["top_score"]["K"] == 1 and js["min_cnll_5"]["K"] == 5 and "cnll" in js["top_score"]["results"]["inpainted"]
+    top = [r["cnll_top"] for r in rows if r["cnll_top"] is not None]
+    if top:
+        assert js["top_score"]["results"]["inpainted"]["cnll"] == pytest.approx(sum(top) / len(top), abs=1e-3)
     assert info["full_estimate"]["est_full_cost"] == pytest.approx(0.001 * 4)
 
     run_dataset(cfg, ns(), be, d, "test", ph, log=lambda *a: None)
@@ -107,11 +118,12 @@ def test_retry_then_full_image_fallback(env):
     assert [t for _, t in bad] == [None, 0.7, 0.7]                                          # 1 + retries (2), lần thử lại nhiệt 0.7
     rec = {r["image_id"]: r for r in _lines(os.path.join(d, "responses.jsonl"))}
     assert rec[bad[0][0]]["n_valid"] == 0 and rec[bad[0][0]]["attempts"] == 3 and rec[bad[0][0]]["cost"] == pytest.approx(0.003)
-    raw = {r["image_id"]: r for r in _lines(os.path.join(d, "test_raw.jsonl"))}
+    rows = {r["image_id"]: r for r in _lines(os.path.join(d, "test.jsonl"))}
     W, H = rec[bad[0][0]]["orig_wh"]
-    assert raw[bad[0][0]]["boxes"] == [[0, 0, W, H]] * 5
+    assert rows[bad[0][0]]["n_valid"] == 0 and rows[bad[0][0]]["boxes"][0]["box"] == [0, 0, W, H]
+    assert rows[bad[0][0]]["boxes"][0]["fallback"] == "full_image" and len(rows[bad[0][0]]["boxes"]) == 1
     with open(os.path.join(d, "test.json")) as f:
-        assert json.load(f)["n_fail"] == 1
+        assert json.load(f)["selected"]["n_fail"] == 1
 
 
 def test_api_errors_not_saved_and_stop(env):
@@ -120,7 +132,7 @@ def test_api_errors_not_saved_and_stop(env):
     logs = []
     info, _ = run_dataset({**cfg, "max_api_errors": 2}, ns(), FakeBackend(errors={"*"}), d, "test", prompt_hash(cfg), log=logs.append)
     assert _lines(os.path.join(d, "responses.jsonl")) == [] and "lỗi API liên tiếp" in info["this_run"]["stopped"]
-    assert not os.path.exists(os.path.join(d, "test.json")) and any("chưa chấm" in m for m in logs)
+    assert not os.path.exists(os.path.join(d, "test.jsonl")) and any("chưa chấm" in m for m in logs)
     info, _ = run_dataset(cfg, ns(), FakeBackend(fatal=True), d, "test", prompt_hash(cfg), log=lambda *a: None)
     assert "402" in info["this_run"]["stopped"]
 
@@ -133,11 +145,13 @@ def test_max_cost_stops_and_score_only(env):
     assert spent == pytest.approx(2.0) and len(_lines(os.path.join(d, "responses.jsonl"))) == 2   # dừng sau khối đầu (chunk 2)
     assert "max-cost" in info["this_run"]["stopped"]
     run_dataset(cfg, ns(), None, d, "test", ph, log=lambda *a: None)                         # score-only còn thiếu -> không chấm
-    assert not os.path.exists(os.path.join(d, "test.json"))
+    assert not os.path.exists(os.path.join(d, "test.jsonl"))
     run_dataset(cfg, ns(), FakeBackend(), d, "test", ph, score=False, log=lambda *a: None)
-    assert not os.path.exists(os.path.join(d, "test.json"))
+    with open(os.path.join(d, "test.json")) as f:                                            # chưa chấm: chỉ tiền / token
+        assert "top_score" not in json.load(f)
     run_dataset(cfg, ns(), None, d, "test", ph, log=lambda *a: None)
-    assert os.path.exists(os.path.join(d, "test.json")) and os.path.exists(os.path.join(d, "test_k1.json"))
+    with open(os.path.join(d, "test.json")) as f:
+        assert "top_score" in json.load(f) and os.path.exists(os.path.join(d, "test.jsonl"))
 
 
 def test_cli_dry_run_needs_no_key(env, capsys, monkeypatch):

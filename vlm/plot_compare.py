@@ -4,9 +4,9 @@
   hàng 1: Original (ảnh model nhận + vật đang có xanh dương + box GT xanh lá nét đứt) | GPT-6 Luna | GLM-5.3-Flash
   hàng 2: gpt-4.1-mini | Perceptron Mk1.5 | Elorian Glimpse
 
-Ô model chỉ vẽ box dự đoán (đỏ mảnh) + box C-NLL thấp nhất (đỏ đậm). Tiêu đề "<tên>, CNLL = <C-NLL thấp nhất của ảnh>"; Original =
-C-NLL thấp nhất của box GT. VLM = `output/add/vlm/<model>/<tập>/<name>_boxes.json` (dump chấm K = 30; box lặp vòng khi thiếu được
-gộp lại khi vẽ). Box dump là pixel canvas 512 (letterbox góc trên trái) -> chia tỉ lệ về pixel ảnh gốc. Chỉ đọc JSON + ảnh.
+Ô model chỉ vẽ box dự đoán (đỏ mảnh) + box `score` cao nhất (đỏ đậm, = box chấm chính ZETA5 / 6). Tiêu đề "<tên>, CNLL = <C-NLL
+của box đó>"; Original = C-NLL thấp nhất của box GT. VLM = `output/add/vlm/<model>/<tập>/<name>.jsonl` (1 dòng / ảnh, box xếp theo
+score); pilot chấm trước 2026-11-04 không có file này ⇒ đọc dump cũ `<name>_boxes.json` (K = 30; box lặp vòng được gộp lại khi vẽ). Box dump là pixel canvas 512 (letterbox góc trên trái) -> chia tỉ lệ về pixel ảnh gốc. Chỉ đọc JSON + ảnh.
 
   cd object-detection/vlm
   python plot_compare.py --dataset ce130 --n 1                 # thử 1 ảnh
@@ -31,7 +31,7 @@ from matplotlib.lines import Line2D  # noqa: E402
 from matplotlib.patches import Rectangle  # noqa: E402
 from PIL import Image  # noqa: E402
 
-from ce_localization.data.turns import TurnIndex, letterbox_size, present_objects  # noqa: E402
+from ce_localization.data.turns import TurnIndex, iter_jsonl, letterbox_size, present_objects  # noqa: E402
 
 OUT = os.path.join(ROOT, "..", "output", "add")
 MODELS = [("gpt-6-luna", "GPT-6 Luna"), ("glm-5.3-flash", "GLM-5.3-Flash"), ("gpt-4.1-mini", "gpt-4.1-mini"),
@@ -40,8 +40,16 @@ DSET = {"ce130": ("ce130_test_all", "inpainted"), "cocount": ("cocount_review5",
 BLUE, GREEN, RED = "#1e6fff", "#00b050", "#e8000b"
 
 
-def load_dump(path, key):
-    with open(path) as f:
+def load_vlm(root, model, dset_dir, name, key):
+    """-> {image_id: {"boxes" (canvas 512), "cnll" (từng box), "cnll_gt"}}, box xếp theo score."""
+    jl = os.path.join(root, model, dset_dir, f"{name}.jsonl")
+    if os.path.exists(jl):
+        out = {}
+        for r in iter_jsonl(jl):
+            out[r["image_id"]] = {"boxes": [c["box_512"] for c in r["boxes"]], "cnll_gt": r.get("cnll_gt"),
+                                  **({"cnll": [c["cnll"] for c in r["boxes"]]} if r["boxes"] and "cnll" in r["boxes"][0] else {})}
+        return out
+    with open(os.path.join(root, model, dset_dir, f"{name}_boxes.json")) as f:
         return {r["image_id"]: r for r in json.load(f)["results"][key]}
 
 
@@ -100,10 +108,9 @@ def model_panel(ax, img, name, boxes, cnll):
     if not len(boxes):
         panel(ax, img, f"{name}, no box")
         return
-    i = int(np.argmin(cnll))
-    panel(ax, img, f"{name}, CNLL = {cnll[i]:.2f}")
-    draw(ax, img, np.delete(boxes, i, axis=0), RED, 0.7, alpha=0.75)
-    draw(ax, img, boxes[i:i + 1], RED, 2.4)
+    panel(ax, img, f"{name}, CNLL = {cnll[0]:.2f}")                    # box[0] = score cao nhất
+    draw(ax, img, boxes[1:], RED, 0.7, alpha=0.75)
+    draw(ax, img, boxes[:1], RED, 2.4)
 
 
 def figure(dataset, image_id, a, vlm, out_path):
@@ -124,10 +131,10 @@ def figure(dataset, image_id, a, vlm, out_path):
         if r is None:
             panel(ax, img, f"{name}, missing")
             continue
-        model_panel(ax, img, name, *unique(to_orig(r["boxes"], wh), r["cnll"]))
+        model_panel(ax, img, name, *unique(to_orig(r["boxes"], wh), r.get("cnll") or [float("nan")] * len(r["boxes"])))
     handles = [Line2D([], [], color=BLUE, lw=1.2, label="Existing objects"),
                Line2D([], [], color=GREEN, lw=1.6, ls="--", label="Ground-truth boxes"),
-               Line2D([], [], color=RED, lw=1.2, label="Predicted boxes (bold = lowest CNLL)")]
+               Line2D([], [], color=RED, lw=1.2, label="Predicted boxes (bold = highest confidence)")]
     fig.legend(handles=handles, loc="upper center", ncol=3, frameon=False, fontsize=11, bbox_to_anchor=(0.5, 1 - 0.05 / H))
     fig.text(0.5, 1 - 0.62 / H, f"{image_id}  |  class: {scene_class(dataset, image_id, a)}", ha="center", va="top", fontsize=11)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -159,7 +166,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     for dataset in (["ce130", "cocount"] if a.dataset == "all" else [a.dataset]):
         dset_dir, key = DSET[dataset]
-        vlm = {m: load_dump(os.path.join(a.vlm_root, m, dset_dir, f"{a.name}_boxes.json"), key) for m, _ in MODELS}
+        vlm = {m: load_vlm(a.vlm_root, m, dset_dir, a.name, key) for m, _ in MODELS}
         ids = a.ids or list(vlm[MODELS[0][0]])
         for image_id in ids[:a.n] if a.n else ids:
             out = os.path.join(a.out, dset_dir, f"{image_id}.png")

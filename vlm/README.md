@@ -1,7 +1,8 @@
 # vlm — ZETA5 (VLM thương mại) + ZETA6 (VLM open-source) cho bài ADD, chạy theo cách của tác giả
 
 Mỗi ảnh test gọi VLM **một lần**, xin **30 box** chỗ thêm một vật cùng lớp. Chấm bằng đúng code chấm của ZETA / CE-Loc
-(`baseline/score.py`). Có hai kết quả: K = 30 (lấy box C-NLL thấp nhất, như ZETA1–3) và K = 1 (box có `score` cao nhất).
+(`baseline/score.py`). **Kết quả chính = C-NLL của box `score` (confidence model trả) cao nhất** (người dùng chốt 2026-11-04;
+ZETA1–3 / DELTA vẫn lấy box C-NLL thấp nhất trong 30). Tham khảo: min C-NLL trong 30 box, cùng lần gọi.
 
 **Làm giống code GPT của tác giả nhất có thể** (`refs/inference_layout.py` + `refs/example4.py`, gpt-4.1-mini; người dùng chốt
 2026-11-03). Chung cho mọi model (`config/base.yaml`):
@@ -59,7 +60,10 @@ Box vật CoCount đã rà tay: `--cocount-review` mặc định `../data/cocoun
   sampling ⇒ `prompt_hash` khác ⇒ hỏi lại.
 - **Lỗi API** (sau backoff; 402 in-flight thì chờ rồi thử lại) không được ghi: chạy lại sẽ hỏi lại ảnh đó. 20 lỗi liên tiếp ⇒ dừng.
 - **0 box hợp lệ**: thử lại 2 lần ở nhiệt 0,7, rồi chấm bằng box cả ảnh (bị phạt), đếm `n_fail`. Thiếu box thì lặp vòng cho đủ 30
-  (min C-NLL không đổi), đếm `n_short`.
+  (box score cao nhất và min C-NLL không đổi), đếm `n_short`.
+- **Chọn box**: box xếp theo `score` giảm dần (bằng nhau giữ thứ tự model trả; box score cao nhất mà hỏng — diện tích 0 — thì lấy box kế
+  tiếp; box không có score xếp sau). Chấm parse lại từ `text` trong `responses.jsonl` ⇒ `--score-only` chấm lại câu trả lời cũ theo
+  luật này. Ảnh không box nào có score (JSON không theo schema / regex) ⇒ box đầu model trả, đếm `n_noscore`.
 - **OpenRouter**: bỏ tham số model không nhận (theo `/api/v1/models`), in hạn mức key + số dư lúc khởi động.
 - **Tiến độ** mỗi ~60 s (ảnh xong, ETA, $, token vào / ra / suy nghĩ, 0 box / thiếu box). **Ước cả tập** in cuối lần chạy, ghi vào
   `<name>_run.json`: tiền = TB $/ảnh × số ảnh (kèm p90), giờ = số ảnh × giây / lần gọi ÷ song song (Gemini còn chặn theo `rpm`).
@@ -69,18 +73,19 @@ tên file theo `pilot<K>` hay `test`:
 
 | file | nội dung |
 |---|---|
-| `responses.jsonl` | mọi câu trả lời (text thô, box, token, cost, giây) |
-| `<name>_raw.jsonl` | 30 box / ảnh, pixel ảnh gốc, định dạng `score.py` |
-| `<name>.json` + `_boxes.json` | K = 30 |
-| `<name>_k1.json` | K = 1 |
-| `<name>_run.json` | tiền, token, thời gian, ước cả tập |
+| `<name>.jsonl` | **1 dòng / ảnh, mọi thông tin**: `class`, `orig_wh`, `n_obj`, `n_valid`, `cnll_top` (box score cao nhất = số chính), `cnll_min`, `cnll_gt` (từng lỗ GT), `boxes` (xếp theo score; mỗi box: `box` pixel ảnh gốc, `box_512` canvas chấm, `score`, `name` / `placement_type` / `reason` nếu model trả, `cnll`, CoCount thêm `cnll_objsize[_exemplar]`; 0 box ⇒ 1 box cả ảnh `fallback`), `attempts`, token, `cost`, `sec`, `finish`, `text` thô |
+| `<name>.json` | số tổng: `top_score` (**chính**, K = 1) và `min_cnll_30` (tham khảo), mỗi cái `results` + `prior` theo khoá (`inpainted` / `cocount[_objsize[_exemplar]]`); `selected` (0 box, thiếu box, token, tiền), `full_estimate`, `this_run`, `n_noscore` |
+| `responses.jsonl` | câu trả lời thô ghi dần lúc chạy — để resume (chung pilot / all), không cần đọc |
+
+Chưa đủ câu trả lời (dừng giữa chừng / `--no-score`) ⇒ `<name>.json` chỉ có tiền / token, chưa có `<name>.jsonl`.
+Pilot chấm trước 2026-11-04 còn bố cục cũ (`<name>_raw.jsonl`, `_boxes.json`, `_k1.json`, `_run.json`); `--score-only` ra bố cục mới.
 
 Log: `log/add/vlm/<model>/`; log launcher (chạy nhiều model một lượt) ở `log/add/vlm/launch/`. Khuôn nohup: `docs/EXPERIMENT_ZETA.md`.
 
 ## So box các VLM — `plot_compare.py`
 
-Hình 2 × 3 / ảnh pilot (chữ tiếng Anh): ô Original (ảnh + vật đang có + box GT) và một ô / model (box dự đoán + box C-NLL thấp nhất).
-Chỉ đọc `output/add/vlm/<model>/<tập>/<name>_boxes.json` + ảnh, ghi `output/add/viz/vlm_compare/<tập>/<image_id>.png`.
+Hình 2 × 3 / ảnh pilot (chữ tiếng Anh): ô Original (ảnh + vật đang có + box GT) và một ô / model (box dự đoán + box score cao nhất, đậm).
+Chỉ đọc `output/add/vlm/<model>/<tập>/<name>.jsonl` (pilot chấm trước 2026-11-04: `<name>_boxes.json`) + ảnh, ghi `output/add/viz/vlm_compare/<tập>/<image_id>.png`.
 
 ```bash
 python plot_compare.py --dataset ce130 --n 1      # thử 1 ảnh; --dataset all = mọi ảnh pilot cả hai tập; --name pilot10 mặc định

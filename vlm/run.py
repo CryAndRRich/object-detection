@@ -9,8 +9,9 @@
   # vLLM (venv riêng): python ../tools/run_on_free_gpu.py -- run.py --config config/server/internvl3.5-8b.yaml --pilot 50 --no-score
   #   rồi venv chính:  python run.py --config config/server/internvl3.5-8b.yaml --pilot 50 --score-only
 
-Output `<out-root>/<name>/{ce130_test_all,cocount_review5}/`: `responses.jsonl` (mọi câu trả lời, resume), `<pilotK|test>_raw.jsonl`,
-`<..>.json` + `_boxes.json` (K = 30), `<..>_k1.json` (K = 1 = box đầu), `<..>_run.json` (tiền, token, thời gian, ước cả tập).
+Output `<out-root>/<name>/{ce130_test_all,cocount_review5}/`: `<pilotK|test>.jsonl` (1 dòng / ảnh: box + score + reason + C-NLL
+từng box + token / tiền + text), `<..>.json` (số tổng: `top_score` = CHÍNH, `min_cnll_30` tham khảo; tiền, token, ước cả tập),
+`responses.jsonl` (câu trả lời thô ghi dần, để resume).
 """
 
 import argparse

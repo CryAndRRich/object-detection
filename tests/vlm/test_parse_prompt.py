@@ -1,4 +1,4 @@
-"""ZETA5 / ZETA6: parse (pixel canvas, schema `candidates` tác giả xếp theo score, JSON chung, regex, suy nghĩ, rác), lọc / đảo cạnh,
+"""ZETA5 / ZETA6: parse (pixel canvas, schema `candidates` tác giả xếp theo score — box[0] = confidence cao nhất, JSON chung, regex, suy nghĩ, rác), lọc / đảo cạnh,
 lặp vòng + box cả ảnh; prompt = nguyên văn prompt tác giả (refs/inference_layout.py) với K; few-shot tác giả (`vlm/icl/author.json`)
 dựng đúng lượt + parse lại ra đúng box; hash bỏ qua concurrency."""
 
@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from vlm.parse import extract, fill, parse_boxes, strip_think
+from vlm.parse import extract, fill, parse_boxes, parse_scored, strip_think
 from vlm.prompt import author_turns, box_schema, build_messages, encode_image, prompt_hash, system_text, user_text
 
 ORIG, SENT = (2000, 1000), (1000, 500)
@@ -32,8 +32,20 @@ def test_author_candidates_sorted_by_score_and_bad_key_kept():
                                       {"name": "chair", "seashell": [20, 20, 30, 30], "score": 0.9},
                                       {"name": "cup", "box": [40, 40, 50, 50], "score": 0.5, "reason": "x [1,2,3,4]"}]})
     assert parse_boxes(text, _cfg(), (100, 100), (100, 100)) == [[20, 20, 30, 30], [40, 40, 50, 50], [0, 0, 10, 10]]
-    no_score = json.dumps({"candidates": [{"box": [5, 5, 9, 9]}, {"box": [1, 1, 3, 3], "score": 1}]})
-    assert parse_boxes(no_score, _cfg(), (100, 100), (100, 100)) == [[5, 5, 9, 9], [1, 1, 3, 3]]   # thiếu score: giữ thứ tự
+    assert parse_scored(text, _cfg(), (100, 100), (100, 100))[1] == [0.9, 0.5, 0.2]
+
+
+def test_top_score_first_invalid_skipped_missing_score_last():
+    text = json.dumps({"candidates": [{"box": [5, 5, 9, 9]}, {"box": [1, 1, 3, 3], "score": 0.3},
+                                      {"box": [7, 7, 7, 9], "score": 0.99},                        # score cao nhất nhưng diện tích 0
+                                      {"box": [2, 2, 4, 4], "score": 0.8}, {"box": [6, 6, 8, 8], "score": 0.8},  # bằng nhau: giữ thứ tự
+                                      {"box": [3, 3, 6, 6], "score": float("nan")}]})
+    boxes, scores = parse_scored(text, _cfg(), (100, 100), (100, 100))
+    assert boxes == [[2, 2, 4, 4], [6, 6, 8, 8], [1, 1, 3, 3], [5, 5, 9, 9], [3, 3, 6, 6]]
+    assert scores == [0.8, 0.8, 0.3, None, None]
+    many = json.dumps({"candidates": [{"box": [i, i, i + 2, i + 2], "score": i / 10} for i in range(8)]})
+    assert parse_scored(many, _cfg(k=3), (100, 100), (100, 100))[1] == [0.7, 0.6, 0.5]           # quá K: giữ K score cao nhất
+    assert parse_scored("Boxes: (1, 2, 3, 4)", _cfg(), (100, 100), (100, 100)) == ([[1, 2, 3, 4]], [None])
 
 
 def test_pixel_format_uses_canvas_and_think_is_stripped():

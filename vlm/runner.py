@@ -1,6 +1,10 @@
 """Chạy một VLM trên một tập test (CE-130 `test_all` | CE-CoCount `review5`): chọn mẫu (pilot K ảnh | all), resume, gọi backend theo
 khối, parse, ghi từng câu trả lời ngay, tiến độ + ETA + tiền, ước tiền / giờ cho cả tập, rồi chấm bằng đúng code chấm ZETA
-(`baseline/score.py::run_score`): K = 30 -> `<name>.json` (+ `_boxes.json`), K = 1 (box đầu) -> `<name>_k1.json`.
+(`baseline/scoring.py`). Model trả 30 box kèm `score`; **kết quả chính ZETA5 / 6 = C-NLL của box `score` cao nhất** (người dùng chốt
+2026-11-04); tham khảo: box C-NLL thấp nhất trong 30 (như ZETA1–3). Mỗi tập 3 file: `responses.jsonl` (ghi dần lúc chạy, để resume),
+`<name>.jsonl` (1 dòng / ảnh, mọi thông tin), `<name>.json` (số tổng cả hai luật + tiền / token / thời gian / ước cả tập). Chấm parse
+lại từ `text` (câu trả lời cũ chấm theo cùng luật). Không box nào có score (regex / JSON không `candidates`) ⇒ box đầu model trả,
+đếm `n_noscore`.
 
 Pilot = K mẫu đầu theo hash blake2b(`seed:image_id`) ⇒ ổn định, và là tập con của all ⇒ chạy all dùng lại câu trả lời pilot.
 `responses.jsonl` (một dòng / ảnh, có `prompt_hash`): resume bỏ ảnh đã xong cùng hash; đổi prompt / model / sampling ⇒ hỏi lại.
@@ -16,7 +20,7 @@ import numpy as np
 
 from ce_localization.data.turns import iter_jsonl
 from vlm.backends import Fatal
-from vlm.parse import fill, parse_boxes
+from vlm.parse import fill, parse_candidates, parse_scored
 from vlm.prompt import author_turns, build_messages, encode_image
 
 __all__ = ["dataset_dir", "select", "load_responses", "record_cost", "summarize", "run_dataset", "FULL_SIZES"]
@@ -100,8 +104,7 @@ def summarize(recs, cfg, n_full, par):
 
 def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=None, score=True, log=print, spent0=0.0):
     """-> (summary, đã tiêu USD trong lần chạy này). `backend` None = chỉ chấm từ responses.jsonl (`--score-only`)."""
-    from baseline.score import load_data, run_score
-    from baseline.scoring import read_boxes, write_json, write_jsonl
+    from baseline.score import load_data
 
     tag = f"[{ns.dataset} {name}]"
     samples, index, geo = load_data(ns)
@@ -148,14 +151,14 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
                         n_api_err += 1
                         log(f"{tag} lỗi API {j['image_id']}: {res['error']}")
                         continue
-                    boxes = parse_boxes(res["text"], cfg, j["im"]["canvas_wh"], j["im"]["orig_wh"])
+                    boxes, scores = parse_scored(res["text"], cfg, j["im"]["canvas_wh"], j["im"]["orig_wh"])
                     if not boxes and j["attempts"] <= retries:
                         j["temperature"] = cfg.get("retry_temperature", 0.7)
                         again.append(j)
                         continue
                     n_api_err = 0
                     rec = {"image_id": j["image_id"], "prompt_hash": phash, "model": cfg["model"], "text": res["text"], "boxes": boxes,
-                           "n_valid": len(boxes), "attempts": j["attempts"], "in": j["in"], "out": j["out"], "reasoning": j["reasoning"],
+                           "scores": scores, "n_valid": len(boxes), "attempts": j["attempts"], "in": j["in"], "out": j["out"], "reasoning": j["reasoning"],
                            "cost": j["cost"], "sec": j["sec"], "sent_wh": list(j["im"]["sent_wh"]), "canvas_wh": list(j["im"]["canvas_wh"]),
                            "orig_wh": list(j["im"]["orig_wh"]),
                            "finish": res.get("finish"), "date": time.strftime("%Y-%m-%d %H:%M:%S")}
@@ -191,12 +194,11 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
     sm_full = summarize(recs, cfg, len(samples), par)
     if rpm and recs:                                                   # Gemini: tốc độ bị chặn bởi RPM
         sm_full["est_full_hours"] = max(sm_full["est_full_hours"], len(samples) * float(np.mean([r["attempts"] for r in recs])) / rpm / 60)
-    info = {"model": cfg["model"], "config": cfg.get("_path"), "prompt_hash": phash, "dataset": ns.dataset, "mode": name,
-            "selected": sm, "full_estimate": {k: sm_full[k] for k in ("n_full", "est_full_cost", "est_full_cost_p90", "est_full_hours")
-                                              if k in sm_full},
+    info = {"model": cfg["model"], "backend": cfg["backend"], "config": cfg.get("_path"), "prompt_hash": phash, "dataset": ns.dataset,
+            "mode": name, "selected": sm,
+            "full_estimate": {k: sm_full[k] for k in ("n_full", "est_full_cost", "est_full_cost_p90", "est_full_hours") if k in sm_full},
             "this_run": {"new": n_new, "sec": el, "spent": spent, "stopped": stopped},
             "free_tier": bool((cfg.get("gemini") or {}).get("free_tier")), "date": time.strftime("%Y-%m-%d %H:%M")}
-    write_json(os.path.join(out_dir, f"{name}_run.json"), info)
     if recs and "est_full_cost" in sm_full:
         free = " (free tier: thực trả $0)" if info["free_tier"] else ""
         log(f"{tag} xong {len(recs)}/{len(sel)} ảnh, lần này {n_new} ảnh mới trong {_fmt_sec(el)}, ${spent:.4f}{free} | TB "
@@ -205,21 +207,75 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
             f"~{sm_full['est_full_hours']:.1f} giờ ở song song {par}")
     if stopped:
         log(f"{tag} DỪNG: {stopped}")
-    if len(recs) < len(sel):
-        log(f"{tag} chưa chấm: còn {len(sel) - len(recs)} ảnh chưa có câu trả lời — chạy lại cùng lệnh để tiếp")
+    summary_path = os.path.join(out_dir, f"{name}.json")
+    if len(recs) < len(sel) or not score:
+        write_summary(summary_path, info)
+        log(f"{tag} chưa chấm: còn {len(sel) - len(recs)} ảnh chưa có câu trả lời — chạy lại cùng lệnh để tiếp" if len(recs) < len(sel)
+            else f"{tag} --no-score: chấm sau bằng --score-only (venv chính)")
         return info, spent
-    if not score:
-        log(f"{tag} --no-score: chấm sau bằng --score-only (venv chính)")
-        return info, spent
-
-    rows = [{"image_id": r["image_id"], "boxes": fill(r["boxes"], K, r["orig_wh"]), "n_valid": r["n_valid"]} for r in recs]
-    raw = os.path.join(out_dir, f"{name}_raw.jsonl")
-    write_jsonl(raw, rows)
-    meta = {"method": "vlm", "model": cfg["model"], "backend": cfg["backend"], "config": cfg.get("_path"), "prompt_hash": phash,
-            "raw": raw, "n_fail": sm["n_fail"], "n_short": sm["n_short"], "mean_valid": sm["mean_valid"], "cost": sm["cost"],
-            "free_tier": info["free_tier"], "date": time.strftime("%Y-%m-%d %H:%M")}
-    for first, suffix in ((None, ""), (1, "_k1")):
-        ns.out = os.path.join(out_dir, f"{name}{suffix}.json")
-        log(f"{tag} chấm K = {first or K} -> {ns.out}")
-        run_score(ns, sel, index, geo, read_boxes(raw, first), {**meta, "first": first}, log=log)
+    score_all(recs, sel, index, geo, cfg, ns, info, out_dir, name, tag, log)
     return info, spent
+
+
+def write_summary(path, info, scores=None):
+    """`<name>.json` = tiền / token / thời gian / ước cả tập (+ kết quả chấm khi đủ câu trả lời)."""
+    from baseline.scoring import write_json
+    write_json(path, {**info, **(scores or {})})
+
+
+SHOW = ("cnll", "cnll_gt", "on_object", "in_image", "degenerate")
+
+
+def score_all(recs, sel, index, geo, cfg, ns, info, out_dir, name, tag, log=print):
+    """Chấm bằng code chấm ZETA rồi ghi 2 file: `<name>.jsonl` (1 dòng / ảnh: câu trả lời + mọi box kèm score, reason, C-NLL…) và
+    `<name>.json` (số tổng: `top_score` = CHÍNH, box score cao nhất; `min_cnll_K` = tham khảo, box C-NLL thấp nhất trong K).
+    Parse lại từ `text` ⇒ câu trả lời cũ chấm theo cùng luật."""
+    from baseline.scoring import records_from_boxes, score_records, write_jsonl
+
+    K = cfg["k"]
+    by_id = {r["image_id"]: r for r in recs}
+    cands = {i: parse_candidates(r["text"], cfg, r["canvas_wh"], r["orig_wh"]) for i, r in by_id.items()}
+    boxes = {i: fill([c["box"] for c in cands[i]], K, r["orig_wh"]) for i, r in by_id.items()}
+    n_noscore = sum(bool(cs) and cs[0]["score"] is None for cs in cands.values())
+    if n_noscore:
+        log(f"{tag} ⚠️ {n_noscore} ảnh không có score -> lấy box đầu model trả")
+    obj_size = ns.obj_size if ns.dataset == "cocount" else None
+    out, per_box = {}, {}
+    for sel_name, first in (("top_score", 1), (f"min_cnll_{K}", None)):
+        recs_c, k = records_from_boxes(sel, {i: b[:first] if first else b for i, b in boxes.items()}, geo)
+        results, prior, dump = score_records(recs_c, ns.dataset, k, index=index, obj_size=obj_size, seed=ns.seed)
+        out[sel_name] = {"K": k, "results": results, "prior": prior}
+        if first is None:
+            per_box = {key: {row["image_id"]: row for row in rows} for key, rows in dump.items()}
+        for key, res in results.items():
+            pri = prior.get(key, {})
+            log(f"{tag} {sel_name} {key} ({res['n']} mẫu; C-NLL trên {res['n_cnll']} mẫu >= 5 vật): "
+                + " | ".join(f"{m} {res[m]:.4f} (prior {pri.get(m, float('nan')):.4f})" for m in SHOW if m in res))
+
+    main_key = next(iter(per_box))
+    rows = []
+    for s in sel:
+        i = s["image_id"]
+        r, cs, d = by_id[i], cands[i], per_box[main_key][i]
+        box_rows = cs if cs else [{"box": boxes[i][0], "score": None, "fallback": "full_image"}]
+        for j, c in enumerate(box_rows):
+            c["box_512"] = list(d["boxes"][j])                          # canvas letterbox 512 của code chấm
+            for key, rows_k in per_box.items():
+                cn = rows_k[i].get("cnll")
+                if cn is not None:
+                    c["cnll" + key[len(main_key):]] = cn[j]
+        cnll = [c["cnll"] for c in box_rows if "cnll" in c]
+        rows.append({"image_id": i, "class": s.get("class"), "t": d.get("t"), "orig_wh": r["orig_wh"], "n_obj": d.get("n_obj"),
+                     "n_valid": len(cs), "cnll_top": cnll[0] if cnll else None, "cnll_min": min(cnll) if cnll else None,
+                     "cnll_gt": d.get("cnll_gt"), "boxes": box_rows,
+                     **{k: r.get(k) for k in ("attempts", "in", "out", "reasoning", "cost", "sec", "finish", "date", "text")}})
+    jl = os.path.join(out_dir, f"{name}.jsonl")
+    write_jsonl(jl, rows)
+    write_summary(os.path.join(out_dir, f"{name}.json"), info,
+                  {"main": "top_score", "n_noscore": n_noscore, "dataset_meta": _dataset_meta(ns), **out})
+    log(f"{tag} -> {jl} (1 dòng / ảnh) + {name}.json (số tổng)")
+
+
+def _dataset_meta(ns):
+    return {"split": ns.split if ns.dataset == "ce130" else None, "seed": ns.seed,
+            **({"cocount_review": ns.cocount_review, "cocount_min_obj": ns.cocount_min_obj} if ns.dataset == "cocount" else {})}
