@@ -110,15 +110,19 @@ class Gemini:
                 raise Fatal(f"Gemini 400 với responseJsonSchema (schema tác giả) cho {self.cfg['model']}: {r.text[:300]}")
             if r.status_code != 200:
                 return result(sec=time.time() - t0, error=f"HTTP {r.status_code}: {r.text[:300]}")
-            d = r.json()
-            u = d.get("usageMetadata") or {}
-            cand = (d.get("candidates") or [{}])[0]
-            text = "".join(p.get("text", "") for p in (cand.get("content") or {}).get("parts", []) if not p.get("thought"))
-            think = u.get("thoughtsTokenCount") or 0
-            return result(text, u.get("promptTokenCount"), (u.get("candidatesTokenCount") or 0) + think, think, None, time.time() - t0,
-                          None if text else f"không có text (finishReason {cand.get('finishReason')})", time.time() - t_req,
-                          finish=cand.get("finishReason"))
+            return self.parse(r.json(), time.time() - t0, time.time() - t_req)
         return result(sec=time.time() - t0, error=f"hết {tries} lần thử lại: {err}")
+
+    def parse(self, d, sec=0.0, latency=None):
+        """GenerateContentResponse -> Result (gọi thường + Batch API). `cached` = token vào trúng cache ngầm (implicit caching,
+        `usageMetadata.cachedContentTokenCount`) — tính theo `price.cached`."""
+        u = d.get("usageMetadata") or {}
+        cand = (d.get("candidates") or [{}])[0]
+        text = "".join(p.get("text", "") for p in (cand.get("content") or {}).get("parts", []) if not p.get("thought"))
+        think = u.get("thoughtsTokenCount") or 0
+        return result(text, u.get("promptTokenCount"), (u.get("candidatesTokenCount") or 0) + think, think, None, sec,
+                      None if text else f"không có text (finishReason {cand.get('finishReason')})", latency,
+                      cached=u.get("cachedContentTokenCount") or 0, finish=cand.get("finishReason"))
 
     def batch(self, jobs):
         with ThreadPoolExecutor(max_workers=self.concurrency) as ex:

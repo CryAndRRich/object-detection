@@ -20,11 +20,12 @@ import time
 import numpy as np
 
 from ce_localization.data.turns import iter_jsonl
-from vlm.backends import Fatal
+from vlm.backends import Fatal, token_cost
 from vlm.parse import fill, parse_candidates, parse_scored
 from vlm.prompt import author_turns, build_messages, encode_image
 
-__all__ = ["dataset_dir", "select", "in_shard", "load_responses", "load_all_responses", "merge_shards", "record_cost", "summarize",
+__all__ = ["dataset_dir", "select", "batch_size",
+           "in_shard", "load_responses", "load_all_responses", "merge_shards", "record_cost", "summarize",
            "run_dataset", "FULL_SIZES"]
 
 FULL_SIZES = {"ce130": 6122, "cocount": 1263}           # test_all / review5 — chỉ để in khi chạy một tập
@@ -92,10 +93,34 @@ def record_cost(res, cfg):
     cache — `cached`, OpenAI — theo `price.cached`, không có thì như token vào)."""
     if res.get("cost") is not None:
         return float(res["cost"])
-    p = cfg.get("price") or {}
-    cached = min(int(res.get("cached") or 0), res["in"])
-    return ((res["in"] - cached) * float(p.get("in", 0)) + cached * float(p.get("cached", p.get("in", 0)))
-            + res["out"] * float(p.get("out", 0))) / 1e6
+    return token_cost(res, cfg.get("price"))
+
+
+def batch_size(cfg, done, max_cost, spent, n_left):
+    """Số ảnh gửi trong lô Batch tới: `batch.chunk` (mặc định 10.000 = cả phần còn lại một lần — các lô chạy tuần tự, mỗi lô chờ tới
+    24 giờ; backend tự chia thành phần <= `batch.max_requests` gửi song song); có `--max-cost` thì <= (ngân sách còn lại / TB tiền
+    / ảnh đã có,
+    giá gọi thường ⇒ ước dư ~2 lần); chưa có câu trả lời nào để ước thì lô đầu chỉ `batch.first` (20) ảnh. -> (số ảnh, lý do)."""
+    b = cfg.get("batch") or {}
+    n = min(int(b.get("chunk", 10000)), n_left)
+    pb, p = cfg.get("price_batch") or {}, cfg.get("price") or {}
+    ratio = 1.0                                                     # câu gọi thường -> quy về giá batch (lấy tỉ lệ lớn hơn: ước dư)
+    if p.get("in") and p.get("out"):
+        ratio = max(float(pb.get("in", p["in"])) / float(p["in"]), float(pb.get("out", p["out"])) / float(p["out"]))
+    costs = [r["cost"] * (1.0 if r.get("batch") else ratio) for r in done.values() if r.get("cost")]
+    mean = float(np.mean(costs)) if costs else None
+    if not costs:
+        n = min(n, int(b.get("first", 20)))
+    est = f"~${n * mean:.2f} (TB ${mean:.5f}/ảnh theo giá batch)" if mean else "chưa có số để ước (lô đầu nhỏ để đo giá)"
+    if max_cost is not None:
+        left = max_cost - spent
+        if left <= 0:
+            return 0, f"chạm --max-cost ${max_cost:.2f} (đã tiêu ${spent:.4f})"
+        if mean:
+            n = min(n, int(left / mean + 1e-9))
+            if n < 1:
+                return 0, f"ngân sách còn ${left:.4f} < 1 ảnh (TB ${mean:.5f}) — chạm --max-cost ${max_cost:.2f}"
+    return n, f"lô tới {n} ảnh (còn {n_left}), ước {est}" + (f", --max-cost còn ${max_cost - spent:.2f}" if max_cost is not None else "")
 
 
 def _fmt_sec(s):
@@ -168,9 +193,19 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
     chunk = int(cfg.get("chunk") or max(8, 4 * par))
     if pending and backend is None:
         stopped = f"còn {len(pending)} ảnh chưa có câu trả lời (--score-only không gọi model)"
+    if backend is not None and hasattr(backend, "set_state_dir"):
+        backend.set_state_dir(os.path.join(out_dir, f"batch_shard{shard[0]}" if shard else "batch"))
+    c0 = 0
     with open(resp_path, "a") as fout:
-        for c0 in (range(0, len(pending), chunk) if backend is not None else []):
-            c1 = min(c0 + chunk, len(pending))
+        while backend is not None and c0 < len(pending):
+            size = chunk
+            if getattr(backend, "is_batch", False):
+                size, why = batch_size(cfg, done, max_cost, spent0 + spent, len(pending) - c0)
+                log(f"{tag} [batch] {why}")
+                if not size:
+                    stopped = why
+                    break
+            c1 = min(c0 + size, len(pending))
             jobs = []
             for s in pending[c0:c1]:
                 im = encode_image(s["image"], img_cfg.get("max_side"), img_cfg.get("jpeg_quality", 95))
@@ -179,7 +214,8 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
                              "latency": None})
             while jobs:
                 try:
-                    results = backend.batch([{k: j[k] for k in ("image_id", "messages", "temperature")} for j in jobs])
+                    results = backend.batch([{"image_id": j["image_id"], "messages": j["messages"], "temperature": j["temperature"],
+                                              "attempt": j["attempts"]} for j in jobs])
                 except Fatal as e:
                     stopped = f"lỗi không cứu được: {e}"
                     break
@@ -206,6 +242,7 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
                            "scores": scores, "n_valid": len(boxes), "attempts": j["attempts"], "in": j["in"], "out": j["out"], "reasoning": j["reasoning"],
                            "cost": j["cost"], "sec": j["sec"],
                            "latency": j["latency"], "gen_id": res.get("gen_id"), "provider": res.get("provider"),
+                           "batch": bool(res.get("batch")),
                            "sent_wh": list(j["im"]["sent_wh"]), "canvas_wh": list(j["im"]["canvas_wh"]),
                            "orig_wh": list(j["im"]["orig_wh"]),
                            "finish": res.get("finish"), "date": time.strftime("%Y-%m-%d %H:%M:%S")}
@@ -234,6 +271,7 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
             if n_api_err >= int(cfg.get("max_api_errors", 20)):
                 stopped = f"{n_api_err} lỗi API liên tiếp (hết quota / mạng / provider?) — xem log, chạy lại để tiếp"
                 break
+            c0 = c1
 
     el = time.time() - t0
     recs = [done[s["image_id"]] for s in sel if s["image_id"] in done]

@@ -5,7 +5,8 @@ name: gpt-4.1-mini
 backend: openai          # key OPENAI_API_KEY trước; trống / None / sai / hết tiền -> OpenRouter (cùng model, cùng prompt_hash)
 fallback: [openrouter]
 model: openai/gpt-4.1-mini
-price: {in: 0.4, out: 1.6, cached: 0.1}   # cached: giá token vào đã cache (OpenAI trực tiếp)
+price: {in: 0.4, out: 1.6, cached: 0.1}                  # USD / 1M, bảng giá OpenAI (đọc 2026-11-04)
+price_batch: {in: 0.2, out: 0.8}                         # Batch API (--batch); giá cache batch không niêm yết -> tính như token vào
 openai:
   concurrency: 8         # tier thấp bị 429 nhiều thì giảm
 openrouter:

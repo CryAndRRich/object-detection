@@ -60,8 +60,14 @@ class OpenAI:
         if not self.o.get("probe", True):
             return
         body = {"model": self.model, "messages": [{"role": "user", "content": "Reply OK."}], "max_completion_tokens": 16}
+        if self.cfg.get("retries", 2):                 # biết trước model có nhận temperature (lần thử lại) không — Batch không hỏi lại được
+            body["temperature"] = float(self.cfg.get("retry_temperature", 0.7))
         r = self.http.post(f"{API}/chat/completions", headers=self.headers, json=body, timeout=60)
         e = _err(r) if r.status_code != 200 else {}
+        if self._learn_drop(r.status_code, e, body):
+            body.pop(e["param"])
+            r = self.http.post(f"{API}/chat/completions", headers=self.headers, json=body, timeout=60)
+            e = _err(r) if r.status_code != 200 else {}
         if r.status_code == 429 and e.get("code") == "insufficient_quota" or r.status_code in (401, 402, 403):
             raise Fatal(f"OpenAI {r.status_code} {e.get('code')}: hết tiền / quota — nạp ở "
                         f"https://platform.openai.com/settings/organization/billing ({e.get('message', '')[:150]})")
@@ -94,23 +100,9 @@ class OpenAI:
                     self.sleep(backoff(i))
                 continue
             if r.status_code == 200:
-                d = r.json()
-                ch = d["choices"][0]
-                u = d.get("usage") or {}
-                msg = ch.get("message") or {}
-                text = msg.get("content") or ""
-                return result(text, u.get("prompt_tokens"), u.get("completion_tokens"),
-                              (u.get("completion_tokens_details") or {}).get("reasoning_tokens"), None, time.time() - t0,
-                              None if text else f"không có text (refusal {str(msg.get('refusal'))[:100]}, {ch.get('finish_reason')})",
-                              time.time() - t_req, cached=(u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0,
-                              gen_id=d.get("id"), finish=ch.get("finish_reason"), provider="OpenAI (trực tiếp)")
+                return self.parse(r.json(), time.time() - t0, time.time() - t_req)
             e = _err(r)
-            if r.status_code == 400 and e.get("code") in ("unsupported_parameter", "unsupported_value") and e.get("param") in body:
-                if e["param"] in NO_DROP:
-                    raise Fatal(f"OpenAI {self.model} không nhận `{e['param']}`: {e.get('message', '')[:200]}")
-                if e["param"] not in self._dropped:
-                    self._dropped.add(e["param"])
-                    self.log(f"[openai] {self.model} không nhận `{e['param']}` -> bỏ")
+            if self._learn_drop(r.status_code, e, body):
                 continue
             if r.status_code == 429 and e.get("code") == "insufficient_quota" or r.status_code in (401, 402, 403, 404):
                 raise Fatal(f"OpenAI {r.status_code} {e.get('code')} cho {self.model}: {e.get('message', '')[:300]}")
@@ -121,6 +113,29 @@ class OpenAI:
                 continue
             return result(sec=time.time() - t0, error=f"HTTP {r.status_code}: {e.get('message', '')[:300]}")
         return result(sec=time.time() - t0, error=f"hết {tries} lần thử lại: {err}")
+
+    def parse(self, d, sec=0.0, latency=None, provider="OpenAI (trực tiếp)"):
+        """Body chat.completion -> Result (dùng chung cho gọi thường + Batch API)."""
+        ch = (d.get("choices") or [{}])[0]
+        u = d.get("usage") or {}
+        msg = ch.get("message") or {}
+        text = msg.get("content") or ""
+        return result(text, u.get("prompt_tokens"), u.get("completion_tokens"),
+                      (u.get("completion_tokens_details") or {}).get("reasoning_tokens"), None, sec,
+                      None if text else f"không có text (refusal {str(msg.get('refusal'))[:100]}, {ch.get('finish_reason')})",
+                      latency, cached=(u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0,
+                      gen_id=d.get("id"), finish=ch.get("finish_reason"), provider=provider)
+
+    def _learn_drop(self, status, e, body):
+        """400 unsupported_parameter / value cho tham số sampling -> bỏ hẳn tham số đó (True = gửi lại); reasoning / schema -> Fatal."""
+        if status != 400 or e.get("code") not in ("unsupported_parameter", "unsupported_value") or e.get("param") not in body:
+            return False
+        if e["param"] in NO_DROP:
+            raise Fatal(f"OpenAI {self.model} không nhận `{e['param']}`: {e.get('message', '')[:200]}")
+        if e["param"] not in self._dropped:
+            self._dropped.add(e["param"])
+            self.log(f"[openai] {self.model} không nhận `{e['param']}` -> bỏ")
+        return True
 
     def batch(self, jobs):
         with ThreadPoolExecutor(max_workers=self.concurrency) as ex:

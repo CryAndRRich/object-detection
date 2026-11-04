@@ -61,6 +61,18 @@ Chép `.env.example` thành `vlm/.env` rồi điền `OPENAI_API_KEY`, `OPENROUT
 | `--dataset ce130 \| cocount \| all` | mặc định `all` (cả hai tập) |
 | `--max-cost USD` | dừng êm khi tiền lần chạy này chạm ngưỡng; câu trả lời đã lưu, chạy lại cùng lệnh để tiếp |
 | `--no-score` / `--score-only` | tách sinh câu trả lời (venv vLLM) và chấm (venv chính) |
+| `--batch` | Batch API (backend `openai` / `gemini`): giá token 50 %, trả trong <= 24 giờ; câu trả lời như gọi thường; không đo latency |
+
+**Batch API** (`--batch`; `vlm/backends/batch.py`, docs OpenAI / Gemini đọc 2026-11-04):
+- Giá = `price_batch` của config (bảng Batch chính thức; thiếu thì dừng). Hạn: OpenAI 24 giờ (quá hạn: request xong vẫn trả + tính
+  tiền, phần chưa xong huỷ, không tính), Gemini mục tiêu 24 giờ, quá 48 giờ hết hạn. Gemini free tier không có Batch (cần billing).
+- Lô đầu `batch.first` (20) ảnh để đo giá; sau đó cả phần còn lại một lô (`batch.chunk` 10.000), tự chia thành phần <=
+  `batch.max_requests` (1.000) / <= 190 MB (OpenAI) gửi song song. `--max-cost` chặn TRƯỚC khi gửi (ước theo TB tiền / ảnh đã có).
+- Không gửi trùng: mỗi lô ghi vào `<tập>/batch/state.json` ngay khi tạo, file kết quả tải về giữ cạnh đó ⇒ bị ngắt thì chạy lại cùng
+  lệnh: chờ / lấy lô cũ. Khoá request `<image_id>#<lần thử>`. Request hết hạn / hàng đợi đầy: chờ `batch.limit_wait_sec` (900) rồi gửi lại.
+- Log mỗi 10 phút: trạng thái, số request xong / lỗi, đã chờ bao lâu (provider không cho ETA).
+- `--batch` bỏ `fallback` (OpenRouter = gọi thường, giá gấp đôi): key OpenAI lỗi thì dừng, không tự chuyển.
+- Latency vẫn đo bằng `tools/latency.py` (gọi thường, từng ảnh) — Batch không có thời gian từng request.
 
 Box vật CoCount đã rà tay: `--cocount-review` mặc định `../data/cocount_review.jsonl` (`object-detection/data/`, cùng tên trong zip).
 
