@@ -153,9 +153,12 @@ def gemini_server(state):
             if state.pop("limit_once", False):
                 return R(429, {"error": {"status": "RESOURCE_EXHAUSTED", "message": "enqueued tokens exceeded"}})
             return R(200, {"name": "batches/b1", "metadata": {"state": "BATCH_STATE_PENDING"}})
-        if url.endswith("/v1beta/batches/b1"):
-            return R(200, {"name": "batches/b1", "done": True, "metadata": {"state": "BATCH_STATE_SUCCEEDED",
-                     "batchStats": {"requestCount": 3, "successfulRequestCount": 3}, "output": {"responsesFile": "files/out1"}}})
+        if url.endswith("/v1beta/batches/b1"):                 # như API thật: inputConfig.fileName (file vào) đứng trước output
+            return R(200, {"name": "batches/b1", "done": True, "metadata": {
+                "inputConfig": {"fileName": "files/in1"}, "state": "BATCH_STATE_SUCCEEDED",
+                "batchStats": {"requestCount": 3, "successfulRequestCount": 3}, "output": {"responsesFile": "files/out1"}}})
+        if "files/in1:download" in url:
+            return R(400, {"error": {"code": 400, "message": "Only GENERATED files can be downloaded."}})
         if "files/out1:download" in url:
             return R(200, text="".join(json.dumps(x) + "\n" for x in state["out"]))
         raise AssertionError(url)

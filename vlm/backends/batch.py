@@ -182,7 +182,9 @@ class GeminiBatchAPI:
         if raw.upper().endswith("CANCELED"):
             state = "cancelled"
         st = _find(d, "batchStats") or {}
-        f = _find(d, "responsesFile", "fileName")
+        # file KẾT QUẢ: `responsesFile` (output / response) hoặc `dest.fileName` — KHÔNG lấy `fileName` bất kỳ: trạng thái job còn chứa
+        # `inputConfig.fileName` = file ĐẦU VÀO đã tải lên (tải về -> 400 "Only GENERATED files can be downloaded", lỗi 2026-11-04)
+        f = _find(d, "responsesFile") or _find(_find(d, "dest") or {}, "fileName")
         err = _find(d, "error")
         return {"state": state, "raw": raw, "done": int(st.get("successfulRequestCount") or 0),
                 "failed": int(st.get("failedRequestCount") or 0), "total": st.get("requestCount"), "files": [f] if f else [],
