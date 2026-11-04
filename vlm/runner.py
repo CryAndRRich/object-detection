@@ -26,9 +26,7 @@ from vlm.prompt import author_turns, build_messages, encode_image
 
 __all__ = ["dataset_dir", "select", "batch_size",
            "in_shard", "load_responses", "load_all_responses", "merge_shards", "record_cost", "summarize",
-           "run_dataset", "FULL_SIZES"]
-
-FULL_SIZES = {"ce130": 6122, "cocount": 1263}           # test_all / review5 — chỉ để in khi chạy một tập
+           "run_dataset"]
 
 
 def dataset_dir(ns):
@@ -277,7 +275,8 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
     el = time.time() - t0
     recs = [done[s["image_id"]] for s in sel if s["image_id"] in done]
     sm = summarize(recs, cfg, len(sel), par)
-    sm_full = summarize(recs, cfg, len(samples), par)
+    n_par = shard[1] if shard else 1                                   # n bản song song cùng chạy ⇒ giờ cả tập chia n
+    sm_full = summarize(recs, cfg, len(samples), par * n_par)
     if rpm and recs:                                                   # Gemini: tốc độ bị chặn bởi RPM
         sm_full["est_full_hours"] = max(sm_full["est_full_hours"], len(samples) * float(np.mean([r["attempts"] for r in recs])) / rpm / 60)
     info = {"model": cfg["model"], "backend": cfg["backend"], "config": cfg.get("_path"), "prompt_hash": phash, "dataset": ns.dataset,
@@ -290,7 +289,7 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
         log(f"{tag} xong {len(recs)}/{len(sel)} ảnh, lần này {n_new} ảnh mới trong {_fmt_sec(el)}, ${spent:.4f}{free} | TB "
             f"${sm['cost_per_image_mean']:.5f}/ảnh (p90 ${sm['cost_per_image_p90']:.5f}) | 0 box {sm['n_fail']}, thiếu {sm['n_short']}")
         log(f"{tag} ƯỚC cả tập {len(samples)} ảnh: ${sm_full['est_full_cost']:.2f} (p90 ${sm_full['est_full_cost_p90']:.2f}){free}, "
-            f"~{sm_full['est_full_hours']:.1f} giờ ở song song {par}")
+            f"~{sm_full['est_full_hours']:.1f} giờ ở song song {par}" + (f" × {n_par} bản" if n_par > 1 else ""))
     if stopped:
         log(f"{tag} DỪNG: {stopped}")
     summary_path = os.path.join(out_dir, f"{name}.json")

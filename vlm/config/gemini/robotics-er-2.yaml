@@ -14,5 +14,5 @@ price_batch: {in: 0.5, out: 2.5}                         # Batch API (--batch, c
 gemini:
   thinking_level: minimal
   free_tier: false       # billing bật từ 2026-11-04 (chỉ đổi cách in tiền)
-  rpm: 10                # sửa theo hạn mức thật
-  concurrency: 2
+  rpm: 600              # hạn mức tài khoản trả phí (AI Studio 2026-11-04): 1.000 RPM, 2M TPM, 86.400 RPD — để dư ~40 %
+  concurrency: 24        # ~10 s / request ⇒ ~140 request / phút × ~5k token = ~0,7M TPM (< 2M)

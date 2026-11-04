@@ -180,10 +180,16 @@ def test_data_parallel_shards_disjoint_merge_then_score(env):
     assert sorted(i for k in (0, 1) for i in ids if in_shard(i, (k, 2))) == sorted(ids)
     calls = []
     for k in (0, 1):
-        be = FakeBackend()
-        run_dataset(cfg, ns(), be, d, f"test_shard{k}", ph, score=False, shard=(k, 2), log=lambda *a: None)
+        be, logs = FakeBackend(), []
+        info, _ = run_dataset(cfg, ns(), be, d, f"test_shard{k}", ph, score=False, shard=(k, 2), log=logs.append)
         calls.append({c[0] for c in be.calls})
         assert all(in_shard(i, (k, 2)) for i in calls[k])
+        # ước giờ cả tập: 2 bản cùng chạy ⇒ chia 2 (không ngoại suy tốc độ một bản cho cả tập)
+        recs = [json.loads(line) for line in open(os.path.join(d, f"responses_shard{k}.jsonl"))]
+        sec = sum(r["sec"] for r in recs) / len(recs)
+        par = int((cfg.get("openrouter") or {}).get("concurrency") or 1)
+        assert abs(info["full_estimate"]["est_full_hours"] - len(ids) * sec / (2 * par) / 3600) < 1e-9
+        assert any("× 2 bản" in m for m in logs if "ƯỚC" in m)
     assert not calls[0] & calls[1] and calls[0] | calls[1] == set(ids)
     be = FakeBackend()
     run_dataset(cfg, ns(), be, d, "test", ph, score=False, log=lambda *a: None)       # shard chưa gộp vẫn tính là xong

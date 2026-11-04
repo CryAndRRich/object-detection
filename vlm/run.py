@@ -28,7 +28,7 @@ from ce_localization.utils.config import load_config  # noqa: E402
 from vlm.backends import Fatal, make_backend  # noqa: E402
 from vlm.env import load_env  # noqa: E402
 from vlm.prompt import build_messages, encode_image, prompt_hash  # noqa: E402
-from vlm.runner import FULL_SIZES, dataset_dir, merge_shards, run_dataset, select  # noqa: E402
+from vlm.runner import dataset_dir, merge_shards, run_dataset, select  # noqa: E402
 
 
 def log(*a):
@@ -192,8 +192,6 @@ def main(argv=None):
     if len(est) == 2 and all("est_full_cost" in e for e in est):
         log(f"[vlm] ƯỚC --all cả hai tập ({sum(e['n_full'] for e in est)} ảnh): ${sum(e['est_full_cost'] for e in est):.2f} "
             f"(p90 ${sum(e['est_full_cost_p90'] for e in est):.2f}), ~{sum(e['est_full_hours'] for e in est):.1f} giờ")
-    elif len(datasets) == 1:
-        log(f"[vlm] (cả hai tập: {sum(FULL_SIZES.values())} ảnh)")
     log(f"[vlm] xong, lần này tiêu ${spent:.4f}")
     if fatal:
         raise SystemExit(3)                 # dừng vì lỗi không cứu được (hết quota / key): mã khác 0 cho vòng lệnh ngoài `|| break`

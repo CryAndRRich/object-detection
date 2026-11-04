@@ -119,11 +119,11 @@ python plot_compare.py --dataset ce130 --n 1      # thử 1 ảnh; --dataset all
 
 Server: driver 535 (CUDA 12.2; vLLM >= 0.20 trên PyPI là CUDA 13) + GPU dùng chung còn 4,7–9,9 GiB ⇒ model 8B không vừa. Kaggle:
 `config/kaggle/<model>.yaml` (Qwen3-VL-4B, InternVL3.5-8B, LLaVA-OV-2-8B) — T4 không bf16 / FP8 / FlashAttention 2 ⇒ `dtype: half`,
-`tensor_parallel_size: 2`, `vllm.gpu_mem_gib` / `kv_cache_gib` tính MỖI card. Model vừa một card (Qwen3-VL-4B): `vllm.data_parallel: 2`
+`tensor_parallel_size: 2`, `vllm.gpu_mem_gib` / `kv_cache_gib` tính MỖI card. Model vừa một card: `vllm.data_parallel: 2`
 ⇒ `run.py` mở 2 tiến trình con (`--shard i/2`, mỗi con một GPU, TP 1), chia ảnh theo hash tên ảnh, ghi `responses_shard<i>.jsonl`,
-xong / bị dừng thì gộp vào `responses.jsonl` (resume đọc cả file chưa gộp). Khoá `engine` chỉ đổi tốc độ / bộ nhớ
+xong / bị dừng thì gộp vào `responses.jsonl` (resume đọc cả file chưa gộp). Qwen3-VL-4B thử `data_parallel: 2` (KV 3,5 GiB / card đầy) không nhanh hơn TP 2 ⇒ dùng TP 2 (ZETA mục 13). Khoá `engine` chỉ đổi tốc độ / bộ nhớ
 (`max_num_seqs`, `tensor_parallel_size`, `limit_mm_per_prompt`, …) nằm ngoài `prompt_hash` ⇒ chỉnh giữa các phiên vẫn resume. Notebook
-`notebooks/vlm_kaggle.ipynb` (local, gitignore): cài vLLM theo driver, chép CoCount sang ổ local, nối `responses.jsonl` phiên trước,
+`notebooks/vlm_kaggle.ipynb` (local, gitignore): cài vLLM theo driver, chép CoCount sang ổ local, nối `responses.jsonl` phiên trước, in tiến độ / lỗi (thống kê vLLM gộp 1 dòng / engine / 10 phút; file log giữ đủ),
 `MODELS` × `DATASETS` (pilot: đủ cả hai để thử một lượt; full: mỗi lần một model × một tập = 6 lần), mỗi model `--pilot K` hay
 `--all` + (`LATENCY`) `tools/latency.py vlm` (latency 1 ảnh chuẩn, `output/add/latency/<model>.json`) + chẩn đoán (`diagnose.json`: số box,
 finish, token, s / ảnh (khối), không JSON / score, box trong ảnh theo pixel và theo 0–1000), xoá weight, gói `zeta6_<tag>.zip`.
