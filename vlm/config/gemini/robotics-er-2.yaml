@@ -13,6 +13,6 @@ price_batch: {in: 0.5, out: 2.5}                         # Batch API (--batch, c
                                                          # batch chỉ nói cho cache tường minh -> token cache tính như token vào
 gemini:
   thinking_level: minimal
-  free_tier: true        # bật billing thì đổi false (chỉ đổi cách in tiền)
+  free_tier: false       # billing bật từ 2026-11-04 (chỉ đổi cách in tiền)
   rpm: 10                # sửa theo hạn mức thật
   concurrency: 2
