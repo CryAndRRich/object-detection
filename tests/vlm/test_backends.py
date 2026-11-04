@@ -78,6 +78,14 @@ def test_openrouter_payload_usage_and_retry(monkeypatch):
     assert not any("sk-or-test-1234567890" in m for m in logs) and any("…7890" in m for m in logs)
 
 
+def test_latency_excludes_retry_wait(monkeypatch):
+    import time
+    be, _, _, _ = _or(monkeypatch, [Resp(503, {}), Resp(200, OK)])
+    be.sleep = lambda sec: time.sleep(0.3)                                                  # chờ thử lại thật 0,3 s
+    r = be.batch([JOB])[0]
+    assert r["sec"] >= 0.3 and r["latency"] is not None and r["latency"] < 0.2 and r["gen_id"] == "gen-1"
+
+
 def test_openrouter_unsupported_params_dropped_and_fatal(monkeypatch):
     be, sess, logs, _ = _or(monkeypatch, [Resp(200, OK)], supported=("structured_outputs", "reasoning"))   # Luna: không temperature
     be.batch([{**JOB, "temperature": 0.7}])

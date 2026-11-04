@@ -76,6 +76,7 @@ class Gemini:
         err = None
         for i in range(tries + 1):
             self._throttle()
+            t_req = time.time()
             try:
                 r = self.http.post(url, headers=hdr, json=body, timeout=float(self.g.get("timeout", 300)))
             except requests.RequestException as e:
@@ -100,7 +101,8 @@ class Gemini:
             text = "".join(p.get("text", "") for p in (cand.get("content") or {}).get("parts", []) if not p.get("thought"))
             think = u.get("thoughtsTokenCount") or 0
             return result(text, u.get("promptTokenCount"), (u.get("candidatesTokenCount") or 0) + think, think, None, time.time() - t0,
-                          None if text else f"không có text (finishReason {cand.get('finishReason')})", finish=cand.get("finishReason"))
+                          None if text else f"không có text (finishReason {cand.get('finishReason')})", time.time() - t_req,
+                          finish=cand.get("finishReason"))
         return result(sec=time.time() - t0, error=f"hết {tries} lần thử lại: {err}")
 
     def batch(self, jobs):

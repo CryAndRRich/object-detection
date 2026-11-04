@@ -98,6 +98,9 @@ def summarize(recs, cfg, n_full, par):
                    cost_per_image_p90=float(np.percentile(cost, 90)), sec_per_call_mean=float(sec.mean()),
                    est_full_cost=float(cost.mean() * n_full), est_full_cost_p90=float(np.percentile(cost, 90) * n_full),
                    est_full_hours=float(n_full * sec.mean() / max(par, 1) / 3600))
+    lat = [r["latency"] for r in recs if r.get("latency") is not None]       # câu trả lời trước 2026-11-04 không có
+    if lat:
+        out.update(latency_mean=float(np.mean(lat)), n_latency=len(lat))
     out["n_full"] = n_full
     return out
 
@@ -132,7 +135,8 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
             for s in pending[c0:c0 + chunk]:
                 im = encode_image(s["image"], img_cfg.get("max_side"), img_cfg.get("jpeg_quality", 95))
                 jobs.append({"image_id": s["image_id"], "messages": build_messages(s, im, cfg, examples), "temperature": None,
-                             "sample": s, "im": im, "attempts": 0, "cost": 0.0, "in": 0, "out": 0, "reasoning": 0, "sec": 0.0})
+                             "sample": s, "im": im, "attempts": 0, "cost": 0.0, "in": 0, "out": 0, "reasoning": 0, "sec": 0.0,
+                             "latency": None})
             while jobs:
                 try:
                     results = backend.batch([{k: j[k] for k in ("image_id", "messages", "temperature")} for j in jobs])
@@ -147,6 +151,7 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
                     for k in ("in", "out", "reasoning", "sec"):
                         j[k] += res[k]
                     j["cost"] += c
+                    j["latency"] = res.get("latency")                 # của lần gọi có câu trả lời được giữ
                     if res["error"] and not res["text"]:
                         n_api_err += 1
                         log(f"{tag} lỗi API {j['image_id']}: {res['error']}")
@@ -159,7 +164,9 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
                     n_api_err = 0
                     rec = {"image_id": j["image_id"], "prompt_hash": phash, "model": cfg["model"], "text": res["text"], "boxes": boxes,
                            "scores": scores, "n_valid": len(boxes), "attempts": j["attempts"], "in": j["in"], "out": j["out"], "reasoning": j["reasoning"],
-                           "cost": j["cost"], "sec": j["sec"], "sent_wh": list(j["im"]["sent_wh"]), "canvas_wh": list(j["im"]["canvas_wh"]),
+                           "cost": j["cost"], "sec": j["sec"],
+                           "latency": j["latency"], "gen_id": res.get("gen_id"), "provider": res.get("provider"),
+                           "sent_wh": list(j["im"]["sent_wh"]), "canvas_wh": list(j["im"]["canvas_wh"]),
                            "orig_wh": list(j["im"]["orig_wh"]),
                            "finish": res.get("finish"), "date": time.strftime("%Y-%m-%d %H:%M:%S")}
                     fout.write(json.dumps(rec) + "\n")
@@ -179,8 +186,8 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
                 left = len(pending) - n_new
                 log(f"{tag} {len(recs)}/{len(sel)} | {_fmt_sec(el)} | ETA {_fmt_sec(left * el / n_new)} | ${spent:.4f} lần này "
                     f"(TB ${sm['cost_per_image_mean']:.5f}/ảnh) | vào {_k(sm['tokens_in_mean'])} / ra {_k(sm['tokens_out_mean'])} "
-                    f"(nghĩ {_k(sm['tokens_reasoning_mean'])}) tok/ảnh | 0 box {sm['n_fail']} thiếu {sm['n_short']} | lỗi API liên tiếp "
-                    f"{n_api_err}")
+                    f"(nghĩ {_k(sm['tokens_reasoning_mean'])}) tok/ảnh | latency TB {sm.get('latency_mean', float('nan')):.1f} s | "
+                    f"0 box {sm['n_fail']} thiếu {sm['n_short']} | lỗi API liên tiếp {n_api_err}")
             if max_cost is not None and spent0 + spent >= max_cost:
                 stopped = f"chạm --max-cost ${max_cost:.2f} (đã tiêu ${spent0 + spent:.4f})"
                 break
@@ -268,7 +275,8 @@ def score_all(recs, sel, index, geo, cfg, ns, info, out_dir, name, tag, log=prin
         rows.append({"image_id": i, "class": s.get("class"), "t": d.get("t"), "orig_wh": r["orig_wh"], "n_obj": d.get("n_obj"),
                      "n_valid": len(cs), "cnll_top": cnll[0] if cnll else None, "cnll_min": min(cnll) if cnll else None,
                      "cnll_gt": d.get("cnll_gt"), "boxes": box_rows,
-                     **{k: r.get(k) for k in ("attempts", "in", "out", "reasoning", "cost", "sec", "finish", "date", "text")}})
+                     **{k: r.get(k) for k in ("attempts", "in", "out", "reasoning", "cost", "sec", "latency", "finish", "provider", "gen_id",
+                                                 "date", "text")}})
     jl = os.path.join(out_dir, f"{name}.jsonl")
     write_jsonl(jl, rows)
     write_summary(os.path.join(out_dir, f"{name}.json"), info,

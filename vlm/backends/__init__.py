@@ -1,6 +1,7 @@
 """Backend VLM: `make_backend(cfg, log)` theo `cfg["backend"]` (openrouter | gemini | vllm; import lười — venv chính không cần vllm).
 Giao diện chung: `backend.batch(jobs) -> [Result]`, job = {"image_id", "messages", "temperature" (None = theo config)}; Result = dict
-{"text", "in", "out" (gồm token suy nghĩ), "reasoning", "cost" (USD, None = tính từ giá config), "sec", "error"}. Lỗi không cứu được
+{"text", "in", "out" (gồm token suy nghĩ), "reasoning", "cost" (USD, None = tính từ giá config), "sec" (cả lần gọi, gồm chờ thử lại
+HTTP), "latency" (chỉ request thành công cuối: gửi -> nhận đủ; None nếu không đo được từng ảnh), "error"}. Lỗi không cứu được
 (sai key, hết tiền, model không tồn tại) -> `Fatal`: dừng cả job, câu trả lời đã có vẫn còn trong responses.jsonl."""
 
 import random
@@ -16,9 +17,9 @@ class Fatal(RuntimeError):
     pass
 
 
-def result(text="", n_in=0, n_out=0, reasoning=0, cost=None, sec=0.0, error=None, **extra):
+def result(text="", n_in=0, n_out=0, reasoning=0, cost=None, sec=0.0, error=None, latency=None, **extra):
     return {"text": text or "", "in": int(n_in or 0), "out": int(n_out or 0), "reasoning": int(reasoning or 0), "cost": cost,
-            "sec": float(sec), "error": error, **extra}
+            "sec": float(sec), "latency": None if latency is None else float(latency), "error": error, **extra}
 
 
 def backoff(attempt, retry_after=None, cap=60.0):

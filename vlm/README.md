@@ -73,9 +73,14 @@ tên file theo `pilot<K>` hay `test`:
 
 | file | nội dung |
 |---|---|
-| `<name>.jsonl` | **1 dòng / ảnh, mọi thông tin**: `class`, `orig_wh`, `n_obj`, `n_valid`, `cnll_top` (box score cao nhất = số chính), `cnll_min`, `cnll_gt` (từng lỗ GT), `boxes` (xếp theo score; mỗi box: `box` pixel ảnh gốc, `box_512` canvas chấm, `score`, `name` / `placement_type` / `reason` nếu model trả, `cnll`, CoCount thêm `cnll_objsize[_exemplar]`; 0 box ⇒ 1 box cả ảnh `fallback`), `attempts`, token, `cost`, `sec`, `finish`, `text` thô |
+| `<name>.jsonl` | **1 dòng / ảnh, mọi thông tin**: `class`, `orig_wh`, `n_obj`, `n_valid`, `cnll_top` (box score cao nhất = số chính), `cnll_min`, `cnll_gt` (từng lỗ GT), `boxes` (xếp theo score; mỗi box: `box` pixel ảnh gốc, `box_512` canvas chấm, `score`, `name` / `placement_type` / `reason` nếu model trả, `cnll`, CoCount thêm `cnll_objsize[_exemplar]`; 0 box ⇒ 1 box cả ảnh `fallback`), `attempts`, token, `cost`, `sec`, **`latency`**, `finish`, `provider`, `gen_id`, `text` thô |
 | `<name>.json` | số tổng: `top_score` (**chính**, K = 1) và `min_cnll_30` (tham khảo), mỗi cái `results` + `prior` theo khoá (`inpainted` / `cocount[_objsize[_exemplar]]`); `selected` (0 box, thiếu box, token, tiền), `full_estimate`, `this_run`, `n_noscore` |
 | `responses.jsonl` | câu trả lời thô ghi dần lúc chạy — để resume (chung pilot / all), không cần đọc |
+
+**Thời gian / ảnh**: báo `latency` = chỉ request thành công cuối (gửi -> nhận đủ, gồm mạng + hàng đợi provider — API không tách được),
+không gồm chờ thử lại HTTP / hỏi lại khi 0 box; `sec` = cả lần gọi (gồm các thứ đó). vLLM chạy theo khối ⇒ `sec` = thông lượng,
+`latency` chỉ có khi `chunk: 1` (đo từng ảnh). `<name>.json` `selected.latency_mean` (+ `n_latency`). Câu trả lời trước 2026-11-04
+(pilot, đầu lần full GLM) không có `latency`.
 
 Chưa đủ câu trả lời (dừng giữa chừng / `--no-score`) ⇒ `<name>.json` chỉ có tiền / token, chưa có `<name>.jsonl`.
 Pilot chấm trước 2026-11-04 còn bố cục cũ (`<name>_raw.jsonl`, `_boxes.json`, `_k1.json`, `_run.json`); `--score-only` ra bố cục mới.

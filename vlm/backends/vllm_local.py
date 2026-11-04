@@ -89,6 +89,7 @@ class VLLMLocal:
         t0 = time.time()
         outs = self.llm.chat([self.conversation(j) for j in jobs], sampling_params=[self.params(j) for j in jobs], use_tqdm=False,
                              chat_template_kwargs=self.cfg.get("chat_template_kwargs"))
-        sec = (time.time() - t0) / max(len(jobs), 1)
+        el = time.time() - t0
+        sec = el / max(len(jobs), 1)                       # thông lượng khối; latency 1 ảnh chỉ đo được khi chạy từng ảnh (`chunk: 1`)
         return [result(o.outputs[0].text, len(o.prompt_token_ids or []), len(o.outputs[0].token_ids), 0, 0.0, sec, None,
-                       finish=o.outputs[0].finish_reason) for o in outs]
+                       el if len(jobs) == 1 else None, finish=o.outputs[0].finish_reason) for o in outs]

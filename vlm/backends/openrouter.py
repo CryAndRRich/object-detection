@@ -106,6 +106,7 @@ class OpenRouter:
         tries = int(self.o.get("http_retries", 6))
         err = None
         for i in range(tries + 1):
+            t_req = time.time()
             try:
                 r = self.http.post(f"{API}/chat/completions", headers=self.headers, json=body, timeout=float(self.o.get("timeout", 300)))
             except requests.RequestException as e:
@@ -140,7 +141,7 @@ class OpenRouter:
                 text = "".join(p.get("text", "") for p in text if isinstance(p, dict))
             return result(text, u.get("prompt_tokens"), u.get("completion_tokens"),
                           (u.get("completion_tokens_details") or {}).get("reasoning_tokens"), u.get("cost"), time.time() - t0,
-                          None, gen_id=d.get("id"), finish=ch.get("finish_reason"), provider=d.get("provider"))
+                          None, time.time() - t_req, gen_id=d.get("id"), finish=ch.get("finish_reason"), provider=d.get("provider"))
         return result(sec=time.time() - t0, error=f"hết {tries} lần thử lại: {err}")
 
     def batch(self, jobs):
