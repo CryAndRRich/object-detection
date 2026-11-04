@@ -210,7 +210,7 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
             for s in pending[c0:c1]:
                 im = encode_image(s["image"], img_cfg.get("max_side"), img_cfg.get("jpeg_quality", 95))
                 jobs.append({"image_id": s["image_id"], "messages": build_messages(s, im, cfg, examples), "temperature": None,
-                             "sample": s, "im": im, "attempts": 0, "cost": 0.0, "in": 0, "out": 0, "reasoning": 0, "sec": 0.0,
+                             "sample": s, "im": im, "attempts": 0, "cost": 0.0, "in": 0, "out": 0, "reasoning": 0, "cached": 0, "sec": 0.0,
                              "latency": None})
             while jobs:
                 try:
@@ -226,6 +226,7 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
                     j["attempts"] += 1
                     for k in ("in", "out", "reasoning", "sec"):
                         j[k] += res[k]
+                    j["cached"] += int(res.get("cached") or 0)                 # token vào trúng cache (OpenAI / Gemini)
                     j["cost"] += c
                     j["latency"] = res.get("latency")                 # của lần gọi có câu trả lời được giữ
                     if res["error"] and not res["text"]:
@@ -239,7 +240,7 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
                         continue
                     n_api_err = 0
                     rec = {"image_id": j["image_id"], "prompt_hash": phash, "model": cfg["model"], "text": res["text"], "boxes": boxes,
-                           "scores": scores, "n_valid": len(boxes), "attempts": j["attempts"], "in": j["in"], "out": j["out"], "reasoning": j["reasoning"],
+                           "scores": scores, "n_valid": len(boxes), "attempts": j["attempts"], "in": j["in"], "out": j["out"], "reasoning": j["reasoning"], "cached": j["cached"],
                            "cost": j["cost"], "sec": j["sec"],
                            "latency": j["latency"], "gen_id": res.get("gen_id"), "provider": res.get("provider"),
                            "batch": bool(res.get("batch")),
