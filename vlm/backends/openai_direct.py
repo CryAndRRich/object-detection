@@ -14,7 +14,7 @@ import requests
 
 from vlm.backends import RETRY_STATUS, Fatal, backoff, result
 from vlm.backends.openrouter import chat_messages
-from vlm.env import mask, require_key
+from vlm.env import key_source, mask, require_key
 from vlm.prompt import box_schema
 
 __all__ = ["OpenAI", "API"]
@@ -45,7 +45,8 @@ class OpenAI:
         self.concurrency = int(self.o.get("concurrency", 8))
         self._dropped = set()
         p = cfg.get("price") or {}
-        log(f"[openai] key {mask(self.key)} | {self.model} | concurrency {self.concurrency} | tiền = token × giá config "
+        log(f"[openai] key {mask(self.key)} (nguồn: {key_source('OPENAI_API_KEY')}) | "
+            f"{self.model} | concurrency {self.concurrency} | tiền = token × giá config "
             f"vào ${p.get('in')} / ra ${p.get('out')} / cache ${p.get('cached', p.get('in'))} mỗi 1M (OpenAI không trả tiền mỗi request)")
         self._probe()
 

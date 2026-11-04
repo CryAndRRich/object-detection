@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 import requests
 
 from vlm.backends import RETRY_STATUS, Fatal, backoff, result
-from vlm.env import mask, require_key
+from vlm.env import key_source, mask, require_key
 from vlm.prompt import box_schema
 
 __all__ = ["Gemini", "API"]
@@ -31,7 +31,8 @@ class Gemini:
         self.concurrency = int(self.g.get("concurrency", 4))
         self.rpm = float(self.g.get("rpm") or 0)
         self._lock, self._next = threading.Lock(), 0.0
-        log(f"[gemini] key {mask(self.key)} | {cfg['model']} | thinking {self.g.get('thinking_level')} | rpm {self.rpm or '∞'} | "
+        log(f"[gemini] key {mask(self.key)} (nguồn: {key_source('GEMINI_API_KEY')}) | "
+            f"{cfg['model']} | thinking {self.g.get('thinking_level')} | rpm {self.rpm or '∞'} | "
             f"concurrency {self.concurrency} | free_tier {bool(self.g.get('free_tier'))}")
 
     def _throttle(self):

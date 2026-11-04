@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 import requests
 
 from vlm.backends import FATAL_STATUS, RETRY_STATUS, Fatal, backoff, result
-from vlm.env import mask, require_key
+from vlm.env import key_source, mask, require_key
 from vlm.prompt import box_schema
 
 __all__ = ["OpenRouter", "API", "chat_messages"]
@@ -52,7 +52,8 @@ class OpenRouter:
         if "structured_outputs" not in self.supported:                                         # schema tác giả qua API
             raise Fatal(f"{cfg['model']} không có structured_outputs trên OpenRouter (`/api/v1/models`) -> không gửi được schema "
                         "tác giả, chọn model khác")
-        log(f"[openrouter] key {mask(self.key)} | {cfg['model']} | concurrency {self.concurrency} | provider {self.o.get('provider')}")
+        log(f"[openrouter] key {mask(self.key)} (nguồn: {key_source('OPENROUTER_API_KEY')}) | "
+            f"{cfg['model']} | concurrency {self.concurrency} | provider {self.o.get('provider')}")
         self._print_credits()
 
     def _model_info(self):

@@ -267,7 +267,7 @@ def test_chain_skips_missing_key_and_switches_on_fatal(monkeypatch):
 
 def test_placeholder_keys_are_missing(monkeypatch):
     from vlm.env import get_key
-    for v in ("None", "null", " ", "<điền key>", "your_key"):
+    for v in ("None", "null", " ", "<điền key>", "your_key", "sk-your-openai-key", "sk-proj-xxxxxxxx"):
         monkeypatch.setenv("K_TEST", v)
         assert get_key("K_TEST") is None
         with pytest.raises(SystemExit, match="trống / None"):
@@ -306,3 +306,14 @@ def test_gemini_daily_quota_is_fatal(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "None")
     with pytest.raises(SystemExit, match="GEMINI_API_KEY"):                                   # không có key -> dừng
         Gemini({"model": "m", "gemini": {}}, log=lambda *a: None)
+
+
+def test_env_last_line_wins_and_export_shadow_reported(tmp_path, monkeypatch):
+    from vlm.env import key_source
+    p = tmp_path / ".env"
+    p.write_text("OPENAI_API_KEY=sk-old-aaaaaaaa\nOPENAI_API_KEY=sk-new-bbbbbbbb\nGEMINI_API_KEY=g-file-123456\n")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "sk-your-gemini-key")                             # export sẵn trong shell (chữ mẫu)
+    load_env(str(p))
+    assert require_key("OPENAI_API_KEY") == "sk-new-bbbbbbbb" and key_source("OPENAI_API_KEY") == ".env"
+    assert "KHÁC giá trị trong .env" in key_source("GEMINI_API_KEY")
