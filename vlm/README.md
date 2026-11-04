@@ -96,6 +96,16 @@ Chỉ đọc `output/add/vlm/<model>/<tập>/<name>.jsonl` (pilot chấm trướ
 python plot_compare.py --dataset ce130 --n 1      # thử 1 ảnh; --dataset all = mọi ảnh pilot cả hai tập; --name pilot10 mặc định
 ```
 
+## Kaggle 2 × T4 (vLLM) — ZETA6 open-source (chốt 2026-11-04)
+
+Server: driver 535 (CUDA 12.2; vLLM >= 0.20 trên PyPI là CUDA 13) + GPU dùng chung còn 4,7–9,9 GiB ⇒ model 8B không vừa. Kaggle:
+`config/kaggle/<model>.yaml` (Qwen3-VL-4B, InternVL3.5-8B, LLaVA-OV-2-8B) — T4 không bf16 / FP8 / FlashAttention 2 ⇒ `dtype: half`,
+`tensor_parallel_size: 2`, `vllm.gpu_mem_gib` / `kv_cache_gib` tính MỖI card. Notebook `notebooks/vlm_kaggle.ipynb` (local,
+gitignore): cài vLLM theo driver, dry-run, mỗi model pilot (`--no-score`) + vài ảnh chạy từng ảnh (latency) + chẩn đoán
+(`diagnose.json`: số box, finish, token, giây, không JSON / không score, box trong ảnh, dấu hiệu toạ độ 0–1000), xoá weight, gói
+`zeta6_pilot.zip`. Chấm trên server: giải nén vào gốc `/mnt/disk1/aiotlab/haitn/` rồi `python run.py --config
+config/kaggle/<model>.yaml --pilot 10 --score-only` (venv chính). Rủi ro T4: fp16 tràn số (model học bf16), kernel attention Turing.
+
 ## Server A30 (vLLM) — venv riêng
 
 - Hai model 8B ở bf16 cần ~16 GiB, quá chỗ trống ~9–10 GiB của GPU dùng chung ⇒ FP8 chỉ weight (`fp8_per_tensor`, Marlin trên

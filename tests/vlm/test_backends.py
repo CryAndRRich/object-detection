@@ -155,3 +155,16 @@ def test_vllm_memory_utilization():
     assert memory_utilization(10, 12 * 1024, 24 * 1024) == pytest.approx(10 / 24)
     with pytest.raises(RuntimeError, match="GPU trống 9.5 GiB < cần 10.0 GiB"):
         memory_utilization(10, 9.5 * 1024, 24 * 1024)
+
+
+def test_vllm_free_memory_takes_tightest_visible_gpu(monkeypatch):
+    import subprocess
+    from vlm.backends import vllm_local
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="14000, 15360\n9000, 15360\n")
+    monkeypatch.setattr(vllm_local.subprocess, "run", fake_run)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    assert vllm_local.gpu_free_total_mib() == (9000.0, 15360.0) and seen["cmd"][2] == "0,1"     # tensor parallel: card trống ít nhất

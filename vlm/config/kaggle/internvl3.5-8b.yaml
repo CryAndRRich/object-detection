@@ -1,0 +1,20 @@
+# InternVL3.5-8B (OpenGVLab, 08/2025) — vLLM offline trên Kaggle 2 × T4 (ZETA6 open-source), cách chạy của tác giả (base.yaml): schema
+# qua structured outputs, sampling = generation_config. T4: fp16 đầy đủ (~16 GiB weight) chia 2 card (tensor parallel, ~8,5 GiB / card)
+# + KV 3 GiB / card. Few-shot tác giả = 3 ảnh / prompt ⇒ max_dynamic_patch 4 (<= 5 ô 448 ≈ 1,3k token / ảnh), max_model_len 12288.
+base: ../base.yaml
+name: internvl3.5-8b
+backend: vllm
+model: OpenGVLab/InternVL3_5-8B
+price: {in: 0.0, out: 0.0}
+chunk: 32
+vllm:
+  gpu_mem_gib: 13.5
+  kv_cache_gib: 3.0
+engine:
+  dtype: half
+  trust_remote_code: true
+  tensor_parallel_size: 2
+  max_model_len: 12288
+  max_num_seqs: 16
+  limit_mm_per_prompt: {image: 3}
+  mm_processor_kwargs: {max_dynamic_patch: 4}

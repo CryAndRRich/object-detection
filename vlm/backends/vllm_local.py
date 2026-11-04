@@ -2,6 +2,7 @@
 - vLLM báo lỗi khi tổng × `gpu_memory_utilization` > bộ nhớ ĐANG trống ⇒ đọc bộ nhớ trống (nvidia-smi, GPU mà `run_on_free_gpu.py` đặt
   trong CUDA_VISIBLE_DEVICES) rồi đặt utilization = `vllm.gpu_mem_gib` / tổng; trống không đủ thì dừng NGAY với thông báo rõ;
 - `kv_cache_memory_bytes` cố định KV cache (bỏ qua utilization); `quantization: fp8_per_tensor` = FP8 chỉ weight (Marlin) trên Ampere;
+- `engine.tensor_parallel_size` 2 (Kaggle 2 × T4, `config/kaggle/`): `vllm.gpu_mem_gib` / `kv_cache_gib` tính MỖI card, kiểm card trống ít nhất;
 - `LLM.chat` nhận ảnh base64 data URL (chỉ base64); structured outputs JSON theo schema tác giả. Tiền = 0; `sec` = thời gian khối /
   số prompt."""
 
@@ -16,12 +17,11 @@ __all__ = ["VLLMLocal", "gpu_free_total_mib", "memory_utilization"]
 
 
 def gpu_free_total_mib():
-    """-> (trống, tổng) MiB của GPU đầu tiên trong CUDA_VISIBLE_DEVICES (hay GPU 0)."""
-    idx = (os.environ.get("CUDA_VISIBLE_DEVICES") or "0").split(",")[0].strip()
-    out = subprocess.run(["nvidia-smi", "-i", idx, "--query-gpu=memory.free,memory.total", "--format=csv,noheader,nounits"],
-                         capture_output=True, text=True, check=True).stdout.strip().splitlines()[0]
-    free, total = (float(v) for v in out.split(","))
-    return free, total
+    """-> (trống, tổng) MiB, lấy GPU trống ÍT nhất trong CUDA_VISIBLE_DEVICES (hay GPU 0) — tensor parallel cần đủ chỗ trên MỌI card."""
+    ids = [i.strip() for i in (os.environ.get("CUDA_VISIBLE_DEVICES") or "0").split(",") if i.strip()]
+    out = subprocess.run(["nvidia-smi", "-i", ",".join(ids), "--query-gpu=memory.free,memory.total", "--format=csv,noheader,nounits"],
+                         capture_output=True, text=True, check=True).stdout.strip().splitlines()
+    return min((tuple(float(v) for v in line.split(",")) for line in out), key=lambda ft: ft[0])
 
 
 def memory_utilization(gib, free_mib, total_mib, margin_mib=256):

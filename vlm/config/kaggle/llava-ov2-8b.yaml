@@ -1,0 +1,21 @@
+# LLaVA-OneVision-2-8B-Instruct (lmms-lab, 05/2026; nền Qwen3-8B) — vLLM >= 0.25.0 (`LlavaOnevision2ForConditionalGeneration`) offline
+# trên Kaggle 2 × T4 (ZETA6 open-source), cách chạy của tác giả (base.yaml). T4: fp16 đầy đủ chia 2 card. Docs KHÔNG nói có ra box
+# (grounding 2D trong bài báo ra điểm pixel). Few-shot tác giả = 3 ảnh / prompt ⇒ ảnh <= ~1 MP, max_model_len 12288.
+base: ../base.yaml
+name: llava-ov2-8b
+backend: vllm
+model: lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct
+price: {in: 0.0, out: 0.0}
+chunk: 32
+chat_template_kwargs: {enable_thinking: false}   # nền Qwen3: tắt suy nghĩ nếu template có cờ này
+vllm:
+  gpu_mem_gib: 13.5
+  kv_cache_gib: 3.0
+engine:
+  dtype: half
+  trust_remote_code: true
+  tensor_parallel_size: 2
+  max_model_len: 12288
+  max_num_seqs: 16
+  limit_mm_per_prompt: {image: 3}
+  mm_processor_kwargs: {max_pixels: 1048576}
