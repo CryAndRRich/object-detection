@@ -44,6 +44,9 @@ def parse_args(argv=None):
     ap.add_argument("--dry-run", action="store_true", help="in prompt 2 ảnh đầu, không gọi model, không cần key")
     ap.add_argument("--no-score", action="store_true", help="chỉ sinh câu trả lời (venv vLLM)")
     ap.add_argument("--score-only", action="store_true", help="chỉ chấm từ responses.jsonl, không gọi model")
+    ap.add_argument("--coord", default=None, choices=["pixel", "norm1000"],
+                    help="đọc toạ độ theo thang này thay `coord` của config (chỉ lúc parse / chấm; file ra thêm hậu tố _<coord>)")
+    ap.add_argument("--latency-n", type=int, default=0, help="N ảnh / tập đầu tiên chưa hỏi gọi TỪNG ẢNH để đo latency (cùng lần nạp)")
     ap.add_argument("--out-root", default="../../output/add/vlm")
     ap.add_argument("--split", default="test_all", choices=["test", "test_all", "val"])
     ap.add_argument("--turn-index", default="../data/turn_index.json")
@@ -93,6 +96,9 @@ def main(argv=None):
     phash = prompt_hash(cfg)
     datasets = ["ce130", "cocount"] if a.dataset == "all" else [a.dataset]
     name = f"pilot{a.pilot}" if a.pilot else "test"
+    if a.coord:
+        cfg["coord"] = a.coord
+        name += f"_{a.coord}"
     log(f"[vlm] {time.strftime('%Y-%m-%d %H:%M:%S')} | {socket.gethostname()} | {cfg['name']} = {cfg['model']} ({cfg['backend']}) | "
         f"{name} | tập {datasets} | prompt_hash {phash} | K {cfg['k']} | icl {cfg.get('icl', 0)} | max-cost {a.max_cost}")
     if a.dry_run:
@@ -109,7 +115,7 @@ def main(argv=None):
         ns = data_ns(a, d)
         out_dir = os.path.join(a.out_root, cfg["name"], dataset_dir(ns))
         info, s = run_dataset(cfg, ns, backend, out_dir, name, phash, pilot=a.pilot, max_cost=a.max_cost, score=not a.no_score,
-                              log=log, spent0=spent)
+                              log=log, spent0=spent, latency_n=a.latency_n)
         spent += s
         est.append(info["full_estimate"])
         if info["this_run"]["stopped"] and a.max_cost is not None and spent >= a.max_cost:

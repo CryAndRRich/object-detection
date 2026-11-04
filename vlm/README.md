@@ -100,10 +100,14 @@ python plot_compare.py --dataset ce130 --n 1      # thử 1 ảnh; --dataset all
 
 Server: driver 535 (CUDA 12.2; vLLM >= 0.20 trên PyPI là CUDA 13) + GPU dùng chung còn 4,7–9,9 GiB ⇒ model 8B không vừa. Kaggle:
 `config/kaggle/<model>.yaml` (Qwen3-VL-4B, InternVL3.5-8B, LLaVA-OV-2-8B) — T4 không bf16 / FP8 / FlashAttention 2 ⇒ `dtype: half`,
-`tensor_parallel_size: 2`, `vllm.gpu_mem_gib` / `kv_cache_gib` tính MỖI card. Notebook `notebooks/vlm_kaggle.ipynb` (local,
-gitignore): cài vLLM theo driver, dry-run, mỗi model pilot (`--no-score`) + vài ảnh chạy từng ảnh (latency) + chẩn đoán
-(`diagnose.json`: số box, finish, token, giây, không JSON / không score, box trong ảnh, dấu hiệu toạ độ 0–1000), xoá weight, gói
-`zeta6_pilot.zip`. Chấm trên server: giải nén vào gốc `/mnt/disk1/aiotlab/haitn/` rồi `python run.py --config
+`tensor_parallel_size: 2`, `vllm.gpu_mem_gib` / `kv_cache_gib` tính MỖI card. Khoá `engine` chỉ đổi tốc độ / bộ nhớ
+(`max_num_seqs`, `tensor_parallel_size`, `limit_mm_per_prompt`, …) nằm ngoài `prompt_hash` ⇒ chỉnh giữa các phiên vẫn resume. Notebook
+`notebooks/vlm_kaggle.ipynb` (local, gitignore): cài vLLM theo driver, chép CoCount sang ổ local, nối `responses.jsonl` phiên trước,
+`MODELS` × `DATASETS` (pilot: đủ cả hai để thử một lượt; full: mỗi lần một model × một tập = 6 lần), mỗi model `--pilot K` hay
+`--all` với `--latency-n` (N ảnh / tập đầu gọi từng ảnh, cùng lần nạp) + chẩn đoán (`diagnose.json`: số box,
+finish, token, s / ảnh, latency, không JSON / score, box trong ảnh theo pixel và theo 0–1000), xoá weight, gói `zeta6_<tag>.zip`.
+**Toạ độ** `coord`: `pixel` (mặc định, như prompt tác giả) | `norm1000` (Qwen3-VL, LLaVA-OV-2 trả thang 0–1000 dù prompt xin pixel —
+pilot 2026-11-04); chỉ đổi cách đọc, không vào hash; `--coord` khi chấm để so (file thêm hậu tố). Chấm trên server: giải nén vào gốc `/mnt/disk1/aiotlab/haitn/` rồi `python run.py --config
 config/kaggle/<model>.yaml --pilot 10 --score-only` (venv chính). Rủi ro T4: fp16 tràn số (model học bf16), kernel attention Turing.
 
 ## Server A30 (vLLM) — venv riêng

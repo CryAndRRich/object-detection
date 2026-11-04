@@ -102,9 +102,18 @@ def _valid(b):
     return [x1, y1, x2, y2] if x2 > x1 and y2 > y1 else None
 
 
+COORDS = ("pixel", "norm1000")
+
+
 def parse_candidates(text, cfg, canvas_wh, orig_wh):
     """-> [{"box": xyxy pixel ảnh gốc, "score": số | None, + name / placement_type / reason nếu model trả}] — box hợp lệ, tối đa K,
-    xếp theo score giảm dần (phần tử 0 = confidence cao nhất)."""
+    xếp theo score giảm dần (phần tử 0 = confidence cao nhất). `cfg["coord"]`: "pixel" (mặc định, như prompt tác giả: pixel canvas) |
+    "norm1000" (model trả thang 0–1000 theo cách nó được huấn luyện — Qwen3-VL / LLaVA-OV-2; chỉ đổi cách ĐỌC, prompt giữ nguyên)."""
+    coord = cfg.get("coord") or "pixel"
+    if coord not in COORDS:
+        raise ValueError(f"coord {coord!r} không thuộc {COORDS}")
+    if coord == "norm1000":
+        canvas_wh = (1000, 1000)
     pairs = _extract(text)
     out = []
     for b, c in zip(to_pixel([b for b, _ in pairs], canvas_wh, orig_wh), (c for _, c in pairs)):

@@ -166,3 +166,16 @@ def test_cli_dry_run_needs_no_key(env, capsys, monkeypatch):
     if os.path.exists(os.path.join(os.path.dirname(CFG), "..", "..", "..", "data", "all_phase2_V2")):   # ảnh ví dụ tác giả có ở máy này
         assert "few-shot 6 lượt" in txt and "Your seashell boxes are too small" in txt
     assert not os.path.exists(out)
+
+
+def test_latency_n_first_images_one_by_one(env):
+    cfg, ns, out = env
+    sizes = []
+
+    class Sized(FakeBackend):
+        def batch(self, jobs):
+            sizes.append(len(jobs))
+            return super().batch(jobs)
+    run_dataset({**cfg, "chunk": 8}, ns(), Sized(), str(out / "lat"), "test", prompt_hash(cfg), latency_n=2, score=False,
+                log=lambda *a: None)
+    assert sizes[:2] == [1, 1] and sum(sizes) == 4 and all(s <= 8 for s in sizes)              # 2 ảnh từng ảnh, còn lại theo khối

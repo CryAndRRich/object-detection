@@ -105,8 +105,9 @@ def summarize(recs, cfg, n_full, par):
     return out
 
 
-def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=None, score=True, log=print, spent0=0.0):
-    """-> (summary, đã tiêu USD trong lần chạy này). `backend` None = chỉ chấm từ responses.jsonl (`--score-only`)."""
+def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=None, score=True, log=print, spent0=0.0, latency_n=0):
+    """-> (summary, đã tiêu USD trong lần chạy này). `backend` None = chỉ chấm từ responses.jsonl (`--score-only`). `latency_n` N:
+    N ảnh chưa hỏi đầu tiên gọi TỪNG ẢNH (đo `latency` 1 ảnh, cùng lần nạp model), phần còn lại theo khối `chunk`."""
     from baseline.score import load_data
 
     tag = f"[{ns.dataset} {name}]"
@@ -130,9 +131,11 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
     if pending and backend is None:
         stopped = f"còn {len(pending)} ảnh chưa có câu trả lời (--score-only không gọi model)"
     with open(resp_path, "a") as fout:
-        for c0 in range(0, len(pending) if backend is not None else 0, chunk):
+        n1 = min(int(latency_n or 0), len(pending))
+        bounds = [(i, i + 1) for i in range(n1)] + [(c, min(c + chunk, len(pending))) for c in range(n1, len(pending), chunk)]
+        for c0, c1 in (bounds if backend is not None else []):
             jobs = []
-            for s in pending[c0:c0 + chunk]:
+            for s in pending[c0:c1]:
                 im = encode_image(s["image"], img_cfg.get("max_side"), img_cfg.get("jpeg_quality", 95))
                 jobs.append({"image_id": s["image_id"], "messages": build_messages(s, im, cfg, examples), "temperature": None,
                              "sample": s, "im": im, "attempts": 0, "cost": 0.0, "in": 0, "out": 0, "reasoning": 0, "sec": 0.0,
@@ -179,7 +182,7 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
             if stopped:
                 break
             el = time.time() - t0
-            if n_new and (time.time() - last_log >= float(cfg.get("log_sec", 60)) or c0 + chunk >= len(pending)):
+            if n_new and (time.time() - last_log >= float(cfg.get("log_sec", 60)) or c1 >= len(pending)):
                 last_log = time.time()
                 recs = [done[s["image_id"]] for s in sel if s["image_id"] in done]
                 sm = summarize(recs, cfg, len(sel), par)

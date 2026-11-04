@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from vlm.parse import extract, fill, parse_boxes, parse_scored, strip_think
+from vlm.parse import extract, fill, parse_boxes, parse_candidates, parse_scored, strip_think
 from vlm.prompt import author_turns, box_schema, build_messages, encode_image, prompt_hash, system_text, user_text
 
 ORIG, SENT = (2000, 1000), (1000, 500)
@@ -145,3 +145,15 @@ def test_prompt_hash_ignores_runtime_knobs():
     assert prompt_hash({**base, "sampling": {"temperature": 0.1}}) != h
     assert prompt_hash({**base, "openrouter": {"detail": "original"}}) != h
     assert prompt_hash({**base, "icl": "author"}) != h
+    eng = {**base, "engine": {"dtype": "half", "max_num_seqs": 16, "tensor_parallel_size": 2, "limit_mm_per_prompt": {"image": 3}}}
+    he = prompt_hash(eng)                                                            # khoá chỉ đổi tốc độ / bộ nhớ: ngoài hash
+    assert prompt_hash({**eng, "engine": {"dtype": "half", "max_num_seqs": 32, "limit_mm_per_prompt": {"image": 3, "video": 0}}}) == he
+    assert prompt_hash({**eng, "engine": {"dtype": "float32"}}) != he and prompt_hash({**base, "coord": "norm1000"}) == h
+
+
+def test_coord_norm1000_reads_0_1000_scale():
+    text = json.dumps({"candidates": [{"box": [100, 500, 300, 1000], "score": 0.9}]})
+    assert parse_candidates(text, {"k": 5, "coord": "norm1000"}, (408, 384), (408, 384))[0]["box"] == pytest.approx([40.8, 192, 122.4, 384])
+    assert parse_candidates(text, {"k": 5}, (408, 384), (408, 384))[0]["box"] == [100, 500, 300, 1000]       # mặc định pixel canvas
+    with pytest.raises(ValueError):
+        parse_candidates(text, {"k": 5, "coord": "yx"}, (408, 384), (408, 384))
