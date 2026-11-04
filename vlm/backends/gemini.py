@@ -17,9 +17,20 @@ from vlm.backends import RETRY_STATUS, Fatal, backoff, result
 from vlm.env import key_source, mask, require_key
 from vlm.prompt import box_schema
 
-__all__ = ["Gemini", "API"]
+__all__ = ["Gemini", "API", "retry_delay"]
 
 API = "https://generativelanguage.googleapis.com/v1beta/models"
+
+
+def retry_delay(r):
+    """Giây chờ Google gợi ý trong body 429 (`google.rpc.RetryInfo.retryDelay`, vd "37s"; Gemini không gửi header Retry-After)."""
+    try:
+        for d in (r.json().get("error") or {}).get("details") or []:
+            if str(d.get("retryDelay", "")).endswith("s"):
+                return float(d["retryDelay"][:-1]) + 1.0
+    except (ValueError, AttributeError, TypeError):
+        pass
+    return None
 
 
 class Gemini:
@@ -93,7 +104,7 @@ class Gemini:
             if r.status_code in RETRY_STATUS:
                 err = f"HTTP {r.status_code}: {r.text[:200]}"
                 if i < tries:
-                    self.sleep(backoff(i, r.headers.get("Retry-After")))
+                    self.sleep(backoff(i, r.headers.get("Retry-After") or retry_delay(r)))
                 continue
             if r.status_code == 400 and "chema" in r.text:
                 raise Fatal(f"Gemini 400 với responseJsonSchema (schema tác giả) cho {self.cfg['model']}: {r.text[:300]}")

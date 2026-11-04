@@ -175,7 +175,7 @@ def main(argv=None):
         backend = None if a.score_only else make_backend(cfg, log)
     except Fatal as e:
         raise SystemExit(f"[vlm] {e}")
-    spent, est = 0.0, []
+    spent, est, fatal = 0.0, [], False
     for d in datasets:
         ns = data_ns(a, d)
         out_dir = os.path.join(a.out_root, cfg["name"], dataset_dir(ns))
@@ -183,7 +183,10 @@ def main(argv=None):
                               log=log, spent0=spent, shard=shard)
         spent += s
         est.append(info["full_estimate"])
-        if info["this_run"]["stopped"] and a.max_cost is not None and spent >= a.max_cost:
+        stopped = info["this_run"]["stopped"] or ""
+        fatal = stopped.startswith("lỗi không cứu được")
+        if fatal or (stopped and a.max_cost is not None and spent >= a.max_cost):
+            log(f"[vlm] dừng, không chạy tập sau ({stopped}) — câu trả lời đã có giữ trong responses.jsonl; chạy lại cùng lệnh để tiếp")
             break
     if len(est) == 2 and all("est_full_cost" in e for e in est):
         log(f"[vlm] ƯỚC --all cả hai tập ({sum(e['n_full'] for e in est)} ảnh): ${sum(e['est_full_cost'] for e in est):.2f} "
@@ -191,6 +194,8 @@ def main(argv=None):
     elif len(datasets) == 1:
         log(f"[vlm] (cả hai tập: {sum(FULL_SIZES.values())} ảnh)")
     log(f"[vlm] xong, lần này tiêu ${spent:.4f}")
+    if fatal:
+        raise SystemExit(3)                 # dừng vì lỗi không cứu được (hết quota / key): mã khác 0 cho vòng lệnh ngoài `|| break`
 
 
 if __name__ == "__main__":

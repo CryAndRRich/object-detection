@@ -115,7 +115,7 @@ xong / bị dừng thì gộp vào `responses.jsonl` (resume đọc cả file ch
 `MODELS` × `DATASETS` (pilot: đủ cả hai để thử một lượt; full: mỗi lần một model × một tập = 6 lần), mỗi model `--pilot K` hay
 `--all` + (`LATENCY`) `tools/latency.py vlm` (latency 1 ảnh chuẩn, `output/add/latency/<model>.json`) + chẩn đoán (`diagnose.json`: số box,
 finish, token, s / ảnh (khối), không JSON / score, box trong ảnh theo pixel và theo 0–1000), xoá weight, gói `zeta6_<tag>.zip`.
-**Toạ độ** `coord`: `pixel` (mặc định, như prompt tác giả) | `norm1000` (Qwen3-VL, LLaVA-OV-2 trả thang 0–1000 dù prompt xin pixel —
+**Toạ độ** `coord`: `pixel` (mặc định, như prompt tác giả) | `norm1000` (Qwen3-VL, LLaVA-OV-2, Gemini Robotics-ER 2 trả thang 0–1000, thứ tự x-y, dù prompt xin pixel —
 pilot 2026-11-04); chỉ đổi cách đọc, không vào hash; `--coord` khi chấm để so (file thêm hậu tố). Chấm trên server: giải nén vào gốc `/mnt/disk1/aiotlab/haitn/` rồi `python run.py --config
 config/kaggle/<model>.yaml --pilot 10 --score-only` (venv chính). Rủi ro T4: fp16 tràn số (model học bf16), kernel attention Turing.
 

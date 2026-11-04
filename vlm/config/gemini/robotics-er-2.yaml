@@ -7,6 +7,7 @@ name: robotics-er-2
 backend: gemini
 model: gemini-robotics-er-2-preview
 max_tokens: 8192
+coord: norm1000        # pilot 10 (2026-11-04): ER-2 trả thang 0–1000, thứ tự x-y (không theo pixel canvas của prompt); chỉ đổi cách đọc
 price: {in: 1.0, out: 5.0}
 gemini:
   thinking_level: minimal

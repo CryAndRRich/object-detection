@@ -317,3 +317,14 @@ def test_env_last_line_wins_and_export_shadow_reported(tmp_path, monkeypatch):
     load_env(str(p))
     assert require_key("OPENAI_API_KEY") == "sk-new-bbbbbbbb" and key_source("OPENAI_API_KEY") == ".env"
     assert "KHÁC giá trị trong .env" in key_source("GEMINI_API_KEY")
+
+
+def test_gemini_minute_quota_waits_retry_delay(monkeypatch):
+    """429 theo phút: chờ đúng `retryDelay` Google gợi ý (+1 s) rồi thử lại, không dừng."""
+    monkeypatch.setenv("GEMINI_API_KEY", "AIza-test-abcdefgh")
+    q = Resp(429, {"error": {"status": "RESOURCE_EXHAUSTED", "details": [
+        {"violations": [{"quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"}]}, {"retryDelay": "37s"}]}})
+    ok = Resp(200, {"candidates": [{"content": {"parts": [{"text": "{}"}]}}], "usageMetadata": {}})
+    sleeps = []
+    be = Gemini({"model": "m", "k": 30, "max_tokens": 50, "gemini": {}}, log=lambda *a: None, sleep=sleeps.append, session=Session([q, ok]))
+    assert be.batch([JOB])[0]["text"] == "{}" and sleeps == [38.0]
