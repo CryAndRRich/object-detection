@@ -29,7 +29,7 @@ from ce_localization.models.box_policy import unit_to_boxes
 from ce_localization.utils.box_ops_np import box_iou, ioa
 from ce_localization.utils.log import fmt_time
 
-__all__ = ["CNLL_MIN_OBJ", "SIZE_STATS", "predict_add", "prior_unit_boxes", "prior_records", "resize_to_objects", "clip_boxes", "cnll",
+__all__ = ["CNLL_MIN_OBJ", "SIZE_STATS", "predict_batch", "predict_add", "prior_unit_boxes", "prior_records", "resize_to_objects", "clip_boxes", "cnll",
            "select_nms", "other_class", "record_cnll", "add_metrics"]
 
 HIT = 0.5
@@ -37,6 +37,24 @@ CNLL_MIN_OBJ = 5                 # Gaussian 4-D cần >= 5 điểm để hiệp 
 CNLL_RIDGE = 1e-6
 KNN = 3
 SIZE_STATS = ("mean", "exemplar")
+
+
+@torch.no_grad()
+def predict_batch(model, batch, text_table, n_samples, gens, variants, amp=False):
+    """MỘT batch (đã `to_device_add`) -> {hậu tố: box [B, K, 4] xyxy pixel canvas (float64 numpy)}. Ảnh mã hoá một lần cho mọi
+    biến thể; `gens` = {hậu tố: torch.Generator}. Dùng chung cho `predict_add` và đo latency (`tools/latency.py`)."""
+    dev = batch["images"].device
+    text = text_table(batch["text"], dev)
+    with torch.autocast(device_type=dev.type, dtype=torch.float16, enabled=amp and dev.type == "cuda"):
+        cond, obj, ctx = model.encode(batch["images"], text, batch["valid_hw"], batch["objects"], text_table.tokens(batch["text"], dev))
+        us = {}
+        for s, kw in variants:
+            kw = dict(kw)
+            o = obj if kw.pop("use_objects", True) else None
+            c = ctx if kw.pop("use_refiner", True) else None
+            us[s] = model.sample_from_cond(cond, n_samples, gens[s], obj=o, ctx=c, **kw)
+    canvas = torch.full_like(batch["whwh"], float(batch["images"].shape[-1]))
+    return {s: unit_to_boxes(u.float(), canvas[:, None, :], model.box_coder).cpu().numpy().astype(np.float64) for s, u in us.items()}
 
 
 @torch.no_grad()
@@ -52,20 +70,9 @@ def predict_add(model, loader, text_table, n_samples=30, seed=0, variants=(("", 
     records, t0, n = {s: [] for s, _ in variants}, time.time(), len(loader.dataset)
     for bi, batch in enumerate(loader):
         batch = to_device_add(batch, dev)
-        text = text_table(batch["text"], dev)
-        with torch.autocast(device_type=dev.type, dtype=torch.float16, enabled=amp and dev.type == "cuda"):
-            cond, obj, ctx = model.encode(batch["images"], text, batch["valid_hw"], batch["objects"],
-                                          text_table.tokens(batch["text"], dev))
-            us = {}
-            for s, kw in variants:
-                kw = dict(kw)
-                o = obj if kw.pop("use_objects", True) else None
-                c = ctx if kw.pop("use_refiner", True) else None
-                us[s] = model.sample_from_cond(cond, n_samples, gens[s], obj=o, ctx=c, **kw)
-        canvas = torch.full_like(batch["whwh"], float(batch["images"].shape[-1]))
+        out = predict_batch(model, batch, text_table, n_samples, gens, variants, amp)
         wh = batch["whwh"][:, :2].cpu().numpy()
-        for s, u in us.items():
-            boxes = unit_to_boxes(u.float(), canvas[:, None, :], model.box_coder).cpu().numpy().astype(np.float64)
+        for s, boxes in out.items():
             for i in range(len(batch["image_id"])):
                 records[s].append({"image_id": batch["image_id"][i], "t": batch["t"][i], "wh": wh[i].astype(np.float64),
                                    "boxes": boxes[i], "holes": batch["holes"][i].numpy().astype(np.float64),

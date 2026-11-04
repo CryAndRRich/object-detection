@@ -144,7 +144,7 @@ HASH_FIXED = {"format": "json_pixel", "coord": None, "order": None, "schema": "a
 HASH_SUB = {"openrouter": ("detail", "provider"), "gemini": ("thinking_level",)}
 # Khoá `engine` vLLM chỉ đổi tốc độ / bộ nhớ, không đổi câu trả lời ⇒ ngoài hash (đổi được giữa các phiên, resume vẫn dùng lại).
 ENGINE_FREE = ("max_num_seqs", "tensor_parallel_size", "enforce_eager", "limit_mm_per_prompt", "gpu_memory_utilization",
-               "max_num_batched_tokens")
+               "max_num_batched_tokens", "disable_log_stats")
 
 
 def prompt_hash(cfg):

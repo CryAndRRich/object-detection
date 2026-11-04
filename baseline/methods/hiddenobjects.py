@@ -239,15 +239,16 @@ class _TestImages(Dataset):
 
 
 @torch.no_grad()
-def predict(model, samples, k, p, seed=0, dev="cpu", log=print, log_every=500):
+def predict(model, samples, k, p, seed=0, dev="cpu", log=print, log_every=500, texts=None):
     """-> list {"image_id", "boxes" [K,4] pixel ảnh gốc (xếp theo điểm giảm dần), "score" [K]}. `p` = khối `predict` của config.
-    Tất định (không ngẫu nhiên) ⇒ `seed` không dùng."""
+    Tất định (không ngẫu nhiên) ⇒ `seed` không dùng. `texts` = `class_texts(...)` tính sẵn (đo latency: không nạp lại CLIP mỗi ảnh);
+    None = tính từ lớp của `samples`."""
     model.eval()
     dev = torch.device(dev)
     if k > model.num_queries:
         raise ValueError(f"K {k} > num_queries {model.num_queries}")
     S, n_img, nw = model.image_size, p.get("batch_images", 32), p.get("num_workers", 4)
-    idx, text = class_texts([s["class"] for s in samples], model.clip_text, dev)
+    idx, text = texts or class_texts([s["class"] for s in samples], model.clip_text, dev)
     amp = dev.type == "cuda"
     loader = DataLoader(_TestImages(samples, S), batch_size=n_img, num_workers=nw, pin_memory=amp)
     out, t0 = [], time.time()

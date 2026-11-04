@@ -9,12 +9,14 @@ name: internvl3.5-8b
 backend: vllm
 model: OpenGVLab/InternVL3_5-8B
 price: {in: 0.0, out: 0.0}
+coord: norm1000        # pilot 20 (2026-11-04): 19 / 20 ảnh CE-130, 17 / 20 CoCount mọi toạ độ <= 1000 (đọc 0–1000 ⇒ 94–100 % trong ảnh)
 chunk: 64
 vllm:
   gpu_mem_gib: 13.5
   kv_cache_gib: 5.0
 engine:
   dtype: half
+  disable_log_stats: false          # log vLLM ~10 s / lần: token/s, số chuỗi đang chạy, % KV
   trust_remote_code: true
   tensor_parallel_size: 2
   max_model_len: 12288

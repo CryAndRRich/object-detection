@@ -73,14 +73,13 @@ tên file theo `pilot<K>` hay `test`:
 
 | file | nội dung |
 |---|---|
-| `<name>.jsonl` | **1 dòng / ảnh, mọi thông tin**: `class`, `orig_wh`, `n_obj`, `n_valid`, `cnll_top` (box score cao nhất = số chính), `cnll_min`, `cnll_gt` (từng lỗ GT), `boxes` (xếp theo score; mỗi box: `box` pixel ảnh gốc, `box_512` canvas chấm, `score`, `name` / `placement_type` / `reason` nếu model trả, `cnll`, CoCount thêm `cnll_objsize[_exemplar]`; 0 box ⇒ 1 box cả ảnh `fallback`), `attempts`, token, `cost`, `sec`, **`latency`**, `finish`, `provider`, `gen_id`, `text` thô |
+| `<name>.jsonl` | **1 dòng / ảnh, mọi thông tin**: `class`, `orig_wh`, `n_obj`, `n_valid`, `cnll_top` (box score cao nhất = số chính), `cnll_min`, `cnll_gt` (từng lỗ GT), `boxes` (xếp theo score; mỗi box: `box` pixel ảnh gốc, `box_512` canvas chấm, `score`, `name` / `placement_type` / `reason` nếu model trả, `cnll`, CoCount thêm `cnll_objsize[_exemplar]`; 0 box ⇒ 1 box cả ảnh `fallback`), `attempts`, token, `cost`, `sec`, `request_sec`, `finish`, `provider`, `gen_id`, `text` thô |
 | `<name>.json` | số tổng: `top_score` (**chính**, K = 1) và `min_cnll_30` (tham khảo), mỗi cái `results` + `prior` theo khoá (`inpainted` / `cocount[_objsize[_exemplar]]`); `selected` (0 box, thiếu box, token, tiền), `full_estimate`, `this_run`, `n_noscore` |
 | `responses.jsonl` | câu trả lời thô ghi dần lúc chạy — để resume (chung pilot / all), không cần đọc |
 
-**Thời gian / ảnh**: báo `latency` = chỉ request thành công cuối (gửi -> nhận đủ, gồm mạng + hàng đợi provider — API không tách được),
-không gồm chờ thử lại HTTP / hỏi lại khi 0 box; `sec` = cả lần gọi (gồm các thứ đó). vLLM chạy theo khối ⇒ `sec` = thông lượng,
-`latency` chỉ có khi `chunk: 1` (đo từng ảnh). `<name>.json` `selected.latency_mean` (+ `n_latency`). Câu trả lời trước 2026-11-04
-(pilot, đầu lần full GLM) không có `latency`.
+**Thời gian / ảnh**: lúc chạy chỉ ghi để theo dõi — `sec` = cả lần gọi (gồm chờ thử lại; vLLM theo khối ⇒ thông lượng), `request_sec`
+= request thành công cuối (API; vLLM khối 1 ảnh). **Số báo cáo = latency 1 ảnh của `tools/latency.py`** (một định nghĩa chung mọi
+method, chốt 2026-11-04 — docstring tool), không lấy từ hai trường này.
 
 Chưa đủ câu trả lời (dừng giữa chừng / `--no-score`) ⇒ `<name>.json` chỉ có tiền / token, chưa có `<name>.jsonl`.
 Pilot chấm trước 2026-11-04 còn bố cục cũ (`<name>_raw.jsonl`, `_boxes.json`, `_k1.json`, `_run.json`); `--score-only` ra bố cục mới.
@@ -100,12 +99,14 @@ python plot_compare.py --dataset ce130 --n 1      # thử 1 ảnh; --dataset all
 
 Server: driver 535 (CUDA 12.2; vLLM >= 0.20 trên PyPI là CUDA 13) + GPU dùng chung còn 4,7–9,9 GiB ⇒ model 8B không vừa. Kaggle:
 `config/kaggle/<model>.yaml` (Qwen3-VL-4B, InternVL3.5-8B, LLaVA-OV-2-8B) — T4 không bf16 / FP8 / FlashAttention 2 ⇒ `dtype: half`,
-`tensor_parallel_size: 2`, `vllm.gpu_mem_gib` / `kv_cache_gib` tính MỖI card. Khoá `engine` chỉ đổi tốc độ / bộ nhớ
+`tensor_parallel_size: 2`, `vllm.gpu_mem_gib` / `kv_cache_gib` tính MỖI card. Model vừa một card (Qwen3-VL-4B): `vllm.data_parallel: 2`
+⇒ `run.py` mở 2 tiến trình con (`--shard i/2`, mỗi con một GPU, TP 1), chia ảnh theo hash tên ảnh, ghi `responses_shard<i>.jsonl`,
+xong / bị dừng thì gộp vào `responses.jsonl` (resume đọc cả file chưa gộp). Khoá `engine` chỉ đổi tốc độ / bộ nhớ
 (`max_num_seqs`, `tensor_parallel_size`, `limit_mm_per_prompt`, …) nằm ngoài `prompt_hash` ⇒ chỉnh giữa các phiên vẫn resume. Notebook
 `notebooks/vlm_kaggle.ipynb` (local, gitignore): cài vLLM theo driver, chép CoCount sang ổ local, nối `responses.jsonl` phiên trước,
 `MODELS` × `DATASETS` (pilot: đủ cả hai để thử một lượt; full: mỗi lần một model × một tập = 6 lần), mỗi model `--pilot K` hay
-`--all` với `--latency-n` (N ảnh / tập đầu gọi từng ảnh, cùng lần nạp) + chẩn đoán (`diagnose.json`: số box,
-finish, token, s / ảnh, latency, không JSON / score, box trong ảnh theo pixel và theo 0–1000), xoá weight, gói `zeta6_<tag>.zip`.
+`--all` + (`LATENCY`) `tools/latency.py vlm` (latency 1 ảnh chuẩn, `output/add/latency/<model>.json`) + chẩn đoán (`diagnose.json`: số box,
+finish, token, s / ảnh (khối), không JSON / score, box trong ảnh theo pixel và theo 0–1000), xoá weight, gói `zeta6_<tag>.zip`.
 **Toạ độ** `coord`: `pixel` (mặc định, như prompt tác giả) | `norm1000` (Qwen3-VL, LLaVA-OV-2 trả thang 0–1000 dù prompt xin pixel —
 pilot 2026-11-04); chỉ đổi cách đọc, không vào hash; `--coord` khi chấm để so (file thêm hậu tố). Chấm trên server: giải nén vào gốc `/mnt/disk1/aiotlab/haitn/` rồi `python run.py --config
 config/kaggle/<model>.yaml --pilot 10 --score-only` (venv chính). Rủi ro T4: fp16 tràn số (model học bf16), kernel attention Turing.

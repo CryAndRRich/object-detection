@@ -168,14 +168,51 @@ def test_cli_dry_run_needs_no_key(env, capsys, monkeypatch):
     assert not os.path.exists(out)
 
 
-def test_latency_n_first_images_one_by_one(env):
+def test_data_parallel_shards_disjoint_merge_then_score(env):
+    """`vllm.data_parallel`: 2 bản chia ảnh theo hash (không trùng, không sót), mỗi bản ghi file riêng; bản chưa gộp vẫn được tính
+    là đã xong (resume); gộp rồi chấm như chạy một bản."""
+    from baseline.score import load_data
+    from vlm.runner import in_shard, merge_shards
     cfg, ns, out = env
-    sizes = []
+    ph = prompt_hash(cfg)
+    d = str(out / "dp")
+    ids = [s["image_id"] for s in load_data(ns())[0]]
+    assert sorted(i for k in (0, 1) for i in ids if in_shard(i, (k, 2))) == sorted(ids)
+    calls = []
+    for k in (0, 1):
+        be = FakeBackend()
+        run_dataset(cfg, ns(), be, d, f"test_shard{k}", ph, score=False, shard=(k, 2), log=lambda *a: None)
+        calls.append({c[0] for c in be.calls})
+        assert all(in_shard(i, (k, 2)) for i in calls[k])
+    assert not calls[0] & calls[1] and calls[0] | calls[1] == set(ids)
+    be = FakeBackend()
+    run_dataset(cfg, ns(), be, d, "test", ph, score=False, log=lambda *a: None)       # shard chưa gộp vẫn tính là xong
+    assert not be.calls
+    assert merge_shards(d) == len(ids) and sorted(os.listdir(d)) == sorted(["responses.jsonl", "test.json", "test_shard0.json",
+                                                                               "test_shard1.json"])
+    info, _ = run_dataset(cfg, ns(), None, d, "test", ph, log=lambda *a: None)
+    assert info["selected"]["n"] == len(ids) and os.path.exists(os.path.join(d, "test.jsonl"))
 
-    class Sized(FakeBackend):
-        def batch(self, jobs):
-            sizes.append(len(jobs))
-            return super().batch(jobs)
-    run_dataset({**cfg, "chunk": 8}, ns(), Sized(), str(out / "lat"), "test", prompt_hash(cfg), latency_n=2, score=False,
-                log=lambda *a: None)
-    assert sizes[:2] == [1, 1] and sum(sizes) == 4 and all(s <= 8 for s in sizes)              # 2 ảnh từng ảnh, còn lại theo khối
+
+def test_launch_shards_one_gpu_each_and_merge(env, monkeypatch):
+    """Tiến trình cha: n con `--shard i/n`, CUDA_VISIBLE_DEVICES thứ i; con xong ⇒ gộp `responses_shard*.jsonl`."""
+    cfg, ns, out = env
+    d = out / "root" / cfg["name"] / "ce130_test_all"
+    d.mkdir(parents=True)
+    seen = []
+
+    class P:
+        def __init__(self, cmd, env):
+            i = int(cmd[cmd.index("--shard") + 1].split("/")[0])
+            seen.append((cmd[cmd.index("--shard") + 1], env["CUDA_VISIBLE_DEVICES"]))
+            (d / f"responses_shard{i}.jsonl").write_text(json.dumps({"image_id": f"x{i}", "prompt_hash": "h"}) + "\n")
+            self.returncode = 0
+
+        def poll(self):
+            return 0
+    monkeypatch.setattr(vlm_run.subprocess, "Popen", P)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    a = vlm_run.parse_args(["--config", CFG, "--all", "--dataset", "ce130", "--out-root", str(out / "root")])
+    assert vlm_run.launch_shards(cfg, a, ["--config", CFG], ["ce130"], 2, stagger=0) == 0
+    assert seen == [("0/2", "0"), ("1/2", "1")] and sorted(os.listdir(d)) == ["responses.jsonl"]
+    assert [r["image_id"] for r in _lines(d / "responses.jsonl")] == ["x0", "x1"]

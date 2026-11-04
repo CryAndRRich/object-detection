@@ -70,10 +70,11 @@ def _load_hiddenobjects(cfg, ck, path, dev):
     return model.to(dev)
 
 
-def predict(cfg, model, samples, dev="cpu", seed=0, log=print):
+def predict(cfg, model, samples, dev="cpu", seed=0, log=print, **kw):
+    """`kw` -> `predict` của method (`log_every`; HiddenObjects: `texts`)."""
     p = cfg["predict"]
     m = model[0] if cfg["method"] == "csanet" else model
-    return METHODS[cfg["method"]].predict(m, samples, p["k"], p, seed=seed, dev=dev, log=log)
+    return METHODS[cfg["method"]].predict(m, samples, p["k"], p, seed=seed, dev=dev, log=log, **kw)
 
 
 def make_trainer(cfg, dev, model):

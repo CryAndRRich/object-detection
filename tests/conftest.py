@@ -13,7 +13,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 SLOW = {"test_flow_val_select_resume_eval", "test_flow_train_loss_select_resume", "test_ddp_two_processes",
-        "test_flow_positive_all_pair_resume"}
+        "test_flow_positive_all_pair_resume", "test_latency_celoc_flow"}
 
 
 def pytest_addoption(parser):

@@ -11,6 +11,7 @@ Pilot = K mẫu đầu theo hash blake2b(`seed:image_id`) ⇒ ổn định, và 
 Lỗi API (sau khi backend đã thử lại) KHÔNG ghi ⇒ chạy lại sẽ hỏi lại ảnh đó; model trả lời mà 0 box hợp lệ sau `retries` lần ⇒ ghi
 (`n_valid` = 0, chấm bằng box cả ảnh)."""
 
+import glob
 import hashlib
 import json
 import os
@@ -23,7 +24,8 @@ from vlm.backends import Fatal
 from vlm.parse import fill, parse_candidates, parse_scored
 from vlm.prompt import author_turns, build_messages, encode_image
 
-__all__ = ["dataset_dir", "select", "load_responses", "record_cost", "summarize", "run_dataset", "FULL_SIZES"]
+__all__ = ["dataset_dir", "select", "in_shard", "load_responses", "load_all_responses", "merge_shards", "record_cost", "summarize",
+           "run_dataset", "FULL_SIZES"]
 
 FULL_SIZES = {"ce130": 6122, "cocount": 1263}           # test_all / review5 — chỉ để in khi chạy một tập
 
@@ -44,10 +46,45 @@ def select(samples, seed, pilot=None):
     return [s for s in samples if s["image_id"] in keep]
 
 
+def in_shard(image_id, shard):
+    """`shard` (i, n) — vLLM chạy n bản song song (`vllm.data_parallel`): ảnh thuộc bản i theo hash riêng của tên ảnh (không phụ thuộc
+    thứ tự / ảnh nào đã xong ⇒ các bản khởi động lệch giờ vẫn không trùng, không sót)."""
+    if not shard:
+        return True
+    i, n = shard
+    return int.from_bytes(hashlib.blake2b(f"shard:{image_id}".encode(), digest_size=8).digest(), "little") % n == i
+
+
 def load_responses(path, phash):
     if not os.path.exists(path):
         return {}
     return {r["image_id"]: r for r in iter_jsonl(path) if r.get("prompt_hash") == phash}
+
+
+def _resp_files(out_dir):
+    return [os.path.join(out_dir, "responses.jsonl")] + sorted(glob.glob(os.path.join(out_dir, "responses_shard*.jsonl")))
+
+
+def load_all_responses(out_dir, phash):
+    """`responses.jsonl` + `responses_shard*.jsonl` (bản song song chưa gộp, vd phiên bị kill) — dòng sau đè dòng trước cùng ảnh."""
+    done = {}
+    for f in _resp_files(out_dir):
+        done.update(load_responses(f, phash))
+    return done
+
+
+def merge_shards(out_dir):
+    """Nối `responses_shard*.jsonl` vào `responses.jsonl` rồi xoá chúng. -> số dòng đã nối."""
+    n = 0
+    with open(os.path.join(out_dir, "responses.jsonl"), "a") as fout:
+        for f in _resp_files(out_dir)[1:]:
+            with open(f) as fin:
+                for line in fin:
+                    if line.strip():
+                        fout.write(line if line.endswith("\n") else line + "\n")
+                        n += 1
+            os.remove(f)
+    return n
 
 
 def record_cost(res, cfg):
@@ -98,26 +135,24 @@ def summarize(recs, cfg, n_full, par):
                    cost_per_image_p90=float(np.percentile(cost, 90)), sec_per_call_mean=float(sec.mean()),
                    est_full_cost=float(cost.mean() * n_full), est_full_cost_p90=float(np.percentile(cost, 90) * n_full),
                    est_full_hours=float(n_full * sec.mean() / max(par, 1) / 3600))
-    lat = [r["latency"] for r in recs if r.get("latency") is not None]       # câu trả lời trước 2026-11-04 không có
-    if lat:
-        out.update(latency_mean=float(np.mean(lat)), n_latency=len(lat))
     out["n_full"] = n_full
     return out
 
 
-def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=None, score=True, log=print, spent0=0.0, latency_n=0):
-    """-> (summary, đã tiêu USD trong lần chạy này). `backend` None = chỉ chấm từ responses.jsonl (`--score-only`). `latency_n` N:
-    N ảnh chưa hỏi đầu tiên gọi TỪNG ẢNH (đo `latency` 1 ảnh, cùng lần nạp model), phần còn lại theo khối `chunk`."""
+def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=None, score=True, log=print, spent0=0.0, shard=None):
+    """-> (summary, đã tiêu USD trong lần chạy này). `backend` None = chỉ chấm từ responses.jsonl (`--score-only`). Latency 1 ảnh
+    KHÔNG đo ở đây (`sec` = thông lượng) — dùng `tools/latency.py`. `shard` (i, n): chỉ phần ảnh của bản i (`in_shard`), ghi
+    `responses_shard<i>.jsonl` (`run.py` gộp lại khi các bản xong)."""
     from baseline.score import load_data
 
     tag = f"[{ns.dataset} {name}]"
     samples, index, geo = load_data(ns)
-    sel = select(samples, cfg.get("seed", 0), pilot)
+    sel = [s for s in select(samples, cfg.get("seed", 0), pilot) if in_shard(s["image_id"], shard)]
     os.makedirs(out_dir, exist_ok=True)
-    resp_path = os.path.join(out_dir, "responses.jsonl")
-    done = load_responses(resp_path, phash)
+    resp_path = os.path.join(out_dir, f"responses_shard{shard[0]}.jsonl" if shard else "responses.jsonl")
+    done = load_all_responses(out_dir, phash)
     pending = [s for s in sel if s["image_id"] not in done]
-    K, retries = cfg["k"], int(cfg.get("retries", 2))
+    retries = int(cfg.get("retries", 2))
     img_cfg = cfg.get("image") or {}
     # mức song song để ước giờ; vLLM: 1 (`sec` đã chia theo khối)
     par = int(((cfg.get("openrouter") or {}).get("concurrency")) or ((cfg.get("gemini") or {}).get("concurrency")) or 1)
@@ -131,9 +166,8 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
     if pending and backend is None:
         stopped = f"còn {len(pending)} ảnh chưa có câu trả lời (--score-only không gọi model)"
     with open(resp_path, "a") as fout:
-        n1 = min(int(latency_n or 0), len(pending))
-        bounds = [(i, i + 1) for i in range(n1)] + [(c, min(c + chunk, len(pending))) for c in range(n1, len(pending), chunk)]
-        for c0, c1 in (bounds if backend is not None else []):
+        for c0 in (range(0, len(pending), chunk) if backend is not None else []):
+            c1 = min(c0 + chunk, len(pending))
             jobs = []
             for s in pending[c0:c1]:
                 im = encode_image(s["image"], img_cfg.get("max_side"), img_cfg.get("jpeg_quality", 95))
@@ -189,7 +223,7 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
                 left = len(pending) - n_new
                 log(f"{tag} {len(recs)}/{len(sel)} | {_fmt_sec(el)} | ETA {_fmt_sec(left * el / n_new)} | ${spent:.4f} lần này "
                     f"(TB ${sm['cost_per_image_mean']:.5f}/ảnh) | vào {_k(sm['tokens_in_mean'])} / ra {_k(sm['tokens_out_mean'])} "
-                    f"(nghĩ {_k(sm['tokens_reasoning_mean'])}) tok/ảnh | latency TB {sm.get('latency_mean', float('nan')):.1f} s | "
+                    f"(nghĩ {_k(sm['tokens_reasoning_mean'])}) tok/ảnh | "
                     f"0 box {sm['n_fail']} thiếu {sm['n_short']} | lỗi API liên tiếp {n_api_err}")
             if max_cost is not None and spent0 + spent >= max_cost:
                 stopped = f"chạm --max-cost ${max_cost:.2f} (đã tiêu ${spent0 + spent:.4f})"
@@ -278,8 +312,8 @@ def score_all(recs, sel, index, geo, cfg, ns, info, out_dir, name, tag, log=prin
         rows.append({"image_id": i, "class": s.get("class"), "t": d.get("t"), "orig_wh": r["orig_wh"], "n_obj": d.get("n_obj"),
                      "n_valid": len(cs), "cnll_top": cnll[0] if cnll else None, "cnll_min": min(cnll) if cnll else None,
                      "cnll_gt": d.get("cnll_gt"), "boxes": box_rows,
-                     **{k: r.get(k) for k in ("attempts", "in", "out", "reasoning", "cost", "sec", "latency", "finish", "provider", "gen_id",
-                                                 "date", "text")}})
+                     **{k: r.get(k) for k in ("attempts", "in", "out", "reasoning", "cost", "sec")}, "request_sec": r.get("latency"),
+                     **{k: r.get(k) for k in ("finish", "provider", "gen_id", "date", "text")}})
     jl = os.path.join(out_dir, f"{name}.jsonl")
     write_jsonl(jl, rows)
     write_summary(os.path.join(out_dir, f"{name}.json"), info,

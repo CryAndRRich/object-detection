@@ -17,6 +17,7 @@ vllm:
   kv_cache_gib: 5.0
 engine:
   dtype: half
+  disable_log_stats: false          # log vLLM ~10 s / lần: token/s, số chuỗi đang chạy, % KV
   trust_remote_code: true
   tensor_parallel_size: 2
   max_model_len: 12288

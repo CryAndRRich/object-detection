@@ -21,17 +21,33 @@ def strip_think(text):
     return text.split("</think>")[-1]
 
 
-def _json_blocks(text):
-    """Các khối JSON đọc được: khối ```json```, rồi đoạn từ dấu [ / { đầu tới ] / } cuối (dấu mở sớm hơn = khối ngoài, thử trước)."""
+def _json_blocks(text, repair_tries=80):
+    """Các khối JSON đọc được: khối ```json```; rồi với từng dấu mở [ / { đầu tiên (sớm hơn = khối ngoài, thử trước): đoạn tới dấu đóng
+    cuối, khối JSON hoàn chỉnh đầu tiên (bỏ phần thừa phía sau), rồi SỬA khối bị cắt — cắt ở `}` đóng một candidate (từ cuối, tối đa
+    `repair_tries` chỗ) rồi đóng `]}`. GLM 2026-11-04: 25 / 7.385 câu viết đủ 30 candidate rồi trôi sang khoảng trắng / chữ rác tới hết
+    max_tokens, không đóng mảng."""
     out = [m.group(1) for m in re.finditer(r"```(?:json)?\s*(.*?)```", text, flags=re.S)]
-    spans = [(text.find(o), text.rfind(c)) for o, c in (("[", "]"), ("{", "}"))]
-    for i, j in sorted(s for s in spans if 0 <= s[0] < s[1]):
-        out.append(text[i:j + 1])
     for s in out:
         try:
             yield json.loads(s)
         except ValueError:
             continue
+    dec = json.JSONDecoder()
+    spans = sorted(s for s in ((text.find(o), text.rfind(c)) for o, c in (("[", "]"), ("{", "}"))) if 0 <= s[0] < s[1])
+    for i, j in spans:
+        for parse in (lambda: json.loads(text[i:j + 1]), lambda: dec.raw_decode(text, i)[0]):
+            try:
+                yield parse()
+            except ValueError:
+                pass
+        if text[i] == "{" and '"candidates"' in text[i:i + 40]:
+            ends = [m.start() for m in re.finditer(r"\}", text[i:])][::-1][:repair_tries]
+            for e in ends:
+                try:
+                    yield json.loads(text[i:i + e + 1] + "]}")
+                    break
+                except ValueError:
+                    continue
 
 
 def _num(v):

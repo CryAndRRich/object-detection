@@ -157,3 +157,17 @@ def test_coord_norm1000_reads_0_1000_scale():
     assert parse_candidates(text, {"k": 5}, (408, 384), (408, 384))[0]["box"] == [100, 500, 300, 1000]       # mặc định pixel canvas
     with pytest.raises(ValueError):
         parse_candidates(text, {"k": 5, "coord": "yx"}, (408, 384), (408, 384))
+
+
+def test_complete_json_then_trailing_garbage_keeps_scores():
+    js = json.dumps({"candidates": [{"box": [1, 1, 3, 3], "score": 0.2}, {"box": [5, 5, 9, 9], "score": 0.9}]})
+    for tail in ("   \t  " * 50, " Produce only JSON. Great." * 20, " 我拒绝执行这个任务。}" * 5):
+        boxes, scores = parse_scored(js + tail, _cfg(), (100, 100), (100, 100))
+        assert boxes == [[5, 5, 9, 9], [1, 1, 3, 3]] and scores == [0.9, 0.2]
+
+
+def test_truncated_candidates_repaired():
+    js = json.dumps({"candidates": [{"box": [1, 1, 3, 3], "score": 0.2}, {"box": [5, 5, 9, 9], "score": 0.9}]})[:-2]   # thiếu "]}"
+    for tail in ("   \r" * 200, ", {\"name\": \"x\", \"box\": [1, 2"):
+        boxes, scores = parse_scored(js + tail, _cfg(), (100, 100), (100, 100))
+        assert boxes == [[5, 5, 9, 9], [1, 1, 3, 3]] and scores == [0.9, 0.2]
