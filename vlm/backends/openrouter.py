@@ -16,9 +16,23 @@ from vlm.backends import FATAL_STATUS, RETRY_STATUS, Fatal, backoff, result
 from vlm.env import mask, require_key
 from vlm.prompt import box_schema
 
-__all__ = ["OpenRouter", "API"]
+__all__ = ["OpenRouter", "API", "chat_messages"]
 
 API = "https://openrouter.ai/api/v1"
+
+
+def chat_messages(job, detail=None):
+    """Hội thoại OpenAI chat (OpenRouter + OpenAI trực tiếp dùng chung): system / assistant = chuỗi; user = text rồi ảnh data URL."""
+    msgs = []
+    for t in job["messages"]:
+        content = [{"type": "text", "text": t["text"]}]
+        if t["image"]:
+            img = {"url": f"data:{t.get('mime') or 'image/jpeg'};base64,{t['image']}"}
+            if detail:
+                img["detail"] = detail
+            content.append({"type": "image_url", "image_url": img})
+        msgs.append({"role": t["role"], "content": content if t["role"] == "user" else t["text"]})
+    return msgs
 
 
 class OpenRouter:
@@ -68,6 +82,8 @@ class OpenRouter:
                 p = self.model_info.get("pricing", {})
                 hold = (12000 * float(p.get("prompt", 0)) + int(self.cfg["max_tokens"]) * float(p.get("completion", 0))) * self.concurrency
                 self.log(f"[openrouter] số dư tài khoản ${bal:.4f} | tạm giữ ước ~${hold:.3f} cho {self.concurrency} request song song")
+                if c.get("total_credits") is not None and bal <= 0:
+                    raise Fatal(f"OpenRouter hết số dư (${bal:.4f}) — nạp credit ở https://openrouter.ai/settings/credits")
                 if bal < hold:
                     self.log("[openrouter] ⚠️ số dư < tạm giữ -> sẽ bị 402 in-flight (code chờ + thử lại); nạp credit hoặc giảm "
                              "`openrouter.concurrency`")
@@ -75,16 +91,7 @@ class OpenRouter:
             self.log(f"[openrouter] không đọc được /key, /credits ({e}) — chạy tiếp")
 
     def payload(self, job):
-        msgs = []
-        for t in job["messages"]:
-            content = [{"type": "text", "text": t["text"]}]
-            if t["image"]:
-                img = {"url": f"data:{t.get('mime') or 'image/jpeg'};base64,{t['image']}"}
-                if self.o.get("detail"):
-                    img["detail"] = self.o["detail"]
-                content.append({"type": "image_url", "image_url": img})
-            msgs.append({"role": t["role"], "content": content if t["role"] == "user" else t["text"]})
-        body = {"model": self.cfg["model"], "messages": msgs, "max_tokens": int(self.cfg["max_tokens"])}
+        body = {"model": self.cfg["model"], "messages": chat_messages(job, self.o.get("detail")), "max_tokens": int(self.cfg["max_tokens"])}
         opt = {**(self.cfg.get("sampling") or {})}
         if job.get("temperature") is not None:
             opt["temperature"] = job["temperature"]

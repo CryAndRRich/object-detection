@@ -88,11 +88,14 @@ def merge_shards(out_dir):
 
 
 def record_cost(res, cfg):
-    """USD của một lần gọi: `cost` backend trả (OpenRouter) hay token × giá config (`price.in` / `price.out` USD / 1M)."""
+    """USD của một lần gọi: `cost` backend trả (OpenRouter) hay token × giá config (`price.in` / `price.out` USD / 1M; token vào đã
+    cache — `cached`, OpenAI — theo `price.cached`, không có thì như token vào)."""
     if res.get("cost") is not None:
         return float(res["cost"])
     p = cfg.get("price") or {}
-    return (res["in"] * float(p.get("in", 0)) + res["out"] * float(p.get("out", 0))) / 1e6
+    cached = min(int(res.get("cached") or 0), res["in"])
+    return ((res["in"] - cached) * float(p.get("in", 0)) + cached * float(p.get("cached", p.get("in", 0)))
+            + res["out"] * float(p.get("out", 0))) / 1e6
 
 
 def _fmt_sec(s):
@@ -155,7 +158,7 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
     retries = int(cfg.get("retries", 2))
     img_cfg = cfg.get("image") or {}
     # mức song song để ước giờ; vLLM: 1 (`sec` đã chia theo khối)
-    par = int(((cfg.get("openrouter") or {}).get("concurrency")) or ((cfg.get("gemini") or {}).get("concurrency")) or 1)
+    par = int(((cfg.get("openai") or {}).get("concurrency")) or ((cfg.get("openrouter") or {}).get("concurrency")) or ((cfg.get("gemini") or {}).get("concurrency")) or 1)
     rpm = float((cfg.get("gemini") or {}).get("rpm") or 0)
     log(f"{tag} {len(sel)} / {len(samples)} mẫu | đã có {len(sel) - len(pending)} (prompt_hash {phash}) | cần hỏi {len(pending)} | "
         f"-> {out_dir}")

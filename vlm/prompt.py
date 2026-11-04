@@ -141,6 +141,9 @@ HASH_KEYS = ("backend", "model", "k", "icl", "image", "reasoning", "sampling", "
 # định như mọi config lúc còn dùng ⇒ hash không đổi, dùng lại câu trả lời đã có.
 HASH_FIXED = {"format": "json_pixel", "coord": None, "order": None, "schema": "api", "openrouter.structured": None,
               "gemini.json": None}
+# OpenAI trực tiếp và OpenRouter (chỉ chuyển tiếp tới OpenAI) chạy CÙNG model `openai/...` ⇒ cùng hash: dùng lại câu trả lời pilot,
+# đổi / chuyển đường giữa chừng không hỏi lại (mỗi câu trả lời ghi `provider`).
+HASH_ALIAS = {"backend": {"openai": "openrouter"}}
 HASH_SUB = {"openrouter": ("detail", "provider"), "gemini": ("thinking_level",)}
 # Khoá `engine` vLLM chỉ đổi tốc độ / bộ nhớ, không đổi câu trả lời ⇒ ngoài hash (đổi được giữa các phiên, resume vẫn dùng lại).
 ENGINE_FREE = ("max_num_seqs", "tensor_parallel_size", "enforce_eager", "limit_mm_per_prompt", "gpu_memory_utilization",
@@ -152,6 +155,7 @@ def prompt_hash(cfg):
     Đổi ⇒ resume hỏi lại."""
     key = {"v": PROMPT_VERSION, "system": SYSTEM, "user": USER, "formats": FORMAT, **HASH_FIXED,
            **{k: cfg.get(k) for k in HASH_KEYS},
+           **{k: m.get(cfg.get(k), cfg.get(k)) for k, m in HASH_ALIAS.items()},
            "engine": {k: v for k, v in cfg["engine"].items() if k not in ENGINE_FREE} if cfg.get("engine") else cfg.get("engine"),
            **{f"{s}.{k}": (cfg.get(s) or {}).get(k) for s, ks in HASH_SUB.items() for k in ks}}
     if cfg.get("icl") == "author":

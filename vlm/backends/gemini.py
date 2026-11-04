@@ -86,6 +86,9 @@ class Gemini:
                 continue
             if r.status_code in (401, 403, 404):
                 raise Fatal(f"Gemini {r.status_code} cho {self.cfg['model']}: {r.text[:300]}")
+            if r.status_code == 429 and "PerDay" in r.text:          # hết quota NGÀY (free tier: RPD) — thử lại vô ích
+                raise Fatal(f"Gemini hết quota ngày cho {self.cfg['model']} (429 {r.text[:200]}) — chạy lại hôm sau (resume) hoặc bật "
+                            "billing")
             if r.status_code in RETRY_STATUS:
                 err = f"HTTP {r.status_code}: {r.text[:200]}"
                 if i < tries:

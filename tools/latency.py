@@ -282,7 +282,7 @@ def main(argv=None):
         log(f"[latency] {d}: đo {len(measured)} / {len(samples)} ảnh, warm-up {len(warm)}")
         rows[d] = [{"dataset": d, **r} for r in measure(run, measured, warm, prefetch, m.sync, tag=d)]
     sm = summarize(rows)
-    kind = "api" if a.method == "vlm" and m.cfg["backend"] in ("openrouter", "gemini") else "local"
+    kind = "api" if a.method == "vlm" and m.cfg["backend"] in ("openai", "openrouter", "gemini") else "local"
     res = {"name": name, "method": a.method, "kind": kind, "definition": DEFINITION, **sm, "gpu": gpus if kind == "local" else None,
            "host": socket.gethostname(), "date": time.strftime("%Y-%m-%d %H:%M"), "n_per_dataset": a.n, "warmup": a.warmup,
            "pick_seed": PICK_SEED, **m.info, "images": [r for d in a.datasets for r in rows[d]]}

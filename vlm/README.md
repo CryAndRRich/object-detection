@@ -26,8 +26,8 @@ Quyết định, lý do chọn model, kết quả: `docs/EXPERIMENT_ZETA.md` m�
 | nhóm | config | model | chạy ở đâu | ghi chú |
 |---|---|---|---|---|
 | **ZETA5** thương mại | `config/gemini/robotics-er-2.yaml` | `gemini-robotics-er-2-preview` | Gemini API | chuyên không gian; thinking minimal; free tier |
-| | `config/openrouter/gpt-6-luna.yaml` | `openai/gpt-6-luna` | OpenRouter | họ OpenAI; tắt suy nghĩ; không nhận temperature |
-| | `config/openrouter/gpt-4.1-mini.yaml` | `openai/gpt-4.1-mini` | OpenRouter | đúng model tác giả dùng; $0,4 / $1,6 |
+| | `config/openrouter/gpt-6-luna.yaml` | `openai/gpt-6-luna` | OpenAI, dự phòng OpenRouter | họ OpenAI; tắt suy nghĩ; không nhận temperature |
+| | `config/openrouter/gpt-4.1-mini.yaml` | `openai/gpt-4.1-mini` | OpenAI, dự phòng OpenRouter | đúng model tác giả dùng; $0,4 / $1,6 |
 | **ZETA6** open-source | *(chưa có config)* | Qwen3-VL-4B | GPU server, vLLM | |
 | | `config/openrouter/glm-5.3-flash.yaml` | `z-ai/glm-5.3-flash` | OpenRouter (320B MoE, không vừa A30) | suy nghĩ `low` (không tắt được) |
 | | `config/server/internvl3.5-8b.yaml` | `OpenGVLab/InternVL3_5-8B` | GPU server, vLLM | FP8 chỉ weight |
@@ -38,10 +38,18 @@ Qwen3.8-27B — xem `docs/EXPERIMENT_ZETA.md` mục 0.
 
 ## Key
 
-Chép `.env.example` thành `vlm/.env` rồi điền `OPENROUTER_API_KEY` và `GEMINI_API_KEY`.
+Chép `.env.example` thành `vlm/.env` rồi điền `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`.
 - `vlm/.env` đã bị gitignore: đừng commit, đừng dán key vào chat / log.
 - Code chỉ in tên biến và 4 ký tự cuối của key; kiểm key OpenRouter bắt đầu bằng `sk-or-`, key không có ký tự trắng / lạ.
-- Biến môi trường đã `export` được ưu tiên hơn file.
+- Biến môi trường đã `export` được ưu tiên hơn file. Giá trị trống / `None` / `null` / `<...>` = không có key.
+- **Thứ tự key** (`backend` rồi `fallback` trong config): GPT-6 Luna, gpt-4.1-mini = `openai` -> `openrouter`. Key trống / sai / hết
+  tiền (lúc khởi động hay giữa chừng) -> chuyển cái sau, ảnh đang dở gửi lại; hết danh sách -> dừng êm (câu trả lời đã có vẫn giữ).
+  Hai đường cùng model nên cùng `prompt_hash` (dùng lại pilot); mỗi câu trả lời ghi `provider`. Gemini / GLM chỉ một đường: thiếu key
+  -> dừng.
+- **Số dư**: OpenRouter in số dư `/credits` lúc khởi động, số dư <= 0 -> bỏ đường đó. OpenAI không có API đọc số dư cho key thường
+  ⇒ gửi một request thăm dò 16 token (~$0,00001): `insufficient_quota` -> bỏ. Gemini: không có API số dư; hết quota ngày (free tier)
+  -> dừng, chạy lại hôm sau. Tiền một lần chạy chặn bằng `--max-cost`. OpenAI không trả tiền mỗi request ⇒ tính token × `price`
+  (`price.cached` cho token vào đã cache).
 
 ## Chạy (từ `object-detection/vlm/`)
 

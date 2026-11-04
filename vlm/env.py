@@ -3,7 +3,7 @@ giá trị — log chỉ ghi tên biến + 4 ký tự cuối."""
 
 import os
 
-__all__ = ["ENV_PATH", "load_env", "require_key", "mask"]
+__all__ = ["ENV_PATH", "load_env", "get_key", "require_key", "mask"]
 
 ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 _from_file = {}                     # tên biến -> True nếu giá trị lấy từ .env (không phải biến export sẵn)
@@ -36,12 +36,23 @@ def mask(value):
     return f"…{value[-4:]}" if value and len(value) >= 8 else "…"
 
 
-def require_key(name):
-    """-> key; thiếu / có ký tự trắng hay ngoài ASCII bên trong (dán lỗi; OpenRouter trả 401 "Missing Authentication header") -> dừng,
-    chỉ báo vị trí + mã ký tự, không in key."""
+PLACEHOLDER = {"none", "null", "nil", "false", "0", "-", "...", "…", "todo", "changeme", "your_key", "your-key"}
+
+
+def get_key(name):
+    """-> key, hoặc None nếu chưa có / để trống / giữ chỗ (`None`, `null`, `<...>`, …) ⇒ coi như không có key."""
     v = os.environ.get(name, "").strip()
-    if not v:
-        raise SystemExit(f"thiếu {name}: điền vào {ENV_PATH} (cấu trúc xem .env.example) hoặc export trước khi chạy")
+    if not v or v.lower() in PLACEHOLDER or (v.startswith("<") and v.endswith(">")):
+        return None
+    return v
+
+
+def require_key(name):
+    """-> key; thiếu / giữ chỗ (`get_key`) / có ký tự trắng hay ngoài ASCII bên trong (dán lỗi; OpenRouter trả 401 "Missing
+    Authentication header") -> dừng (SystemExit; backend có `fallback` thì chuyển key sau), chỉ báo vị trí + mã ký tự, không in key."""
+    v = get_key(name)
+    if v is None:
+        raise SystemExit(f"thiếu {name} (trống / None): điền vào {ENV_PATH} (cấu trúc xem .env.example) hoặc export trước khi chạy")
     bad = [(i, f"U+{ord(c):04X}") for i, c in enumerate(v) if c.isspace() or not 33 <= ord(c) <= 126]
     if bad:
         src = "biến môi trường đã export (được ưu tiên hơn .env)" if name in os.environ and not _from_file.get(name) else ENV_PATH
