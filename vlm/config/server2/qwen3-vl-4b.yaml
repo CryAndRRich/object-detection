@@ -1,10 +1,10 @@
 # Qwen3-VL-4B (ZETA6) trên server 2 (RTX PRO 5000 Blackwell 48 GB, venv `envs/vllm`) — y hệt `kaggle/qwen3-vl-4b.yaml` (fp16, prompt /
-# ảnh / max_model_len / coord), chỉ đổi khoá NGOÀI prompt_hash: một card (không tensor parallel), KV 24 GiB, 64 chuỗi ⇒ cùng hash
+# ảnh / max_model_len / coord), chỉ đổi khoá NGOÀI prompt_hash: một card (không tensor parallel), KV 14 GiB (34 GiB tổng: chạy được cạnh job người khác, 2026-11-06), 64 chuỗi ⇒ cùng hash
 # `2acb150694da` (test khẳng định): resume / gộp với câu trả lời Kaggle; dùng để đo latency 1 ảnh (tools/latency.py) và chạy nốt CE-130.
 base: ../kaggle/qwen3-vl-4b.yaml
 vllm:
-  gpu_mem_gib: 44.0
-  kv_cache_gib: 24.0
+  gpu_mem_gib: 34.0
+  kv_cache_gib: 14.0
 engine:
   tensor_parallel_size: 1
   max_num_seqs: 64
