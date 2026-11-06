@@ -1,4 +1,4 @@
-"""Backend VLM: `make_backend(cfg, log)` theo `cfg["backend"]` (openai | openrouter | gemini | vllm; import lười — venv chính không cần
+"""Backend VLM: `make_backend(cfg, log)` theo `cfg["backend"]` (openai | openrouter | vllm; import lười — venv chính không cần
 vllm). `cfg["fallback"]` = backend thử tiếp theo thứ tự (`Chain`): key trống / None / sai / hết tiền (`Fatal` hay `SystemExit` lúc
 dựng, `Fatal` giữa chừng) -> chuyển sang cái sau, job đang dở gửi lại ở cái mới; hết danh sách -> `Fatal`.
 Giao diện chung: `backend.batch(jobs) -> [Result]`, job = {"image_id", "messages", "temperature" (None = theo config), "attempt"};
@@ -46,23 +46,20 @@ def backoff(attempt, retry_after=None, cap=60.0):
 
 
 def _make_one(kind, cfg, log, sleep):
-    if kind in ("openai_batch", "gemini_batch"):
-        from vlm.backends.batch import BatchBackend, GeminiBatchAPI, OpenAIBatchAPI
-        sync = _make_one(kind.split("_")[0], cfg, log, sleep)
-        return BatchBackend(sync, (OpenAIBatchAPI if kind == "openai_batch" else GeminiBatchAPI)(sync, sleep), cfg, log=log, sleep=sleep)
+    if kind == "openai_batch":
+        from vlm.backends.batch import BatchBackend, OpenAIBatchAPI
+        sync = _make_one("openai", cfg, log, sleep)
+        return BatchBackend(sync, OpenAIBatchAPI(sync, sleep), cfg, log=log, sleep=sleep)
     if kind == "openai":
         from vlm.backends.openai_direct import OpenAI
         return OpenAI(cfg, log=log, sleep=sleep)
     if kind == "openrouter":
         from vlm.backends.openrouter import OpenRouter
         return OpenRouter(cfg, log=log, sleep=sleep)
-    if kind == "gemini":
-        from vlm.backends.gemini import Gemini
-        return Gemini(cfg, log=log, sleep=sleep)
     if kind == "vllm":
         from vlm.backends.vllm_local import VLLMLocal
         return VLLMLocal(cfg, log=log)
-    raise ValueError(f"backend {kind!r} không thuộc openai | openrouter | gemini | vllm")
+    raise ValueError(f"backend {kind!r} không thuộc openai | openrouter | vllm")
 
 
 class Chain:
@@ -129,12 +126,12 @@ class Chain:
 
 
 def make_backend(cfg, log=print, sleep=time.sleep, batch=False):
-    """`batch` (run.py --batch): Batch API của backend đầu (openai | gemini), BỎ `fallback` — đường dự phòng là gọi thường giá gấp đôi,
+    """`batch` (run.py --batch): Batch API của backend đầu (chỉ openai), BỎ `fallback` — đường dự phòng là gọi thường giá gấp đôi,
     không tự chuyển sang; key lỗi thì dừng (chạy lại không --batch nếu muốn đi OpenRouter)."""
     kinds = [cfg["backend"], *(cfg.get("fallback") or [])]
     if batch:
-        if kinds[0] not in ("openai", "gemini"):
-            raise Fatal(f"--batch chỉ cho backend openai | gemini (config: {kinds[0]}; OpenRouter / vLLM không có Batch API)")
+        if kinds[0] != "openai":
+            raise Fatal(f"--batch chỉ cho backend openai (config: {kinds[0]}; OpenRouter / vLLM không có Batch API)")
         if len(kinds) > 1:
             log(f"[route] --batch: bỏ dự phòng {kinds[1:]} (gọi thường = giá gấp đôi) — key {kinds[0]} lỗi thì dừng")
         kinds = [kinds[0] + "_batch"]

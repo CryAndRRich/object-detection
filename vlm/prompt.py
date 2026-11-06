@@ -163,6 +163,7 @@ HASH_FIXED = {"format": "json_pixel", "coord": None, "order": None, "schema": "a
 # OpenAI trực tiếp và OpenRouter (chỉ chuyển tiếp tới OpenAI) chạy CÙNG model `openai/...` ⇒ cùng hash: dùng lại câu trả lời pilot,
 # đổi / chuyển đường giữa chừng không hỏi lại (mỗi câu trả lời ghi `provider`).
 HASH_ALIAS = {"backend": {"openai": "openrouter"}}
+# "gemini.thinking_level" giữ dù backend Gemini đã bỏ (2026-11-06): mọi config có khoá này (= None) trong hash, bỏ là đổi hash mọi model.
 HASH_SUB = {"openrouter": ("detail", "provider"), "gemini": ("thinking_level",)}
 # Khoá `engine` vLLM chỉ đổi tốc độ / bộ nhớ, không đổi câu trả lời ⇒ ngoài hash (đổi được giữa các phiên, resume vẫn dùng lại).
 ENGINE_FREE = ("max_num_seqs", "tensor_parallel_size", "enforce_eager", "limit_mm_per_prompt", "gpu_memory_utilization",

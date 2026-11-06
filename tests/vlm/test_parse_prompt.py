@@ -218,6 +218,10 @@ def test_replan_keys_do_not_change_existing_hashes():
     vlm_dir = os.path.join(os.path.dirname(__file__), "..", "..", "vlm", "config")
     assert prompt_hash(load_config(os.path.join(vlm_dir, "openrouter", "gpt-4.1-mini.yaml"))) == "31cfbb6932c5"
     assert prompt_hash(load_config(os.path.join(vlm_dir, "kaggle", "qwen3-vl-4b.yaml"))) == "2acb150694da"
+    for name, h in (("qwen3-vl-4b", "2acb150694da"), ("llava-ov2-8b", "23ef3969c451"), ("internvl3.5-8b", "2f45111beb11"),
+                    ("replan-7b", "5f6106bd7722")):                    # server 2: một card, chỉ đổi khoá ngoài hash
+        cfg = load_config(os.path.join(vlm_dir, "server2", f"{name}.yaml"))
+        assert prompt_hash(cfg) == h and cfg["engine"].get("tensor_parallel_size", 1) == 1, name
     rp = load_config(os.path.join(vlm_dir, "server2", "replan-7b.yaml"))
     assert prompt_hash({**rp, "replan": {**rp["replan"], "samples": 9}}) != prompt_hash(rp)
     assert prompt_hash({**rp, "instruction": "Add a {cls}."}) != prompt_hash(rp)

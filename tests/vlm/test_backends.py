@@ -1,14 +1,12 @@
 """ZETA5 / ZETA6 backend với HTTP giả (không mạng): OpenRouter payload (reasoning / provider / ảnh data URL / schema tác giả + require_parameters,
 bỏ tham số model không nhận, model không có structured_outputs = Fatal),
-đọc usage.cost + token suy nghĩ, thử lại 429 theo Retry-After, 402 = Fatal; Gemini payload (inlineData, thinkingLevel, key ở header),
-bỏ phần thought, token suy nghĩ cộng vào token ra, giãn RPM; `.env` (env var ưu tiên, không in giá trị); bộ nhớ vLLM."""
+đọc usage.cost + token suy nghĩ, thử lại 429 theo Retry-After, 402 = Fatal; `.env` (env var ưu tiên, không in giá trị); bộ nhớ vLLM."""
 
 import json
 
 import pytest
 
 from vlm.backends import Fatal
-from vlm.backends.gemini import Gemini
 from vlm.backends.openrouter import OpenRouter
 from vlm.backends.vllm_local import memory_utilization
 from vlm.env import load_env, mask, require_key
@@ -107,41 +105,14 @@ def test_openrouter_unsupported_params_dropped_and_fatal(monkeypatch):
         OpenRouter({"model": "x/none", "openrouter": {}}, log=lambda *a: None, session=Session([], []))
 
 
-def test_gemini_payload_thoughts_and_rpm(monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "AIza-test-abcdefgh")
-    body = {"candidates": [{"content": {"parts": [{"text": "thinking...", "thought": True}, {"text": '[{"y": 1}]'}]},
-                            "finishReason": "STOP"}],
-            "usageMetadata": {"promptTokenCount": 900, "candidatesTokenCount": 200, "thoughtsTokenCount": 400}}
-    sess = Session([Resp(200, body), Resp(200, body)])
-    now = [0.0]
-    sleeps = []
-    cfg = {"model": "gemini-robotics-er-2-preview", "k": 30, "max_tokens": 50, "sampling": {"temperature": 1.0},
-           "gemini": {"thinking_level": "medium", "rpm": 30, "concurrency": 1}}
-    be = Gemini(cfg, log=lambda *a: None, sleep=sleeps.append, session=sess, clock=lambda: now[0])
-    job = {**JOB, "messages": [{"role": "system", "text": "SYS", "image": None}, {**JOB["messages"][0], "mime": "image/png"}]}
-    r1, r2 = be.batch([job, job])
-    assert r1["text"] == '[{"y": 1}]' and r1["in"] == 900 and r1["out"] == 600 and r1["reasoning"] == 400 and r1["cost"] is None
-    assert sleeps == [2.0]                                                                   # 30 RPM -> cách nhau 2 s
-    url, hdr, b = sess.sent[0]
-    assert url.endswith("gemini-robotics-er-2-preview:generateContent") and "key=" not in url and hdr["x-goog-api-key"]
-    assert b["contents"][0]["parts"][1] == {"inlineData": {"mimeType": "image/png", "data": "QUJD"}} and len(b["contents"]) == 1
-    assert b["systemInstruction"] == {"parts": [{"text": "SYS"}]}
-    assert b["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "medium"} and b["generationConfig"]["temperature"] == 1.0
-    assert b["generationConfig"]["responseMimeType"] == "application/json"
-    assert b["generationConfig"]["responseJsonSchema"]["properties"]["candidates"]["maxItems"] == 30          # schema tác giả qua API
-    sess.posts = [Resp(400, {"error": {"message": "Invalid JSON payload: responseJsonSchema ..."}})]
-    with pytest.raises(Fatal, match="400 với responseJsonSchema"):
-        be.batch([job])
-
-
 def test_env_loader(tmp_path, monkeypatch):
     p = tmp_path / ".env"
-    p.write_text("# c\nOPENROUTER_API_KEY='sk-file-abcdef'\nexport GEMINI_API_KEY=g-file-123456\nEMPTY=\n")
+    p.write_text("# c\nOPENROUTER_API_KEY='sk-file-abcdef'\nexport OTHER_API_KEY=g-file-123456\nEMPTY=\n")
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-env-zzzzzz")
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("OTHER_API_KEY", raising=False)
     monkeypatch.delenv("EMPTY", raising=False)
-    assert load_env(str(p)) == ["OPENROUTER_API_KEY", "GEMINI_API_KEY", "EMPTY"]
-    assert require_key("OPENROUTER_API_KEY") == "sk-env-zzzzzz" and require_key("GEMINI_API_KEY") == "g-file-123456"
+    assert load_env(str(p)) == ["OPENROUTER_API_KEY", "OTHER_API_KEY", "EMPTY"]
+    assert require_key("OPENROUTER_API_KEY") == "sk-env-zzzzzz" and require_key("OTHER_API_KEY") == "g-file-123456"
     with pytest.raises(SystemExit, match="EMPTY") as e:
         require_key("EMPTY")
     assert "sk-" not in str(e.value) and mask("sk-env-zzzzzz") == "…zzzz" and load_env(str(tmp_path / "none")) == []
@@ -281,7 +252,7 @@ def test_hash_same_for_openai_and_openrouter_route():
     cfg = {"backend": "openrouter", "model": "openai/gpt-6-luna", "k": 30, "icl": 0, "reasoning": "none",
            "openrouter": {"provider": {"data_collection": "deny"}}}
     assert prompt_hash({**cfg, "backend": "openai", "fallback": ["openrouter"], "openai": {"concurrency": 4}}) == prompt_hash(cfg)
-    assert prompt_hash({**cfg, "backend": "gemini"}) != prompt_hash(cfg)
+    assert prompt_hash({**cfg, "backend": "vllm"}) != prompt_hash(cfg)
 
 
 def test_openrouter_zero_balance_fatal(monkeypatch):
@@ -296,38 +267,15 @@ def test_openrouter_zero_balance_fatal(monkeypatch):
         OpenRouter({"model": "m/x", "k": 30, "max_tokens": 10, "openrouter": {}}, log=lambda *a: None, session=sess)
 
 
-def test_gemini_daily_quota_is_fatal(monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "AIza-test-abcdefgh")
-    q = Resp(429, {"error": {"status": "RESOURCE_EXHAUSTED", "details": [{"violations": [
-        {"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]}]}})
-    be = Gemini({"model": "m", "k": 30, "max_tokens": 50, "gemini": {}}, log=lambda *a: None, sleep=lambda s: None, session=Session([q]))
-    with pytest.raises(Fatal, match="hết quota ngày"):
-        be.batch([JOB])
-    monkeypatch.setenv("GEMINI_API_KEY", "None")
-    with pytest.raises(SystemExit, match="GEMINI_API_KEY"):                                   # không có key -> dừng
-        Gemini({"model": "m", "gemini": {}}, log=lambda *a: None)
-
-
 def test_env_last_line_wins_and_export_shadow_reported(tmp_path, monkeypatch):
     from vlm.env import key_source
     p = tmp_path / ".env"
-    p.write_text("OPENAI_API_KEY=sk-old-aaaaaaaa\nOPENAI_API_KEY=sk-new-bbbbbbbb\nGEMINI_API_KEY=g-file-123456\n")
+    p.write_text("OPENAI_API_KEY=sk-old-aaaaaaaa\nOPENAI_API_KEY=sk-new-bbbbbbbb\nOTHER_API_KEY=g-file-123456\n")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv("GEMINI_API_KEY", "sk-your-gemini-key")                             # export sẵn trong shell (chữ mẫu)
+    monkeypatch.setenv("OTHER_API_KEY", "sk-your-other-key")                             # export sẵn trong shell (chữ mẫu)
     load_env(str(p))
     assert require_key("OPENAI_API_KEY") == "sk-new-bbbbbbbb" and key_source("OPENAI_API_KEY") == ".env"
-    assert "KHÁC giá trị trong .env" in key_source("GEMINI_API_KEY")
-
-
-def test_gemini_minute_quota_waits_retry_delay(monkeypatch):
-    """429 theo phút: chờ đúng `retryDelay` Google gợi ý (+1 s) rồi thử lại, không dừng."""
-    monkeypatch.setenv("GEMINI_API_KEY", "AIza-test-abcdefgh")
-    q = Resp(429, {"error": {"status": "RESOURCE_EXHAUSTED", "details": [
-        {"violations": [{"quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"}]}, {"retryDelay": "37s"}]}})
-    ok = Resp(200, {"candidates": [{"content": {"parts": [{"text": "{}"}]}}], "usageMetadata": {}})
-    sleeps = []
-    be = Gemini({"model": "m", "k": 30, "max_tokens": 50, "gemini": {}}, log=lambda *a: None, sleep=sleeps.append, session=Session([q, ok]))
-    assert be.batch([JOB])[0]["text"] == "{}" and sleeps == [38.0]
+    assert "KHÁC giá trị trong .env" in key_source("OTHER_API_KEY")
 
 
 def test_vllm_replan_greedy_plus_samples_joined(monkeypatch):

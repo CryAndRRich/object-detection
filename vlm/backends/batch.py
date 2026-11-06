@@ -3,9 +3,7 @@ gọi thường (cùng payload / model / schema); KHÔNG dùng để đo latency
 - OpenAI (developers.openai.com/api/docs/guides/batch): file JSONL `{"custom_id", "method", "url": "/v1/chat/completions", "body"}`,
   <= 50.000 request và <= 200 MB / file, `completion_window` chỉ `24h`; quá hạn -> `expired`: request xong vẫn trả + tính tiền, chưa xong
   bị huỷ; thứ tự dòng ra có thể khác dòng vào (khớp theo `custom_id`); lỗi từng request ở `error_file_id`.
-- Gemini (ai.google.dev/gemini-api/docs/batch-api): file JSONL `{"key", "request": GenerateContentRequest}` tải lên File API
-  (resumable), <= 2 GB / file; `models/<m>:batchGenerateContent`; mục tiêu 24 giờ, quá 48 giờ -> `JOB_STATE_EXPIRED` (không có kết
-  quả); free tier KHÔNG có Batch; tạo job không idempotent.
+(Gemini Batch đã bỏ cùng ER-2, 2026-11-06 — git giữ lịch sử.)
 An toàn tiền: (1) mỗi lô ghi vào `<out_dir>/batch/state.json` NGAY khi tạo ⇒ chạy lại cùng lệnh thì CHỜ / LẤY lô cũ, không gửi lại;
 (2) file kết quả tải về giữ ở `<out_dir>/batch/`; (3) giá = `price_batch` của config (bảng giá Batch chính thức) — thiếu thì dừng, không
 đoán; (4) runner chặn `--max-cost` TRƯỚC khi gửi (ước theo TB tiền / ảnh đã có; chưa có thì lô đầu chỉ `batch.first` ảnh)."""
@@ -19,31 +17,13 @@ import requests
 
 from vlm.backends import Fatal, backoff, result, token_cost
 
-__all__ = ["BatchBackend", "OpenAIBatchAPI", "GeminiBatchAPI", "LimitError"]
+__all__ = ["BatchBackend", "OpenAIBatchAPI", "LimitError"]
 
 TERMINAL = ("succeeded", "failed", "expired", "cancelled")
 
 
 class LimitError(RuntimeError):
     """Provider từ chối vì hạn mức hàng đợi batch (token đang xếp hàng) — chờ rồi gửi lại, không tốn tiền."""
-
-
-def _find(d, *names):
-    """Giá trị đầu tiên của một trong `names` ở bất kỳ độ sâu nào (docs Gemini ghi lệch `.metadata.state` / `.state`)."""
-    if isinstance(d, dict):
-        for n in names:
-            if d.get(n) not in (None, "", {}):
-                return d[n]
-        for v in d.values():
-            r = _find(v, *names)
-            if r is not None:
-                return r
-    elif isinstance(d, list):
-        for v in d:
-            r = _find(v, *names)
-            if r is not None:
-                return r
-    return None
 
 
 class _HTTP:
@@ -125,82 +105,6 @@ class OpenAIBatchAPI:
         e = e or d.get("error") or {}
         return d.get("custom_id"), result(error=f"batch: {e.get('code')}: {str(e.get('message'))[:200]}",
                                           expired=e.get("code") == "batch_expired", param=e.get("param"), code=e.get("code"))
-
-
-class GeminiBatchAPI:
-    name = "gemini"
-    max_bytes, max_requests = 1.9e9, 100000
-
-    def __init__(self, sync, sleep=time.sleep):
-        self.sync = sync
-        self.root = "https://generativelanguage.googleapis.com"
-        self.h = {"x-goog-api-key": sync.key}
-        self.req = _HTTP(sync.http, sleep)
-
-    def line(self, key, job):
-        return {"key": key, "request": self.sync.payload(job)}
-
-    @staticmethod
-    def _check(r, what):
-        if r.status_code == 200:
-            return
-        t = r.text[:400]
-        if r.status_code == 429 or "RESOURCE_EXHAUSTED" in t:
-            if "free" in t.lower():
-                raise Fatal(f"Gemini {what}: free tier không có Batch API — bật billing ({t[:200]})")
-            raise LimitError(f"Gemini {what} 429: {t[:200]}")
-        raise Fatal(f"Gemini {what} lỗi {r.status_code}: {t}")
-
-    def create(self, data, label):
-        r = self.req("POST", f"{self.root}/upload/v1beta/files", retry429=False, headers={
-            **self.h, "X-Goog-Upload-Protocol": "resumable", "X-Goog-Upload-Command": "start",
-            "X-Goog-Upload-Header-Content-Length": str(len(data)), "X-Goog-Upload-Header-Content-Type": "application/jsonl",
-            "Content-Type": "application/json"}, json={"file": {"display_name": label}})
-        self._check(r, "mở upload")
-        url = r.headers.get("x-goog-upload-url") or r.headers.get("X-Goog-Upload-URL")
-        if not url:
-            raise Fatal("Gemini không trả x-goog-upload-url")
-        r = self.req("POST", url, headers={"Content-Length": str(len(data)), "X-Goog-Upload-Offset": "0",
-                                           "X-Goog-Upload-Command": "upload, finalize"}, data=data)
-        self._check(r, "tải file")
-        fname = _find(r.json(), "name")
-        r = self.req("POST", f"{self.root}/v1beta/models/{self.sync.cfg['model']}:batchGenerateContent", retry429=False,
-                     headers={**self.h, "Content-Type": "application/json"},
-                     json={"batch": {"display_name": label, "input_config": {"file_name": fname}}})
-        self._check(r, "tạo batch")
-        name = r.json().get("name") or _find(r.json(), "name")
-        if not name:
-            raise Fatal(f"Gemini tạo batch không trả tên: {r.text[:200]}")
-        return name
-
-    def status(self, name):
-        r = self.req("GET", f"{self.root}/v1beta/{name}", headers=self.h)
-        self._check(r, f"đọc {name}")
-        d = r.json()
-        raw = str(_find(d, "state") or "")
-        state = next((s for s in TERMINAL if raw.upper().endswith(s.upper())), "running")
-        if raw.upper().endswith("CANCELED"):
-            state = "cancelled"
-        st = _find(d, "batchStats") or {}
-        # file KẾT QUẢ: `responsesFile` (output / response) hoặc `dest.fileName` — KHÔNG lấy `fileName` bất kỳ: trạng thái job còn chứa
-        # `inputConfig.fileName` = file ĐẦU VÀO đã tải lên (tải về -> 400 "Only GENERATED files can be downloaded", lỗi 2026-11-04)
-        f = _find(d, "responsesFile") or _find(_find(d, "dest") or {}, "fileName")
-        err = _find(d, "error")
-        return {"state": state, "raw": raw, "done": int(st.get("successfulRequestCount") or 0),
-                "failed": int(st.get("failedRequestCount") or 0), "total": st.get("requestCount"), "files": [f] if f else [],
-                "reason": str(err)[:400] if err else "", "limit": False}
-
-    def download(self, fname):
-        r = self.req("GET", f"{self.root}/download/v1beta/{fname}:download", headers=self.h, params={"alt": "media"})
-        self._check(r, f"tải {fname}")
-        return r.text
-
-    def parse_line(self, d):
-        k = d.get("key")
-        if isinstance(d.get("response"), dict):
-            return k, self.sync.parse(d["response"])
-        e = d.get("error") or d.get("status") or {}
-        return k, result(error=f"batch: {str(e)[:250]}")
 
 
 class BatchBackend:
@@ -305,7 +209,7 @@ class BatchBackend:
             if st["raw"] != raw_last or now - t_last >= self.log_every or st["state"] in TERMINAL:
                 el = now - p["created"]
                 self.log(f"[batch] {p['id']} {st['raw']} | {st['done']}/{st['total'] or len(p['keys'])} xong, {st['failed']} lỗi | "
-                         f"đã chờ {int(el // 3600)}h{int(el % 3600 // 60):02d}m (hạn: OpenAI 24h, Gemini 48h) | "
+                         f"đã chờ {int(el // 3600)}h{int(el % 3600 // 60):02d}m (hạn OpenAI 24h) | "
                          f"{time.strftime('%Y-%m-%d %H:%M:%S')}")
                 t_last, raw_last = now, st["raw"]
             if st["state"] in TERMINAL:
@@ -335,7 +239,7 @@ class BatchBackend:
                         r["cost"] = token_cost(r, self.price)
                     res[k] = r
         for k in p["keys"]:
-            if k not in res:                       # Gemini hết hạn / huỷ: không có dòng -> chưa tính tiền, gửi lại
+            if k not in res:                       # hết hạn / huỷ: không có dòng -> chưa tính tiền, gửi lại
                 res[k] = result(error=f"batch {p['id']} {p['status']}: không có kết quả", resubmit=True)
             elif res[k].get("expired"):
                 res[k]["resubmit"] = True

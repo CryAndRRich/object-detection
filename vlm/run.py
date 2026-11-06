@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """ZETA5 / ZETA6: một VLM trả 30 box chỗ thêm vật / ảnh trên CE-130 `test_all` + CE-CoCount `review5`, chấm bằng code chấm CE-Loc
-(`baseline/score.py`). Một config = một model (`config/{openrouter,server,gemini}/`). Key: `vlm/.env` (mẫu `.env.example`).
+(`baseline/score.py`). Một config = một model (`config/{openrouter,kaggle,server,server2}/`). Key: `vlm/.env` (mẫu `.env.example`).
 
   cd /mnt/disk1/aiotlab/haitn/object-detection/vlm
   python run.py --config config/openrouter/gpt-6-luna.yaml --pilot 5 --dry-run       # xem prompt, KHÔNG gọi API
   python run.py --config config/openrouter/gpt-6-luna.yaml --pilot 50                # thử 50 ảnh / tập, in tiền + ước cả tập
   python run.py --config config/openrouter/gpt-6-luna.yaml --all --max-cost 10       # toàn bộ test (dùng lại câu trả lời pilot)
-  # vLLM (venv riêng): python ../tools/run_on_free_gpu.py -- run.py --config config/server/internvl3.5-8b.yaml --pilot 50 --no-score
-  #   rồi venv chính:  python run.py --config config/server/internvl3.5-8b.yaml --pilot 50 --score-only
+  # vLLM (venv riêng): python ../tools/run_on_free_gpu.py -- run.py --config config/server2/internvl3.5-8b.yaml --pilot 50 --no-score
+  #   rồi venv chính:  python run.py --config config/server2/internvl3.5-8b.yaml --pilot 50 --score-only
 
 Output `<out-root>/<name>/{ce130_test_all,cocount_review5}/`: `<pilotK|test>.jsonl` (1 dòng / ảnh: box + score + reason + C-NLL
 từng box + token / tiền + text), `<..>.json` (số tổng: `top_score` = CHÍNH, `min_cnll_30` tham khảo; tiền, token, ước cả tập),
@@ -43,7 +43,7 @@ def parse_args(argv=None):
     mode.add_argument("--all", action="store_true", help="toàn bộ tập test")
     ap.add_argument("--dataset", default="all", choices=["ce130", "cocount", "all"])
     ap.add_argument("--max-cost", type=float, default=None, help="USD tối đa cho lần chạy này (cả hai tập); chạm thì dừng êm")
-    ap.add_argument("--batch", action="store_true", help="Batch API (openai | gemini): giá 50 %%, trả trong <= 24 h; không đo latency")
+    ap.add_argument("--batch", action="store_true", help="Batch API (chỉ backend openai): giá 50 %%, trả trong <= 24 h; không đo latency")
     ap.add_argument("--dry-run", action="store_true", help="in prompt 2 ảnh đầu, không gọi model, không cần key")
     ap.add_argument("--no-score", action="store_true", help="chỉ sinh câu trả lời (venv vLLM)")
     ap.add_argument("--score-only", action="store_true", help="chỉ chấm từ responses.jsonl, không gọi model")

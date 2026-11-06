@@ -8,15 +8,17 @@ Latency = thời gian thực (wall-clock) từ lúc đưa MỘT ảnh (+ tên l�
     sinh token), đưa box về pixel ảnh gốc (VLM: parse JSON). GPU đồng bộ (`torch.cuda.synchronize`) trước khi bấm giờ;
   - KHÔNG gồm: thời gian đĩa (mọi file của tập đo được đọc trước một lần ⇒ nằm trong page cache), nạp model, nhúng CLIP tên lớp
     (CE-Loc / HiddenObjects tính sẵn một lần cho mọi lớp, như bảng tra), chấm C-NLL;
-  - tập đo: `--n` ảnh / tập (mặc định 20 CE-130 `test_all` + 20 CE-CoCount `review5`) = đúng `pilot 20` của VLM (hash seed 0);
-  - VLM qua API (OpenRouter / Gemini): cùng cách đo, gồm mạng + hàng đợi provider ⇒ `kind: api`, không so trực tiếp với GPU. Mỗi ảnh
-    MỘT lần gọi (không thử lại khi 0 box; `n_valid` ghi kèm). VLM vLLM: config như lúc chạy full (`tensor_parallel_size` ghi kèm).
+  - tập đo: `--n` ảnh / tập (mặc định 100 CE-130 `test_all` + 100 CE-CoCount `review5`, chốt 2026-11-06) = 100 ảnh đầu theo hash
+    seed 0 (= `pilot 100` của VLM, chứa pilot 20); warm-up = các ảnh kế tiếp theo hash;
+  - VLM qua API (OpenRouter): cùng cách đo, gồm mạng + hàng đợi provider ⇒ `kind: api`, không so trực tiếp với GPU. Mỗi ảnh
+    MỘT lần gọi (không thử lại khi 0 box; `n_valid` ghi kèm). VLM vLLM: config như lúc chạy full (`tensor_parallel_size` ghi kèm);
+    RePlan (ZETA4): 1 ảnh = câu greedy + 29 câu sample (đủ 30 box).
 Báo CHỈ số TB giây / ảnh (mỗi tập + chung) kèm tên GPU. Ra `<out-root>/<name>.json` (mặc định `output/add/latency/`), có từng ảnh.
 
   cd /mnt/disk1/aiotlab/haitn/object-detection
   python tools/run_on_free_gpu.py -- tools/latency.py celoc --ckpt weights/add/delta8/snapshots/ep010.pth
-  python tools/run_on_free_gpu.py -- tools/latency.py zeta --config baseline/config/zeta1.yaml --ckpt weights/add/zeta1/best.pth
-  python tools/latency.py vlm --config vlm/config/kaggle/qwen3-vl-4b.yaml                     # môi trường có vLLM (Kaggle)
+  python tools/run_on_free_gpu.py -- tools/latency.py zeta --config baseline/config/zeta3.yaml --ckpt weights/add/zeta3/best.pth
+  <venv vllm>/bin/python tools/run_on_free_gpu.py -- tools/latency.py vlm --config vlm/config/server2/qwen3-vl-4b.yaml   # server 2
   python tools/latency.py vlm --config vlm/config/openrouter/glm-5.3-flash.yaml               # API (key trong vlm/.env)
 """
 
@@ -33,7 +35,7 @@ sys.path.insert(0, ROOT)
 
 import numpy as np  # noqa: E402
 
-PICK_SEED = 0                    # = seed chọn pilot của VLM ⇒ tập đo = pilot 20
+PICK_SEED = 0                    # = seed chọn pilot của VLM ⇒ tập đo = pilot `--n`
 DATASETS = ("ce130", "cocount")
 DEFINITION = ("1 ảnh / lần (batch 1), sau warm-up trên ảnh khác; từ đọc + giải mã ảnh (file đã trong page cache) tới 30 box pixel "
               "ảnh gốc: gồm tiền xử lý, model, đọc box; không gồm nạp model, nhúng CLIP tên lớp (tính sẵn), chấm C-NLL; "
@@ -251,7 +253,7 @@ def parse_args(argv=None):
             p.add_argument("--ce130-root", default=os.path.join(ROOT, "data", "all_phase2_V2"))
         p.add_argument("--name", default=None, help="tên file ra (mặc định: celoc <run>_<ckpt>, zeta <config>_<ckpt>, vlm cfg name)")
         p.add_argument("--datasets", nargs="+", default=list(DATASETS), choices=DATASETS)
-        p.add_argument("--n", type=int, default=20, help="số ảnh đo / tập (= pilot 20 của VLM)")
+        p.add_argument("--n", type=int, default=100, help="số ảnh đo / tập (= pilot 100 của VLM, chốt 2026-11-06)")
         p.add_argument("--warmup", type=int, default=3, help="số ảnh warm-up / tập (khác tập đo, không tính)")
         p.add_argument("--seed", type=int, default=0, help="seed nhiễu của model (CE-Loc / CSANet), như eval")
         p.add_argument("--out-root", default=os.path.join(ROOT, "..", "output", "add", "latency"))
@@ -282,7 +284,7 @@ def main(argv=None):
         log(f"[latency] {d}: đo {len(measured)} / {len(samples)} ảnh, warm-up {len(warm)}")
         rows[d] = [{"dataset": d, **r} for r in measure(run, measured, warm, prefetch, m.sync, tag=d)]
     sm = summarize(rows)
-    kind = "api" if a.method == "vlm" and m.cfg["backend"] in ("openai", "openrouter", "gemini") else "local"
+    kind = "api" if a.method == "vlm" and m.cfg["backend"] in ("openai", "openrouter") else "local"
     res = {"name": name, "method": a.method, "kind": kind, "definition": DEFINITION, **sm, "gpu": gpus if kind == "local" else None,
            "host": socket.gethostname(), "date": time.strftime("%Y-%m-%d %H:%M"), "n_per_dataset": a.n, "warmup": a.warmup,
            "pick_seed": PICK_SEED, **m.info, "images": [r for d in a.datasets for r in rows[d]]}

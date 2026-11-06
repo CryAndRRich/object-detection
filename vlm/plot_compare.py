@@ -2,11 +2,11 @@
 """So box các VLM: hình 2 × 3 / ảnh (chữ trong hình tiếng Anh).
 
   hàng 1: Original (ảnh model nhận + vật đang có xanh dương + box GT xanh lá nét đứt) | GLM-5.3-Flash | gpt-4.1-mini
-  hàng 2: GPT-6 Luna | LLaVA-OV-2-8B | Gemini ER-2
+  hàng 2: GPT-6 Luna | LLaVA-OV-2-8B | Qwen3-VL-4B   (`--models` chọn tối đa 5 model khác, vd RePlan / InternVL)
 
 Ô model vẽ box dự đoán (đỏ mảnh) + một box đỏ đậm: `--bold min` (mặc định) = box C-NLL thấp nhất, `--bold top` = box `score` cao
 nhất (= box chấm chính ZETA5 / 6). Tiêu đề "<tên>, CNLL = <C-NLL box đậm>"; Original = C-NLL thấp nhất của box GT. VLM =
-`output/add/vlm/<model>/<tập>/<name>.jsonl` (1 dòng / ảnh, box xếp theo score); model chưa có `<name>.jsonl` (vd ER-2 mới pilot500)
+`output/add/vlm/<model>/<tập>/<name>.jsonl` (1 dòng / ảnh, box xếp theo score); model chưa có `<name>.jsonl` (vd mới chạy pilot)
 ⇒ lấy `pilot<K>.jsonl` K lớn nhất; dump cũ `<name>_boxes.json` (pilot chấm trước 2026-11-04) vẫn đọc được. Box lặp vòng (VLM thiếu
 box) gộp lại khi vẽ. Box dump là pixel canvas 512 (letterbox góc trên trái) -> chia tỉ lệ về pixel ảnh gốc. Chỉ đọc JSON + ảnh.
 
@@ -38,8 +38,9 @@ from PIL import Image  # noqa: E402
 from ce_localization.data.turns import TurnIndex, iter_jsonl, letterbox_size, present_objects  # noqa: E402
 
 OUT = os.path.join(ROOT, "..", "output", "add")
-MODELS = [("glm-5.3-flash", "GLM-5.3-Flash"), ("gpt-4.1-mini", "gpt-4.1-mini"), ("gpt-6-luna", "GPT-6 Luna"),
-          ("llava-ov2-8b", "LLaVA-OV-2-8B"), ("robotics-er-2", "Gemini ER-2")]
+NAMES = {"glm-5.3-flash": "GLM-5.3-Flash", "gpt-4.1-mini": "gpt-4.1-mini", "gpt-6-luna": "GPT-6 Luna", "llava-ov2-8b": "LLaVA-OV-2-8B",
+         "qwen3-vl-4b": "Qwen3-VL-4B", "internvl3.5-8b": "InternVL3.5-8B", "replan-7b": "RePlan (ZETA4)"}
+MODELS = [(m, NAMES[m]) for m in ("glm-5.3-flash", "gpt-4.1-mini", "gpt-6-luna", "llava-ov2-8b", "qwen3-vl-4b")]
 DSET = {"ce130": ("ce130_test_all", "inpainted"), "cocount": ("cocount_review5", "cocount")}
 BLUE, GREEN, RED = "#1e6fff", "#00b050", "#e8000b"
 
@@ -127,7 +128,7 @@ def model_panel(ax, img, name, boxes, cnll, bold="min"):
     draw(ax, img, boxes[i:i + 1], RED, 2.4)
 
 
-def figure(dataset, image_id, a, vlm, out_path):
+def figure(dataset, image_id, a, vlm, out_path, models=MODELS):
     path, wh, objs, holes = scene(dataset, image_id, a)
     img = Image.open(path).convert("RGB")
     pw = 5.0                                                     # inch / ô
@@ -140,7 +141,7 @@ def figure(dataset, image_id, a, vlm, out_path):
     panel(axes[0, 0], img, f"Original, CNLL = {gt[0]:.2f}" if gt else "Original")
     draw(axes[0, 0], img, objs, BLUE, 0.9)
     draw(axes[0, 0], img, holes, GREEN, 1.6, ls="--")
-    for ax, (key, name) in zip(axes.flat[1:], MODELS):
+    for ax, (key, name) in zip(axes.flat[1:], models):
         r = vlm[key].get(image_id)
         if r is None:
             panel(ax, img, f"{name}, missing")
@@ -171,6 +172,7 @@ def main(argv=None):
     ap.add_argument("--name", default="test", help="tên lần chạy VLM (file <name>.jsonl; thiếu -> pilot<K>.jsonl K lớn nhất)")
     ap.add_argument("--pilot", type=int, default=None, help="chỉ vẽ K ảnh pilot (hash seed 0, cùng tập run.py --pilot K)")
     ap.add_argument("--bold", default="min", choices=["min", "top"], help="box đậm: C-NLL thấp nhất | score cao nhất")
+    ap.add_argument("--models", nargs="+", default=None, choices=list(NAMES), help="tối đa 5 model (mặc định: 5 model ZETA5 / 6 đã chạy)")
     ap.add_argument("--n", type=int, default=None, help="chỉ vẽ n ảnh đầu (theo thứ tự trong dump VLM)")
     ap.add_argument("--ids", nargs="*", default=None, help="chỉ vẽ các image_id này")
     ap.add_argument("--vlm-root", default=os.path.join(OUT, "vlm"))
@@ -182,14 +184,15 @@ def main(argv=None):
     a = ap.parse_args(argv)
     for dataset in (["ce130", "cocount"] if a.dataset == "all" else [a.dataset]):
         dset_dir, key = DSET[dataset]
-        vlm = {m: load_vlm(a.vlm_root, m, dset_dir, a.name, key) for m, _ in MODELS}
+        models = [(m, NAMES[m]) for m in a.models[:5]] if a.models else MODELS
+        vlm = {m: load_vlm(a.vlm_root, m, dset_dir, a.name, key) for m, _ in models}
         ids = a.ids or max((list(v) for v in vlm.values()), key=len)              # thứ tự gốc của tập (file full)
         if a.pilot:
             from vlm.runner import select
             ids = [s["image_id"] for s in select([{"image_id": i} for i in ids], 0, a.pilot)]
         for image_id in ids[:a.n] if a.n else ids:
             out = os.path.join(a.out, dset_dir, f"{image_id}.png")
-            figure(dataset, image_id, a, vlm, out)
+            figure(dataset, image_id, a, vlm, out, models)
             print(out)
 
 

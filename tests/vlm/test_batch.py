@@ -1,13 +1,13 @@
-"""`run.py --batch` với HTTP giả (không mạng): OpenAI / Gemini Batch API — file JSONL đúng dạng, chờ tới trạng thái cuối, khớp kết quả
+"""`run.py --batch` với HTTP giả (không mạng): OpenAI Batch API — file JSONL đúng dạng, chờ tới trạng thái cuối, khớp kết quả
 theo khoá (thứ tự dòng ra khác dòng vào), tiền theo `price_batch`, request hết hạn gửi lại, CHẠY LẠI KHÔNG GỬI TRÙNG (dùng lô trong
-state.json), hàng đợi đầy thì chờ rồi gửi lại, free tier Gemini = Fatal, chặn `--max-cost` trước khi gửi."""
+state.json), chặn `--max-cost` trước khi gửi."""
 
 import json
 
 import pytest
 
 from vlm.backends import Fatal, make_backend
-from vlm.backends.batch import BatchBackend, GeminiBatchAPI, OpenAIBatchAPI
+from vlm.backends.batch import BatchBackend, OpenAIBatchAPI
 from vlm.runner import batch_size
 
 
@@ -134,72 +134,6 @@ def test_rerun_reuses_submitted_batch_no_double_submit(monkeypatch, tmp_path):
     st["outputs"].append([ok_line("im0#1")])
     be2.batch(retry)
     assert len(st["batches"]) == 2
-
-
-def gemini_server(state):
-    def route(method, url, kw):
-        h = kw.get("headers") or {}
-        if url.endswith("/upload/v1beta/files"):
-            assert h["X-Goog-Upload-Command"] == "start" and h["x-goog-api-key"]
-            if state.get("upload_fail"):
-                return R(429, {"error": {"status": "RESOURCE_EXHAUSTED", "message": state["upload_fail"]}})
-            return R(200, {}, headers={"x-goog-upload-url": "https://up/1"})
-        if url == "https://up/1":
-            assert h["X-Goog-Upload-Command"] == "upload, finalize"
-            state["files"].append(kw["data"].decode())
-            return R(200, {"file": {"name": "files/in1"}})
-        if url.endswith(":batchGenerateContent"):
-            state["create"].append(kw["json"])
-            if state.pop("limit_once", False):
-                return R(429, {"error": {"status": "RESOURCE_EXHAUSTED", "message": "enqueued tokens exceeded"}})
-            return R(200, {"name": "batches/b1", "metadata": {"state": "BATCH_STATE_PENDING"}})
-        if url.endswith("/v1beta/batches/b1"):                 # như API thật: inputConfig.fileName (file vào) đứng trước output
-            return R(200, {"name": "batches/b1", "done": True, "metadata": {
-                "inputConfig": {"fileName": "files/in1"}, "state": "BATCH_STATE_SUCCEEDED",
-                "batchStats": {"requestCount": 3, "successfulRequestCount": 3}, "output": {"responsesFile": "files/out1"}}})
-        if "files/in1:download" in url:
-            return R(400, {"error": {"code": 400, "message": "Only GENERATED files can be downloaded."}})
-        if "files/out1:download" in url:
-            return R(200, text="".join(json.dumps(x) + "\n" for x in state["out"]))
-        raise AssertionError(url)
-    return route
-
-
-def gem_resp(text="{}"):
-    return {"candidates": [{"content": {"parts": [{"text": text}]}, "finishReason": "STOP"}],
-            "usageMetadata": {"promptTokenCount": 4000, "candidatesTokenCount": 600, "cachedContentTokenCount": 3000}}
-
-
-def _gem(monkeypatch, tmp_path, st):
-    from vlm.backends.gemini import Gemini
-    monkeypatch.setenv("GEMINI_API_KEY", "AIza-test-abcdefgh")
-    cfg = {"name": "robotics-er-2", "model": "gemini-robotics-er-2-preview", "k": 30, "max_tokens": 50, "gemini": {},
-           "price": {"in": 1.0, "out": 5.0, "cached": 0.1}, "price_batch": {"in": 0.5, "out": 2.5}, "batch": {"poll_sec": 1}}
-    sleeps = []
-    sync = Gemini(cfg, log=lambda *a: None, sleep=sleeps.append, session=Fake(gemini_server(st)))
-    be = BatchBackend(sync, GeminiBatchAPI(sync, sleeps.append), cfg, log=lambda *a: None, sleep=sleeps.append)
-    be.set_state_dir(str(tmp_path / "batch"))
-    return be, sleeps
-
-
-def test_gemini_batch_flow_and_queue_limit_wait(monkeypatch, tmp_path):
-    st = {"files": [], "create": [], "limit_once": True,
-          "out": [{"key": f"im{i}#0", "response": gem_resp(f'{{"i": {i}}}')} for i in (2, 0, 1)]}
-    be, sleeps = _gem(monkeypatch, tmp_path, st)
-    out = be.batch(JOBS)
-    assert [o["text"] for o in out] == ['{"i": 0}', '{"i": 1}', '{"i": 2}']
-    assert len(st["create"]) == 2 and 900.0 in sleeps                                               # hàng đợi đầy: chờ 15 phút
-    line = json.loads(st["files"][-1].splitlines()[0])
-    assert line["key"] == "im0#0" and line["request"]["generationConfig"]["responseMimeType"] == "application/json"
-    assert st["create"][0]["batch"]["input_config"] == {"file_name": "files/in1"}
-    assert out[0]["cached"] == 3000 and out[0]["cost"] == pytest.approx((4000 * 0.5 + 600 * 2.5) / 1e6)  # cache batch = giá vào
-
-
-def test_gemini_free_tier_batch_is_fatal(monkeypatch, tmp_path):
-    st = {"files": [], "create": [], "out": [], "upload_fail": "Batch API is not available for free tier users"}
-    be, _ = _gem(monkeypatch, tmp_path, st)
-    with pytest.raises(Fatal, match="free tier không có Batch"):
-        be.batch(JOBS)
 
 
 def test_batch_needs_price_and_supported_backend(monkeypatch):

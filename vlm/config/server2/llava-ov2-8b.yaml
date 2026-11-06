@@ -1,0 +1,9 @@
+# LLaVA-OneVision-2-8B (ZETA6) trên server 2 — y hệt `kaggle/llava-ov2-8b.yaml` (fp16, prompt / ảnh / max_model_len / coord /
+# chat_template_kwargs), chỉ đổi khoá NGOÀI prompt_hash: một card, KV 24 GiB, 64 chuỗi ⇒ cùng hash `23ef3969c451` (test khẳng định).
+base: ../kaggle/llava-ov2-8b.yaml
+vllm:
+  gpu_mem_gib: 44.0
+  kv_cache_gib: 24.0
+engine:
+  tensor_parallel_size: 1
+  max_num_seqs: 64

@@ -9,7 +9,7 @@ ZETA1–3 / DELTA vẫn lấy box C-NLL thấp nhất trong 30). Tham khảo: mi
 - system prompt và câu hỏi user nguyên văn ("Canvas size: WxH.\nObject(s) to insert: …"), text rồi ảnh;
 - canvas = cỡ ảnh gốc, ảnh gửi nguyên file (`image.max_side: null`), toạ độ pixel canvas;
 - JSON theo schema `insertion_layout` của tác giả (`candidates`: name, box, score, placement_type, reason), gửi **qua API**
-  (OpenRouter `response_format` + `provider.require_parameters`, Gemini `responseJsonSchema`, vLLM structured outputs; strict False),
+  (OpenRouter `response_format` + `provider.require_parameters`, vLLM structured outputs; strict False),
   xếp theo `score` giảm dần. Model / bản vLLM không nhận schema ⇒ dừng (`Fatal`);
 - few-shot = 2 hội thoại của tác giả (`icl: author`, file `icl/author.json`; ảnh lấy từ `data/all_phase2_V2/`), hay `icl: 0`
   (zero-shot);
@@ -25,31 +25,31 @@ Quyết định, lý do chọn model, kết quả: `docs/EXPERIMENT_ZETA.md` m�
 
 | nhóm | config | model | chạy ở đâu | ghi chú |
 |---|---|---|---|---|
-| **ZETA5** thương mại | `config/gemini/robotics-er-2.yaml` | `gemini-robotics-er-2-preview` | Gemini API (full: Batch `--batch`) | chuyên không gian; thinking minimal; cần billing |
-| | `config/openrouter/gpt-6-luna.yaml` | `openai/gpt-6-luna` | OpenAI, dự phòng OpenRouter | họ OpenAI; tắt suy nghĩ; không nhận temperature |
-| | `config/openrouter/gpt-4.1-mini.yaml` | `openai/gpt-4.1-mini` | OpenAI, dự phòng OpenRouter (full: OpenRouter gọi thường) | đúng model tác giả dùng; $0,4 / $1,6 |
 | **ZETA4** RePlan | `config/server2/replan-7b.yaml` | `TainU/RePlan-Qwen2.5-VL-7B` (planner) | server 2, vLLM | prompt / parse riêng (`prompt: replan`): greedy = box chính + 29 sample; ZETA mục 14 |
-| **ZETA6** open-source | *(chưa có config)* | Qwen3-VL-4B | GPU server, vLLM | |
-| | `config/openrouter/glm-5.3-flash.yaml` | `z-ai/glm-5.3-flash` | OpenRouter (320B MoE, không vừa A30) | suy nghĩ `low` (không tắt được) |
-| | `config/server/internvl3.5-8b.yaml` | `OpenGVLab/InternVL3_5-8B` | GPU server, vLLM | FP8 chỉ weight |
-| | `config/server/llava-ov2-8b.yaml` | `lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct` | GPU server, vLLM | docs không nói có ra box ⇒ pilot quyết định |
+| **ZETA5** thương mại | `config/openrouter/gpt-6-luna.yaml` | `openai/gpt-6-luna` | OpenAI, dự phòng OpenRouter (full: OpenRouter) | họ OpenAI; tắt suy nghĩ; không nhận temperature |
+| | `config/openrouter/gpt-4.1-mini.yaml` | `openai/gpt-4.1-mini` | OpenAI, dự phòng OpenRouter (full: OpenRouter) | đúng model tác giả dùng; $0,4 / $1,6 |
+| **ZETA6** open-source | `config/kaggle/qwen3-vl-4b.yaml` (+ `server2/`, cùng hash) | `Qwen/Qwen3-VL-4B-Instruct` | Kaggle 2 × T4 / server 2, vLLM | fp16, `coord: norm1000` |
+| | `config/kaggle/llava-ov2-8b.yaml` (+ `server2/`, cùng hash) | `lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct` | Kaggle 2 × T4 / server 2, vLLM | fp16, `coord: norm1000` |
+| | `config/server2/internvl3.5-8b.yaml` | `OpenGVLab/InternVL3_5-8B` | server 2, vLLM | bf16 (bản Kaggle fp16 khác hash), `coord: norm1000` |
+| | `config/openrouter/glm-5.3-flash.yaml` | `z-ai/glm-5.3-flash` | OpenRouter (320B MoE) | suy nghĩ `low` (không tắt được) |
+
+Bỏ: Gemini Robotics-ER 2 (2026-11-06, cùng backend Gemini; pilot 10 / pilot500 giữ ở ZETA mục 13.2). `config/server/` (A30 FP8) chưa
+chạy (GPU dùng chung không đủ chỗ).
 
 ZETA6: ưu tiên chạy trên GPU server; OpenRouter nếu rẻ; nặng quá thì hạ bản nhỏ hơn. Đã thử và loại: Perceptron, Elorian Glimpse,
 Qwen3.8-27B — xem `docs/EXPERIMENT_ZETA.md` mục 0.
 
 ## Key
 
-Chép `.env.example` thành `vlm/.env` rồi điền `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`.
+Chép `.env.example` thành `vlm/.env` rồi điền `OPENAI_API_KEY`, `OPENROUTER_API_KEY`.
 - `vlm/.env` đã bị gitignore: đừng commit, đừng dán key vào chat / log.
 - Code chỉ in tên biến và 4 ký tự cuối của key; kiểm key OpenRouter bắt đầu bằng `sk-or-`, key không có ký tự trắng / lạ.
 - Biến môi trường đã `export` được ưu tiên hơn file. Giá trị trống / `None` / `null` / `<...>` = không có key.
 - **Thứ tự key** (`backend` rồi `fallback` trong config): GPT-6 Luna, gpt-4.1-mini = `openai` -> `openrouter`. Key trống / sai / hết
   tiền (lúc khởi động hay giữa chừng) -> chuyển cái sau, ảnh đang dở gửi lại; hết danh sách -> dừng êm (câu trả lời đã có vẫn giữ).
-  Hai đường cùng model nên cùng `prompt_hash` (dùng lại pilot); mỗi câu trả lời ghi `provider`. Gemini / GLM chỉ một đường: thiếu key
-  -> dừng.
+  Hai đường cùng model nên cùng `prompt_hash` (dùng lại pilot); mỗi câu trả lời ghi `provider`. GLM chỉ một đường: thiếu key -> dừng.
 - **Số dư**: OpenRouter in số dư `/credits` lúc khởi động, số dư <= 0 -> bỏ đường đó. OpenAI không có API đọc số dư cho key thường
-  ⇒ gửi một request thăm dò 16 token (~$0,00001): `insufficient_quota` -> bỏ. Gemini: không có API số dư; hết quota ngày (free tier)
-  -> dừng, chạy lại hôm sau. Tiền một lần chạy chặn bằng `--max-cost`. OpenAI không trả tiền mỗi request ⇒ tính token × `price`
+  ⇒ gửi một request thăm dò 16 token (~$0,00001): `insufficient_quota` -> bỏ. Tiền một lần chạy chặn bằng `--max-cost`. OpenAI không trả tiền mỗi request ⇒ tính token × `price`
   (`price.cached` cho token vào đã cache).
 
 ## Chạy (từ `object-detection/vlm/`)
@@ -62,11 +62,11 @@ Chép `.env.example` thành `vlm/.env` rồi điền `OPENAI_API_KEY`, `OPENROUT
 | `--dataset ce130 \| cocount \| all` | mặc định `all` (cả hai tập) |
 | `--max-cost USD` | dừng êm khi tiền lần chạy này chạm ngưỡng; câu trả lời đã lưu, chạy lại cùng lệnh để tiếp |
 | `--no-score` / `--score-only` | tách sinh câu trả lời (venv vLLM) và chấm (venv chính) |
-| `--batch` | Batch API (backend `openai` / `gemini`): giá token 50 %, trả trong <= 24 giờ; câu trả lời như gọi thường; không đo latency |
+| `--batch` | Batch API (chỉ backend `openai`): giá token 50 %, trả trong <= 24 giờ; câu trả lời như gọi thường; không đo latency |
 
-**Batch API** (`--batch`; `vlm/backends/batch.py`, docs OpenAI / Gemini đọc 2026-11-04):
+**Batch API** (`--batch`; `vlm/backends/batch.py`, docs OpenAI đọc 2026-11-04; Gemini Batch bỏ cùng ER-2 2026-11-06):
 - Giá = `price_batch` của config (bảng Batch chính thức; thiếu thì dừng). Hạn: OpenAI 24 giờ (quá hạn: request xong vẫn trả + tính
-  tiền, phần chưa xong huỷ, không tính), Gemini mục tiêu 24 giờ, quá 48 giờ hết hạn. Gemini free tier không có Batch (cần billing).
+  tiền, phần chưa xong huỷ, không tính).
 - Lô đầu `batch.first` (20) ảnh để đo giá; sau đó cả phần còn lại một lô (`batch.chunk` 10.000), tự chia thành phần <=
   `batch.max_requests` (1.000) / <= 190 MB (OpenAI) gửi song song. `--max-cost` chặn TRƯỚC khi gửi (ước theo TB tiền / ảnh đã có).
 - Không gửi trùng: mỗi lô ghi vào `<tập>/batch/state.json` ngay khi tạo, file kết quả tải về giữ cạnh đó ⇒ bị ngắt thì chạy lại cùng
@@ -87,7 +87,7 @@ Box vật CoCount đã rà tay: `--cocount-review` mặc định `../data/cocoun
   luật này. Ảnh không box nào có score (JSON không theo schema / regex) ⇒ box đầu model trả, đếm `n_noscore`.
 - **OpenRouter**: bỏ tham số model không nhận (theo `/api/v1/models`), in hạn mức key + số dư lúc khởi động.
 - **Tiến độ** mỗi ~60 s (ảnh xong, ETA, $, token vào / ra / suy nghĩ, 0 box / thiếu box). **Ước cả tập** in cuối lần chạy, ghi vào
-  `<name>_run.json`: tiền = TB $/ảnh × số ảnh (kèm p90), giờ = số ảnh × giây / lần gọi ÷ song song (Gemini còn chặn theo `rpm`).
+  `<name>_run.json`: tiền = TB $/ảnh × số ảnh (kèm p90), giờ = số ảnh × giây / lần gọi ÷ song song.
 
 Output ở `output/add/vlm/<model>/{ce130_test_all,cocount_review5}/` (dưới gốc `multi_condition/` hay `/mnt/disk1/aiotlab/haitn/`),
 tên file theo `pilot<K>` hay `test`:
@@ -109,13 +109,15 @@ Log: `log/add/vlm/<model>/`; log launcher (chạy nhiều model một lượt) �
 
 ## So box các VLM — `plot_compare.py`
 
-Hình 2 × 3 / ảnh (chữ tiếng Anh): ô Original (ảnh + vật đang có + box GT) và 5 ô model (GLM-5.3-Flash, gpt-4.1-mini, GPT-6 Luna,
-LLaVA-OV-2-8B, Gemini ER-2): box dự đoán đỏ mảnh + một box đỏ đậm — `--bold min` (mặc định) box C-NLL thấp nhất, `--bold top` box
+Hình 2 × 3 / ảnh (chữ tiếng Anh): ô Original (ảnh + vật đang có + box GT) và 5 ô model (mặc định GLM-5.3-Flash, gpt-4.1-mini, GPT-6 Luna,
+LLaVA-OV-2-8B, Qwen3-VL-4B; `--models` chọn khác, vd `replan-7b`, `internvl3.5-8b`): box dự đoán đỏ mảnh + một box đỏ đậm — `--bold min` (mặc định) box C-NLL thấp nhất, `--bold top` box
 `score` cao nhất. Đọc `output/add/vlm/<model>/<tập>/test.jsonl` (model chưa chạy full thì `pilot<K>.jsonl` K lớn nhất) + ảnh, ghi
 `output/add/viz/vlm_compare/<tập>/<image_id>.png`.
 
 ```bash
 python plot_compare.py --dataset all --pilot 20      # 20 ảnh pilot (cùng tập run.py --pilot 20) cả hai tập; --n 1 = thử 1 ảnh
+python plot_compare.py --dataset all --pilot 10 --bold top --models replan-7b glm-5.3-flash gpt-4.1-mini llava-ov2-8b internvl3.5-8b \
+    --out ../../output/add/viz/vlm_compare_replan       # chọn model (tối đa 5)
 ```
 
 ## Kaggle 2 × T4 (vLLM) — ZETA6 open-source (chốt 2026-11-04)
@@ -130,7 +132,7 @@ xong / bị dừng thì gộp vào `responses.jsonl` (resume đọc cả file ch
 `MODELS` × `DATASETS` (pilot: đủ cả hai để thử một lượt; full: mỗi lần một model × một tập = 6 lần), mỗi model `--pilot K` hay
 `--all` + (`LATENCY`) `tools/latency.py vlm` (latency 1 ảnh chuẩn, `output/add/latency/<model>.json`) + chẩn đoán (`diagnose.json`: số box,
 finish, token, s / ảnh (khối), không JSON / score, box trong ảnh theo pixel và theo 0–1000), xoá weight, gói `zeta6_<tag>.zip`.
-**Toạ độ** `coord`: `pixel` (mặc định, như prompt tác giả) | `norm1000` (Qwen3-VL, LLaVA-OV-2, Gemini Robotics-ER 2 trả thang 0–1000, thứ tự x-y, dù prompt xin pixel —
+**Toạ độ** `coord`: `pixel` (mặc định, như prompt tác giả) | `norm1000` (Qwen3-VL, LLaVA-OV-2, InternVL3.5 trả thang 0–1000, thứ tự x-y, dù prompt xin pixel —
 pilot 2026-11-04); chỉ đổi cách đọc, không vào hash; `--coord` khi chấm để so (file thêm hậu tố). Chấm trên server: giải nén vào gốc `/mnt/disk1/aiotlab/haitn/` rồi `python run.py --config
 config/kaggle/<model>.yaml --pilot 10 --score-only` (venv chính). Rủi ro T4: fp16 tràn số (model học bf16), kernel attention Turing.
 
@@ -155,11 +157,15 @@ config/kaggle/<model>.yaml --pilot 10 --score-only` (venv chính). Rủi ro T4: 
   (`tensor_parallel_size: 1`, `max_num_seqs`, `vllm.kv_cache_gib` / `gpu_mem_gib`) ⇒ cùng hash, resume / gộp `responses.jsonl` với
   phiên Kaggle. **Không** đổi `dtype` (half -> bfloat16), `max_model_len`, `mm_processor_kwargs`, ảnh, sampling: vào hash ⇒ hỏi lại
   từ đầu, số không so được với phần đã chạy.
-- Latency 1 ảnh đo ở đây là GPU khác T4 / A30 ⇒ ghi tên GPU (định nghĩa ZETA mục 4).
+- **Latency 1 ảnh của mọi method chạy local đo ở đây** (chốt 2026-11-06; ZETA mục 4): `tools/latency.py`, 100 ảnh / tập, config
+  `server2/` (Qwen3-VL-4B, LLaVA-OV-2-8B = bản Kaggle một card, cùng hash; InternVL3.5-8B bf16; RePlan). Model qua API không đo.
+- Venv vLLM `envs/vllm` (vLLM 0.33.0, torch 2.14 CUDA 13). Máy không có CUDA toolkit (`nvcc`) ⇒ bộ lấy mẫu FlashInfer không JIT được
+  (`Could not find nvcc`) ⇒ **`export VLLM_USE_FLASHINFER_SAMPLER=0`** (lấy mẫu PyTorch). IPv6 hỏng ⇒ tải weight trước bằng IPv4
+  (`huggingface_hub` + `urllib3.util.connection.HAS_IPV6 = False`) rồi chạy `HF_HUB_OFFLINE=1`; cache compile vào `haitn/`
+  (`VLLM_CACHE_ROOT`, `TRITON_CACHE_DIR`).
 
 ## Dữ liệu gửi đi
 
 - OpenRouter: config đặt `provider.data_collection: deny` ⇒ chỉ qua provider không giữ dữ liệu để huấn luyện.
-- Gemini free tier: Google **dùng dữ liệu để cải thiện sản phẩm**, có thể có người đọc; bật billing thì không. Free chỉ nên cho pilot.
 
 Test: `python -m pytest tests/vlm -q` từ `object-detection/`, CPU, backend / HTTP giả, không gọi mạng.

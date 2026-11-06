@@ -181,8 +181,7 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
     retries = int(cfg.get("retries", 2))
     img_cfg = cfg.get("image") or {}
     # mức song song để ước giờ; vLLM: 1 (`sec` đã chia theo khối)
-    par = int(((cfg.get("openai") or {}).get("concurrency")) or ((cfg.get("openrouter") or {}).get("concurrency")) or ((cfg.get("gemini") or {}).get("concurrency")) or 1)
-    rpm = float((cfg.get("gemini") or {}).get("rpm") or 0)
+    par = int(((cfg.get("openai") or {}).get("concurrency")) or ((cfg.get("openrouter") or {}).get("concurrency")) or 1)
     log(f"{tag} {len(sel)} / {len(samples)} mẫu | đã có {len(sel) - len(pending)} (prompt_hash {phash}) | cần hỏi {len(pending)} | "
         f"-> {out_dir}")
     examples = _icl_turns(cfg, ns, log) if pending and backend is not None else []
@@ -224,7 +223,7 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
                     j["attempts"] += 1
                     for k in ("in", "out", "reasoning", "sec"):
                         j[k] += res[k]
-                    j["cached"] += int(res.get("cached") or 0)                 # token vào trúng cache (OpenAI / Gemini)
+                    j["cached"] += int(res.get("cached") or 0)                 # token vào trúng cache (OpenAI)
                     j["cost"] += c
                     j["latency"] = res.get("latency")                 # của lần gọi có câu trả lời được giữ
                     if res["error"] and not res["text"]:
@@ -277,18 +276,15 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
     sm = summarize(recs, cfg, len(sel), par)
     n_par = shard[1] if shard else 1                                   # n bản song song cùng chạy ⇒ giờ cả tập chia n
     sm_full = summarize(recs, cfg, len(samples), par * n_par)
-    if rpm and recs:                                                   # Gemini: tốc độ bị chặn bởi RPM
-        sm_full["est_full_hours"] = max(sm_full["est_full_hours"], len(samples) * float(np.mean([r["attempts"] for r in recs])) / rpm / 60)
     info = {"model": cfg["model"], "backend": cfg["backend"], "config": cfg.get("_path"), "prompt_hash": phash, "dataset": ns.dataset,
             "mode": name, "selected": sm,
             "full_estimate": {k: sm_full[k] for k in ("n_full", "est_full_cost", "est_full_cost_p90", "est_full_hours") if k in sm_full},
             "this_run": {"new": n_new, "sec": el, "spent": spent, "stopped": stopped},
-            "free_tier": bool((cfg.get("gemini") or {}).get("free_tier")), "date": time.strftime("%Y-%m-%d %H:%M")}
+            "date": time.strftime("%Y-%m-%d %H:%M")}
     if recs and "est_full_cost" in sm_full:
-        free = " (free tier: thực trả $0)" if info["free_tier"] else ""
-        log(f"{tag} xong {len(recs)}/{len(sel)} ảnh, lần này {n_new} ảnh mới trong {_fmt_sec(el)}, ${spent:.4f}{free} | TB "
+        log(f"{tag} xong {len(recs)}/{len(sel)} ảnh, lần này {n_new} ảnh mới trong {_fmt_sec(el)}, ${spent:.4f} | TB "
             f"${sm['cost_per_image_mean']:.5f}/ảnh (p90 ${sm['cost_per_image_p90']:.5f}) | 0 box {sm['n_fail']}, thiếu {sm['n_short']}")
-        log(f"{tag} ƯỚC cả tập {len(samples)} ảnh: ${sm_full['est_full_cost']:.2f} (p90 ${sm_full['est_full_cost_p90']:.2f}){free}, "
+        log(f"{tag} ƯỚC cả tập {len(samples)} ảnh: ${sm_full['est_full_cost']:.2f} (p90 ${sm_full['est_full_cost_p90']:.2f}), "
             f"~{sm_full['est_full_hours']:.1f} giờ ở song song {par}" + (f" × {n_par} bản" if n_par > 1 else ""))
     if stopped:
         log(f"{tag} DỪNG: {stopped}")
