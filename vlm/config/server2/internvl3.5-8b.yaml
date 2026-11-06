@@ -1,8 +1,8 @@
 # InternVL3.5-8B (ZETA6) trên server 2 (RTX PRO 5000 Blackwell 48 GB, vLLM 0.33, venv `envs/vllm`). Như `kaggle/internvl3.5-8b.yaml`
 # (prompt / few-shot tác giả, schema qua structured outputs, ảnh max_dynamic_patch 4, max_model_len 12288, coord norm1000) — chỉ khác:
 # - dtype bfloat16 (model học bf16; T4 buộc fp16) ⇒ prompt_hash khác bản Kaggle (Kaggle chưa có câu trả lời full, không mất gì);
-# - một card, không tensor parallel; KV 14 GiB (KV / token = 2 × 36 lớp × 8 KV head × 128 × 2 B = 144 KiB ⇒ ~100k token, ~40 chuỗi
-#   song song vì 2 ảnh few-shot dùng chung qua prefix cache), tối đa 48 chuỗi. 34 GiB tổng để chạy được khi GPU dùng chung (~38 GiB
+# - một card, không tensor parallel; KV 8 GiB (KV / token = 2 × 36 lớp × 8 KV head × 128 × 2 B = 144 KiB ⇒ ~58k token, ~20 chuỗi
+#   song song vì 2 ảnh few-shot dùng chung qua prefix cache), tối đa 48 chuỗi. 28 GiB tổng để chạy được khi GPU dùng chung (~30 GiB
 #   trống, 2026-11-06); `vllm.*` ngoài hash ⇒ đổi không mất resume.
 base: ../base.yaml
 name: internvl3.5-8b
@@ -12,8 +12,8 @@ price: {in: 0.0, out: 0.0}
 coord: norm1000        # pilot 20 Kaggle (2026-11-04): 19 / 20 ảnh CE-130, 17 / 20 CoCount mọi toạ độ <= 1000
 chunk: 64
 vllm:
-  gpu_mem_gib: 34.0
-  kv_cache_gib: 14.0
+  gpu_mem_gib: 28.0
+  kv_cache_gib: 8.0
 engine:
   dtype: bfloat16
   disable_log_stats: false
