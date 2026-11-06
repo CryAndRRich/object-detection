@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
-"""So box các VLM trên ảnh pilot: hình 2 × 3 / ảnh (chữ trong hình tiếng Anh).
+"""So box các VLM: hình 2 × 3 / ảnh (chữ trong hình tiếng Anh).
 
-  hàng 1: Original (ảnh model nhận + vật đang có xanh dương + box GT xanh lá nét đứt) | GPT-6 Luna | GLM-5.3-Flash
-  hàng 2: gpt-4.1-mini | Perceptron Mk1.5 | Elorian Glimpse
+  hàng 1: Original (ảnh model nhận + vật đang có xanh dương + box GT xanh lá nét đứt) | GLM-5.3-Flash | gpt-4.1-mini
+  hàng 2: GPT-6 Luna | LLaVA-OV-2-8B | Gemini ER-2
 
-Ô model chỉ vẽ box dự đoán (đỏ mảnh) + box `score` cao nhất (đỏ đậm, = box chấm chính ZETA5 / 6). Tiêu đề "<tên>, CNLL = <C-NLL
-của box đó>"; Original = C-NLL thấp nhất của box GT. VLM = `output/add/vlm/<model>/<tập>/<name>.jsonl` (1 dòng / ảnh, box xếp theo
-score); pilot chấm trước 2026-11-04 không có file này ⇒ đọc dump cũ `<name>_boxes.json` (K = 30; box lặp vòng được gộp lại khi vẽ). Box dump là pixel canvas 512 (letterbox góc trên trái) -> chia tỉ lệ về pixel ảnh gốc. Chỉ đọc JSON + ảnh.
+Ô model vẽ box dự đoán (đỏ mảnh) + một box đỏ đậm: `--bold min` (mặc định) = box C-NLL thấp nhất, `--bold top` = box `score` cao
+nhất (= box chấm chính ZETA5 / 6). Tiêu đề "<tên>, CNLL = <C-NLL box đậm>"; Original = C-NLL thấp nhất của box GT. VLM =
+`output/add/vlm/<model>/<tập>/<name>.jsonl` (1 dòng / ảnh, box xếp theo score); model chưa có `<name>.jsonl` (vd ER-2 mới pilot500)
+⇒ lấy `pilot<K>.jsonl` K lớn nhất; dump cũ `<name>_boxes.json` (pilot chấm trước 2026-11-04) vẫn đọc được. Box lặp vòng (VLM thiếu
+box) gộp lại khi vẽ. Box dump là pixel canvas 512 (letterbox góc trên trái) -> chia tỉ lệ về pixel ảnh gốc. Chỉ đọc JSON + ảnh.
 
   cd object-detection/vlm
-  python plot_compare.py --dataset ce130 --n 1                 # thử 1 ảnh
-  python plot_compare.py --dataset all                         # mọi ảnh pilot của cả hai tập
+  python plot_compare.py --dataset ce130 --pilot 20 --n 1      # thử 1 ảnh
+  python plot_compare.py --dataset all --pilot 20              # 20 ảnh pilot (hash seed 0, như run.py --pilot 20) cả hai tập
 """
 
 import argparse
+import glob
 import json
 import os
+import re
 import sys
 
 import numpy as np
@@ -34,8 +38,8 @@ from PIL import Image  # noqa: E402
 from ce_localization.data.turns import TurnIndex, iter_jsonl, letterbox_size, present_objects  # noqa: E402
 
 OUT = os.path.join(ROOT, "..", "output", "add")
-MODELS = [("gpt-6-luna", "GPT-6 Luna"), ("glm-5.3-flash", "GLM-5.3-Flash"), ("gpt-4.1-mini", "gpt-4.1-mini"),
-          ("perceptron-mk1.5", "Perceptron Mk1.5"), ("elorian-glimpse", "Elorian Glimpse")]
+MODELS = [("glm-5.3-flash", "GLM-5.3-Flash"), ("gpt-4.1-mini", "gpt-4.1-mini"), ("gpt-6-luna", "GPT-6 Luna"),
+          ("llava-ov2-8b", "LLaVA-OV-2-8B"), ("robotics-er-2", "Gemini ER-2")]
 DSET = {"ce130": ("ce130_test_all", "inpainted"), "cocount": ("cocount_review5", "cocount")}
 BLUE, GREEN, RED = "#1e6fff", "#00b050", "#e8000b"
 
@@ -43,13 +47,21 @@ BLUE, GREEN, RED = "#1e6fff", "#00b050", "#e8000b"
 def load_vlm(root, model, dset_dir, name, key):
     """-> {image_id: {"boxes" (canvas 512), "cnll" (từng box), "cnll_gt"}}, box xếp theo score."""
     jl = os.path.join(root, model, dset_dir, f"{name}.jsonl")
+    if not os.path.exists(jl):                                 # chưa chạy <name> (vd full) -> pilot K lớn nhất đã chấm
+        pil = [(int(m.group(1)), f) for f in glob.glob(os.path.join(root, model, dset_dir, "pilot*.jsonl"))
+               if (m := re.fullmatch(r"pilot(\d+)\.jsonl", os.path.basename(f)))]
+        if pil:
+            jl = max(pil)[1]
     if os.path.exists(jl):
         out = {}
         for r in iter_jsonl(jl):
             out[r["image_id"]] = {"boxes": [c["box_512"] for c in r["boxes"]], "cnll_gt": r.get("cnll_gt"),
                                   **({"cnll": [c["cnll"] for c in r["boxes"]]} if r["boxes"] and "cnll" in r["boxes"][0] else {})}
         return out
-    with open(os.path.join(root, model, dset_dir, f"{name}_boxes.json")) as f:
+    old = os.path.join(root, model, dset_dir, f"{name}_boxes.json")
+    if not os.path.exists(old):
+        return {}
+    with open(old) as f:
         return {r["image_id"]: r for r in json.load(f)["results"][key]}
 
 
@@ -104,13 +116,15 @@ def panel(ax, img, title):
     ax.axis("off")
 
 
-def model_panel(ax, img, name, boxes, cnll):
+def model_panel(ax, img, name, boxes, cnll, bold="min"):
     if not len(boxes):
         panel(ax, img, f"{name}, no box")
         return
-    panel(ax, img, f"{name}, CNLL = {cnll[0]:.2f}")                    # box[0] = score cao nhất
-    draw(ax, img, boxes[1:], RED, 0.7, alpha=0.75)
-    draw(ax, img, boxes[:1], RED, 2.4)
+    # box[0] = score cao nhất; min = box C-NLL thấp nhất (nan -> không chọn)
+    i = int(np.nanargmin(cnll)) if bold == "min" and np.isfinite(cnll).any() else 0
+    panel(ax, img, f"{name}, CNLL = {cnll[i]:.2f}")
+    draw(ax, img, np.delete(boxes, i, axis=0), RED, 0.7, alpha=0.75)
+    draw(ax, img, boxes[i:i + 1], RED, 2.4)
 
 
 def figure(dataset, image_id, a, vlm, out_path):
@@ -131,10 +145,10 @@ def figure(dataset, image_id, a, vlm, out_path):
         if r is None:
             panel(ax, img, f"{name}, missing")
             continue
-        model_panel(ax, img, name, *unique(to_orig(r["boxes"], wh), r.get("cnll") or [float("nan")] * len(r["boxes"])))
+        model_panel(ax, img, name, *unique(to_orig(r["boxes"], wh), r.get("cnll") or [float("nan")] * len(r["boxes"])), bold=a.bold)
     handles = [Line2D([], [], color=BLUE, lw=1.2, label="Existing objects"),
                Line2D([], [], color=GREEN, lw=1.6, ls="--", label="Ground-truth boxes"),
-               Line2D([], [], color=RED, lw=1.2, label="Predicted boxes (bold = highest confidence)")]
+               Line2D([], [], color=RED, lw=1.2, label="Predicted boxes (bold = " + ("lowest CNLL" if a.bold == "min" else "highest confidence") + ")")]
     fig.legend(handles=handles, loc="upper center", ncol=3, frameon=False, fontsize=11, bbox_to_anchor=(0.5, 1 - 0.05 / H))
     fig.text(0.5, 1 - 0.62 / H, f"{image_id}  |  class: {scene_class(dataset, image_id, a)}", ha="center", va="top", fontsize=11)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -154,7 +168,9 @@ def scene_class(dataset, image_id, a, cache={}):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dataset", default="ce130", choices=["ce130", "cocount", "all"])
-    ap.add_argument("--name", default="pilot10", help="tên lần chạy VLM (file <name>_boxes.json)")
+    ap.add_argument("--name", default="test", help="tên lần chạy VLM (file <name>.jsonl; thiếu -> pilot<K>.jsonl K lớn nhất)")
+    ap.add_argument("--pilot", type=int, default=None, help="chỉ vẽ K ảnh pilot (hash seed 0, cùng tập run.py --pilot K)")
+    ap.add_argument("--bold", default="min", choices=["min", "top"], help="box đậm: C-NLL thấp nhất | score cao nhất")
     ap.add_argument("--n", type=int, default=None, help="chỉ vẽ n ảnh đầu (theo thứ tự trong dump VLM)")
     ap.add_argument("--ids", nargs="*", default=None, help="chỉ vẽ các image_id này")
     ap.add_argument("--vlm-root", default=os.path.join(OUT, "vlm"))
@@ -167,7 +183,10 @@ def main(argv=None):
     for dataset in (["ce130", "cocount"] if a.dataset == "all" else [a.dataset]):
         dset_dir, key = DSET[dataset]
         vlm = {m: load_vlm(a.vlm_root, m, dset_dir, a.name, key) for m, _ in MODELS}
-        ids = a.ids or list(vlm[MODELS[0][0]])
+        ids = a.ids or max((list(v) for v in vlm.values()), key=len)              # thứ tự gốc của tập (file full)
+        if a.pilot:
+            from vlm.runner import select
+            ids = [s["image_id"] for s in select([{"image_id": i} for i in ids], 0, a.pilot)]
         for image_id in ids[:a.n] if a.n else ids:
             out = os.path.join(a.out, dset_dir, f"{image_id}.png")
             figure(dataset, image_id, a, vlm, out)

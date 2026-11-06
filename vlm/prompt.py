@@ -5,8 +5,12 @@ gpt-4.1-mini; người dùng chốt 2026-11-03):
 - few-shot = 2 hội thoại của tác giả (`icl: author`, `vlm/icl/author.json`, sửa 1 khoá sai); `icl: 0` = zero-shot.
 Chỉ khác tác giả: K = 30 thay 3 (giao thức ZETA; maxItems 30), thử lại khi 0 box.
 
-Message nội bộ: list lượt {"role": system | user | assistant, "text", "image": base64 | None, "mime"}; mỗi backend tự đổi sang API
-của nó."""
+ZETA4 RePlan (`prompt: replan`): prompt planner của RePlan (`refs/repos/RePlan` @ 6c9b12f, `RePlanPipeline.build_messages`) — MỘT
+lượt user, ảnh trước rồi text = template `prompts/replan.txt` (nguyên byte) + "\n" + lệnh (`instruction`, mặc định "Add one more
+{cls} to the image."); không system, không few-shot, không schema.
+
+Message nội bộ: list lượt {"role": system | user | assistant, "text", "image": base64 | None, "mime", "image_first" (tuỳ chọn: ảnh
+trước text)}; mỗi backend tự đổi sang API của nó."""
 
 import base64
 import hashlib
@@ -17,11 +21,13 @@ import os
 from PIL import Image
 
 __all__ = ["PROMPT_VERSION", "FORMAT", "SYSTEM", "USER", "AUTHOR_ICL", "box_schema", "encode_image", "system_text", "user_text",
-           "author_turns", "build_messages", "prompt_hash"]
+           "author_turns", "build_messages", "prompt_hash", "REPLAN_INSTRUCTION", "replan_template", "replan_text"]
 
 PROMPT_VERSION = 3
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))          # object-detection/
 AUTHOR_ICL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icl", "author.json")
+REPLAN_TEMPLATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts", "replan.txt")
+REPLAN_INSTRUCTION = "Add one more {cls} to the image."
 
 # Nguyên văn SYSTEM của tác giả; {frame} = dòng 2, {output} = dòng cuối ("Output ONLY JSON matching the schema.")
 SYSTEM = """You propose plausible placements for inserting NEW objects into a given background image.
@@ -127,9 +133,22 @@ def author_turns(encode):
     return turns
 
 
+def replan_template():
+    with open(REPLAN_TEMPLATE, encoding="utf-8") as f:
+        return f.read()
+
+
+def replan_text(cfg, cls):
+    """Text lượt user của planner RePlan: template + "\n" + lệnh (như `RePlanPipeline.build_messages`)."""
+    return replan_template() + "\n" + (cfg.get("instruction") or REPLAN_INSTRUCTION).format(cls=cls)
+
+
 def build_messages(sample, image, cfg, examples=()):
     """`image` = `encode_image(sample["image"])`; `examples` = lượt few-shot (`author_turns`). Thứ tự như tác giả: system, ví dụ,
-    lượt hiện tại (text rồi ảnh)."""
+    lượt hiện tại (text rồi ảnh). `prompt: replan` -> một lượt user (ảnh rồi text) của planner RePlan."""
+    if cfg.get("prompt") == "replan":
+        return [{"role": "user", "text": replan_text(cfg, sample["class"]), "image": image["b64"], "mime": image["mime"],
+                 "image_first": True}]
     return ([{"role": "system", "text": system_text(), "image": None, "mime": None}]
             + list(examples)
             + [{"role": "user", "text": user_text(cfg["k"], sample["class"], image["canvas_wh"]), "image": image["b64"],
@@ -160,4 +179,7 @@ def prompt_hash(cfg):
            **{f"{s}.{k}": (cfg.get(s) or {}).get(k) for s, ks in HASH_SUB.items() for k in ks}}
     if cfg.get("icl") == "author":
         key["author_icl"] = _load_author()
+    if cfg.get("prompt") == "replan":                      # chỉ config RePlan có các khoá này ⇒ hash model cũ không đổi
+        key.update(prompt="replan", replan_template=replan_template(), instruction=cfg.get("instruction") or REPLAN_INSTRUCTION,
+                   replan=cfg.get("replan"))
     return hashlib.sha1(json.dumps(key, sort_keys=True, default=str).encode()).hexdigest()[:12]

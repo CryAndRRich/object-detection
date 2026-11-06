@@ -1,0 +1,31 @@
+# ZETA4 RePlan (ECCV 2026) — chỉ planner (Qwen2.5-VL-7B, GRPO), bỏ tầng diffusion (bài ADD chỉ cần box). Server 2 (RTX PRO 5000
+# Blackwell 48 GB), vLLM venv riêng, bf16 đầy đủ (~16 GiB weight). Theo `refs/repos/RePlan` @ 6c9b12f (người dùng chốt 2026-11-06):
+# - prompt: MỘT lượt user, ảnh rồi `prompts/replan.txt` + "\n" + lệnh; không system / few-shot / schema;
+# - box chính = câu GREEDY (checkpoint không có generation_config sampling ⇒ `generate` của tác giả là greedy), max_new_tokens 2048;
+# - min C-NLL / 30 (tham khảo) = câu greedy + 29 câu sample ở cài đặt rollout GRPO của tác giả (`train/configs/stage2.yaml`: n 8,
+#   temperature 1.0, top_p 0.99);
+# - mỗi câu lấy bbox_2d của region "thêm" đầu tiên (bỏ hint "keep …"); toạ độ = pixel ảnh sau smart_resize của Qwen2.5-VL.
+base: ../base.yaml
+name: replan-7b
+backend: vllm
+model: TainU/RePlan-Qwen2.5-VL-7B
+prompt: replan
+instruction: "Add one more {cls} to the image."
+icl: 0
+max_tokens: 2048
+sampling: {temperature: 0.0}                         # greedy như tác giả
+replan: {samples: 29, temperature: 1.0, top_p: 0.99}
+coord: qwen_resized                                  # min / max pixels = preprocessor_config của checkpoint (mặc định trong parse)
+price: {in: 0.0, out: 0.0}
+chunk: 16                                            # ảnh / khối = 16 × 30 chuỗi
+# Ảnh lớn nhất CoCount 8,3 MP ≈ 10,6k token ảnh + ~0,7k text + 2k ra ⇒ max_model_len 16384. KV / token = 2 × 28 lớp × 4 KV head × 128
+# × 2 B = 56 KiB ⇒ 24 GiB ≈ 450k token (prefix ảnh dùng chung giữa 30 chuỗi một ảnh).
+vllm:
+  gpu_mem_gib: 44.0
+  kv_cache_gib: 24.0
+engine:
+  dtype: bfloat16
+  disable_log_stats: false
+  max_model_len: 16384
+  max_num_seqs: 256
+  limit_mm_per_prompt: {image: 1}

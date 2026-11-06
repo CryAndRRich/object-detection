@@ -328,3 +328,35 @@ def test_gemini_minute_quota_waits_retry_delay(monkeypatch):
     sleeps = []
     be = Gemini({"model": "m", "k": 30, "max_tokens": 50, "gemini": {}}, log=lambda *a: None, sleep=sleeps.append, session=Session([q, ok]))
     assert be.batch([JOB])[0]["text"] == "{}" and sleeps == [38.0]
+
+
+def test_vllm_replan_greedy_plus_samples_joined(monkeypatch):
+    """RePlan: mỗi ảnh 2 request cùng prompt (greedy + n sample, seed theo ảnh), ảnh trước text, không schema; text nối bằng REPLAN_SEP."""
+    import sys
+    import types
+    from types import SimpleNamespace as NS
+    from vlm.backends.vllm_local import VLLMLocal
+    from vlm.parse import REPLAN_SEP
+
+    class SP(dict):
+        def __init__(self, **kw):
+            super().__init__(kw)
+    monkeypatch.setitem(sys.modules, "vllm", types.SimpleNamespace(SamplingParams=SP))
+    seen = {}
+
+    def chat(convs, sampling_params, **kw):
+        seen.update(convs=convs, params=sampling_params)
+        out = lambda t: NS(text=t, token_ids=[0] * len(t), finish_reason="stop")
+        return [NS(prompt_token_ids=[0] * 7, outputs=[out("G")]), NS(prompt_token_ids=[0] * 7, outputs=[out("s1"), out("s22")])]
+    b = VLLMLocal.__new__(VLLMLocal)
+    b.cfg = {"max_tokens": 2048, "sampling": {"temperature": 0.0}, "replan": {"samples": 2, "temperature": 1.0, "top_p": 0.99},
+             "prompt": "replan"}
+    b._so, b.llm = {}, NS(chat=chat)
+    job = {"image_id": "x", "attempt": 0, "temperature": None,
+           "messages": [{"role": "user", "text": "T", "image": "b64", "mime": "image/png", "image_first": True}]}
+    (res,) = b.batch([job])
+    assert res["text"] == REPLAN_SEP.join(["G", "s1", "s22"]) and res["in"] == 7 and res["out"] == 1 + 2 + 3
+    g, s = seen["params"]
+    assert g["temperature"] == 0.0 and "n" not in g and s["n"] == 2 and s["temperature"] == 1.0 and s["top_p"] == 0.99
+    assert s["seed"] == b.sample_params(job)["seed"] != b.sample_params({**job, "attempt": 1})["seed"]
+    assert [c["type"] for c in seen["convs"][0][0]["content"]] == ["image_url", "text"] and seen["convs"][0] is seen["convs"][1]

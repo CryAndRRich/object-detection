@@ -4,13 +4,19 @@
 - `kv_cache_memory_bytes` cố định KV cache (bỏ qua utilization); `quantization: fp8_per_tensor` = FP8 chỉ weight (Marlin) trên Ampere;
 - `engine.tensor_parallel_size` 2 (Kaggle 2 × T4, `config/kaggle/`): `vllm.gpu_mem_gib` / `kv_cache_gib` tính MỖI card, kiểm card trống ít nhất;
 - `LLM.chat` nhận ảnh base64 data URL (chỉ base64); structured outputs JSON theo schema tác giả. Tiền = 0; `sec` = thời gian khối /
-  số prompt."""
+  số prompt.
+- ZETA4 RePlan (`replan: {samples, temperature, top_p}`): mỗi ảnh 2 request cùng prompt (prefix cache dùng chung) — greedy
+  (`sampling`, như `generate` của tác giả) + `samples` câu sample (`n`, seed theo ảnh) — không schema (planner tự viết thẻ
+  `<think>/<gen_image>/<region>`); `text` = các câu nối bằng `REPLAN_SEP` (câu 0 = greedy), token ra = tổng."""
+
+import hashlib
 
 import os
 import subprocess
 import time
 
 from vlm.backends import Fatal, result
+from vlm.parse import REPLAN_SEP
 from vlm.prompt import box_schema
 
 __all__ = ["VLLMLocal", "gpu_free_total_mib", "memory_utilization"]
@@ -46,7 +52,7 @@ class VLLMLocal:
         log(f"[vllm] {cfg['model']} | GPU trống {free / 1024:.1f} / {total / 1024:.1f} GiB -> gpu_memory_utilization {util:.3f} | "
             f"engine {engine}")
         t0 = time.time()
-        self._so = self._structured()
+        self._so = {} if cfg.get("prompt") == "replan" else self._structured()
         self.llm = LLM(model=cfg["model"], gpu_memory_utilization=util, seed=int(cfg.get("seed", 0)), **engine)
         free2, _ = gpu_free_total_mib()
         log(f"[vllm] nạp model {time.time() - t0:.0f} s | GPU bị chiếm thêm {(free - free2) / 1024:.1f} GiB (mọi tiến trình trên GPU)")
@@ -73,6 +79,14 @@ class VLLMLocal:
             s["temperature"] = job["temperature"]
         return SamplingParams(max_tokens=int(self.cfg["max_tokens"]), **s)
 
+    def sample_params(self, job):
+        """RePlan: `samples` câu sample cho một ảnh; seed cố định theo ảnh + lần thử (chạy lại cho cùng câu trả lời)."""
+        from vllm import SamplingParams
+        rp = self.cfg["replan"]
+        seed = int.from_bytes(hashlib.blake2b(f"{job['image_id']}#{job.get('attempt', 0)}".encode(), digest_size=4).digest(), "big")
+        return SamplingParams(n=int(rp["samples"]), temperature=float(rp["temperature"]), top_p=float(rp.get("top_p", 1.0)),
+                              max_tokens=int(self.cfg["max_tokens"]), seed=seed)
+
     @staticmethod
     def conversation(job):
         conv = []
@@ -80,6 +94,8 @@ class VLLMLocal:
             if t["image"]:
                 content = [{"type": "text", "text": t["text"]},
                            {"type": "image_url", "image_url": {"url": f"data:{t.get('mime') or 'image/jpeg'};base64,{t['image']}"}}]
+                if t.get("image_first"):
+                    content.reverse()
             else:
                 content = t["text"]
             conv.append({"role": t["role"], "content": content})
@@ -87,9 +103,23 @@ class VLLMLocal:
 
     def batch(self, jobs):
         t0 = time.time()
-        outs = self.llm.chat([self.conversation(j) for j in jobs], sampling_params=[self.params(j) for j in jobs], use_tqdm=False,
-                             chat_template_kwargs=self.cfg.get("chat_template_kwargs"))
+        rp = bool(self.cfg.get("replan"))
+        convs, params = [], []
+        for j in jobs:
+            c = self.conversation(j)
+            convs += [c, c] if rp else [c]
+            params += [self.params(j), self.sample_params(j)] if rp else [self.params(j)]
+        outs = self.llm.chat(convs, sampling_params=params, use_tqdm=False, chat_template_kwargs=self.cfg.get("chat_template_kwargs"))
         el = time.time() - t0
         sec = el / max(len(jobs), 1)                       # thông lượng khối; latency 1 ảnh chỉ đo được khi chạy từng ảnh (`chunk: 1`)
-        return [result(o.outputs[0].text, len(o.prompt_token_ids or []), len(o.outputs[0].token_ids), 0, 0.0, sec, None,
-                       el if len(jobs) == 1 else None, finish=o.outputs[0].finish_reason) for o in outs]
+        lat = el if len(jobs) == 1 else None
+        if not rp:
+            return [result(o.outputs[0].text, len(o.prompt_token_ids or []), len(o.outputs[0].token_ids), 0, 0.0, sec, None, lat,
+                           finish=o.outputs[0].finish_reason) for o in outs]
+        res = []
+        for g, smp in zip(outs[::2], outs[1::2]):
+            texts = [g.outputs[0].text] + [o.text for o in smp.outputs]
+            n_out = len(g.outputs[0].token_ids) + sum(len(o.token_ids) for o in smp.outputs)
+            res.append(result(REPLAN_SEP.join(texts), len(g.prompt_token_ids or []), n_out, 0, 0.0, sec, None, lat,
+                              finish=g.outputs[0].finish_reason))
+        return res

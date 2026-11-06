@@ -171,3 +171,53 @@ def test_truncated_candidates_repaired():
     for tail in ("   \r" * 200, ", {\"name\": \"x\", \"box\": [1, 2"):
         boxes, scores = parse_scored(js + tail, _cfg(), (100, 100), (100, 100))
         assert boxes == [[5, 5, 9, 9], [1, 1, 3, 3]] and scores == [0.9, 0.2]
+
+
+# --- ZETA4 RePlan (planner Qwen2.5-VL-7B): prompt một lượt ảnh-trước, region "thêm", toạ độ smart_resize, hash model cũ giữ nguyên
+
+def _rp(add=None, keep=None, junk=False):
+    regions = ([{"bbox_2d": keep, "point_2d": [0, 0], "hint": "Keep this cup unchanged"}] if keep else []) + \
+              ([{"bbox_2d": add, "point_2d": [0, 0], "hint": "add a new cup here"}] if add else [])
+    body = "[{bad json" if junk else json.dumps(regions)
+    return f"<think>ok</think><gen_image>keep remaining part of image unchanged.</gen_image><region>{body}</region>"
+
+
+def test_qwen_resized_wh_matches_smart_resize():
+    from vlm.parse import qwen_resized_wh
+    assert qwen_resized_wh((540, 384)) == (532, 392)                 # làm tròn bội số 28
+    assert qwen_resized_wh((3840, 2160)) == (3836, 2156)             # 8,3 MP < max 12,8 MP: chỉ làm tròn
+    w, h = qwen_resized_wh((5000, 4000))                             # > max pixels: thu giữ tỉ lệ
+    assert (w, h) == (4004, 3192) and w * h <= 12845056 and w % 28 == h % 28 == 0
+
+
+def test_replan_greedy_box_first_keep_regions_skipped_samples_unscored():
+    from vlm.parse import REPLAN_SEP
+    cfg = {"k": 30, "prompt": "replan", "coord": "qwen_resized"}
+    text = REPLAN_SEP.join([_rp(add=[266, 196, 532, 392], keep=[0, 0, 10, 10]), "no tags", _rp(junk=True), _rp(keep=[1, 1, 5, 5]),
+                            _rp(add=[0, 0, 133, 98])])
+    cands = parse_candidates(text, cfg, (540, 384), (540, 384))     # model thấy 532 × 392 -> đổi về 540 × 384
+    assert [c["score"] for c in cands] == [1.0, None]
+    np.testing.assert_allclose([c["box"] for c in cands], [[270, 192, 540, 384], [0, 0, 135, 96]], atol=1e-6)
+    no_greedy = REPLAN_SEP.join([_rp(keep=[0, 0, 10, 10]), _rp(add=[0, 0, 133, 98])])
+    assert [c["score"] for c in parse_candidates(no_greedy, cfg, (540, 384), (540, 384))] == [None]   # greedy hỏng -> n_noscore
+
+
+def test_replan_messages_single_user_turn_image_first(tmp_path):
+    from vlm.prompt import replan_template
+    p = tmp_path / "a.png"
+    Image.new("RGB", (40, 30)).save(p)
+    msgs = build_messages({"class": "cup"}, encode_image(str(p)), {"k": 30, "prompt": "replan"})
+    assert len(msgs) == 1 and msgs[0]["role"] == "user" and msgs[0]["image_first"] and msgs[0]["image"]
+    assert msgs[0]["text"] == replan_template() + "\nAdd one more cup to the image."
+    assert replan_template().endswith("The user instruction: ")       # nguyên byte template tác giả
+
+
+def test_replan_keys_do_not_change_existing_hashes():
+    from ce_localization.utils.config import load_config
+    import os
+    vlm_dir = os.path.join(os.path.dirname(__file__), "..", "..", "vlm", "config")
+    assert prompt_hash(load_config(os.path.join(vlm_dir, "openrouter", "gpt-4.1-mini.yaml"))) == "31cfbb6932c5"
+    assert prompt_hash(load_config(os.path.join(vlm_dir, "kaggle", "qwen3-vl-4b.yaml"))) == "2acb150694da"
+    rp = load_config(os.path.join(vlm_dir, "server2", "replan-7b.yaml"))
+    assert prompt_hash({**rp, "replan": {**rp["replan"], "samples": 9}}) != prompt_hash(rp)
+    assert prompt_hash({**rp, "instruction": "Add a {cls}."}) != prompt_hash(rp)

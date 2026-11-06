@@ -25,9 +25,10 @@ Quyết định, lý do chọn model, kết quả: `docs/EXPERIMENT_ZETA.md` m�
 
 | nhóm | config | model | chạy ở đâu | ghi chú |
 |---|---|---|---|---|
-| **ZETA5** thương mại | `config/gemini/robotics-er-2.yaml` | `gemini-robotics-er-2-preview` | Gemini API | chuyên không gian; thinking minimal; free tier |
+| **ZETA5** thương mại | `config/gemini/robotics-er-2.yaml` | `gemini-robotics-er-2-preview` | Gemini API (full: Batch `--batch`) | chuyên không gian; thinking minimal; cần billing |
 | | `config/openrouter/gpt-6-luna.yaml` | `openai/gpt-6-luna` | OpenAI, dự phòng OpenRouter | họ OpenAI; tắt suy nghĩ; không nhận temperature |
-| | `config/openrouter/gpt-4.1-mini.yaml` | `openai/gpt-4.1-mini` | OpenAI, dự phòng OpenRouter | đúng model tác giả dùng; $0,4 / $1,6 |
+| | `config/openrouter/gpt-4.1-mini.yaml` | `openai/gpt-4.1-mini` | OpenAI, dự phòng OpenRouter (full: OpenRouter gọi thường) | đúng model tác giả dùng; $0,4 / $1,6 |
+| **ZETA4** RePlan | `config/server2/replan-7b.yaml` | `TainU/RePlan-Qwen2.5-VL-7B` (planner) | server 2, vLLM | prompt / parse riêng (`prompt: replan`): greedy = box chính + 29 sample; ZETA mục 14 |
 | **ZETA6** open-source | *(chưa có config)* | Qwen3-VL-4B | GPU server, vLLM | |
 | | `config/openrouter/glm-5.3-flash.yaml` | `z-ai/glm-5.3-flash` | OpenRouter (320B MoE, không vừa A30) | suy nghĩ `low` (không tắt được) |
 | | `config/server/internvl3.5-8b.yaml` | `OpenGVLab/InternVL3_5-8B` | GPU server, vLLM | FP8 chỉ weight |
@@ -108,11 +109,13 @@ Log: `log/add/vlm/<model>/`; log launcher (chạy nhiều model một lượt) �
 
 ## So box các VLM — `plot_compare.py`
 
-Hình 2 × 3 / ảnh pilot (chữ tiếng Anh): ô Original (ảnh + vật đang có + box GT) và một ô / model (box dự đoán + box score cao nhất, đậm).
-Chỉ đọc `output/add/vlm/<model>/<tập>/<name>.jsonl` (pilot chấm trước 2026-11-04: `<name>_boxes.json`) + ảnh, ghi `output/add/viz/vlm_compare/<tập>/<image_id>.png`.
+Hình 2 × 3 / ảnh (chữ tiếng Anh): ô Original (ảnh + vật đang có + box GT) và 5 ô model (GLM-5.3-Flash, gpt-4.1-mini, GPT-6 Luna,
+LLaVA-OV-2-8B, Gemini ER-2): box dự đoán đỏ mảnh + một box đỏ đậm — `--bold min` (mặc định) box C-NLL thấp nhất, `--bold top` box
+`score` cao nhất. Đọc `output/add/vlm/<model>/<tập>/test.jsonl` (model chưa chạy full thì `pilot<K>.jsonl` K lớn nhất) + ảnh, ghi
+`output/add/viz/vlm_compare/<tập>/<image_id>.png`.
 
 ```bash
-python plot_compare.py --dataset ce130 --n 1      # thử 1 ảnh; --dataset all = mọi ảnh pilot cả hai tập; --name pilot10 mặc định
+python plot_compare.py --dataset all --pilot 20      # 20 ảnh pilot (cùng tập run.py --pilot 20) cả hai tập; --n 1 = thử 1 ảnh
 ```
 
 ## Kaggle 2 × T4 (vLLM) — ZETA6 open-source (chốt 2026-11-04)
@@ -143,6 +146,16 @@ config/kaggle/<model>.yaml --pilot 10 --score-only` (venv chính). Rủi ro T4: 
   `numpy<2` có thể làm hỏng vllm).
 - Chạy: (1) venv vLLM `<venv>/bin/python ../tools/run_on_free_gpu.py -- run.py --config config/server/<model>.yaml --pilot 50
   --no-score`; (2) venv chính `python run.py --config config/server/<model>.yaml --pilot 50 --score-only`.
+
+## Server 2 RTX PRO 5000 Blackwell 48 GB (tạm thời từ 2026-11-05)
+
+- Driver 595 (CUDA 13.2) ⇒ vLLM PyPI bản mới cài thẳng (venv riêng như trên). Một card 48 GB ⇒ model 8B fp16 (~16 GiB) vừa dư, không
+  cần TP 2 / FP8.
+- **Nối tiếp / bổ sung câu trả lời Kaggle** (cùng câu trả lời): dùng config `kaggle/<model>.yaml`, chỉ đổi khoá ngoài `prompt_hash`
+  (`tensor_parallel_size: 1`, `max_num_seqs`, `vllm.kv_cache_gib` / `gpu_mem_gib`) ⇒ cùng hash, resume / gộp `responses.jsonl` với
+  phiên Kaggle. **Không** đổi `dtype` (half -> bfloat16), `max_model_len`, `mm_processor_kwargs`, ảnh, sampling: vào hash ⇒ hỏi lại
+  từ đầu, số không so được với phần đã chạy.
+- Latency 1 ảnh đo ở đây là GPU khác T4 / A30 ⇒ ghi tên GPU (định nghĩa ZETA mục 4).
 
 ## Dữ liệu gửi đi
 

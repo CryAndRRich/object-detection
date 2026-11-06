@@ -2,13 +2,22 @@
 (schema `candidates` của tác giả / list 4 số / dict khoá box) -> regex nhóm 4 số. Box xếp theo `score` giảm dần (bằng nhau giữ thứ tự
 model trả; box không có score xếp sau, giữ thứ tự) ⇒ box[0] = box confidence cao nhất = box chấm chính của ZETA5 / 6. Hợp lệ: 4 số
 hữu hạn, diện tích > 0 (cạnh ngược thì đảo). KHÔNG kẹp vào ảnh — chấm tự đo `in_image`. `fill` đưa về đúng K box: thiếu thì lặp vòng
-(box[0] và min C-NLL không đổi), 0 box thì box cả ảnh (bị phạt, đếm `n_fail`)."""
+(box[0] và min C-NLL không đổi), 0 box thì box cả ảnh (bị phạt, đếm `n_fail`).
+
+ZETA4 RePlan (`prompt: replan`): `text` = các câu trả lời của planner nối bằng `REPLAN_SEP` (câu 0 = greedy, sau đó các câu sample).
+Mỗi câu -> box `bbox_2d` của region "thêm" đầu tiên trong `<region>[...]</region>` (khối đầu tiên, `json.loads` như
+`RePlanPipeline.extract_bbox_from_response`; bỏ region có hint bắt đầu "keep" — template mẫu của tác giả dùng chúng để khoanh vật GIỮ
+nguyên). Box câu greedy có score 1 (= box chính), box câu sample không có score (xếp sau, theo thứ tự). Toạ độ `coord: qwen_resized`
+= pixel ảnh sau `smart_resize` của Qwen2.5-VL (bội số 28, giới hạn số pixel) -> đổi về pixel ảnh gốc."""
 
 import json
 import math
 import re
 
-__all__ = ["strip_think", "extract", "extract_scored", "to_pixel", "parse_candidates", "parse_scored", "parse_boxes", "fill"]
+__all__ = ["strip_think", "extract", "extract_scored", "to_pixel", "parse_candidates", "parse_scored", "parse_boxes", "fill",
+           "REPLAN_SEP", "replan_box", "qwen_resized_wh"]
+
+REPLAN_SEP = "\n<|replan_sample|>\n"
 
 _NUM = r"(-?\d+(?:\.\d+)?)"
 _QUAD = re.compile(rf"[\[(]\s*{_NUM}\s*,\s*{_NUM}\s*,\s*{_NUM}\s*,\s*{_NUM}\s*[\])]")
@@ -118,7 +127,48 @@ def _valid(b):
     return [x1, y1, x2, y2] if x2 > x1 and y2 > y1 else None
 
 
-COORDS = ("pixel", "norm1000")
+def replan_box(text):
+    """1 câu trả lời planner RePlan -> bbox_2d (4 số) của region "thêm" đầu tiên (hint không bắt đầu "keep"), không có -> None."""
+    m = re.search(r"<region>(.*?)</region>", text or "", re.S)
+    if not m:
+        return None
+    try:
+        regions = json.loads(m.group(1).strip())
+    except ValueError:
+        return None
+    for r in regions if isinstance(regions, list) else []:
+        if not isinstance(r, dict) or str(r.get("hint") or "").strip().lower().startswith("keep"):
+            continue
+        b = r.get("bbox_2d")
+        if isinstance(b, list) and len(b) == 4 and all(_num(x) for x in b):
+            return [float(x) for x in b]
+    return None
+
+
+def _extract_replan(text):
+    out = []
+    for i, t in enumerate((text or "").split(REPLAN_SEP)):
+        b = replan_box(t)
+        if b is not None:
+            out.append((b, {"score": 1.0} if i == 0 else None))
+    return out
+
+
+def qwen_resized_wh(orig_wh, factor=28, min_pixels=3136, max_pixels=12845056):
+    """(w, h) ảnh mà Qwen2.5-VL thực sự thấy (`smart_resize`: cạnh làm tròn bội số `factor`, số pixel trong [min, max]); mặc định =
+    `preprocessor_config.json` của RePlan-Qwen2.5-VL-7B (min 3136, max 12845056) — box `bbox_2d` model trả theo pixel ảnh này."""
+    w, h = orig_wh
+    hb, wb = max(factor, round(h / factor) * factor), max(factor, round(w / factor) * factor)
+    if hb * wb > max_pixels:
+        beta = math.sqrt(h * w / max_pixels)
+        hb, wb = max(factor, math.floor(h / beta / factor) * factor), max(factor, math.floor(w / beta / factor) * factor)
+    elif hb * wb < min_pixels:
+        beta = math.sqrt(min_pixels / (h * w))
+        hb, wb = math.ceil(h * beta / factor) * factor, math.ceil(w * beta / factor) * factor
+    return wb, hb
+
+
+COORDS = ("pixel", "norm1000", "qwen_resized")
 
 
 def parse_candidates(text, cfg, canvas_wh, orig_wh):
@@ -130,7 +180,9 @@ def parse_candidates(text, cfg, canvas_wh, orig_wh):
         raise ValueError(f"coord {coord!r} không thuộc {COORDS}")
     if coord == "norm1000":
         canvas_wh = (1000, 1000)
-    pairs = _extract(text)
+    elif coord == "qwen_resized":
+        canvas_wh = qwen_resized_wh(orig_wh, **(cfg.get("smart_resize") or {}))
+    pairs = _extract_replan(text) if cfg.get("prompt") == "replan" else _extract(text)
     out = []
     for b, c in zip(to_pixel([b for b, _ in pairs], canvas_wh, orig_wh), (c for _, c in pairs)):
         v = _valid(b)

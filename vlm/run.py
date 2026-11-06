@@ -82,12 +82,13 @@ def dry_run(cfg, a, datasets):
         for i, s in enumerate(sel[:2]):
             im = encode_image(s["image"], img.get("max_side"), img.get("jpeg_quality", 95))
             msgs = build_messages(s, im, cfg, examples)
-            if i == 0:
+            if i == 0 and msgs[0]["role"] == "system":
                 log(f"--- SYSTEM\n{msgs[0]['text']}")
                 for t in examples:
                     log(f"--- {t['role'].upper()} (few-shot{', có ảnh' if t['image'] else ''})\n{t['text']}")
             log(f"--- USER {s['image_id']} | lớp {s['class']!r} | ảnh gốc = canvas {im['orig_wh']} -> gửi {im['sent_wh']} {im['mime']} "
-                f"({len(im['b64']) * 3 // 4 // 1024} KB) | {len(msgs)} lượt\n{msgs[-1]['text']}")
+                f"({len(im['b64']) * 3 // 4 // 1024} KB) | {len(msgs)} lượt{' | ảnh trước text' if msgs[-1].get('image_first') else ''}"
+                + ("" if i and msgs[0]["role"] != "system" else f"\n{msgs[-1]['text']}"))
 
 
 def data_parallel(cfg):
