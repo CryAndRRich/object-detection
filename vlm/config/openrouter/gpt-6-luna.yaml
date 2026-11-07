@@ -1,15 +1,11 @@
-# GPT-6 Luna qua OpenAI trực tiếp (dự phòng OpenRouter), cách chạy của tác giả (base.yaml) — cùng họ OpenAI với gpt-4.1-mini của tác giả. reasoning none. Model
+# GPT-6 Luna qua OpenRouter, cách chạy của tác giả (base.yaml) — cùng họ OpenAI với gpt-4.1-mini của tác giả. reasoning none. Model
 # không nhận temperature -> backend tự bỏ (cả lần thử lại). ZETA5 (thương mại).
 base: ../base.yaml
 name: gpt-6-luna
-backend: openai          # key OPENAI_API_KEY trước; trống / None / sai / hết tiền -> OpenRouter (cùng model, cùng prompt_hash)
-fallback: [openrouter]
+backend: openrouter
 model: openai/gpt-6-luna
 reasoning: none
-price: {in: 0.1, out: 0.5, cached: 0.01}                 # USD / 1M, bảng giá OpenAI (đọc 2026-11-04, short context)
-price_batch: {in: 0.05, out: 0.25, cached: 0.005}        # Batch API (--batch), cùng bảng
-openai:
-  concurrency: 8         # tier thấp bị 429 nhiều thì giảm
+price: {in: 0.1, out: 0.5, cached: 0.01}   # USD / 1M (OpenRouter trả `usage.cost` thật)
 openrouter:
   concurrency: 8
   provider: {data_collection: deny}

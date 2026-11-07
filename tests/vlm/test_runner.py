@@ -222,30 +222,3 @@ def test_launch_shards_one_gpu_each_and_merge(env, monkeypatch):
     assert vlm_run.launch_shards(cfg, a, ["--config", CFG], ["ce130"], 2, stagger=0) == 0
     assert seen == [("0/2", "0"), ("1/2", "1")] and sorted(os.listdir(d)) == ["responses.jsonl"]
     assert [r["image_id"] for r in _lines(d / "responses.jsonl")] == ["x0", "x1"]
-
-
-def test_batch_mode_first_small_then_budget_capped(env):
-    """Backend Batch: lô đầu `batch.first` ảnh (đo giá), sau đó lô theo `batch.chunk` nhưng không vượt `--max-cost` ước trước khi
-    gửi; state_dir = <out_dir>/batch; mỗi job mang `attempt`."""
-    cfg, ns, out = env
-    cfg = {**cfg, "batch": {"first": 2, "chunk": 100}}
-    d = str(out / "batch")
-
-    class B(FakeBackend):
-        is_batch = True
-
-        def __init__(self, **kw):
-            super().__init__(**kw)
-            self.sizes, self.state = [], None
-
-        def set_state_dir(self, p):
-            self.state = p
-
-        def batch(self, jobs):
-            assert all("attempt" in j for j in jobs)
-            self.sizes.append(len(jobs))
-            return super().batch(jobs)
-    be = B(cost=0.5)
-    info, spent = run_dataset(cfg, ns(), be, d, "test", prompt_hash(cfg), max_cost=2.0, log=lambda *a: None)
-    assert be.state == os.path.join(d, "batch") and be.sizes == [2, 2] and spent == pytest.approx(2.0)   # 2 × $0,5 rồi ($2 − $1) / $0,5
-    assert "max-cost" in info["this_run"]["stopped"]

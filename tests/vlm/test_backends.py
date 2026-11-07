@@ -141,101 +141,6 @@ def test_vllm_free_memory_takes_tightest_visible_gpu(monkeypatch):
     assert vllm_local.gpu_free_total_mib() == (9000.0, 15360.0) and seen["cmd"][2] == "0,1"     # tensor parallel: card trống ít nhất
 
 
-class OASession(Session):
-    """OpenAI giả: GET /models/<m> -> `model_status`; POST lần lượt `posts` (lần đầu = request thăm dò)."""
-
-    def __init__(self, posts, model_status=200):
-        super().__init__(posts)
-        self.model_status = model_status
-
-    def get(self, url, headers=None, timeout=None):
-        return Resp(self.model_status, {"id": url.rsplit("/", 1)[-1]})
-
-
-OA_OK = {"id": "chatcmpl-1", "choices": [{"message": {"content": '{"candidates": []}'}, "finish_reason": "stop"}],
-         "usage": {"prompt_tokens": 1000, "completion_tokens": 200, "prompt_tokens_details": {"cached_tokens": 600},
-                   "completion_tokens_details": {"reasoning_tokens": 0}}}
-QUOTA = Resp(429, {"error": {"code": "insufficient_quota", "message": "You exceeded your current quota"}})
-
-
-def _oa(monkeypatch, posts, model_status=200, key="sk-proj-test-abcdef123456"):
-    from vlm.backends.openai_direct import OpenAI
-    monkeypatch.setenv("OPENAI_API_KEY", key)
-    cfg = {"model": "openai/gpt-6-luna", "k": 30, "max_tokens": 100, "reasoning": "none", "sampling": {},
-           "price": {"in": 0.1, "out": 0.5, "cached": 0.025}, "openai": {"concurrency": 2}, "openrouter": {"detail": "original"}}
-    sess, logs, sleeps = OASession(posts, model_status), [], []
-    return OpenAI(cfg, log=logs.append, sleep=sleeps.append, session=sess), sess, logs, sleeps
-
-
-def test_openai_payload_probe_drop_and_cost(monkeypatch):
-    from vlm.runner import record_cost
-    unsup = Resp(400, {"error": {"code": "unsupported_parameter", "param": "temperature", "message": "no temperature"}})
-    be, sess, logs, _ = _oa(monkeypatch, [Resp(200, OA_OK), unsup, Resp(200, OA_OK)])
-    assert len(sess.sent) == 1 and sess.sent[0][2]["max_completion_tokens"] == 16                  # thăm dò số dư lúc khởi động
-    r = be.batch([{**JOB, "temperature": 0.7}])[0]
-    body = sess.sent[-1][2]
-    assert body["model"] == "gpt-6-luna" and body["reasoning_effort"] == "none" and "temperature" not in body
-    assert "temperature" in sess.sent[1][2] and any("không nhận `temperature`" in m for m in logs)
-    assert body["response_format"]["json_schema"]["name"] == "insertion_layout" and "max_tokens" not in body
-    assert body["messages"][0]["content"][1]["image_url"]["detail"] == "original"                    # cùng detail OpenRouter
-    assert r["cost"] is None and r["cached"] == 600 and r["provider"] == "OpenAI (trực tiếp)"
-    assert record_cost(r, be.cfg) == pytest.approx((400 * 0.1 + 600 * 0.025 + 200 * 0.5) / 1e6)
-    assert not any("abcdef123456" in m for m in logs)
-    sess.posts.append(Resp(400, {"error": {"code": "unsupported_value", "param": "reasoning_effort"}}))
-    with pytest.raises(Fatal, match="không nhận `reasoning_effort`"):                               # không bỏ: đổi câu trả lời
-        be.batch([JOB])
-
-
-@pytest.mark.parametrize("posts,status,key,match", [
-    ([QUOTA], 200, "sk-proj-test-abcdef123456", "hết tiền"),
-    ([], 401, "sk-proj-test-abcdef123456", "từ chối key"),
-    ([], 404, "sk-proj-test-abcdef123456", "không dùng được model"),
-    ([], 200, "sk-or-v1-abcdefghijkl", "là key OpenRouter")])
-def test_openai_startup_fatal(monkeypatch, posts, status, key, match):
-    with pytest.raises(Fatal, match=match):
-        _oa(monkeypatch, posts, status, key)
-
-
-def test_chain_skips_missing_key_and_switches_on_fatal(monkeypatch):
-    """Key OpenAI `None` -> bỏ qua; OpenAI hết tiền giữa chừng -> job gửi lại ở OpenRouter; hết danh sách -> Fatal."""
-    from vlm.backends import Chain, make_backend
-
-    class B:
-        concurrency = 2
-
-        def __init__(self, kind, fail_after=None):
-            self.kind, self.n, self.fail_after = kind, 0, fail_after
-
-        def call(self, job):
-            self.n += 1
-            if self.fail_after is not None and self.n > self.fail_after:
-                raise Fatal("429 insufficient_quota")
-            return {"text": self.kind}
-
-    built = []
-
-    def make(kind, cfg, log, sleep):
-        if kind == "none":
-            from vlm.env import require_key
-            require_key("ZETA_TEST_KEY")
-        b = B(kind, fail_after=1 if kind == "openai" else None)
-        built.append(b)
-        return b
-    monkeypatch.setenv("ZETA_TEST_KEY", "None")
-    logs = []
-    ch = Chain(["none", "openai", "openrouter"], {}, log=logs.append, make=make)
-    assert ch.kind == "openai" and any("bỏ none" in m and "None" in m for m in logs)
-    out = [ch.call(JOB) for _ in range(3)]
-    assert [o["text"] for o in out] == ["openai", "openrouter", "openrouter"] and ch.kind == "openrouter"
-    built[-1].fail_after = 0
-    with pytest.raises(Fatal, match="hết backend"):
-        ch.call(JOB)
-    monkeypatch.setenv("OPENAI_API_KEY", "null")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "")
-    with pytest.raises(Fatal, match="hết backend.*OPENROUTER_API_KEY"):
-        make_backend({"backend": "openai", "fallback": ["openrouter"], "model": "openai/x"}, log=lambda *a: None)
-
-
 def test_placeholder_keys_are_missing(monkeypatch):
     from vlm.env import get_key
     for v in ("None", "null", " ", "<điền key>", "your_key", "sk-your-openai-key", "sk-proj-xxxxxxxx"):
@@ -245,14 +150,6 @@ def test_placeholder_keys_are_missing(monkeypatch):
             require_key("K_TEST")
     monkeypatch.setenv("K_TEST", "sk-proj-real-123456")
     assert get_key("K_TEST") == "sk-proj-real-123456"
-
-
-def test_hash_same_for_openai_and_openrouter_route():
-    from vlm.prompt import prompt_hash
-    cfg = {"backend": "openrouter", "model": "openai/gpt-6-luna", "k": 30, "icl": 0, "reasoning": "none",
-           "openrouter": {"provider": {"data_collection": "deny"}}}
-    assert prompt_hash({**cfg, "backend": "openai", "fallback": ["openrouter"], "openai": {"concurrency": 4}}) == prompt_hash(cfg)
-    assert prompt_hash({**cfg, "backend": "vllm"}) != prompt_hash(cfg)
 
 
 def test_openrouter_zero_balance_fatal(monkeypatch):
@@ -270,11 +167,11 @@ def test_openrouter_zero_balance_fatal(monkeypatch):
 def test_env_last_line_wins_and_export_shadow_reported(tmp_path, monkeypatch):
     from vlm.env import key_source
     p = tmp_path / ".env"
-    p.write_text("OPENAI_API_KEY=sk-old-aaaaaaaa\nOPENAI_API_KEY=sk-new-bbbbbbbb\nOTHER_API_KEY=g-file-123456\n")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    p.write_text("OPENROUTER_API_KEY=sk-old-aaaaaaaa\nOPENROUTER_API_KEY=sk-new-bbbbbbbb\nOTHER_API_KEY=g-file-123456\n")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.setenv("OTHER_API_KEY", "sk-your-other-key")                             # export sẵn trong shell (chữ mẫu)
     load_env(str(p))
-    assert require_key("OPENAI_API_KEY") == "sk-new-bbbbbbbb" and key_source("OPENAI_API_KEY") == ".env"
+    assert require_key("OPENROUTER_API_KEY") == "sk-new-bbbbbbbb" and key_source("OPENROUTER_API_KEY") == ".env"
     assert "KHÁC giá trị trong .env" in key_source("OTHER_API_KEY")
 
 

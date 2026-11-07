@@ -66,7 +66,7 @@ def get_key(name):
 
 def require_key(name):
     """-> key; thiếu / giữ chỗ (`get_key`) / có ký tự trắng hay ngoài ASCII bên trong (dán lỗi; OpenRouter trả 401 "Missing
-    Authentication header") -> dừng (SystemExit; backend có `fallback` thì chuyển key sau), chỉ báo vị trí + mã ký tự, không in key."""
+    Authentication header") -> dừng (SystemExit), chỉ báo vị trí + mã ký tự, không in key."""
     v = get_key(name)
     if v is None:
         raise SystemExit(f"thiếu {name} (trống / None): điền vào {ENV_PATH} (cấu trúc xem .env.example) hoặc export trước khi chạy")

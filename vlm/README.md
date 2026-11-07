@@ -1,4 +1,4 @@
-# vlm — ZETA5 (VLM thương mại) + ZETA6 (VLM open-source) cho bài ADD, chạy theo cách của tác giả
+# vlm — ZETA4 (RePlan) + ZETA5 (VLM thương mại) + ZETA6 (VLM open-source) cho bài ADD, chạy theo cách của tác giả
 
 Mỗi ảnh test gọi VLM **một lần**, xin **30 box** chỗ thêm một vật cùng lớp. Chấm bằng đúng code chấm của ZETA / CE-Loc
 (`baseline/score.py`). **Kết quả chính = C-NLL của box `score` (confidence model trả) cao nhất** (người dùng chốt 2026-11-04;
@@ -26,31 +26,22 @@ Quyết định, lý do chọn model, kết quả: `docs/EXPERIMENT_ZETA.md` m�
 | nhóm | config | model | chạy ở đâu | ghi chú |
 |---|---|---|---|---|
 | **ZETA4** RePlan | `config/server2/replan-7b.yaml` | `TainU/RePlan-Qwen2.5-VL-7B` (planner) | server 2, vLLM | prompt / parse riêng (`prompt: replan`): greedy = box chính + 29 sample; ZETA mục 14 |
-| **ZETA5** thương mại | `config/openrouter/gpt-6-luna.yaml` | `openai/gpt-6-luna` | OpenAI, dự phòng OpenRouter (full: OpenRouter) | họ OpenAI; tắt suy nghĩ; không nhận temperature |
-| | `config/openrouter/gpt-4.1-mini.yaml` | `openai/gpt-4.1-mini` | OpenAI, dự phòng OpenRouter (full: OpenRouter) | đúng model tác giả dùng; $0,4 / $1,6 |
+| **ZETA5** thương mại | `config/openrouter/gpt-6-luna.yaml` | `openai/gpt-6-luna` | OpenRouter | họ OpenAI; tắt suy nghĩ; không nhận temperature |
+| | `config/openrouter/gpt-4.1-mini.yaml` | `openai/gpt-4.1-mini` | OpenRouter | đúng model tác giả dùng; $0,4 / $1,6 |
 | **ZETA6** open-source | `config/kaggle/qwen3-vl-4b.yaml` (+ `server2/`, cùng hash) | `Qwen/Qwen3-VL-4B-Instruct` | Kaggle 2 × T4 / server 2, vLLM | fp16, `coord: norm1000` |
 | | `config/kaggle/llava-ov2-8b.yaml` (+ `server2/`, cùng hash) | `lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct` | Kaggle 2 × T4 / server 2, vLLM | fp16, `coord: norm1000` |
-| | `config/server2/internvl3.5-8b.yaml` | `OpenGVLab/InternVL3_5-8B` | server 2, vLLM | bf16 (bản Kaggle fp16 khác hash), `coord: norm1000` |
+| | `config/server2/internvl3.5-8b.yaml` | `OpenGVLab/InternVL3_5-8B` | server 2, vLLM | bf16, `coord: norm1000` |
 | | `config/openrouter/glm-5.3-flash.yaml` | `z-ai/glm-5.3-flash` | OpenRouter (320B MoE) | suy nghĩ `low` (không tắt được) |
 
-Bỏ: Gemini Robotics-ER 2 (2026-11-06, cùng backend Gemini; pilot 10 / pilot500 giữ ở ZETA mục 13.2). `config/server/` (A30 FP8) chưa
-chạy (GPU dùng chung không đủ chỗ).
-
-ZETA6: ưu tiên chạy trên GPU server; OpenRouter nếu rẻ; nặng quá thì hạ bản nhỏ hơn. Đã thử và loại: Perceptron, Elorian Glimpse,
-Qwen3.8-27B — xem `docs/EXPERIMENT_ZETA.md` mục 0.
+Đã thử và loại (số pilot ở ZETA mục 13.2): Gemini Robotics-ER 2, Perceptron, Elorian Glimpse, Qwen3.8-27B. Backend OpenAI trực tiếp
+và Batch API bỏ 2026-11-07 (key OpenAI hết hạn, mọi lần chạy full / latency đều qua OpenRouter; git giữ lịch sử).
 
 ## Key
 
-Chép `.env.example` thành `vlm/.env` rồi điền `OPENAI_API_KEY`, `OPENROUTER_API_KEY`.
-- `vlm/.env` đã bị gitignore: đừng commit, đừng dán key vào chat / log.
-- Code chỉ in tên biến và 4 ký tự cuối của key; kiểm key OpenRouter bắt đầu bằng `sk-or-`, key không có ký tự trắng / lạ.
-- Biến môi trường đã `export` được ưu tiên hơn file. Giá trị trống / `None` / `null` / `<...>` = không có key.
-- **Thứ tự key** (`backend` rồi `fallback` trong config): GPT-6 Luna, gpt-4.1-mini = `openai` -> `openrouter`. Key trống / sai / hết
-  tiền (lúc khởi động hay giữa chừng) -> chuyển cái sau, ảnh đang dở gửi lại; hết danh sách -> dừng êm (câu trả lời đã có vẫn giữ).
-  Hai đường cùng model nên cùng `prompt_hash` (dùng lại pilot); mỗi câu trả lời ghi `provider`. GLM chỉ một đường: thiếu key -> dừng.
-- **Số dư**: OpenRouter in số dư `/credits` lúc khởi động, số dư <= 0 -> bỏ đường đó. OpenAI không có API đọc số dư cho key thường
-  ⇒ gửi một request thăm dò 16 token (~$0,00001): `insufficient_quota` -> bỏ. Tiền một lần chạy chặn bằng `--max-cost`. OpenAI không trả tiền mỗi request ⇒ tính token × `price`
-  (`price.cached` cho token vào đã cache).
+Chép `.env.example` thành `vlm/.env` rồi điền `OPENROUTER_API_KEY` (gitignore: đừng commit, đừng dán key vào chat / log).
+- Code chỉ in tên biến và 4 ký tự cuối; kiểm key bắt đầu bằng `sk-or-`, không có ký tự trắng / lạ. Biến đã `export` được ưu tiên hơn
+  file; trống / `None` / `null` / `<...>` = không có key ⇒ dừng.
+- OpenRouter in hạn mức key + số dư `/credits` lúc khởi động (số dư <= 0 ⇒ dừng); tiền = `usage.cost` thật; `--max-cost` chặn một lần chạy.
 
 ## Chạy (từ `object-detection/vlm/`)
 
@@ -62,18 +53,6 @@ Chép `.env.example` thành `vlm/.env` rồi điền `OPENAI_API_KEY`, `OPENROUT
 | `--dataset ce130 \| cocount \| all` | mặc định `all` (cả hai tập) |
 | `--max-cost USD` | dừng êm khi tiền lần chạy này chạm ngưỡng; câu trả lời đã lưu, chạy lại cùng lệnh để tiếp |
 | `--no-score` / `--score-only` | tách sinh câu trả lời (venv vLLM) và chấm (venv chính) |
-| `--batch` | Batch API (chỉ backend `openai`): giá token 50 %, trả trong <= 24 giờ; câu trả lời như gọi thường; không đo latency |
-
-**Batch API** (`--batch`; `vlm/backends/batch.py`, docs OpenAI đọc 2026-11-04; Gemini Batch bỏ cùng ER-2 2026-11-06):
-- Giá = `price_batch` của config (bảng Batch chính thức; thiếu thì dừng). Hạn: OpenAI 24 giờ (quá hạn: request xong vẫn trả + tính
-  tiền, phần chưa xong huỷ, không tính).
-- Lô đầu `batch.first` (20) ảnh để đo giá; sau đó cả phần còn lại một lô (`batch.chunk` 10.000), tự chia thành phần <=
-  `batch.max_requests` (1.000) / <= 190 MB (OpenAI) gửi song song. `--max-cost` chặn TRƯỚC khi gửi (ước theo TB tiền / ảnh đã có).
-- Không gửi trùng: mỗi lô ghi vào `<tập>/batch/state.json` ngay khi tạo, file kết quả tải về giữ cạnh đó ⇒ bị ngắt thì chạy lại cùng
-  lệnh: chờ / lấy lô cũ. Khoá request `<image_id>#<lần thử>`. Request hết hạn / hàng đợi đầy: chờ `batch.limit_wait_sec` (900) rồi gửi lại.
-- Log mỗi 10 phút: trạng thái, số request xong / lỗi, đã chờ bao lâu (provider không cho ETA).
-- `--batch` bỏ `fallback` (OpenRouter = gọi thường, giá gấp đôi): key OpenAI lỗi thì dừng, không tự chuyển.
-- Latency vẫn đo bằng `tools/latency.py` (gọi thường, từng ảnh) — Batch không có thời gian từng request.
 
 Box vật CoCount đã rà tay: `--cocount-review` mặc định `../data/cocount_review.jsonl` (`object-detection/data/`, cùng tên trong zip).
 
@@ -102,15 +81,17 @@ tên file theo `pilot<K>` hay `test`:
 = request thành công cuối (API; vLLM khối 1 ảnh). **Số báo cáo = latency 1 ảnh của `tools/latency.py`** (một định nghĩa chung mọi
 method, chốt 2026-11-04 — docstring tool), không lấy từ hai trường này.
 
-Chưa đủ câu trả lời (dừng giữa chừng / `--no-score`) ⇒ `<name>.json` chỉ có tiền / token, chưa có `<name>.jsonl`.
-Pilot chấm trước 2026-11-04 còn bố cục cũ (`<name>_raw.jsonl`, `_boxes.json`, `_k1.json`, `_run.json`); `--score-only` ra bố cục mới.
+Chưa đủ câu trả lời (dừng giữa chừng / `--no-score`) ⇒ `<name>.json` chỉ có tiền / token, chưa có `<name>.jsonl`. Kaggle còn ghi
+`diagnose.json` (số box, finish, token, toạ độ trong ảnh theo pixel / 0–1000).
 
-Log: `log/add/vlm/<model>/`; log launcher (chạy nhiều model một lượt) ở `log/add/vlm/launch/`. Khuôn nohup: `docs/EXPERIMENT_ZETA.md`.
+Log `log/add/vlm/<model>/`: `pilot<K>_<MMDD_HHMM>.log`, `full_<MMDD_HHMM>.log` (sinh `--all`), `score_full_<MMDD_HHMM>.log`
+(`--score-only`); chuỗi nhiều model / bước: `log/add/eval_chain/`.
 
 ## So box các VLM — `plot_compare.py`
 
 Hình 2 × 3 / ảnh (chữ tiếng Anh): ô Original (ảnh + vật đang có + box GT) và 5 ô model (mặc định GLM-5.3-Flash, gpt-4.1-mini, GPT-6 Luna,
-LLaVA-OV-2-8B, Qwen3-VL-4B; `--models` chọn khác, vd `replan-7b`, `internvl3.5-8b`): box dự đoán đỏ mảnh + một box đỏ đậm — `--bold min` (mặc định) box C-NLL thấp nhất, `--bold top` box
+LLaVA-OV-2-8B, Qwen3-VL-4B; `--models` chọn khác, vd `replan-7b`, `internvl3.5-8b`): box dự đoán đỏ mảnh + một box đỏ đậm —
+`--bold min` (mặc định) box C-NLL thấp nhất, `--bold top` box
 `score` cao nhất. Đọc `output/add/vlm/<model>/<tập>/test.jsonl` (model chưa chạy full thì `pilot<K>.jsonl` K lớn nhất) + ảnh, ghi
 `output/add/viz/vlm_compare/<tập>/<image_id>.png`.
 
@@ -120,49 +101,23 @@ python plot_compare.py --dataset all --pilot 10 --bold top --models replan-7b gl
     --out ../../output/add/viz/vlm_compare_replan       # chọn model (tối đa 5)
 ```
 
-## Kaggle 2 × T4 (vLLM) — ZETA6 open-source (chốt 2026-11-04)
+## Chạy vLLM (Kaggle 2 × T4, server 2)
 
-Server: driver 535 (CUDA 12.2; vLLM >= 0.20 trên PyPI là CUDA 13) + GPU dùng chung còn 4,7–9,9 GiB ⇒ model 8B không vừa. Kaggle:
-`config/kaggle/<model>.yaml` (Qwen3-VL-4B, InternVL3.5-8B, LLaVA-OV-2-8B) — T4 không bf16 / FP8 / FlashAttention 2 ⇒ `dtype: half`,
-`tensor_parallel_size: 2`, `vllm.gpu_mem_gib` / `kv_cache_gib` tính MỖI card. Model vừa một card: `vllm.data_parallel: 2`
-⇒ `run.py` mở 2 tiến trình con (`--shard i/2`, mỗi con một GPU, TP 1), chia ảnh theo hash tên ảnh, ghi `responses_shard<i>.jsonl`,
-xong / bị dừng thì gộp vào `responses.jsonl` (resume đọc cả file chưa gộp). Qwen3-VL-4B thử `data_parallel: 2` (KV 3,5 GiB / card đầy) không nhanh hơn TP 2 ⇒ dùng TP 2 (ZETA mục 13). Khoá `engine` chỉ đổi tốc độ / bộ nhớ
-(`max_num_seqs`, `tensor_parallel_size`, `limit_mm_per_prompt`, …) nằm ngoài `prompt_hash` ⇒ chỉnh giữa các phiên vẫn resume. Notebook
-`notebooks/vlm_kaggle.ipynb` (local, gitignore): cài vLLM theo driver, chép CoCount sang ổ local, nối `responses.jsonl` phiên trước, in tiến độ / lỗi (thống kê vLLM gộp 1 dòng / engine / 10 phút; file log giữ đủ),
-`MODELS` × `DATASETS` (pilot: đủ cả hai để thử một lượt; full: mỗi lần một model × một tập = 6 lần), mỗi model `--pilot K` hay
-`--all` + (`LATENCY`) `tools/latency.py vlm` (latency 1 ảnh chuẩn, `output/add/latency/<model>.json`) + chẩn đoán (`diagnose.json`: số box,
-finish, token, s / ảnh (khối), không JSON / score, box trong ảnh theo pixel và theo 0–1000), xoá weight, gói `zeta6_<tag>.zip`.
-**Toạ độ** `coord`: `pixel` (mặc định, như prompt tác giả) | `norm1000` (Qwen3-VL, LLaVA-OV-2, InternVL3.5 trả thang 0–1000, thứ tự x-y, dù prompt xin pixel —
-pilot 2026-11-04); chỉ đổi cách đọc, không vào hash; `--coord` khi chấm để so (file thêm hậu tố). Chấm trên server: giải nén vào gốc `/mnt/disk1/aiotlab/haitn/` rồi `python run.py --config
-config/kaggle/<model>.yaml --pilot 10 --score-only` (venv chính). Rủi ro T4: fp16 tràn số (model học bf16), kernel attention Turing.
-
-## Server A30 (vLLM) — venv riêng
-
-- Hai model 8B ở bf16 cần ~16 GiB, quá chỗ trống ~9–10 GiB của GPU dùng chung ⇒ FP8 chỉ weight (`fp8_per_tensor`, Marlin trên
-  Ampere) ~8 GiB + KV cố định `vllm.kv_cache_gib` (2 GiB).
-- Few-shot tác giả có 3 ảnh / prompt ⇒ `max_model_len` 12288, ảnh giới hạn token (InternVL `max_dynamic_patch` 4, LLaVA
-  `max_pixels` ~1 MP). Không vừa thì `icl: 0` hay bản model nhỏ hơn.
-- Code đọc bộ nhớ trống của GPU mà `tools/run_on_free_gpu.py` đã chọn; không đủ `vllm.gpu_mem_gib` thì dừng ngay.
-- vLLM >= 0.25.0 (bản đầu có LLaVA-OneVision-2). Bản mới (0.33) chỉ có wheel CUDA 13, cần driver >= 580 ⇒ `nvidia-smi` trước.
-- Venv vLLM: `vllm==<bản>` + `pyyaml scipy matplotlib` (kèm torch / transformers). Không cài `requirements.txt` của repo (ghim
-  `numpy<2` có thể làm hỏng vllm).
-- Chạy: (1) venv vLLM `<venv>/bin/python ../tools/run_on_free_gpu.py -- run.py --config config/server/<model>.yaml --pilot 50
-  --no-score`; (2) venv chính `python run.py --config config/server/<model>.yaml --pilot 50 --score-only`.
-
-## Server 2 RTX PRO 5000 Blackwell 48 GB (tạm thời từ 2026-11-05)
-
-- Driver 595 (CUDA 13.2) ⇒ vLLM PyPI bản mới cài thẳng (venv riêng như trên). Một card 48 GB ⇒ model 8B fp16 (~16 GiB) vừa dư, không
-  cần TP 2 / FP8.
-- **Nối tiếp / bổ sung câu trả lời Kaggle** (cùng câu trả lời): dùng config `kaggle/<model>.yaml`, chỉ đổi khoá ngoài `prompt_hash`
-  (`tensor_parallel_size: 1`, `max_num_seqs`, `vllm.kv_cache_gib` / `gpu_mem_gib`) ⇒ cùng hash, resume / gộp `responses.jsonl` với
-  phiên Kaggle. **Không** đổi `dtype` (half -> bfloat16), `max_model_len`, `mm_processor_kwargs`, ảnh, sampling: vào hash ⇒ hỏi lại
-  từ đầu, số không so được với phần đã chạy.
-- **Latency 1 ảnh của mọi method chạy local đo ở đây** (chốt 2026-11-06; ZETA mục 4): `tools/latency.py`, 100 ảnh / tập, config
-  `server2/` (Qwen3-VL-4B, LLaVA-OV-2-8B = bản Kaggle một card, cùng hash; InternVL3.5-8B bf16; RePlan). Model qua API không đo.
-- Venv vLLM `envs/vllm` (vLLM 0.33.0, torch 2.14 CUDA 13). Máy không có CUDA toolkit (`nvcc`) ⇒ bộ lấy mẫu FlashInfer không JIT được
-  (`Could not find nvcc`) ⇒ **`export VLLM_USE_FLASHINFER_SAMPLER=0`** (lấy mẫu PyTorch). IPv6 hỏng ⇒ tải weight trước bằng IPv4
-  (`huggingface_hub` + `urllib3.util.connection.HAS_IPV6 = False`) rồi chạy `HF_HUB_OFFLINE=1`; cache compile vào `haitn/`
-  (`VLLM_CACHE_ROOT`, `TRITON_CACHE_DIR`).
+- Venv vLLM riêng: `vllm==0.33.0` + `pyyaml scipy matplotlib` (kèm torch / transformers); không cài `requirements.txt` của repo (ghim
+  `numpy<2`). vLLM 0.33 là wheel CUDA 13 ⇒ driver >= 580. Sinh câu trả lời ở venv vLLM (`--no-score`), chấm ở venv chính (`--score-only`).
+- Code đọc bộ nhớ trống của GPU mà `tools/run_on_free_gpu.py` chọn; thiếu `vllm.gpu_mem_gib` thì dừng ngay (không chờ). Khoá `vllm.*` và
+  khoá `engine` chỉ đổi tốc độ / bộ nhớ (`max_num_seqs`, `tensor_parallel_size`, `limit_mm_per_prompt`, …) nằm ngoài `prompt_hash` ⇒
+  chỉnh giữa các phiên vẫn resume. **Không** đổi `dtype`, `max_model_len`, `hf_overrides` / ảnh, sampling (vào hash ⇒ hỏi lại từ đầu).
+- **Toạ độ** `coord`: `pixel` (mặc định, như prompt tác giả) | `norm1000` (Qwen3-VL, LLaVA-OV-2, InternVL3.5 trả thang 0–1000 dù prompt
+  xin pixel — pilot 2026-11-04); chỉ đổi cách đọc, không vào hash.
+- **Kaggle** (`config/kaggle/`; T4 không bf16 / FP8 / FlashAttention 2 ⇒ `dtype: half`, `tensor_parallel_size: 2`, bộ nhớ tính MỖI
+  card). `vllm.data_parallel: 2` ⇒ 2 tiến trình con (`--shard i/2`, mỗi con một GPU), ghi `responses_shard<i>.jsonl` rồi gộp. Notebook
+  `notebooks/vlm_kaggle.ipynb` (local, gitignore): cài vLLM, nối `responses.jsonl` phiên trước, `--pilot K` / `--all` + `diagnose.json`,
+  gói `zeta6_<tag>.zip` (giải nén vào gốc `multi_condition/` hay `/mnt/disk1/aiotlab/haitn/`, rồi `--score-only`).
+- **Server 2** RTX PRO 5000 48 GB (`config/server2/`; Qwen3-VL-4B / LLaVA-OV-2-8B = bản Kaggle một card, cùng hash; InternVL3.5-8B
+  bf16; RePlan). Venv `envs/vllm`; không có `nvcc` ⇒ **`export VLLM_USE_FLASHINFER_SAMPLER=0`**; IPv6 hỏng ⇒ tải weight trước bằng IPv4
+  rồi chạy `HF_HUB_OFFLINE=1`; cache compile vào `haitn/` (`VLLM_CACHE_ROOT`, `TRITON_CACHE_DIR`). GPU dùng chung ⇒ `vllm.gpu_mem_gib`
+  vừa số GPU đang trống. Latency 1 ảnh mọi method chạy local đo ở đây (ZETA mục 4).
 
 ## Dữ liệu gửi đi
 

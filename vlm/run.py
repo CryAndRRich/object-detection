@@ -43,7 +43,6 @@ def parse_args(argv=None):
     mode.add_argument("--all", action="store_true", help="toàn bộ tập test")
     ap.add_argument("--dataset", default="all", choices=["ce130", "cocount", "all"])
     ap.add_argument("--max-cost", type=float, default=None, help="USD tối đa cho lần chạy này (cả hai tập); chạm thì dừng êm")
-    ap.add_argument("--batch", action="store_true", help="Batch API (chỉ backend openai): giá 50 %%, trả trong <= 24 h; không đo latency")
     ap.add_argument("--dry-run", action="store_true", help="in prompt 2 ảnh đầu, không gọi model, không cần key")
     ap.add_argument("--no-score", action="store_true", help="chỉ sinh câu trả lời (venv vLLM)")
     ap.add_argument("--score-only", action="store_true", help="chỉ chấm từ responses.jsonl, không gọi model")
@@ -157,7 +156,7 @@ def main(argv=None):
         cfg["coord"] = a.coord
         name += f"_{a.coord}"
     log(f"[vlm] {time.strftime('%Y-%m-%d %H:%M:%S')} | {socket.gethostname()} | {cfg['name']} = {cfg['model']} ({cfg['backend']}) | "
-        f"{name} | tập {datasets} | prompt_hash {phash} | K {cfg['k']} | icl {cfg.get('icl', 0)} | max-cost {a.max_cost} | batch {a.batch}")
+        f"{name} | tập {datasets} | prompt_hash {phash} | K {cfg['k']} | icl {cfg.get('icl', 0)} | max-cost {a.max_cost}")
     if a.dry_run:
         dry_run(cfg, a, datasets)
         return
@@ -174,7 +173,7 @@ def main(argv=None):
     found = load_env()
     log(f"[vlm] .env: {len(found)} biến ({', '.join(found) or 'không có file'})")
     try:
-        backend = None if a.score_only else make_backend(cfg, log, batch=a.batch)
+        backend = None if a.score_only else make_backend(cfg, log)
     except Fatal as e:
         raise SystemExit(f"[vlm] {e}")
     spent, est, fatal = 0.0, [], False
