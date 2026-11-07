@@ -5,6 +5,7 @@ epoch -> `--resume` đúng chỗ, snapshot / history, predict CE-130 + CoCount; 
 
 import json
 import os
+import random
 import sys
 
 import pytest
@@ -77,6 +78,7 @@ def test_bootplace_accumulation_equals_full_batch(tmp_path):
     _, cfg = tiny_cfg(tmp_path, "zeta1")
     cfg["finetune"]["train_scales"] = [64]                         # cùng cỡ (2 mẫu đầu cùng ảnh) ⇒ đệm như nhau ở mọi cách chia micro
     torch.manual_seed(0)
+    random.seed(0)                                                 # lật ngang của dataset
     tr, batch = _batch(cfg, tmp_path)
     scaler = torch.cuda.amp.GradScaler(enabled=False)
     grads = []
@@ -88,7 +90,7 @@ def test_bootplace_accumulation_equals_full_batch(tmp_path):
             tr.backward(chunk, ctx, len(chunk) / len(batch), False, scaler)
         grads.append([p.grad.clone() if p.grad is not None else torch.zeros_like(p) for p in tr.params])
     for a, b in zip(*grads):
-        torch.testing.assert_close(a, b, rtol=1e-4, atol=1e-6)
+        torch.testing.assert_close(a, b, rtol=1e-3, atol=1e-5)    # fp32 cộng theo thứ tự khác (đích [0, 1] ⇒ grad nhỏ, lệch ~2e-4 tương đối)
 
 
 def test_csanet_generator_loss_not_in_discriminator(tmp_path):
@@ -101,8 +103,8 @@ def test_csanet_generator_loss_not_in_discriminator(tmp_path):
     assert all(p.grad is not None for p in tr.g_params)
     torch.manual_seed(1)
     f = lambda k: batch[k].float() / 255  # noqa: E731
-    comp, comp_msk = tr.real_composite(f("bg"), f("fg"), f("msk"), batch["fg_bbox"], batch["trans"])
-    _, d_loss, _ = gan_losses(tr.G, tr.D, f("bg"), f("fg"), f("msk"), batch["fg_bbox"], comp, comp_msk, batch["trans"])
+    comp, comp_msk = tr.real_composite(f("bg"), f("fg"), f("bmsk"), batch["fg_bbox"], batch["trans"])
+    _, d_loss, _ = gan_losses(tr.G, tr.D, f("bg"), f("fg"), f("msk"), batch["fg_bbox"], comp, comp_msk, batch["trans"], blend_msk=f("bmsk"))
     for a, b in zip(got, torch.autograd.grad(d_loss, tr.d_params)):
         torch.testing.assert_close(a, b, rtol=1e-4, atol=1e-7)
 
@@ -130,6 +132,14 @@ def test_csanet_real_composite_gamma_eval_mode_best_last(tmp_path):
             and abs(ys.max().item() + 1 - y2) <= 2
     out = (m == 0).expand_as(comp)
     torch.testing.assert_close(comp[out], f("bg")[out])                  # ngoài vùng dán = nền
+    # zeta2: dán bằng mask vật thật (nằm trong mask chữ nhật của G, nhỏ hơn hẳn); ảnh thật ngoài mask vật = nền
+    assert cfg["finetune"]["blend_mask"] == "object"
+    bm, rm = f("bmsk"), f("msk")
+    assert (bm <= rm + 1e-6).all() and 0 < bm.sum() < 0.8 * rm.sum()
+    comp, m = tr.real_composite(f("bg"), f("fg"), bm, batch["fg_bbox"], batch["trans"])
+    out = (m == 0).expand_as(comp)
+    torch.testing.assert_close(comp[out], f("bg")[out])
+    assert (m > 0.5).sum() < 0.8 * (tr.real_composite(f("bg"), f("fg"), rm, batch["fg_bbox"], batch["trans"])[1] > 0.5).sum()
     tr.cfg["finetune"]["eval_mode"] = False
     tr.train()
     assert tr.G.training and tr.D.training
@@ -153,6 +163,16 @@ def test_bootplace_scene_boxes_change_boxes(tmp_path):
     assert a.std(0).max() > 1e-3 and (a - b).abs().max() > 1e-4
     assert s["scene"].max() > 1.5 and s["scene"][:, 2].max() <= FRAME[0] + 1e-3          # pixel khung, không chuẩn hoá
     torch.testing.assert_close(scene_boxes([[0, 0, 50, 25]], (100, 50), 4), torch.tensor([[0.0, 0.0, 480.0, 270.0]]))
+    # đích train KHÔNG đi qua `scene_boxes`: cxcywh chuẩn hoá như `pred_boxes` (bản 2026-11-07 sáng lẫn hai thứ ⇒ đích pixel, loss ~45k
+    # đứng yên cả 10 epoch)
+    from baseline.methods.bootplace import target_boxes
+    torch.testing.assert_close(target_boxes([[0, 0, 50, 25]], (100, 50)), torch.tensor([[0.25, 0.25, 0.5, 0.5]]))
+    for s in batch:
+        assert len(s["boxes"]) and 0 <= s["boxes"].min() and s["boxes"].max() <= 1
+    model.train()
+    out = model(x, mask, p, [s["scene"]])
+    box, mean, _ = tr.crit(out, [{"boxes": s["boxes"], "labels": torch.zeros(len(s["boxes"]), dtype=torch.int64)}])
+    assert float(box + mean) < 200                                                       # 6 tầng × (5·L1 + 2·GIoU) + clip, đích [0, 1]
 
 
 def test_csanet_bce_matches_torch_and_passes_nan():

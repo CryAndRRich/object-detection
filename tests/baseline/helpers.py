@@ -57,6 +57,9 @@ def fake_ce130(base, seed=0):
             holes = [objs[3], objs[5]]
             for t, (x1, y1, x2, y2) in enumerate(holes, 1):
                 img[int(y1):int(y2), int(x1):int(x2)] = 128
+                m = np.zeros((H, W, 3), dtype=np.uint8)                   # mask vật đã xoá: lõi giữa lỗ (vật không đầy box)
+                m[int(y1) + 3:int(y2) - 3, int(x1) + 2:int(x2) - 2] = 255
+                _save(m, os.path.join(root, br, f"mask_{t}.png"))
                 _save(img, os.path.join(root, br, f"inpainted_turn_{t}.png"))
                 _save(img, os.path.join(samples, split, "images", f"{iid}_{t}.png"))
                 _save(np.zeros((H, W, 3), dtype=np.uint8), os.path.join(samples, split, "density", f"{iid}_{t}.png"))

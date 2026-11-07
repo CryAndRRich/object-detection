@@ -24,9 +24,9 @@ from torch.utils.data import Dataset
 
 from baseline.data import int_box, pick_objects, sample_rng
 from baseline.models.bootplace import build_bootplace, build_criterion
-from baseline.models.detr import box_cxcywh_to_xyxy, nested
+from baseline.models.detr import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh, nested
 
-__all__ = ["FRAME", "resize_size", "prep_images", "patch_canvas", "scene_boxes", "BootPlaceTrain", "rank_queries", "predict", "Trainer"]
+__all__ = ["FRAME", "resize_size", "prep_images", "patch_canvas", "scene_boxes", "target_boxes", "BootPlaceTrain", "rank_queries", "predict", "Trainer"]
 
 MEAN, STD = (0.440, 0.440, 0.440, 0.0), (0.320, 0.319, 0.318, 0.5)
 PATCH, MAX_PATCHES, TOPK_CLIP = 64, 100, 10
@@ -84,6 +84,13 @@ def scene_boxes(boxes_xyxy, wh, q, rng=None):
     return torch.as_tensor(b * np.array([sx, sy, sx, sy]), dtype=torch.float32)
 
 
+def target_boxes(boxes_xyxy, wh):
+    """Box đích (lỗ GT, xyxy pixel ảnh gốc cỡ `wh`) -> cxcywh chuẩn hoá [0, 1] như `pred_boxes` (KHÁC box cảnh `scene_boxes`)."""
+    w, h = wh
+    b = torch.as_tensor(np.asarray(boxes_xyxy, dtype=np.float64).reshape(-1, 4), dtype=torch.float32)
+    return box_xyxy_to_cxcywh(b) / torch.tensor([w, h, w, h], dtype=torch.float32)
+
+
 def _u8(img):
     return torch.from_numpy(np.array(img, dtype=np.uint8)).permute(2, 0, 1).contiguous()
 
@@ -111,7 +118,7 @@ class BootPlaceTrain(Dataset):
             holes, objs = fl(holes), fl(objs)
         rng = np.random.default_rng(random.getrandbits(32))
         return {"image": x, "size": resize_size(FRAME, random.choice(self.scales), self.max_size), "patches": patches,
-                "boxes": scene_boxes(holes, (W, H), len(holes)), "scene": scene_boxes(objs, (W, H), self.q, rng)}
+                "boxes": target_boxes(holes, (W, H)), "scene": scene_boxes(objs, (W, H), self.q, rng)}
 
 
 def collate(batch):

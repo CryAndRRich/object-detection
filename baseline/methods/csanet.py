@@ -4,13 +4,18 @@ trainer, suy luận K box.
 Ô vuông `img_size` (256): nền = ảnh resize méo về S×S; ảnh vật = giữ tỉ lệ cạnh theo tỉ lệ của nền, đệm đen giữa ô (`fg_letterbox`);
 mask vật = chữ nhật đầy ở `fg_bbox`. Dataset trả uint8, chia 255 trên GPU. trans (tỉ lệ, x, y) -> box: vật giữ tỉ lệ cạnh của ảnh vật,
 cỡ theo cạnh "khớp" của nền, góc trên trái = (nền − vật) × (x, y) (`trans_to_box`, như `gen_composite_image`).
-Train: nền = ảnh đã xoá vật 1..t, ảnh vật = cắt `ground_truth.jpg` ở lỗ mới nhất, trans GT = `get_trans_label`, nhãn dương. Ảnh ghép
+Train: nền = ảnh đã xoá vật 1..t, ảnh vật = cắt `ground_truth.jpg` ở lỗ mới nhất, trans GT = `get_trans_label`, nhãn dương. Đầu vào G
+luôn là mask chữ nhật (như lúc test: vật có sẵn không có mask); mask để DÁN ảnh ghép cho D (`finetune.blend_mask`): `rect` | `object` =
+mask thật của vật đã xoá (`<nhánh>/mask_<t>.png`) — dán chữ nhật thì ảnh thật ở đúng chỗ gần như liền mạch (patch cắt từ chính chỗ đó)
+còn ảnh giả lộ viền chữ nhật ⇒ D phân biệt bằng viền, không phải vị trí / cỡ (đo 150 mẫu train: độ gắt viền chữ nhật 26,5 ở GT vs 37,2 chỗ
+ngẫu nhiên; viền mask vật 48,9 vs 53,2). Ảnh ghép
 THẬT cho discriminator = ảnh vật dán vào nền ở trans GT bằng chính `SysNet.blend` (cùng cách dán với ảnh giả — như OPA, nơi ảnh thật cũng
 là ảnh ghép) ⇒ thật / giả chỉ khác vị trí + cỡ. (Bản port đầu dùng ảnh tự nhiên còn vật t làm ảnh thật ⇒ D phân biệt bằng vết dán, G thắng
 bằng thu nhỏ vật + đẩy ra mép — GAN sụp, ZETA mục 11.3.) Suy luận: K lần rút, mỗi lần một vật cùng lớp có sẵn làm ảnh vật (`fg_select`), nhiễu seed
 theo mẫu.
 """
 
+import os
 import time
 
 import numpy as np
@@ -65,9 +70,14 @@ def fg_inputs(fg, bg_wh, S):
     return torch.from_numpy(out).permute(2, 0, 1).contiguous(), torch.from_numpy(msk), torch.tensor(box, dtype=torch.float32)
 
 
+BLEND_MASKS = ("rect", "object")
+
+
 class CSANetTrain(Dataset):
-    def __init__(self, items, S):
-        self.items, self.S = items, S
+    def __init__(self, items, S, blend_mask="rect"):
+        if blend_mask not in BLEND_MASKS:
+            raise ValueError(f"finetune.blend_mask {blend_mask!r} không thuộc {BLEND_MASKS}")
+        self.items, self.S, self.blend_mask = items, S, blend_mask
 
     def __len__(self):
         return len(self.items)
@@ -80,7 +90,11 @@ class CSANetTrain(Dataset):
         x2, y2 = min(x2, x1 + W - 1), min(y2, y1 + H - 1)               # box phải nhỏ hơn nền (trans x, y xác định)
         fg = Image.open(it["gt"]).convert("RGB").crop((x1, y1, x2, y2))
         f, m, fb = fg_inputs(fg, (W, H), S)
-        return {"bg": _resize_sq(bg, S), "fg": f, "msk": m, "fg_bbox": fb,
+        bm = m
+        if self.blend_mask == "object":                               # cùng hình học letterbox với ảnh vật; ngoài ô vật = 0
+            om = Image.open(os.path.join(os.path.dirname(it["gt"]), f"mask_{it['t']}.png")).convert("L").crop((x1, y1, x2, y2))
+            bm = fg_inputs(om.convert("RGB"), (W, H), S)[0][:1].contiguous()
+        return {"bg": _resize_sq(bg, S), "fg": f, "msk": m, "bmsk": bm, "fg_bbox": fb,
                 "trans": torch.from_numpy(get_trans_label((W, H), fg.size, (x1, y1, x2 - x1, y2 - y1)))}
 
 
@@ -120,7 +134,7 @@ class Trainer:
         self.clip = 0.0
 
     def dataset(self, items, **_):
-        return CSANetTrain(items, self.cfg["model"]["img_size"]), None
+        return CSANetTrain(items, self.cfg["model"]["img_size"], self.cfg["finetune"].get("blend_mask", "rect")), None
 
     def train(self):
         mode = not self.cfg["finetune"].get("eval_mode", False)
@@ -138,8 +152,9 @@ class Trainer:
     def backward(self, chunk, ctx, frac, amp, scaler):
         d = self.dev
         bg, fg, msk, fb, tr = _f(chunk["bg"], d, amp), _f(chunk["fg"], d, amp), _f(chunk["msk"], d, amp), chunk["fg_bbox"].to(d), chunk["trans"].to(d)
-        comp, comp_msk = self.real_composite(bg, fg, msk, fb, tr)
-        g, dl, parts = gan_losses(self.G, self.D, bg, fg, msk, fb, comp, comp_msk, tr, amp)
+        bm = _f(chunk["bmsk"], d, amp)
+        comp, comp_msk = self.real_composite(bg, fg, bm, fb, tr)
+        g, dl, parts = gan_losses(self.G, self.D, bg, fg, msk, fb, comp, comp_msk, tr, amp, blend_msk=bm)
         scaler.scale(g * frac).backward(inputs=self.g_params)
         scaler.scale(dl * frac).backward(inputs=self.d_params)
         return {"loss": (g * frac).detach(), "d_loss": (dl * frac).detach(), **{k: v.detach() * frac for k, v in parts.items()}}

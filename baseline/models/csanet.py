@@ -178,10 +178,12 @@ def _bce(p, y):
     return -(y * torch.log(p).clamp(min=-100) + (1 - y) * torch.log1p(-p).clamp(min=-100)).mean()
 
 
-def gan_losses(G, D, bg, fg, msk, fg_bbox, comp, comp_msk, trans_label, amp=False):
+def gan_losses(G, D, bg, fg, msk, fg_bbox, comp, comp_msk, trans_label, amp=False, blend_msk=None):
     """Một lượt `train_disc_gen` bản gốc (mọi mẫu nhãn dương) -> (g_loss, d_loss, thành phần). G forward trong autocast (`amp`); D + loss
     ở fp32: D kết thúc bằng sigmoid rồi BCE trên xác suất — ở fp16 sigmoid bão hoà sớm (|logit| > ~8) và đạo hàm 1/x của BCE tràn số khi
-    quay về đồ thị fp16 ⇒ GradScaler bỏ bước liên tục. D nhỏ (~2,8M tham số) nên fp32 rẻ."""
+    quay về đồ thị fp16 ⇒ GradScaler bỏ bước liên tục. D nhỏ (~2,8M tham số) nên fp32 rẻ. `blend_msk`: mask dùng để DÁN ảnh giả (mặc định
+    = `msk`, đầu vào G) — cùng mask đã dán ảnh thật `comp`."""
+    bm = msk if blend_msk is None else blend_msk
     with torch.autocast(device_type=bg.device.type, dtype=torch.float16, enabled=amp):
         attn = G.encode(bg, fg, msk)
         t1 = G.regress(attn, torch.randn(attn.shape[0], G.opt.d_noise, device=bg.device, dtype=attn.dtype))
@@ -189,8 +191,8 @@ def gan_losses(G, D, bg, fg, msk, fg_bbox, comp, comp_msk, trans_label, amp=Fals
         h = G.vae_enc.fc1(lat)
         mu, logvar = G.vae_enc.fc2(h), G.vae_enc.fc3(h)
         t2 = G.regress(attn, mu + torch.randn_like(mu) * torch.exp(logvar / 2))
-        g1, m1 = G.blend(bg, fg, msk, fg_bbox, t1)
-        g2, m2 = G.blend(bg, fg, msk, fg_bbox, t2)
+        g1, m1 = G.blend(bg, fg, bm, fg_bbox, t1)
+        g2, m2 = G.blend(bg, fg, bm, fg_bbox, t2)
     g1, m1, g2, m2, t2, mu, logvar = (x.float() for x in (g1, m1, g2, m2, t2, mu, logvar))
     d1, d1_det, d2, d2_det = D(g1, m1), D(g1.detach(), m1.detach()), D(g2, m2), D(g2.detach(), m2.detach())
     d_real = D(comp.float(), comp_msk.float())
