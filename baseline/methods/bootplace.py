@@ -1,11 +1,14 @@
 """BootPlace cho bài ADD: tiền xử lý (như `refs/BOOTPLACE/datasets`), dataset finetune CE-130 train, trainer, suy luận K box.
 
-Ảnh nền: dataset trả uint8 [3,H,W] GỐC (+ lật ngang 0,5 lúc train); resize cạnh ngắn (train: ngẫu nhiên `train_scales`, cạnh dài <=
-`train_max_size`; test: `test_size`, cạnh dài <= `test_max_size`) + chuẩn hoá mean / std của BootPlace làm TRÊN GPU (`prep_images`, dùng
-chung train / test). Box chuẩn hoá theo ảnh gốc (không đổi qua resize).
+Ảnh nền: như bản gốc, mọi ảnh coi như đã resize méo về khung `FRAME` 960×540 (`Cityscapes._load_image`) rồi mới resize cạnh ngắn
+(train: ngẫu nhiên `train_scales`, cạnh dài <= `train_max_size`; test: `test_size`, cạnh dài <= `test_max_size`) — gộp thành MỘT lần
+resize từ ảnh gốc tới cỡ cuối, + chuẩn hoá mean / std của BootPlace, làm TRÊN GPU (`prep_images`, dùng chung train / test). Dataset trả
+uint8 [3,H,W] GỐC (+ lật ngang 0,5 lúc train). Box đích chuẩn hoá theo ảnh (không đổi qua resize / khung).
 Patch: <= 100 ảnh vật 64×64 xếp dọc, alpha 255 (vật có sẵn không có mask), ô thừa 0 trước chuẩn hoá 4 kênh. Train: patch = cắt
-`ground_truth.jpg` ở từng lỗ; test: một vật cùng lớp có sẵn (`fg_select`). Box cảnh (`cMLP`): vật đang có, cxcywh chuẩn hoá, <= Q (quá thì
-ngẫu nhiên lúc train, Q box to nhất lúc test). Đích train = mọi lỗ tới lượt t, nhãn 0.
+`ground_truth.jpg` ở từng lỗ; test: một vật cùng lớp có sẵn (`fg_select`). Box cảnh (`cMLP`): vật đang có, **xyxy PIXEL khung 960×540**
+như bản gốc cả train lẫn test (transforms gốc không đụng `scene_boxes`; `location/*.txt` pixel) — `cMLP` nén chúng thành MỘT vô hướng nhân
+vào đặc trưng mọi query, đầu vào chuẩn hoá [0, 1] làm vô hướng ≈ 0 ⇒ box hết phụ thuộc query (bản port đầu, ZETA mục 11.3). <= Q box (quá
+thì ngẫu nhiên lúc train, Q box to nhất lúc test). Đích train = mọi lỗ tới lượt t, nhãn 0.
 Suy luận: K box = 10 vùng xác suất lớp 0 cao nhất xếp theo điểm khớp patch TĂNG dần (luật `test.py` của tác giả bài ⇒ box[0] = box bản đó
 chọn), rồi các vùng xác suất lớp 0 cao tiếp theo.
 """
@@ -21,12 +24,13 @@ from torch.utils.data import Dataset
 
 from baseline.data import int_box, pick_objects, sample_rng
 from baseline.models.bootplace import build_bootplace, build_criterion
-from baseline.models.detr import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh, nested
+from baseline.models.detr import box_cxcywh_to_xyxy, nested
 
-__all__ = ["resize_size", "prep_images", "patch_canvas", "scene_boxes", "BootPlaceTrain", "rank_queries", "predict", "Trainer"]
+__all__ = ["FRAME", "resize_size", "prep_images", "patch_canvas", "scene_boxes", "BootPlaceTrain", "rank_queries", "predict", "Trainer"]
 
 MEAN, STD = (0.440, 0.440, 0.440, 0.0), (0.320, 0.319, 0.318, 0.5)
 PATCH, MAX_PATCHES, TOPK_CLIP = 64, 100, 10
+FRAME = (960, 540)               # khung ảnh (W, H) của BootPlace gốc: mọi ảnh resize méo về đây; box cảnh pixel trong khung này
 
 
 def resize_size(wh, size, max_size=None):
@@ -70,13 +74,14 @@ def _patches(img, boxes):
 
 
 def scene_boxes(boxes_xyxy, wh, q, rng=None):
-    """Box vật đang có (pixel ảnh gốc) -> cxcywh chuẩn hoá [<= q, 4]. Quá q: ngẫu nhiên q (`rng`) | q box diện tích lớn nhất."""
+    """Box vật đang có (xyxy pixel ảnh gốc cỡ `wh`) -> xyxy pixel khung `FRAME` [<= q, 4]. Quá q: ngẫu nhiên q (`rng`) | q box diện tích
+    lớn nhất."""
     b = np.asarray(boxes_xyxy, dtype=np.float64).reshape(-1, 4)
     if len(b) > q:
         area = (b[:, 2] - b[:, 0]) * (b[:, 3] - b[:, 1])
         b = b[np.sort(rng.choice(len(b), q, replace=False) if rng is not None else np.argsort(-area, kind="stable")[:q])]
-    w, h = wh
-    return box_xyxy_to_cxcywh(torch.as_tensor(b, dtype=torch.float32)) / torch.tensor([w, h, w, h], dtype=torch.float32)
+    sx, sy = FRAME[0] / wh[0], FRAME[1] / wh[1]
+    return torch.as_tensor(b * np.array([sx, sy, sx, sy]), dtype=torch.float32)
 
 
 def _u8(img):
@@ -105,7 +110,7 @@ class BootPlaceTrain(Dataset):
             fl = lambda b: b[:, [2, 1, 0, 3]] * np.array([-1, 1, -1, 1]) + np.array([W, 0, W, 0])  # noqa: E731
             holes, objs = fl(holes), fl(objs)
         rng = np.random.default_rng(random.getrandbits(32))
-        return {"image": x, "size": resize_size((W, H), random.choice(self.scales), self.max_size), "patches": patches,
+        return {"image": x, "size": resize_size(FRAME, random.choice(self.scales), self.max_size), "patches": patches,
                 "boxes": scene_boxes(holes, (W, H), len(holes)), "scene": scene_boxes(objs, (W, H), self.q, rng)}
 
 
@@ -192,7 +197,7 @@ def predict(model, samples, k, p, seed=0, dev="cpu", log=print, log_every=500):
         W, H = img.size
         objs = np.asarray(s["objects"], dtype=np.float64).reshape(-1, 4)
         fg = pick_objects(objs, 1, p["fg_select"], sample_rng(seed, s["image_id"]))[0]
-        x, mask = prep_images([_u8(img)], [resize_size((W, H), p["test_size"], p["test_max_size"])], dev)
+        x, mask = prep_images([_u8(img)], [resize_size(FRAME, p["test_size"], p["test_max_size"])], dev)
         o = model(x, mask, patch_canvas([_patches(img, objs[fg:fg + 1])], dev), [scene_boxes(objs, (W, H), q).to(dev)])
         idx = rank_queries(o["pred_logits"][0], o["pred_clip"][0, :, 0], k)
         b = box_cxcywh_to_xyxy(o["pred_boxes"][0, idx]) * torch.tensor([W, H, W, H], dtype=torch.float32, device=dev)

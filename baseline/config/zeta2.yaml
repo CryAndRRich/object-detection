@@ -1,6 +1,7 @@
 # ZETA2 = CSANet (BMVC 2024) — finetune CE-130 train theo bản tác giả bài (refs/CSANet/finetune.py) từ weight công bố (OPA, 18.pth).
 # Batch 64 như CE-Loc; lr = lr THỰC TẾ của tác giả (finetune của tác giả nạp lại optimizer từ checkpoint ⇒ chạy ở lr lưu trong đó,
-# không phải lr đặt trong script), không nhân √ tỉ lệ batch. docs/EXPERIMENT_ZETA.md mục 8–10.
+# không phải lr đặt trong script), không nhân √ tỉ lệ batch. Ảnh thật cho D = ảnh vật dán ở trans GT; gamma khối chú ý không train;
+# best = epoch cuối (sửa 2026-11-07, ZETA mục 11.3). docs/EXPERIMENT_ZETA.md mục 8–11.
 method: csanet
 model:
   img_size: 256
@@ -17,6 +18,7 @@ finetune:
   lr: 2.0e-5                   # như tác giả: VGG 2e-5, phần còn lại của G × 10 = 2e-4, D 2e-5
   b1: 0.5
   b2: 0.999
+  eval_mode: true              # G + D eval mode cả lúc train, như bản gốc (BN đóng băng, tắt dropout) — methods/csanet.py Trainer
   amp: false                   # fp32 như bản gốc: fp16 tràn số (AMP scale 32768 -> 16 sau 60 bước, rồi NaN) — Kaggle 2026-10-31
   num_workers: 2
   log_every: 20

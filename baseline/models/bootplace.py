@@ -1,7 +1,7 @@
 """BootPlace (CVPR 2025; tham khảo `refs/BOOTPLACE/models/bootplace.py`). Tên tham số như bản gốc ⇒ nạp thẳng `BOOTPLACE_Cityscapes`.
 
 Ảnh nền -> DETR -> Q vùng đặt vật (cxcywh chuẩn hoá theo vùng ảnh thật) + logit lớp; nhánh box nhân đặc trưng với MỘT vô hướng tính từ
-box các vật đang có (`cMLP.loc_proj` trên Q × 4 số, ô thừa = 0). Patch vật cần đặt chỉ vào điểm khớp vật–vùng (`pred_clip`).
+box các vật đang có (`cMLP.loc_proj` trên Q × 4 số — xyxy pixel khung 960×540 như bản gốc, ô thừa = 0). Patch vật cần đặt chỉ vào điểm khớp vật–vùng (`pred_clip`).
 Loss Hungarian: CE lớp (no-object trọng số `eos_coef`), L1 + GIoU box (chia `num_boxes` TOÀN batch — truyền vào khi cộng dồn / nhiều
 GPU), `clip`; aux loss mọi tầng decoder (trừ clip).
 """

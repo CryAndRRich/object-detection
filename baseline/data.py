@@ -8,8 +8,8 @@ Mẫu TEST — cùng tập, cùng thứ tự với `ce_localization/eval.py`:
   holes      lỗ GT `holes[:t]` | 10 `loc_bbox` — chỉ để chấm, baseline KHÔNG đọc
 `geometry(sample)` = hình học PIXEL CANVAS 512 như lúc eval CE-Loc (dùng thẳng `ce130_geometry` / `cocount_geometry`).
 
-Mẫu TRAIN (`train_items`, chỉ `samples/train` như CE-Loc): `image` = ảnh đã xoá vật 1..t; `before` = ảnh còn vật t (mẫu samples lượt t−1
-cùng nhánh, t = 1: `ground_truth.jpg`); `gt` = `<gt_root>/<split>/<nhánh>/ground_truth.jpg` (cắt ảnh vật đã xoá); `holes` lỗ mới nhất cuối.
+Mẫu TRAIN (`train_items`, chỉ `samples/train` như CE-Loc): `image` = ảnh đã xoá vật 1..t; `gt` = `<gt_root>/<split>/<nhánh>/ground_truth.jpg`
+(cắt ảnh vật đã xoá); `holes` lỗ mới nhất cuối.
 
 Ảnh vật mẫu (foreground): bài ADD chỉ cho tên lớp ⇒ cắt một vật CÙNG lớp đang có trong ảnh, mask chữ nhật đầy (vật có sẵn không có mask).
 `median` = vật diện tích trung vị; `random` = mỗi lần rút một vật (RNG theo mẫu: chạy lại / đổi batch ra cùng số).
@@ -70,8 +70,7 @@ def train_items(index, samples_root, gt_root, split="train"):
         b = index.branches[e["branch"]]
         t = e["t"]
         gt = os.path.join(gt_root, e["branch"], "ground_truth.jpg")
-        before = gt if t == 1 else os.path.join(samples_root, index.turns[f"{key.rsplit('_t', 1)[0]}_t{t - 1}"]["sample"])
-        out.append({"image_id": key, "t": t, "class": b["class"], "image": os.path.join(samples_root, e["sample"]), "before": before, "gt": gt,
+        out.append({"image_id": key, "t": t, "class": b["class"], "image": os.path.join(samples_root, e["sample"]), "gt": gt,
                     "wh": tuple(int(v) for v in b["wh"]), "objects": present_objects(b, t),
                     "holes": np.asarray(b["holes"][:t], dtype=np.float64).reshape(-1, 4)})
     return out

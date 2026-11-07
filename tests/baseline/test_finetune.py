@@ -1,5 +1,6 @@
 """Finetune + predict trọn luồng (model tí hon, CPU): nạp checkpoint công bố giả (bỏ `drop_keys`, khoá thừa chỉ cảnh báo), dừng giữa
-epoch -> `--resume` đúng chỗ, snapshot / history, predict CE-130 + CoCount; cộng dồn grad = batch lớn; CSANet: grad của g_loss không vào D;
+epoch -> `--resume` đúng chỗ, snapshot / history, predict CE-130 + CoCount; cộng dồn grad = batch lớn; CSANet: grad của g_loss không vào D,
+ảnh thật = ảnh ghép ở trans GT, gamma không train, eval mode, best = epoch cuối; BootPlace: box cảnh pixel khung 960×540 đổi được box;
 `sync_grads` 2 tiến trình."""
 
 import json
@@ -100,9 +101,58 @@ def test_csanet_generator_loss_not_in_discriminator(tmp_path):
     assert all(p.grad is not None for p in tr.g_params)
     torch.manual_seed(1)
     f = lambda k: batch[k].float() / 255  # noqa: E731
-    _, d_loss, _ = gan_losses(tr.G, tr.D, f("bg"), f("fg"), f("msk"), batch["fg_bbox"], f("comp"), f("comp_msk"), batch["trans"])
+    comp, comp_msk = tr.real_composite(f("bg"), f("fg"), f("msk"), batch["fg_bbox"], batch["trans"])
+    _, d_loss, _ = gan_losses(tr.G, tr.D, f("bg"), f("fg"), f("msk"), batch["fg_bbox"], comp, comp_msk, batch["trans"])
     for a, b in zip(got, torch.autograd.grad(d_loss, tr.d_params)):
         torch.testing.assert_close(a, b, rtol=1e-4, atol=1e-7)
+
+
+def test_csanet_real_composite_gamma_eval_mode_best_last(tmp_path):
+    """Ảnh thật = ảnh vật dán ở trans GT (mask phủ đúng lỗ trên ô S×S); gamma khối chú ý đứng yên + ngoài optimizer; `eval_mode` ⇒ G / D
+    eval cả lúc train; best = epoch cuối."""
+    _, cfg = tiny_cfg(tmp_path, "zeta2")
+    tr, batch = _batch(cfg, tmp_path)
+    tr.train()
+    assert cfg["finetune"]["eval_mode"] and not tr.G.training and not tr.D.training and tr.best_last
+    gam = [p for n, p in tr.G.named_parameters() if n.endswith(("gamma1", "gamma2"))]
+    assert gam and all(not p.requires_grad for p in gam)
+    opt_ids = {id(p) for o in tr.optimizers for g in o.param_groups for p in g["params"]}
+    assert not any(id(p) in opt_ids for p in gam) and all(id(p) in opt_ids for p in tr.g_params + tr.d_params)
+    f = lambda k: batch[k].float() / 255  # noqa: E731
+    comp, m = tr.real_composite(f("bg"), f("fg"), f("msk"), batch["fg_bbox"], batch["trans"])
+    S = cfg["model"]["img_size"]
+    from baseline.methods.csanet import trans_to_box
+    for i in range(len(m)):                                       # mask ghép ≈ box của trans GT (cùng công thức với suy luận)
+        fx, fy, fw, fh = batch["fg_bbox"][i].tolist()
+        x1, y1, x2, y2 = trans_to_box(batch["trans"][i], (S, S), (fw, fh))
+        ys, xs = torch.nonzero(m[i, 0] > 0.5, as_tuple=True)
+        assert abs(xs.min().item() - x1) <= 2 and abs(ys.min().item() - y1) <= 2 and abs(xs.max().item() + 1 - x2) <= 2 \
+            and abs(ys.max().item() + 1 - y2) <= 2
+    out = (m == 0).expand_as(comp)
+    torch.testing.assert_close(comp[out], f("bg")[out])                  # ngoài vùng dán = nền
+    tr.cfg["finetune"]["eval_mode"] = False
+    tr.train()
+    assert tr.G.training and tr.D.training
+
+
+def test_bootplace_scene_boxes_change_boxes(tmp_path):
+    """Box cảnh pixel khung 960×540 đi qua `cMLP` làm box ĐỔI theo query và theo cảnh (bản chuẩn hoá [0, 1] cho vô hướng ≈ 0 ⇒ 30 box
+    trùng hệt — lỗi port cũ)."""
+    from baseline.methods.bootplace import FRAME, patch_canvas, prep_images, resize_size, scene_boxes
+    _, cfg = tiny_cfg(tmp_path, "zeta1")
+    tr, batch = _batch(cfg, tmp_path)
+    f = cfg["finetune"]
+    assert all(s["size"] in [resize_size(FRAME, sc, f["train_max_size"]) for sc in f["train_scales"]] for s in batch)   # khung 960×540
+    model = tr.model.eval()
+    s = batch[0]
+    x, mask = prep_images([s["image"]], [s["size"]], "cpu")
+    p = patch_canvas([s["patches"]], "cpu")
+    with torch.no_grad():
+        a = model(x, mask, p, [s["scene"]])["pred_boxes"][0]
+        b = model(x, mask, p, [s["scene"] * 0.5])["pred_boxes"][0]
+    assert a.std(0).max() > 1e-3 and (a - b).abs().max() > 1e-4
+    assert s["scene"].max() > 1.5 and s["scene"][:, 2].max() <= FRAME[0] + 1e-3          # pixel khung, không chuẩn hoá
+    torch.testing.assert_close(scene_boxes([[0, 0, 50, 25]], (100, 50), 4), torch.tensor([[0.0, 0.0, 480.0, 270.0]]))
 
 
 def test_csanet_bce_matches_torch_and_passes_nan():

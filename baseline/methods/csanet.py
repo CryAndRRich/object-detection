@@ -4,8 +4,10 @@ trainer, suy luận K box.
 Ô vuông `img_size` (256): nền = ảnh resize méo về S×S; ảnh vật = giữ tỉ lệ cạnh theo tỉ lệ của nền, đệm đen giữa ô (`fg_letterbox`);
 mask vật = chữ nhật đầy ở `fg_bbox`. Dataset trả uint8, chia 255 trên GPU. trans (tỉ lệ, x, y) -> box: vật giữ tỉ lệ cạnh của ảnh vật,
 cỡ theo cạnh "khớp" của nền, góc trên trái = (nền − vật) × (x, y) (`trans_to_box`, như `gen_composite_image`).
-Train: nền = ảnh đã xoá vật 1..t, ảnh vật = cắt `ground_truth.jpg` ở lỗ mới nhất, ảnh ghép thật = ảnh còn vật t, mask ghép = chữ nhật lỗ,
-nhãn dương; trans GT = `get_trans_label`. Suy luận: K lần rút, mỗi lần một vật cùng lớp có sẵn làm ảnh vật (`fg_select`), nhiễu seed
+Train: nền = ảnh đã xoá vật 1..t, ảnh vật = cắt `ground_truth.jpg` ở lỗ mới nhất, trans GT = `get_trans_label`, nhãn dương. Ảnh ghép
+THẬT cho discriminator = ảnh vật dán vào nền ở trans GT bằng chính `SysNet.blend` (cùng cách dán với ảnh giả — như OPA, nơi ảnh thật cũng
+là ảnh ghép) ⇒ thật / giả chỉ khác vị trí + cỡ. (Bản port đầu dùng ảnh tự nhiên còn vật t làm ảnh thật ⇒ D phân biệt bằng vết dán, G thắng
+bằng thu nhỏ vật + đẩy ra mép — GAN sụp, ZETA mục 11.3.) Suy luận: K lần rút, mỗi lần một vật cùng lớp có sẵn làm ảnh vật (`fg_select`), nhiễu seed
 theo mẫu.
 """
 
@@ -78,10 +80,7 @@ class CSANetTrain(Dataset):
         x2, y2 = min(x2, x1 + W - 1), min(y2, y1 + H - 1)               # box phải nhỏ hơn nền (trans x, y xác định)
         fg = Image.open(it["gt"]).convert("RGB").crop((x1, y1, x2, y2))
         f, m, fb = fg_inputs(fg, (W, H), S)
-        cm = Image.new("L", (W, H), 0)
-        cm.paste(255, (x1, y1, x2, y2))
-        return {"bg": _resize_sq(bg, S), "fg": f, "msk": m, "fg_bbox": fb, "comp": _resize_sq(Image.open(it["before"]).convert("RGB"), S),
-                "comp_msk": torch.from_numpy(np.array(cm.resize((S, S), Image.BILINEAR), dtype=np.uint8))[None],
+        return {"bg": _resize_sq(bg, S), "fg": f, "msk": m, "fg_bbox": fb,
                 "trans": torch.from_numpy(get_trans_label((W, H), fg.size, (x1, y1, x2 - x1, y2 - y1)))}
 
 
@@ -93,18 +92,25 @@ def _f(x, dev, amp):
 class Trainer:
     """Finetune CSANet: generator + discriminator, hai AdamW (VGG chung lr, phần còn lại của G lr × 10, wd 5e-4 cho VGG như bản gốc;
     D lr). Mỗi micro-batch: `g_loss.backward(inputs=G)`, `d_loss.backward(inputs=D)` ⇒ grad của g_loss không lọt vào D (bản gốc xoá bằng
-    `zero_grad` giữa hai bước) ⇒ cộng dồn tương đương batch lớn. Chọn best theo `g_rec` (sai số hồi quy trans so với box GT khi mã lấy từ
-    ảnh ghép thật — phần có giám sát của loss), KHÔNG theo `g_loss` (loss đối kháng, lên xuống theo độ mạnh của D)."""
+    `zero_grad` giữa hai bước) ⇒ cộng dồn tương đương batch lớn. Như bản gốc (`refs/CSANet`):
+    - `gamma1/2` của khối chú ý chéo KHÔNG train (optimizer gốc chỉ lấy Conv / BN / Linear / LayerNorm ⇒ giữ 0 = nhánh chú ý tắt);
+    - `finetune.eval_mode`: G + D ở eval mode cả lúc train (bản gốc vô tình như vậy ~92 % bước: `sample()` mỗi 100 iter gọi
+      `start_eval()`, `start_train()` chỉ đầu epoch ⇒ BN đóng băng, tắt dropout);
+    - best = epoch CUỐI (tác giả chỉ lưu checkpoint cuối; `g_rec` đo nhánh VAE, không phải nhánh nhiễu lúc suy luận) — `g_rec` chỉ để log."""
 
     select = "g_rec"
+    best_last = True
     fixed_size = True
 
     def __init__(self, cfg, dev, model):
         f = cfg["finetune"]
         self.cfg, self.dev, (self.G, self.D) = cfg, dev, model
-        vgg = list(self.G.shared_net.parameters())
+        for n, p in self.G.named_parameters():
+            if n.rsplit(".", 1)[-1] in ("gamma1", "gamma2"):
+                p.requires_grad_(False)
+        vgg = [p for p in self.G.shared_net.parameters() if p.requires_grad]
         ids = {id(p) for p in vgg}
-        rest = [p for p in self.G.parameters() if id(p) not in ids]
+        rest = [p for p in self.G.parameters() if id(p) not in ids and p.requires_grad]
         self.g_params, self.d_params = vgg + rest, list(self.D.parameters())
         self.params = self.g_params + self.d_params
         fused, betas = dev.type == "cuda", (f["b1"], f["b2"])
@@ -117,16 +123,23 @@ class Trainer:
         return CSANetTrain(items, self.cfg["model"]["img_size"]), None
 
     def train(self):
-        self.G.train()
-        self.D.train()
+        mode = not self.cfg["finetune"].get("eval_mode", False)
+        self.G.train(mode)
+        self.D.train(mode)
+
+    def real_composite(self, bg, fg, msk, fg_bbox, trans):
+        """Ảnh ghép thật = ảnh vật dán ở trans GT, cùng `blend` với ảnh giả. -> (ảnh, mask) [B,3|1,S,S] trong [0, 1]."""
+        with torch.no_grad():
+            return self.G.blend(bg.float(), fg.float(), msk.float(), fg_bbox.float(), trans.float())
 
     def context(self, batch, world):
         return None
 
     def backward(self, chunk, ctx, frac, amp, scaler):
         d = self.dev
-        g, dl, parts = gan_losses(self.G, self.D, _f(chunk["bg"], d, amp), _f(chunk["fg"], d, amp), _f(chunk["msk"], d, amp),
-                                  chunk["fg_bbox"].to(d), _f(chunk["comp"], d, amp), _f(chunk["comp_msk"], d, amp), chunk["trans"].to(d), amp)
+        bg, fg, msk, fb, tr = _f(chunk["bg"], d, amp), _f(chunk["fg"], d, amp), _f(chunk["msk"], d, amp), chunk["fg_bbox"].to(d), chunk["trans"].to(d)
+        comp, comp_msk = self.real_composite(bg, fg, msk, fb, tr)
+        g, dl, parts = gan_losses(self.G, self.D, bg, fg, msk, fb, comp, comp_msk, tr, amp)
         scaler.scale(g * frac).backward(inputs=self.g_params)
         scaler.scale(dl * frac).backward(inputs=self.d_params)
         return {"loss": (g * frac).detach(), "d_loss": (dl * frac).detach(), **{k: v.detach() * frac for k, v in parts.items()}}

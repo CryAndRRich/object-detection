@@ -4,7 +4,7 @@
 Batch toàn cục `finetune.batch_size` (64 như CE-Loc) chia đều các GPU; mỗi GPU cộng dồn grad qua micro-batch `finetune.micro_batch`
 (nút chỉnh bộ nhớ: không đổi kết quả, trừ thống kê BN của CSANet); grad TB qua các GPU MỘT lần mỗi bước (`dist.sync_grads`). AMP fp16
 + channels_last + GradScaler (`finetune.amp`, như CE-Loc trên T4), loss tính ở fp32. Như giao thức CE-Loc gốc: không val; `best.pth` =
-epoch có chỉ số `Trainer.select` TB thấp nhất (cộng qua mọi GPU; BootPlace / HiddenObjects = loss train, CSANet = `g_rec`); `last.pth` mỗi epoch + khi dừng (`--max-hours`, đủ để `--resume` giữa epoch);
+epoch có chỉ số `Trainer.select` TB thấp nhất (cộng qua mọi GPU; BootPlace / HiddenObjects = loss train), CSANet (`best_last`) = epoch cuối; `last.pth` mỗi epoch + khi dừng (`--max-hours`, đủ để `--resume` giữa epoch);
 `snapshots/epNNN.pth` chỉ weight mỗi epoch + `ep000` (weight khởi tạo); `history.json`.
 
   cd object-detection/baseline
@@ -175,7 +175,7 @@ def main():
         if step == ipe:                                                # hết epoch
             acc = all_sum(ep_acc, world)
             mean, loss_mean = (acc[0] / acc[1].clamp(min=1)).item(), (acc[2] / acc[1].clamp(min=1)).item()
-            is_best = mean < best
+            is_best = getattr(tr, "best_last", False) or mean < best
             best = min(best, mean)
             history.append({"epoch": epoch + 1, "iter": it, "loss": loss_mean, "select": mean, "select_by": tr.select,
                             "steps_ok": int(acc[1].item()), "sec": time.time() - t0})

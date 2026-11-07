@@ -33,8 +33,8 @@ def test_bootplace_rank_scene_patch_resize():
     top10 = set(torch.topk(logits.softmax(-1)[:, 0], 10).indices.tolist())
     assert set(idx[:10].tolist()) == top10 and len(set(idx.tolist())) == 30
     assert idx[0] == min(top10, key=lambda i: clip.softmax(0)[i])                  # box chính = khớp patch THẤP nhất trong top-10
-    s = scene_boxes([[0, 0, 10, 20], [5, 5, 15, 9], [0, 0, 1, 1]], (100, 50), 2)
-    torch.testing.assert_close(s, torch.tensor([[0.05, 0.2, 0.1, 0.4], [0.1, 0.14, 0.1, 0.08]]))   # 2 box to nhất, giữ thứ tự
+    s = scene_boxes([[0, 0, 10, 20], [5, 5, 15, 9], [0, 0, 1, 1]], (100, 50), 2)       # xyxy pixel khung 960×540 như bản gốc
+    torch.testing.assert_close(s, torch.tensor([[0.0, 0.0, 96.0, 216.0], [48.0, 54.0, 144.0, 97.2]]))   # 2 box to nhất, giữ thứ tự
     p = patch_canvas([torch.full((1, 64, 64, 3), 255, dtype=torch.uint8), torch.zeros((0, 64, 64, 3), dtype=torch.uint8)], "cpu")
     assert p.shape == (2, 4, 6400, 64)
     torch.testing.assert_close(p[0, 3, :64], torch.full((64, 64), 2.0))           # alpha 1 -> (1 − 0) / 0,5
