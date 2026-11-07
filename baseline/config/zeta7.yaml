@@ -1,0 +1,11 @@
+# ZETA7 = OracleLoc (bài Add One, Take One, mục 4.1 + phụ lục A.4.2) — MỐC ORACLE: biết μ (+ Σ) của vật GT, không model, chạy CPU.
+# Cỡ box = μ (w, h TB mọi vật cùng lớp trong ảnh), quét tâm trên lưới canvas 512 như lúc chấm. "best matches µ" bài không nói theo gì ⇒
+# chạy cả hai tiêu chí rồi chốt (người dùng 2026-11-07): euclid = ‖z − μ‖₂ (bám câu chữ), cnll = ½ Mahalanobis = tối ưu thẳng C-NLL.
+# baseline/methods/oracleloc.py; docs/EXPERIMENT_ZETA.md mục 15.
+method: oracleloc
+predict:
+  k: 30                        # K vị trí điểm thấp nhất sau NMS (min / 30 = vị trí tốt nhất); box[0] = tốt nhất
+  stride: 2                    # px canvas 512
+  nms_iou: 0.5
+  criteria: [euclid, cnll]
+  workers: 16                  # tiến trình CPU (mỗi ảnh độc lập; ~0,3–6 s / ảnh / tiến trình tuỳ số vật)

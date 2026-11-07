@@ -11,11 +11,11 @@ ZETA (người dùng chốt 2026-10-30), dùng lại (không sửa) dữ liệu 
 | `finetune.py` | finetune một baseline (1 GPU hoặc `torchrun`): batch toàn cục 64, cộng dồn micro-batch, AMP, `--max-hours` + `--resume` giữa epoch; `--cache-dir` (HiddenObjects: memmap ảnh letterbox) |
 | `predict.py` | K box / ảnh (mặc định 30) -> `<out>_raw.jsonl`, rồi chấm như `score.py` |
 | `score.py` | chấm jsonl box pixel ảnh gốc -> `<out>.json` + `<out>_boxes.json` (định dạng `eval.py`); `--first 1` = box chính |
-| `config/` | `zeta1.yaml` (ZETA1 = BootPlace), `zeta2.yaml` (ZETA2 = CSANet), `zeta3.yaml` (ZETA3 = HiddenObjects) — một run một config |
+| `config/` | `zeta1.yaml` (ZETA1 = BootPlace), `zeta2.yaml` (ZETA2 = CSANet), `zeta3.yaml` (ZETA3 = HiddenObjects), `zeta7.yaml` (ZETA7 = OracleLoc — mốc oracle, không model: `predict.py` không `--ckpt`, CPU) — một run một config |
 | `data.py` | mẫu test (cùng tập / thứ tự với eval CE-Loc) + hình học canvas, mẫu train, chọn ảnh vật mẫu |
 | `scoring.py`, `dist.py` | box gốc -> record canvas -> `add_metrics` / prior / dump; tổng + TB grad qua GPU |
 | `models/` | `detr`, `bootplace`, `csanet`, `hiddenobjects` — tên tham số như bản gốc ⇒ nạp checkpoint công bố |
-| `methods/` | mỗi baseline: tiền xử lý, dataset finetune, `Trainer`, suy luận; `__init__` nạp checkpoint (HiddenObjects: `class_embed` công bố -> `text_proj` trên CLIP text bằng lstsq) |
+| `methods/` | mỗi baseline: tiền xử lý, dataset finetune, `Trainer`, suy luận (`oracleloc`: chỉ dò lưới cỡ μ theo `euclid` / `cnll`); `__init__` nạp checkpoint (HiddenObjects: `class_embed` công bố -> `text_proj` trên CLIP text bằng lstsq) |
 
 Test: `python -m pytest tests/baseline -q` từ `object-detection/` (~80 s CPU; CLIP giả, không tải HF). Kaggle: `object-detection/notebooks/baseline_kaggle.ipynb`
 (gitignore; mỗi Save & Run All một baseline). Eval trên server:

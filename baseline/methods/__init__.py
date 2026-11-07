@@ -1,14 +1,15 @@
-"""Baseline ZETA theo `cfg["method"]` (bootplace | csanet | hiddenobjects): nạp checkpoint, suy luận K box, trainer finetune, chia
-micro-batch."""
+"""Baseline ZETA theo `cfg["method"]` (bootplace | csanet | hiddenobjects | oracleloc): nạp checkpoint, suy luận K box, trainer finetune,
+chia micro-batch. OracleLoc không có model / checkpoint (`NO_WEIGHTS`)."""
 
 import torch
 
-from baseline.methods import bootplace, csanet, hiddenobjects
+from baseline.methods import bootplace, csanet, hiddenobjects, oracleloc
 from baseline.models.hiddenobjects import lstsq_text_proj
 
-__all__ = ["METHODS", "load_model", "predict", "make_trainer", "split_batch", "batch_len"]
+__all__ = ["METHODS", "NO_WEIGHTS", "load_model", "predict", "make_trainer", "split_batch", "batch_len"]
 
-METHODS = {"bootplace": bootplace, "csanet": csanet, "hiddenobjects": hiddenobjects}
+METHODS = {"bootplace": bootplace, "csanet": csanet, "hiddenobjects": hiddenobjects, "oracleloc": oracleloc}
+NO_WEIGHTS = ("oracleloc",)
 
 
 def _load(module, sd, what, drop=()):
@@ -71,8 +72,10 @@ def _load_hiddenobjects(cfg, ck, path, dev):
 
 
 def predict(cfg, model, samples, dev="cpu", seed=0, log=print, **kw):
-    """`kw` -> `predict` của method (`log_every`; HiddenObjects: `texts`)."""
+    """`kw` -> `predict` của method (`log_every`; HiddenObjects: `texts`; OracleLoc: `geo_fn` bắt buộc, trả {tiêu chí: rows})."""
     p = cfg["predict"]
+    if cfg["method"] == "oracleloc":
+        return oracleloc.predict(samples, kw.pop("geo_fn"), p["k"], p, log=log, **kw)
     m = model[0] if cfg["method"] == "csanet" else model
     return METHODS[cfg["method"]].predict(m, samples, p["k"], p, seed=seed, dev=dev, log=log, **kw)
 

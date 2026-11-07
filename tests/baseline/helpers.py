@@ -16,6 +16,7 @@ TINY = {
     "zeta2": {"model": {"img_size": 32, "d_noise": 16, "mid": 16},
                "finetune": {"batch_size": 2, "micro_batch": 1, "epochs": 2, "num_workers": 0, "log_every": 1, "amp": False},
                "predict": {"k": 4, "batch_images": 3}},
+    "zeta7": {"predict": {"k": 5, "stride": 4, "workers": 2}},
     "zeta3": {"model": {"hidden_dim": 32, "nheads": 2, "enc_layers": 1, "dec_layers": 1, "dim_feedforward": 64, "dropout": 0.0,
                         "num_queries": 8, "image_size": 64, "backbone_weights": None},
               "finetune": {"batch_size": 2, "micro_batch": 1, "epochs": 2, "num_workers": 0, "log_every": 1, "amp": False},
