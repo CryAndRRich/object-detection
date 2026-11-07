@@ -50,6 +50,8 @@ def parse_args(argv=None):
                     help="đọc toạ độ theo thang này thay `coord` của config (chỉ lúc parse / chấm; file ra thêm hậu tố _<coord>)")
     ap.add_argument("--shard", default=None, help="i/n — nội bộ: bản thứ i trong n bản song song (`vllm.data_parallel`, tự đặt)")
     ap.add_argument("--out-root", default="../../output/add/vlm")
+    ap.add_argument("--model", default=None, help="ghi đè `model` của config (vd thư mục HF đã merge LoRA của finetune.py; vào hash)")
+    ap.add_argument("--name", default=None, help="ghi đè `name` (thư mục con trong --out-root; vd epNNN của một snapshot)")
     ap.add_argument("--split", default="test_all", choices=["test", "test_all", "val"])
     ap.add_argument("--turn-index", default="../data/turn_index.json")
     ap.add_argument("--samples-root", default="../data/samples")
@@ -149,6 +151,10 @@ def main(argv=None):
         raise SystemExit("--no-score và --score-only loại trừ nhau")
     cfg = load_config(a.config)
     cfg["_path"] = a.config
+    if a.model:
+        cfg["model"] = a.model
+    if a.name:
+        cfg["name"] = a.name
     phash = prompt_hash(cfg)
     datasets = ["ce130", "cocount"] if a.dataset == "all" else [a.dataset]
     name = f"pilot{a.pilot}" if a.pilot else "test"

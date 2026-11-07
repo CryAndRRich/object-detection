@@ -1,0 +1,25 @@
+# ZETA4.1 = planner RePlan (ZETA4) + SFT LoRA trên CE-130 train (docs/EXPERIMENT_ZETA.md mục 14.1; người dùng chốt hướng A 2026-11-07).
+# Suy luận / chấm y hệt ZETA4 (kế thừa replan-7b.yaml: prompt tác giả, box chính = câu greedy, + 29 câu sample t 1,0 / top_p 0,99, coord
+# qwen_resized). Snapshot: `vlm/finetune.py --merge epNNN --out DIR` rồi `run.py --model DIR --name epNNN --out-root
+# ../../output/add/vlm/replan-7b-sft`. Khối `finetune` không vào prompt_hash (model vào hash ⇒ mỗi snapshot một hash).
+base: replan-7b.yaml
+name: replan-7b-sft
+finetune:
+  epochs: 3                    # ít epoch, lưu snapshot mọi epoch (người dùng)
+  batch_size: 64               # toàn cục như CE-Loc ⇒ 312 bước / epoch (19.998 mẫu)
+  micro_batch: 8               # nút bộ nhớ (cộng dồn 8); loss TB theo token nên không đổi kết quả
+  lr: 1.0e-4                   # LoRA; warmup 3 % rồi cosine về 0
+  warmup: 0.03
+  weight_decay: 0.0
+  clip: 1.0
+  grad_ckpt: true
+  attn: sdpa
+  num_workers: 4
+  log_every: 10
+  seed: 0                      # thứ tự mẫu + lỗ đích mỗi epoch
+  lora:
+    r: 64
+    alpha: 128
+    dropout: 0.05
+    targets: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+    skip: [visual]             # tháp ảnh (cũng có gate / up / down_proj) + merger đóng băng

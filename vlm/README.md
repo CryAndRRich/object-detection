@@ -119,6 +119,20 @@ python plot_compare.py --dataset all --pilot 10 --bold top --models replan-7b gl
   rồi chạy `HF_HUB_OFFLINE=1`; cache compile vào `haitn/` (`VLLM_CACHE_ROOT`, `TRITON_CACHE_DIR`). GPU dùng chung ⇒ `vllm.gpu_mem_gib`
   vừa số GPU đang trống. Latency 1 ảnh mọi method chạy local đo ở đây (ZETA mục 4).
 
+## Finetune planner RePlan — ZETA4.1 (`finetune.py`, server 2, venv vLLM)
+
+SFT + LoRA (tự viết, `lora.py`) trên CE-130 train; dữ liệu / câu đích / gom batch ở `sft.py` (ZETA mục 14.1). Snapshot mỗi epoch
+`weights/add/zeta4_1/snapshots/epNNN.pth` (chỉ LoRA), `last.pth` (+ optimizer, `--resume` ở biên epoch); `--limit N --max-steps M`
+cho pilot (ghi `itNNNNN.pth`).
+
+```bash
+python ../tools/run_on_free_gpu.py -- finetune.py --config config/server2/replan-7b-sft.yaml --save-dir ../weights/add/zeta4_1
+python finetune.py --config config/server2/replan-7b-sft.yaml --save-dir ../weights/add/zeta4_1 --merge ep001 --out ../weights/add/zeta4_1/merged_ep001
+python ../tools/run_on_free_gpu.py -- run.py --config config/server2/replan-7b-sft.yaml --all --no-score \
+    --model ../weights/add/zeta4_1/merged_ep001 --name ep001 --out-root ../../output/add/vlm/replan-7b-sft
+```
+`run.py --model` / `--name` ghi đè model / tên thư mục (model vào prompt_hash ⇒ mỗi snapshot một hash).
+
 ## Dữ liệu gửi đi
 
 - OpenRouter: config đặt `provider.data_collection: deny` ⇒ chỉ qua provider không giữ dữ liệu để huấn luyện.
