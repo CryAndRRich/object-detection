@@ -26,7 +26,7 @@ from baseline.data import int_box, pick_objects, sample_rng
 from baseline.models.bootplace import build_bootplace, build_criterion
 from baseline.models.detr import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh, nested
 
-__all__ = ["FRAME", "resize_size", "prep_images", "patch_canvas", "scene_boxes", "target_boxes", "BootPlaceTrain", "rank_queries", "predict", "Trainer"]
+__all__ = ["FRAME", "resize_size", "prep_images", "patch_canvas", "scene_boxes", "target_boxes", "BootPlaceTrain", "rank_queries", "sample_inputs", "predict", "Trainer"]
 
 MEAN, STD = (0.440, 0.440, 0.440, 0.0), (0.320, 0.319, 0.318, 0.5)
 PATCH, MAX_PATCHES, TOPK_CLIP = 64, 100, 10
@@ -191,6 +191,17 @@ def rank_queries(logits, clip_logits, k):
     return torch.cat([top, order[TOPK_CLIP:]])[:k]
 
 
+def sample_inputs(model, s, p, seed=0, dev="cpu"):
+    """Mẫu test -> (đối số forward (x, mask, patches, [box cảnh]), (W, H) ảnh gốc, chỉ số vật làm patch `fg`)."""
+    img = Image.open(s["image"]).convert("RGB")
+    W, H = img.size
+    objs = np.asarray(s["objects"], dtype=np.float64).reshape(-1, 4)
+    fg = pick_objects(objs, 1, p["fg_select"], sample_rng(seed, s["image_id"]))[0]
+    x, mask = prep_images([_u8(img)], [resize_size(FRAME, p["test_size"], p["test_max_size"])], dev)
+    args = (x, mask, patch_canvas([_patches(img, objs[fg:fg + 1])], dev), [scene_boxes(objs, (W, H), model.num_queries).to(dev)])
+    return args, (W, H), fg
+
+
 @torch.no_grad()
 def predict(model, samples, k, p, seed=0, dev="cpu", log=print, log_every=500):
     """-> list {"image_id", "boxes" [K,4] pixel ảnh gốc (thứ tự xếp hạng), "fg", "prob"}. `p` = khối `predict` của config."""
@@ -200,12 +211,8 @@ def predict(model, samples, k, p, seed=0, dev="cpu", log=print, log_every=500):
         raise ValueError(f"K {k} > num_queries {q}")
     out, t0 = [], time.time()
     for n, s in enumerate(samples, 1):
-        img = Image.open(s["image"]).convert("RGB")
-        W, H = img.size
-        objs = np.asarray(s["objects"], dtype=np.float64).reshape(-1, 4)
-        fg = pick_objects(objs, 1, p["fg_select"], sample_rng(seed, s["image_id"]))[0]
-        x, mask = prep_images([_u8(img)], [resize_size(FRAME, p["test_size"], p["test_max_size"])], dev)
-        o = model(x, mask, patch_canvas([_patches(img, objs[fg:fg + 1])], dev), [scene_boxes(objs, (W, H), q).to(dev)])
+        args, (W, H), fg = sample_inputs(model, s, p, seed, dev)
+        o = model(*args)
         idx = rank_queries(o["pred_logits"][0], o["pred_clip"][0, :, 0], k)
         b = box_cxcywh_to_xyxy(o["pred_boxes"][0, idx]) * torch.tensor([W, H, W, H], dtype=torch.float32, device=dev)
         out.append({"image_id": s["image_id"], "boxes": b.cpu().double().numpy().round(2).tolist(), "fg": fg,
