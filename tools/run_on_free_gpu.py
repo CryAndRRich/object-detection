@@ -23,7 +23,8 @@ tới hết (`tools/gpu_hold.py`) — không ai chen vào lúc bộ nhớ dùng 
 được + một khoảng nhỏ. Không dùng cho job vLLM (tự giữ `gpu_mem_gib`).
 `--grab-margin-gib M` (người dùng 2026-11-08): GPU chưa đủ G thì GOM DẦN (giữ phần đang trống
 trừ M GiB, xin thêm khi job khác nhả) tới đủ G rồi mới chạy; job vLLM thêm `--release` (gom đủ
-rồi nhả cho vLLM tự giữ).
+rồi nhả cho vLLM tự giữ). `--handoff DIR`: lấy chỗ từ người giữ chỗ của cả chuỗi
+(`gpu_hold.py --keeper DIR`), xong trả lại.
 """
 
 import argparse
@@ -57,11 +58,12 @@ def pick_gpu(gpus):
     return max(gpus, key=lambda g: g[1])
 
 
-def build_cmd(target, reserve_gib=0.0, grab_margin=None, release=False):
+def build_cmd(target, reserve_gib=0.0, grab_margin=None, release=False, handoff=None):
     """script + tham số -> lệnh con; giữ trước bộ nhớ thì chạy qua `gpu_hold.py` (cùng tiến trình; `grab_margin` = gom dần)."""
     if reserve_gib and reserve_gib > 0:
         hold = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gpu_hold.py")
         opt = ["--grab", f"{grab_margin:g}"] + (["--release"] if release else []) if grab_margin is not None else []
+        opt += ["--handoff", handoff] if handoff and grab_margin is not None else []
         return [sys.executable, hold] + opt + [f"{reserve_gib:g}"] + list(target)
     return [sys.executable] + list(target)
 
@@ -103,6 +105,8 @@ def main():
                     help="cùng --reserve-gib: GOM DẦN tới G (chờ job khác nhả), luôn chừa M GiB trống cho người khác")
     ap.add_argument("--release", action="store_true",
                     help="cùng --grab-margin-gib: gom đủ G rồi nhả hết trước khi chạy (job vLLM tự giữ bộ nhớ)")
+    ap.add_argument("--handoff", default=None,
+                    help="cùng --grab-margin-gib: thư mục của người giữ chỗ (`gpu_hold.py --keeper DIR`) — lấy chỗ từ nó, xong trả lại")
     ap.add_argument("target", nargs=argparse.REMAINDER,
                     help="script + tham số của nó, đặt sau --")
     a = ap.parse_args()
@@ -112,9 +116,9 @@ def main():
         ap.error("chưa có script — đặt sau --, vd: -- train.py --save-dir ../weights/detection/x")
     if (a.grab_margin_gib is not None or a.release) and not a.reserve_gib:
         ap.error("--grab-margin-gib / --release cần --reserve-gib G")
-    if a.release and a.grab_margin_gib is None:
-        ap.error("--release chỉ đi với --grab-margin-gib")
-    cmd = build_cmd(target, a.reserve_gib, a.grab_margin_gib, a.release)
+    if (a.release or a.handoff) and a.grab_margin_gib is None:
+        ap.error("--release / --handoff chỉ đi với --grab-margin-gib")
+    cmd = build_cmd(target, a.reserve_gib, a.grab_margin_gib, a.release, a.handoff)
 
     for attempt in range(1, a.retries + 2):
         rc = run_once(cmd, a.gpu)

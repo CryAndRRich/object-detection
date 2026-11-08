@@ -242,3 +242,58 @@ def test_gpu_hold_release_runs_child(tmp_path):
     r = subprocess.run([sys.executable, os.path.join(_HERE, "tools", "gpu_hold.py"), "--grab", "3", "--release", "0",
                         str(tmp_path / "s.py"), "a"], cwd=str(_HERE), capture_output=True, text=True)
     assert r.returncode == 5, r.stderr
+
+
+def test_keeper_hands_off_to_step_and_regrabs(monkeypatch, tmp_path):
+    """Người giữ chỗ: gom đủ -> ready; bước GPU xin (want) -> nhả hết + freed; bước xong -> gom lại -> ready; stop -> thoát."""
+    import threading
+    import time as _t
+    t, st = _grab_torch([48.0])
+    monkeypatch.setitem(sys.modules, "torch", t)
+    mod = _hold_mod()
+    d = str(tmp_path / "k")
+    th = threading.Thread(target=mod.keeper, args=(d, 37, 8), kwargs=dict(poll=0.01, log=lambda *a, **k: None), daemon=True)
+    th.start()
+
+    def until(c, sec=5):
+        end = _t.time() + sec
+        while not c():
+            assert _t.time() < end, "quá giờ"
+            _t.sleep(0.01)
+
+    p = lambda n: os.path.join(d, n)
+    until(lambda: os.path.exists(p("ready")))
+    assert st["live"] == 37 * 2 ** 30
+    open(p("want"), "w").write("123")
+    until(lambda: os.path.exists(p("freed")))
+    assert st["live"] == 0 and st["cached"] == 0 and not os.path.exists(p("ready"))   # nhả về driver cho bước GPU
+    os.remove(p("want"))
+    until(lambda: os.path.exists(p("ready")))
+    assert st["live"] == 37 * 2 ** 30 and not os.path.exists(p("freed"))
+    open(p("stop"), "w").close()
+    th.join(5)
+    assert not th.is_alive() and st["live"] == 0 and not os.path.exists(p("keeper.pid"))
+
+
+def test_take_over_waits_for_keeper_then_cleans_want(tmp_path):
+    """Bước GPU: tạo want, chờ freed; người giữ chỗ không còn sống -> không chờ mãi."""
+    mod = _hold_mod()
+    d = tmp_path / "k"
+    d.mkdir()
+    (d / "keeper.pid").write_text(str(os.getpid()))
+    calls = {"n": 0}
+
+    def sleep(_):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            (d / "freed").write_text("")
+    mod._take_over(str(d), 1.0, lambda *a, **k: None, sleep)
+    assert (d / "want").exists() and calls["n"] == 3
+    (d / "freed").unlink()
+    (d / "keeper.pid").write_text("999999999")             # người giữ chết -> thôi chờ
+    mod._take_over(str(d), 1.0, lambda *a, **k: None, lambda _: None)
+
+
+def test_build_cmd_handoff():
+    cmd = _load().build_cmd(["finetune.py"], 37, 1, handoff="/x/k")
+    assert cmd[2:] == ["--grab", "1", "--handoff", "/x/k", "37", "finetune.py"]
