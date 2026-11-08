@@ -104,7 +104,7 @@ python plot_compare.py --dataset all --pilot 10 --bold top --models replan-7b gl
 
 `--grid` = hình bài báo 2 hàng (1 ảnh CE-130 | 1 ảnh CoCount, ngẫu nhiên theo `--seed` hoặc `--ids <ce130> <cocount>`) × 8 cột:
 CE-Loc (DELTA8 ep 10, box `selected` lọc tay của `output/add/review/delta8_ep010/`) | gpt-4.1-mini, GPT-6 Luna (closed) | Qwen3-VL-4B,
-GLM-5.3-Flash (open-source) | CSANet ZETA2 ep 10, BootPlace ZETA1.1 ep 6, HiddenObjects ZETA3 ep 9 (finetune; mỗi nhóm cũ -> mới) —
+GLM-5.3-Flash (open-source) | CSANet ZETA2 ep 10, RePlan ZETA4.1 ep 3, HiddenObjects ZETA3 ep 9 (finetune; mỗi nhóm cũ -> mới) —
 `GRID` trong file; mỗi ô 5 box C-NLL thấp nhất (bỏ box IoU > 0,3 với box đã lấy), viền đỏ đậm, tiêu đề chỉ tên phương pháp, ô đúng tỉ
 lệ ảnh. Ghi `output/add/viz/method_grid/<ce130 id>__<cocount id>.png`.
 `--grid --rank 50 --dataset all` = 50 ứng viên / tập (1 hàng / hình, `method_grid/candidates/<tập>/NN_<id>.png`): ảnh xếp theo TB C-NLL

@@ -56,7 +56,7 @@ BLUE, GREEN, RED = "#1e6fff", "#00b050", "#e8000b"
 GRID = [("CE-Loc", ("celoc", "delta8_ep010")),                       # thứ tự cột: closed -> open-source -> finetune, trong nhóm cũ -> mới
         ("gpt-4.1-mini", ("vlm", "gpt-4.1-mini")), ("GPT-6 Luna", ("vlm", "gpt-6-luna")),
         ("Qwen3-VL-4B", ("vlm", "qwen3-vl-4b")), ("GLM-5.3-Flash", ("vlm", "glm-5.3-flash")),
-        ("CSANet", ("run", "zeta2", "ep010")), ("BootPlace", ("run", "zeta1_1", "ep006")),
+        ("CSANet", ("run", "zeta2", "ep010")), ("RePlan", ("vlm", "replan-7b-sft/ep003")),
         ("HiddenObjects", ("run", "zeta3", "ep009"))]
 
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Web chấm kết quả CE-Gen (người dùng 2026-11-08): mỗi màn một (tập, model, zeroshot / finetune, add / remove, ảnh) — người chấm xem
-ảnh input + ảnh output của model (+ heatmap khác biệt), ghi THÀNH CÔNG (thêm / xoá đúng MỘT vật cùng loại) hay THẤT BẠI, kèm MỘT box
-bao vật được thêm / bị xoá (thành công: bắt buộc). Thành công / thất bại -> metric user study; box -> C-NLL.
+ảnh input + ảnh output của model (+ heatmap khác biệt) và làm HAI việc độc lập: (1) kết luận THÀNH CÔNG (thêm / xoá đúng MỘT vật cùng
+loại) hay THẤT BẠI, (2) box bao vật được thêm / bị xoá — TỰ VẼ, hoặc bấm `s` nhận box gợi ý số 1 khi nó đã khớp. Một màn XONG khi và
+chỉ khi có đủ cả hai (người dùng chốt 2026-11-08; box gợi ý chưa được nhận thì không tính). Thành công / thất bại -> metric user study; box -> C-NLL.
 
 Dữ liệu (server 2, thư mục `hachi/`): `<src>/FSC_final` (CE-130, lượt 1: 1.679 nhánh = 1.335 test + 344 val, chia 4 subset
 `FSC_{easy,difficult}_{overlap,no_overlap}`) và `<src>/processed_dataset` (CE-CoCount, 1.484 file lớp); mỗi tập 3 model × zeroshot /
@@ -18,8 +19,8 @@ KHÔNG import torch — chạy bằng env `imgedit` (numpy + Pillow; `serve` th�
             vài chục KB / ảnh thay cho PNG output 1–2 MB) + `manifest.json` (mọi màn, lớp, box gợi ý). Song song `--workers`, chạy lại
             chỉ làm phần còn thiếu (`--force` làm lại hết). In thống kê từng run (status, không có box gợi ý, output lệch tỉ lệ, cỡ
             input khác ảnh gốc).
-  serve     app Gradio (`--share`: link *.gradio.live; luôn mở cả cổng LAN `--host`): chọn Data + User trên giao diện, lọc tuỳ
-            chọn theo Model / Setting / Task (chấm hết một run trước để có số sớm; bảng "Progress per run" = số màn đã chấm của
+  serve     app Gradio (`--share`: link *.gradio.live; luôn mở cả cổng LAN `--host`): chọn Data + User + Model + Setting + Task
+            (= MỘT run; chấm hết một run trước để có số sớm; bảng "Progress per run" = số màn đã chấm của
             từng run, cả hai user — run đủ cả hai phần là dùng được). Mọi phiên
             (2 tập × 2 user) dựng sẵn lúc mở app; trình duyệt tải trước + giải mã sẵn ảnh 8 màn kế; vẽ / chọn box chạy hoàn toàn ở
             trình duyệt, chỉ lúc lưu / chuyển màn mới gọi server (một lượt đi về).
@@ -27,19 +28,21 @@ KHÔNG import torch — chạy bằng env `imgedit` (numpy + Pillow; `serve` th�
 Chia việc: theo ẢNH (`image_id`), xen kẽ theo thứ tự ảnh -> user1 / user2; mỗi ảnh chấm đủ 12 run (6 add rồi 6 remove, liền nhau —
 ảnh input chỉ tải một lần). Hiện tên model / zeroshot / finetune (không chấm mù — người dùng 2026-11-08).
 
-Thao tác (màn chưa chấm mở ra đã chọn sẵn box gợi ý số 1 = vùng khác biệt mạnh nhất):
-  Enter       THÀNH CÔNG + lưu box đang chọn, sang màn sau (chưa có box: không lưu, báo)
-  f           THẤT BẠI, sang màn sau (không lưu box)
-  kéo chuột   vẽ box mới (trên ảnh input hoặc output — cùng hệ toạ độ)
-  bấm / 1–9   chọn box gợi ý (bấm gần viền / trong box; phím số = box số đó)
-  r / x       về box ban đầu của màn / bỏ box
+Thao tác (box gợi ý: số 1 = khung đỏ liền, số 2.. = đỏ đứt nét; box đang chọn / đã vẽ = vàng):
+  s           nhận box gợi ý số 1 (vùng khác biệt mạnh nhất) làm box của màn
+  kéo chuột   vẽ box (trên ảnh input hoặc output — cùng hệ toạ độ); vẽ lại = thay box
+  Enter       THÀNH CÔNG + lưu box vàng   } đủ kết luận + box: màn XONG, sang màn sau; chưa có box vàng: vẫn lưu kết luận,
+  f           THẤT BẠI + lưu box vàng     } ở lại màn, báo "chưa xong" (vẽ / bấm s rồi bấm lại)
+  r / x       về box đã lưu của màn / bỏ box
   h           ẩn / hiện heatmap
   ← / →       màn trước / sau (không lưu; lưu lại màn đã chấm = ghi đè)
 
 Kết quả: `<out-dir>/annot_<ce130|cocount>_<user>.jsonl` — chỉ GHI NỐI, dòng sau cùng của mỗi `key` là bản chấm (tắt app mở lại: tiếp
 từ màn chưa chấm đầu tiên). Mỗi dòng: {"key", "dataset", "model", "setting", "task", "subset", "image_id", "class", "success",
 "box": [x1, y1, x2, y2] | null (pixel ẢNH INPUT, toạ độ liên tục 0..W / 0..H — cùng hệ với box vật CE-130 / CE-CoCount),
-"box_src": "cand<k>" (box gợi ý thứ k+1) | "drawn" | null, "wh": [W, H], "user", "time", "sec"}.
+"box_src": "drawn" (tự vẽ) | "picked" (nhận box gợi ý số 1 bằng `s`) | null, "wh": [W, H], "user", "time", "sec"}. Bản chấm dùng
+được = dòng sau cùng của key thoả `is_done` (có `success` và box drawn / picked); dòng cũ "box_src": "cand<k>" (box gợi ý tự chọn
+sẵn, logic trước 2026-11-08 tối) KHÔNG tính là xong.
 
   python box_review/cegen.py prepare --workers 8
   python box_review/cegen.py serve --share
@@ -69,7 +72,7 @@ OD = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = "/mnt/disk1/aiotlab/hachi/Image_Editing/output"
 OUT_DIR = os.path.join(os.path.dirname(OD), "output", "cegen", "annot")
 DATASETS = {"FSC_final": "ce130", "processed_dataset": "cocount"}
-LABELS = {"ce130": "CE-130", "cocount": "CE-CoCount"}
+LABELS = {"ce130": "CE130", "cocount": "CoCount"}
 USERS = ("user1", "user2")
 TASKS = ("add", "remove")
 SETTINGS = ("zeroshot", "finetune")
@@ -79,8 +82,8 @@ TASK_RE = re.compile(r"(?:^|[_\-])(add|remove)(?=$|[_\-])", re.I)
 SKIP_DIRS = {"img", "input", "mask_l1", "mask_l2", "visual"}
 IMG_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 PREFETCH = 8
-ALL = "all"
 FILTER_KEYS = ("model", "setting", "task")
+BOX_SRC = ("drawn", "picked")        # tự vẽ / nhận box gợi ý số 1 (phím s)
 FILE_ROUTE = "/gradio_api/file="
 LANCZOS = getattr(Image, "Resampling", Image).LANCZOS
 
@@ -366,6 +369,11 @@ def clean_box(box, wh, min_side=2.0):
     return [round(x1, 1), round(y1, 1), round(x2, 1), round(y2, 1)]
 
 
+def is_done(rec):
+    """Màn XONG khi và chỉ khi có kết luận success / fail VÀ box người chấm vẽ / chủ động nhận (người dùng chốt 2026-11-08)."""
+    return bool(rec) and rec.get("success") in (True, False) and rec.get("box_src") in BOX_SRC and bool(rec.get("box"))
+
+
 class Annotator:
     """Phiên chấm của một (tập, user): danh sách màn, vị trí, file kết quả. Thao tác gọi trong `lock` (Hub)."""
 
@@ -381,9 +389,9 @@ class Annotator:
         self.set_filter({})
 
     def set_filter(self, filt):
-        """`filt`: {model / setting / task: giá trị | None | "all"} -> chỉ đi qua các màn khớp (`view` = vị trí trong `items`).
+        """`filt`: {model / setting / task: giá trị | None} -> chỉ đi qua các màn khớp (`view` = vị trí trong `items`).
         Đổi bộ lọc: sang màn chưa chấm đầu tiên của bộ lọc mới. -> False khi bộ lọc không có màn nào."""
-        f = tuple((k, filt[k]) for k in FILTER_KEYS if filt.get(k) not in (None, "", ALL))
+        f = tuple((k, filt[k]) for k in FILTER_KEYS if filt.get(k) not in (None, ""))
         if f != self.filt:
             if f not in self.views:
                 view = [p for p, it in enumerate(self.items) if all(it[k] == v for k, v in f)]
@@ -396,7 +404,7 @@ class Annotator:
         return bool(self.view)
 
     def filter_name(self):
-        return " · ".join(v for _, v in self.filt) or ALL
+        return " · ".join(v for _, v in self.filt) or "all runs"
 
     def cur(self):
         return self.items[self.view[self.pos]]
@@ -406,39 +414,47 @@ class Annotator:
         if pos != self.pos:
             self.pos, self.t_show = pos, time.time()
 
+    def done(self, it):
+        return is_done(self.store.latest.get(it["key"]))
+
     def first_unsaved(self):
-        self.go(next((i for i, p in enumerate(self.view) if self.items[p]["key"] not in self.store.latest), len(self.view) - 1))
+        """Màn CHƯA XONG đầu tiên (chưa chấm, hoặc thiếu kết luận / box tự vẽ)."""
+        self.go(next((i for i, p in enumerate(self.view) if not self.done(self.items[p])), len(self.view) - 1))
 
     def n_saved(self, all_items=False):
+        """Số màn XONG (`is_done`)."""
         ps = range(len(self.items)) if all_items else self.view
-        return sum(self.items[p]["key"] in self.store.latest for p in ps)
+        return sum(self.done(self.items[p]) for p in ps)
 
     def save(self, success, box=None, src=None):
-        """Lưu màn hiện tại rồi sang màn sau. Thành công cần box hợp lệ (không: không lưu, trả câu báo)."""
+        """Lưu kết luận + box tự vẽ (nếu có) của màn hiện tại. Đủ cả hai -> XONG, sang màn sau, trả ""; thiếu box -> vẫn lưu kết
+        luận, ở lại màn, trả câu báo."""
         it = self.cur()
-        box = clean_box(box, it["wh"]) if success else None
-        if success and box is None:
-            return "Success needs a box: drag on the image, click a suggested box or press 1-9."
-        src = src if box is not None and isinstance(src, str) and re.fullmatch(r"cand\d+|drawn", src) else None
+        if src == "picked":                       # box gợi ý số 1 lấy từ manifest, không tin toạ độ trình duyệt gửi
+            box = it["cands"][0] if it["cands"] else None
+        box = clean_box(box, it["wh"]) if src in BOX_SRC else None
         rec = {"key": it["key"], "dataset": it["ds"], "model": it["model"], "setting": it["setting"], "task": it["task"],
                "subset": it["subset"], "image_id": it["id"], "class": it["cls"], "success": bool(success), "box": box,
-               "box_src": src, "wh": it["wh"], "user": self.user, "time": datetime.now().isoformat(timespec="milliseconds"),
-               "sec": round(time.time() - self.t_show, 1)}
+               "box_src": src if box else None, "wh": it["wh"], "user": self.user,
+               "time": datetime.now().isoformat(timespec="milliseconds"), "sec": round(time.time() - self.t_show, 1)}
         self.store.put(rec)
-        self.go(self.pos + 1)
-        return ""
+        if is_done(rec):
+            self.go(self.pos + 1)
+            return ""
+        return (f"{'SUCCESS' if success else 'FAIL'} saved, but this screen is NOT done: draw a box around the added / removed "
+                "object (drag on the image) or press s to take suggestion 1, then press Enter / f again.")
 
     def eta(self):
-        secs = [r["sec"] for r in list(self.store.latest.values())[-200:] if 0 < r.get("sec", 0) <= 300]
+        secs = [r["sec"] for r in list(self.store.latest.values())[-200:] if is_done(r) and 0 < r.get("sec", 0) <= 300]
         left = len(self.view) - self.n_saved()
         return _fmt(statistics.median(secs) * left) if secs and left else "-"
 
     def header(self, warn=""):
         n, done = len(self.view), self.n_saved()
-        head = (f"**{self.name}** · filter **{self.filter_name()}** · screen {self.pos + 1} / {n} · saved {done} "
+        head = (f"**{self.name}** · filter **{self.filter_name()}** · screen {self.pos + 1} / {n} · done {done} "
                 f"({100 * done / n:.1f}%) · ETA {self.eta()}")
         if self.filt:
-            head += f" · all runs: saved {self.n_saved(True)} / {len(self.items)}"
+            head += f" · all runs: done {self.n_saved(True)} / {len(self.items)}"
         return head + (f"\n\n**⚠ {warn}**" if warn else "")
 
     def html(self, url, nonce=0):
@@ -446,14 +462,15 @@ class Annotator:
         it = self.cur()
         rec = self.store.latest.get(it["key"])
         W, H = it["wh"]
-        if rec and rec.get("box"):
-            box, src = rec["box"], rec.get("box_src") or "drawn"
-        elif it["cands"]:
-            box, src = it["cands"][0], "cand0"
+        if rec and rec.get("box") and rec.get("box_src") in BOX_SRC:
+            box, src = rec["box"], rec["box_src"]
         else:
             box, src = None, ""
-        state = ("not saved" if rec is None else
-                 f'saved: <b class="{"cg_ok" if rec["success"] else "cg_bad"}">{"SUCCESS" if rec["success"] else "FAIL"}</b>')
+        if rec is None:
+            state = "not saved"
+        else:
+            state = (f'saved: <b class="{"cg_ok" if rec["success"] else "cg_bad"}">{"SUCCESS" if rec["success"] else "FAIL"}</b>'
+                     + (" · box ✓ · <b>DONE</b>" if is_done(rec) else ' · <b class="cg_bad">NO BOX — not done</b>'))
         meta = [f"<b>{html.escape(it['model'])}</b> · <b>{it['setting']}</b>", f"id {html.escape(it['id'])}"]
         if it["subset"]:
             meta.append(html.escape(it["subset"]))
@@ -512,7 +529,7 @@ class Hub:
             for it in a.items:
                 c = cnt[(it["model"], it["setting"], it["task"])]
                 c[u + "_n"] += 1
-                c[u] += it["key"] in a.store.latest
+                c[u] += a.done(it)
         if not cnt:
             return ""
         rows = ["| run | " + " | ".join(self.users) + " | all |", "|---|" + "---:|" * (len(self.users) + 1)]
@@ -520,14 +537,14 @@ class Hub:
             done, n = sum(c[u] for u in self.users), sum(c[u + "_n"] for u in self.users)
             rows.append(f"| {m} · {st} · {t} | " + " | ".join(f"{c[u]}/{c[u + '_n']}" for u in self.users)
                         + f" | {'**done**' if done == n else f'{100 * done / n:.0f}%'} |")
-        return "**Progress per run** (both users)\n\n" + "\n".join(rows)
+        return "**Progress per run** (both users; done = verdict + your box)\n\n" + "\n".join(rows)
 
-    def act(self, data, user, payload, action, goto=None, filt=None):
+    def act(self, data, user, payload, action, filt=None):
         """-> (header markdown, html). `payload` (JSON từ trình duyệt): key màn đang hiện + box đang chọn; `filt`: bộ lọc
-        {model, setting, task} trình duyệt đang chọn (None / "all" = không lọc)."""
+        {model, setting, task} trình duyệt đang chọn (None = không lọc; giao diện luôn gửi đủ cả ba = một run)."""
         a = self.sessions.get((data, user))
         if a is None:
-            return "**Choose Data and User on the right to start.**", ""
+            return "**Choose Data, User, Model, Setting and Task on the right to start.**", ""
         try:
             p = json.loads(payload or "{}")
         except ValueError:
@@ -547,21 +564,18 @@ class Hub:
             if action == "ok":
                 warn = a.save(True, p.get("box"), p.get("src"))
             elif action == "fail":
-                warn = a.save(False)
+                warn = a.save(False, p.get("box"), p.get("src"))
             elif action == "prev":
                 a.go(a.pos - 1)
             elif action == "next":
                 a.go(a.pos + 1)
             elif action == "first":
                 a.first_unsaved()
-            elif action == "goto" and goto:
-                a.go(int(goto) - 1)
             return a.header(warn), a.html(self.url, next(self.renders))
 
 
 KEYS_JS = """<script>
 window.__cg = window.__cg || {box: null, src: '', key: null, busy: 0, img: new Map()};
-const CG_HIT = 10;
 function cgRoot() { return document.querySelector('.cg_root'); }
 function cgWH() { const r = cgRoot(); return r ? r.dataset.wh.split(',').map(Number) : [1, 1]; }
 function cgCands() { const r = cgRoot(); try { return JSON.parse(r.dataset.cands || '[]'); } catch (e) { return []; } }
@@ -570,14 +584,14 @@ function cgDraw() {
   const C = cgCands(), [W, H] = cgWH(), fs = Math.max(W, H) / 32, b = window.__cg.box;
   let s = '';
   C.forEach((c, i) => {
-    s += `<rect class="cg_cand" x="${c[0]}" y="${c[1]}" width="${c[2] - c[0]}" height="${c[3] - c[1]}" vector-effect="non-scaling-stroke"/>`;
+    s += `<rect class="${i ? 'cg_cand' : 'cg_top'}" x="${c[0]}" y="${c[1]}" width="${c[2] - c[0]}" height="${c[3] - c[1]}" vector-effect="non-scaling-stroke"/>`;
     s += `<text class="cg_lab" x="${c[0]}" y="${Math.max(c[1] - fs * 0.15, fs)}" font-size="${fs}" stroke-width="${fs * 0.08}">${i + 1}</text>`;
   });
   if (b) s += `<rect class="cg_cur" x="${b[0]}" y="${b[1]}" width="${b[2] - b[0]}" height="${b[3] - b[1]}" vector-effect="non-scaling-stroke"/>`;
   r.querySelectorAll('svg').forEach((svg) => { svg.innerHTML = s; });
   const info = document.getElementById('cg_boxinfo');
-  if (info) info.textContent = b ? `box (${window.__cg.src === 'drawn' ? 'drawn' : 'suggestion ' + (+window.__cg.src.slice(4) + 1)}): `
-      + b.map((v) => Math.round(v)).join(', ') : 'no box (Enter needs one: drag on the image or press 1-9)';
+  if (info) info.textContent = b ? `your box (${window.__cg.src === 'picked' ? 'suggestion 1' : 'drawn'}): `
+      + b.map((v) => Math.round(v)).join(', ') : 'no box yet: press s to take suggestion 1 (solid red) or drag to draw one';
 }
 function cgReset() {
   const r = cgRoot(); if (!r) return;
@@ -585,29 +599,17 @@ function cgReset() {
   window.__cg.src = r.dataset.src || '';
   cgDraw();
 }
-function cgSetCand(k) { const C = cgCands(); if (k >= 0 && k < C.length) { window.__cg.box = C[k].slice(); window.__cg.src = 'cand' + k; cgDraw(); } }
 window.cgPayload = function () { return JSON.stringify({key: window.__cg.key, box: window.__cg.box, src: window.__cg.src}); };
 function cgPt(e, svg) {
   const rc = svg.getBoundingClientRect(), vb = svg.viewBox.baseVal;
   return [(e.clientX - rc.left) * vb.width / rc.width, (e.clientY - rc.top) * vb.height / rc.height, rc.width / vb.width];
 }
-function cgPick(px, py, sc) {               // box gợi ý có viền gần nhất (<= CG_HIT px màn hình), không thì box nhỏ nhất chứa điểm
-  let best = -1, bd = Infinity, inner = -1, ia = Infinity;
-  cgCands().forEach((c, i) => {
-    const [x1, y1, x2, y2] = c, a = (x2 - x1) * (y2 - y1);
-    const dx = Math.max(x1 - px, 0, px - x2) * sc, dy = Math.max(y1 - py, 0, py - y2) * sc;
-    const d = (dx || dy) ? Math.hypot(dx, dy) : Math.min(px - x1, x2 - px, py - y1, y2 - py) * sc;
-    if (d < bd) { bd = d; best = i; }
-    if (!dx && !dy && a < ia) { ia = a; inner = i; }
-  });
-  return bd <= CG_HIT ? best : inner;
-}
 let cgDrag = null;
 document.addEventListener('mousedown', (e) => {
   const w = e.button === 0 && e.target.closest && e.target.closest('.cg_draw .cg_wrap');
   if (!w) return;
-  const svg = w.querySelector('svg'), [x, y, sc] = cgPt(e, svg);
-  cgDrag = {svg, x0: x, y0: y, sc, cx: e.clientX, cy: e.clientY, moved: false, prev: [window.__cg.box, window.__cg.src]};
+  const svg = w.querySelector('svg'), [x, y] = cgPt(e, svg);
+  cgDrag = {svg, x0: x, y0: y, cx: e.clientX, cy: e.clientY, moved: false, prev: [window.__cg.box, window.__cg.src]};
   e.preventDefault();
 });
 document.addEventListener('mousemove', (e) => {
@@ -622,7 +624,7 @@ document.addEventListener('mousemove', (e) => {
 document.addEventListener('mouseup', () => {
   if (!cgDrag) return;
   const d = cgDrag; cgDrag = null;
-  if (!d.moved) { cgSetCand(cgPick(d.x0, d.y0, d.sc)); return; }
+  if (!d.moved) return;
   const b = window.__cg.box;
   if (!b || b[2] - b[0] < 2 || b[3] - b[1] < 2) { [window.__cg.box, window.__cg.src] = d.prev; }
   else window.__cg.box = b.map((v) => Math.round(v));
@@ -649,7 +651,7 @@ document.addEventListener('keydown', (e) => {
     if (el) { window.__cg.busy = Date.now(); el.click(); }
     return;
   }
-  if (/^[1-9]$/.test(e.key)) { e.preventDefault(); cgSetCand(+e.key - 1); }
+  if (e.key === 's' || e.key === 'S') { const C = cgCands(); if (C.length) { window.__cg.box = C[0].slice(); window.__cg.src = 'picked'; cgDraw(); } }
   else if (e.key === 'r') cgReset();
   else if (e.key === 'x') { window.__cg.box = null; window.__cg.src = ''; cgDraw(); }
   else if (e.key === 'h') document.body.classList.toggle('cg_nohm');
@@ -675,11 +677,13 @@ CSS = (".cg_hidden {display: none !important;} "
        ".cg_wrap svg {position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible;} "
        ".cg_draw .cg_wrap {cursor: crosshair;} body.cg_nohm .cg_hm {display: none;} "
        ".cg_cand {fill: none; stroke: #ff3b30; stroke-width: 1.5; stroke-dasharray: 5 3;} "
+       ".cg_top {fill: none; stroke: #ff3b30; stroke-width: 2.5;} "
        ".cg_cur {fill: rgba(255, 230, 0, 0.10); stroke: #ffe600; stroke-width: 3;} "
        ".cg_lab {fill: #ff3b30; font-weight: 700; font-family: sans-serif; paint-order: stroke; stroke: #000;}")
 
-HELP = ("**Enter** success (saves the yellow box) · **f** fail · **drag** draw box · **click / 1-9** pick a suggestion · "
-        "**r** reset box · **x** no box · **h** heatmap · **← →** prev / next (re-saving overwrites)")
+HELP = ("A screen is **done** only with BOTH a verdict and **your box** (yellow). **s** take suggestion 1 (solid red) · "
+        "**drag** draw box · **Enter** success · **f** fail (both save the yellow box) · **r** reset box · **x** no box · **h** heatmap · "
+        "**← →** prev / next (re-saving overwrites)")
 
 
 def build_ui(hub, gr):
@@ -696,18 +700,15 @@ def build_ui(hub, gr):
             with gr.Column(scale=1, min_width=230):
                 data = gr.Radio(hub.datasets, value=None, label="Data")
                 user = gr.Radio(hub.users, value=None, label="User")
-                model = gr.Radio([ALL] + hub.models, value=ALL, label="Model")
-                setting = gr.Radio([ALL, *SETTINGS], value=ALL, label="Setting")
-                task = gr.Radio([ALL, *TASKS], value=ALL, label="Task")
+                model = gr.Radio(hub.models, value=None, label="Model")
+                setting = gr.Radio(list(SETTINGS), value=None, label="Setting")
+                task = gr.Radio(list(TASKS), value=None, label="Task")
                 ok = gr.Button("Success (Enter)", variant="primary", elem_id="cg_ok")
                 fail = gr.Button("Fail (f)", variant="stop", elem_id="cg_fail")
                 with gr.Row():
                     prev = gr.Button("← prev", elem_id="cg_prev", min_width=60)
                     nxt = gr.Button("next →", elem_id="cg_next", min_width=60)
-                first = gr.Button("Go to first unsaved", size="sm")
-                with gr.Row():
-                    num = gr.Number(value=None, label="Go to #", precision=0, minimum=1, min_width=80)
-                    go = gr.Button("Go", size="sm", min_width=40)
+                first = gr.Button("Go to first not done", size="sm")
                 gr.Markdown(HELP)
                 payload = gr.Textbox(**hidden)
         prog = gr.Markdown()
@@ -716,14 +717,15 @@ def build_ui(hub, gr):
         q = {"queue": False, "show_progress": "hidden"}
         js = "(d, u, m, s, t, p) => [d, u, m, s, t, window.cgPayload ? window.cgPayload() : '']"
 
-        def run(d, u, m, s, t, p, action, goto=None):
-            return (*hub.act(d, u, p, action, goto, {"model": m, "setting": s, "task": t}), hub.progress(d))
+        def run(d, u, m, s, t, p, action):
+            if not (m and s and t):
+                return "**Choose Data, User, Model, Setting and Task on the right to start.**", "", hub.progress(d)
+            return (*hub.act(d, u, p, action, {"model": m, "setting": s, "task": t}), hub.progress(d))
 
         def mk(action):
             return lambda d, u, m, s, t, p: run(d, u, m, s, t, p, action)
         for b, action in ((ok, "ok"), (fail, "fail"), (prev, "prev"), (nxt, "next"), (first, "first")):
             b.click(mk(action), sel + [payload], outs, js=js, **q)
-        go.click(lambda d, u, m, s, t, n: run(d, u, m, s, t, "", "goto", n), sel + [num], outs, **q)
         for r in sel:
             r.input(lambda d, u, m, s, t: run(d, u, m, s, t, "", "show"), sel, outs, **q)
         demo.load(lambda: (*hub.act(None, None, "", "show"), ""), None, outs, **q)
@@ -740,7 +742,7 @@ def serve(out_dir, host="0.0.0.0", port=7860, share=False):
         man = json.load(f)
     hub = Hub(man, out_dir)
     for (d, u), a in hub.sessions.items():
-        print(f"[{d} · {u}] {len(a.items)} màn, đã chấm {a.n_saved()} -> {a.store.path}", flush=True)
+        print(f"[{d} · {u}] {len(a.items)} màn, xong {a.n_saved()} (đủ kết luận + box tự vẽ) -> {a.store.path}", flush=True)
     print(f"[serve] manifest {len(man['items'])} màn ({man['time']}), dựng phiên {time.time() - t0:.1f}s", flush=True)
     demo, launch_kw = build_ui(hub, gr)
     demo.launch(server_name=host, server_port=port, share=share, allowed_paths=[man["cache"]], **launch_kw)

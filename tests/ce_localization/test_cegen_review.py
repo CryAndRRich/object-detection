@@ -10,7 +10,7 @@ import pytest
 from PIL import Image
 
 from ce_localization.box_review import cegen
-from ce_localization.box_review.cegen import Annotator, Hub, Store, clean_box, find_runs, prepare, run_task, split_items
+from ce_localization.box_review.cegen import Annotator, Hub, Store, clean_box, find_runs, is_done, prepare, run_task, split_items
 
 CE_IDS = ["2_b1", "10_b1", "10_b2"]
 CC_IDS = ["F_1_positive", "F_1_negative"]
@@ -120,8 +120,8 @@ def test_prepare_cache_manifest(man, tmp_path):
     assert len({x["in"] for x in ce if x["id"] == "2_b1"}) == 1                              # 4 run chung một file input
     assert {x["cls"] for x in items if x["ds"] == "cocount"} == {"sunflower seed"}
     st = man["stats"]
-    assert st["CE-130 M0 zeroshot add"]["out_aspect>2%"] == 1                                # 10_b2: 100x60 vs 40x30
-    assert st["CE-130 M0 zeroshot add"]["input!=ref_size"] == 1                              # 10_b2: ref 41x30
+    assert st["CE130 M0 zeroshot add"]["out_aspect>2%"] == 1                                # 10_b2: 100x60 vs 40x30
+    assert st["CE130 M0 zeroshot add"]["input!=ref_size"] == 1                              # 10_b2: ref 41x30
     with open(os.path.join(str(tmp_path / "out"), "manifest.json")) as f:
         assert len(json.load(f)["items"]) == len(items)
 
@@ -150,41 +150,57 @@ def test_clean_box():
 
 
 def test_annotator_save_resume(man, tmp_path):
+    """Màn XONG <=> có kết luận VÀ box tự vẽ; thiếu box: vẫn lưu kết luận, ở lại màn; box gợi ý không tính."""
     items = [it for it in man["items"] if it["ds"] == "ce130"]
     path = str(tmp_path / "a.jsonl")
     a = Annotator(items, path, "x", "user1")
     assert a.pos == 0
-    assert a.save(True, None) and a.pos == 0 and not a.store.latest                         # thành công thiếu box: không lưu
-    assert a.save(True, [5, 5, 20, 20], "cand0") == "" and a.pos == 1
-    assert a.save(False, [1, 1, 9, 9], "drawn") == "" and a.pos == 2
+    assert a.save(True, None) and a.pos == 0 and a.n_saved() == 0                          # kết luận, chưa box: chưa xong
+    assert a.store.latest[items[0]["key"]]["success"] is True and "NO BOX" in a.html(lambda r: r)
+    assert a.save(True, [5, 5, 20, 20], "cand0") and a.pos == 0 and a.n_saved() == 0        # box gợi ý: không tính
+    assert a.save(True, [5, 5, 20, 20], "drawn") == "" and a.pos == 1                      # đủ cả hai: xong, sang màn sau
+    assert a.save(False, [1, 1, 9, 9], "drawn") == "" and a.pos == 2                        # thất bại cũng cần box
+    a.save(False, None)
+    assert a.pos == 2 and a.n_saved() == 2
     recs = Store(path).latest
-    assert recs[items[0]["key"]]["box"] == [5.0, 5.0, 20.0, 20.0] and recs[items[0]["key"]]["box_src"] == "cand0"
-    assert recs[items[1]["key"]]["success"] is False and recs[items[1]["key"]]["box"] is None
+    assert recs[items[0]["key"]]["box"] == [5.0, 5.0, 20.0, 20.0] and recs[items[0]["key"]]["box_src"] == "drawn"
+    assert recs[items[1]["key"]]["success"] is False and recs[items[1]["key"]]["box"] == [1.0, 1.0, 9.0, 9.0]
+    assert not is_done(recs[items[2]["key"]]) and not is_done({"success": None, "box": [1, 1, 5, 5], "box_src": "drawn"})
     a.go(0)
     a.save(True, [0, 0, 10, 10], "evil<script>")
     r0 = Store(path).latest[items[0]["key"]]                                                # ghi đè: dòng sau thắng
-    assert r0["box"] == [0.0, 0.0, 10.0, 10.0] and r0["box_src"] is None
+    assert r0["box"] is None and r0["box_src"] is None and not is_done(r0)
     b = Annotator(items, path, "x", "user1")
-    assert b.pos == 2 and b.n_saved() == 2                                                  # mở lại: màn chưa chấm đầu tiên
+    assert b.pos == 0 and b.n_saved() == 1                                                  # mở lại: màn CHƯA XONG đầu tiên
+    page = b.html(lambda r: r)
+    assert 'data-box=""' in page and 'data-src=""' in page                                  # không chọn sẵn box gợi ý
+    b.go(2)                                                                                 # s = nhận box gợi ý số 1
+    assert b.save(True, [0, 0, 1, 1], "picked") == "" and b.pos == 3                        # toạ độ lấy từ manifest
+    r2 = b.store.latest[items[2]["key"]]
+    assert r2["box"] == clean_box(items[2]["cands"][0], items[2]["wh"]) and r2["box_src"] == "picked" and is_done(r2)
+    b.go(2)
+    assert 'data-src="picked"' in b.html(lambda r: r) and "DONE" in b.html(lambda r: r)
 
 
 def test_hub_acts_on_shown_screen(man, tmp_path):
     hub = Hub(man, str(tmp_path / "res"))
-    assert set(hub.sessions) == {("CE-130", "user1"), ("CE-130", "user2"), ("CE-CoCount", "user1"), ("CE-CoCount", "user2")}
+    assert set(hub.sessions) == {("CE130", "user1"), ("CE130", "user2"), ("CoCount", "user1"), ("CoCount", "user2")}
     head, page = hub.act(None, "user1", "", "show")
     assert "Choose" in head and page == ""
-    a = hub.sessions[("CE-130", "user1")]
+    a = hub.sessions[("CE130", "user1")]
     k3 = a.items[3]["key"]
-    head, page = hub.act("CE-130", "user1", json.dumps({"key": k3, "box": [5, 5, 20, 20], "src": "cand0"}), "ok")
+    head, page = hub.act("CE130", "user1", json.dumps({"key": k3, "box": [5, 5, 20, 20], "src": "drawn"}), "ok")
     assert k3 in a.store.latest and a.pos == 4 and a.items[0]["key"] not in a.store.latest
     assert 'class="cg_root"' in page and cegen.FILE_ROUTE in page and "REMOVE one apple" not in page
-    head, page = hub.act("CE-130", "user1", "not json", "fail")
+    head, page = hub.act("CE130", "user1", "not json", "fail")
     assert a.items[4]["key"] in a.store.latest and a.store.latest[a.items[4]["key"]]["success"] is False
-    hub.act("CE-130", "user1", "", "first")
+    assert a.pos == 4 and "NOT done" in head                                                # thất bại chưa box: ở lại màn
+    hub.act("CE130", "user1", "", "first")
     assert a.pos == 0
-    head, page = hub.act("CE-130", "user1", "", "goto", 4)
-    assert a.pos == 3 and "saved: <b" in page and "SUCCESS" in page
-    assert hub.sessions[("CE-130", "user2")].pos == 0                                       # phiên user khác không đổi
+    a.go(3)
+    head, page = hub.act("CE130", "user1", "", "show")
+    assert a.pos == 3 and "saved: <b" in page and "SUCCESS" in page and "DONE" in page and 'data-src="drawn"' in page
+    assert hub.sessions[("CE130", "user2")].pos == 0                                       # phiên user khác không đổi
 
 
 def test_hub_filter_and_progress(tmp_path):
@@ -193,41 +209,43 @@ def test_hub_filter_and_progress(tmp_path):
     man = prepare(src, str(tmp_path / "out"), ti, cc, workers=1, top_k=1, expect_runs=8, log=lambda m: None)
     hub = Hub(man, str(tmp_path / "res"))
     assert hub.models == ["M0", "M1"]
-    a = hub.sessions[("CE-CoCount", "user1")]
-    f = {"model": "M1", "setting": "finetune", "task": "all"}
-    head, page = hub.act("CE-CoCount", "user1", "", "show", filt=f)
+    a = hub.sessions[("CoCount", "user1")]
+    f = {"model": "M1", "setting": "finetune", "task": None}
+    head, page = hub.act("CoCount", "user1", "", "show", filt=f)
     want = [it["key"] for it in a.items if it["model"] == "M1" and it["setting"] == "finetune"]
     assert [a.items[p]["key"] for p in a.view] == want and len(want) == 2 and "M1 · finetune" in head
     assert a.cur()["key"] == want[0] and "M1" in page and "finetune" in page
     pre = page.split('data-pre="')[1].split('"')[0]
     assert all(it["out"] not in pre for it in a.items if it["model"] == "M0")              # tải trước chỉ màn trong bộ lọc
-    hub.act("CE-CoCount", "user1", json.dumps({"key": want[0], "box": [2, 2, 9, 9], "src": "drawn"}), "ok", filt=f)
+    hub.act("CoCount", "user1", json.dumps({"key": want[0], "box": [2, 2, 9, 9], "src": "drawn"}), "ok", filt=f)
     assert want[0] in a.store.latest and a.cur()["key"] == want[1]
-    hub.act("CE-CoCount", "user1", json.dumps({"key": want[1]}), "fail", filt=f)
-    assert set(a.store.latest) == set(want)
+    hub.act("CoCount", "user1", json.dumps({"key": want[1]}), "fail", filt=f)                # thiếu box: chưa xong
+    assert set(a.store.latest) == set(want) and a.cur()["key"] == want[1]
+    assert "| M1 · finetune · remove | 0/1 |" in hub.progress("CoCount")
+    hub.act("CoCount", "user1", json.dumps({"key": want[1], "box": [1, 1, 8, 8], "src": "drawn"}), "fail", filt=f)
     other = next(it["key"] for it in a.items if it["model"] == "M0")                         # màn ngoài bộ lọc: không lưu
-    head, _ = hub.act("CE-CoCount", "user1", json.dumps({"key": other, "box": [2, 2, 9, 9], "src": "drawn"}), "ok", filt=f)
+    head, _ = hub.act("CoCount", "user1", json.dumps({"key": other, "box": [2, 2, 9, 9], "src": "drawn"}), "ok", filt=f)
     assert other not in a.store.latest and "not saved" in head
-    head, page = hub.act("CE-CoCount", "user1", "", "show", filt={"model": "M9"})
+    head, page = hub.act("CoCount", "user1", "", "show", filt={"model": "M9"})
     assert "no screens" in head and page == ""
-    hub.act("CE-CoCount", "user1", "", "show", filt={})                                      # bỏ lọc: màn chưa chấm đầu tiên
+    hub.act("CoCount", "user1", "", "show", filt={})                                      # bỏ lọc: màn chưa chấm đầu tiên
     assert len(a.view) == len(a.items) and a.cur()["key"] not in a.store.latest
-    prog = hub.progress("CE-CoCount")
+    prog = hub.progress("CoCount")
     assert "| M1 · finetune · add | 1/1 | 0/1 | 50% |" in prog and "| M1 · finetune · remove | 1/1 | 0/1 | 50% |" in prog
     for (d, u), s in hub.sessions.items():                                                   # chấm hết user2 phần M1 · finetune
-        if d == "CE-CoCount" and u == "user2":
+        if d == "CoCount" and u == "user2":
             for it in s.items:
                 if it["model"] == "M1" and it["setting"] == "finetune":
-                    s.store.put({"key": it["key"], "success": False})
-    assert "| M1 · finetune · add | 1/1 | 1/1 | **done** |" in hub.progress("CE-CoCount")
+                    s.store.put({"key": it["key"], "success": False, "box": [1, 1, 5, 5], "box_src": "drawn"})
+    assert "| M1 · finetune · add | 1/1 | 1/1 | **done** |" in hub.progress("CoCount")
 
 
 def test_html_prefill_and_prefetch(man, tmp_path):
     hub = Hub(man, str(tmp_path / "res"))
-    a = hub.sessions[("CE-CoCount", "user1")]
+    a = hub.sessions[("CoCount", "user1")]
     page = a.html(hub.url)
     it = a.cur()
-    assert f'data-box="{",".join(str(v) for v in it["cands"][0])}"' in page and 'data-src="cand0"' in page
+    assert 'data-box=""' in page and json.dumps(it["cands"]) in page.replace("&quot;", '"')   # gợi ý chỉ để vẽ khung
     assert "ADD one sunflower seed" in page and "data-pre=" in page
     pre = page.split('data-pre="')[1].split('"')[0]
     assert a.items[1]["out"] in pre
