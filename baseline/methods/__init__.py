@@ -29,6 +29,21 @@ def model_state(ck):
     return sd["model"] if isinstance(sd.get("model"), dict) else sd
 
 
+# Khởi tạo từ DETR-R50 COCO (`detr-r50-e632da11.pth`, đúng weight README BootPlace train từ đó — ZETA1.1): phần BootPlace thêm vào
+# DETR + đầu lớp (92 lớp COCO) + query (100 ≠ num_queries) khởi tạo mới; `bbox_embed.layers` (MLP 3 tầng) cùng cỡ ⇒ giữ.
+DETR_NEW = ("bbox_embed.loc_proj.", "transformer.patch_encoder.", "logit_scale", "class_embed.", "query_embed.")
+
+
+def detr_to_bootplace(sd):
+    """State dict DETR -> khoá port BootPlace: cross-attn decoder `multihead_attn` -> `cross_attn`; bỏ `class_embed`, `query_embed`."""
+    out = {}
+    for k, v in sd.items():
+        if k.startswith(("class_embed.", "query_embed.")):
+            continue
+        out[k.replace(".multihead_attn.", ".cross_attn.")] = v
+    return out
+
+
 def load_model(cfg, path, dev="cpu", drop_keys=(), train=False):
     """-> BootPlace: `BOOTPLACE`; CSANet: (G, D); HiddenObjects: `PlacementDETR` (`_load_hiddenobjects`). `path`: checkpoint công bố hay của ZETA (khoá `model`). `drop_keys`: bỏ trước khi nạp
     (khởi tạo lại). BootPlace: num_queries lấy từ checkpoint (`bbox_embed.loc_proj` [Q, 4Q]); `train` ⇒ train layer2–4 của ResNet."""
@@ -37,11 +52,18 @@ def load_model(cfg, path, dev="cpu", drop_keys=(), train=False):
     if cfg["method"] == "hiddenobjects":
         return _load_hiddenobjects(cfg, ck, path, dev)
     if cfg["method"] == "bootplace":
+        detr = "bbox_embed.loc_proj.0.weight" not in sd
+        if detr:
+            sd = detr_to_bootplace(sd)
         sd = {k: v for k, v in sd.items() if k not in drop_keys}
-        q = int(sd["bbox_embed.loc_proj.0.weight"].shape[0])
+        q = int(cfg["model"]["num_queries"] if detr else sd["bbox_embed.loc_proj.0.weight"].shape[0])
         model = bootplace.build({**cfg, "model": {**cfg["model"], "num_queries": q}},
                                 train_backbone=train and cfg["finetune"]["lr_backbone"] > 0)
-        _load(model, sd, f"BootPlace {path}", drop_keys)
+        new = tuple(k for k in model.state_dict() if k.startswith(DETR_NEW)) if detr else ()
+        if detr:
+            print(f"[nạp] {path}: DETR COCO -> BootPlace, khởi tạo mới {len(new)} khoá ({sorted({'.'.join(k.split('.')[:2]) for k in new})})",
+                  flush=True)
+        _load(model, sd, f"BootPlace {path}", tuple(drop_keys) + new)
         return model.to(dev)
     G, D = csanet.build(cfg)
     _load(G, sd["generator"], f"CSANet G {path}")

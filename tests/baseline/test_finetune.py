@@ -13,7 +13,7 @@ import torch
 import torch.multiprocessing as mp
 
 from baseline.data import train_items
-from baseline.methods import load_model, make_trainer, split_batch
+from baseline.methods import bootplace, load_model, make_trainer, split_batch
 from baseline.models.csanet import _bce, gan_losses
 from ce_localization.data.turns import TurnIndex
 from tests.baseline.helpers import fake_ce130, fake_ckpt, fake_cocount, tiny_cfg
@@ -24,7 +24,7 @@ def _run(monkeypatch, mod, argv):
     mod.main()
 
 
-@pytest.mark.parametrize("run", ["zeta1", "zeta2", "zeta3"])
+@pytest.mark.parametrize("run", ["zeta1", "zeta1_1", "zeta2", "zeta3"])
 def test_finetune_resume_predict(tmp_path, monkeypatch, run):
     """BootPlace / HiddenObjects: dừng giữa epoch -> resume -> hết 2 epoch -> predict CE-130 + CoCount. CSANet (vòng lặp chung đã test ở trên): 1 bước ->
     predict CE-130 từ `last.pth`."""
@@ -201,3 +201,22 @@ def test_csanet_predict_batch_invariant(tmp_path):
     for a, b in zip(*rows):
         assert a["image_id"] == b["image_id"] and a["fg"] == b["fg"]
         torch.testing.assert_close(torch.tensor(a["boxes"]), torch.tensor(b["boxes"]), rtol=1e-4, atol=1e-3)
+
+
+def test_bootplace_init_from_detr(tmp_path):
+    """ZETA1.1: checkpoint DETR COCO -> BootPlace: phần chung nạp đúng (cross-attn đổi tên), phần mới khởi tạo, num_queries từ config."""
+    from baseline.methods import load_model
+    from tests.baseline.helpers import detr_state
+    _, cfg = tiny_cfg(tmp_path, "zeta1_1")
+    assert cfg["loss"]["ce_loss_coef"] == 1 and cfg["finetune"]["drop_keys"] == [] and "detr" in cfg["finetune"]["init"]
+    torch.manual_seed(3)
+    src = bootplace.build(cfg).state_dict()
+    p = tmp_path / "detr.pth"
+    torch.save({"model": detr_state(src, cfg["model"]["hidden_dim"])}, p)
+    m = load_model(cfg, str(p))
+    sd = m.state_dict()
+    assert m.num_queries == cfg["model"]["num_queries"] != 100
+    for k in ("transformer.decoder.layers.0.cross_attn.in_proj_weight", "transformer.encoder.layers.0.linear1.weight",
+              "bbox_embed.layers.2.weight", "input_proj.weight", "backbone.0.body.layer1.0.conv1.weight"):
+        assert torch.equal(sd[k], src[k]), k
+    assert not torch.equal(sd["bbox_embed.loc_proj.0.weight"], src["bbox_embed.loc_proj.0.weight"])     # khởi tạo mới

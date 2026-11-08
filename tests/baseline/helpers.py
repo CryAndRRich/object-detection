@@ -22,6 +22,7 @@ TINY = {
               "finetune": {"batch_size": 2, "micro_batch": 1, "epochs": 2, "num_workers": 0, "log_every": 1, "amp": False},
               "predict": {"k": 5, "batch_images": 3, "num_workers": 0}},
 }
+TINY["zeta1_1"] = TINY["zeta1"]                     # ZETA1.1 = kiến trúc ZETA1, khởi tạo DETR (fake_ckpt khuôn DETR)
 HO_CLASSES = ["apple", "cup", "dog"]
 
 
@@ -119,6 +120,15 @@ def tiny_cfg(tmp_path, run):
     return p, load_config(p)
 
 
+def detr_state(sd, d):
+    """State dict BootPlace -> khuôn DETR COCO: cross-attn tên `multihead_attn`, 92 lớp, 100 query, không có phần riêng BootPlace."""
+    import torch
+    out = {k.replace(".cross_attn.", ".multihead_attn."): v for k, v in sd.items()
+           if not k.startswith(("bbox_embed.loc_proj.", "transformer.patch_encoder.", "logit_scale", "class_embed.", "query_embed."))}
+    out.update({"class_embed.weight": torch.randn(92, d), "class_embed.bias": torch.zeros(92), "query_embed.weight": torch.randn(100, d)})
+    return out
+
+
 def fake_ckpt(cfg, path, seed=0):
     """Checkpoint 'công bố' giả (weight ngẫu nhiên, khuôn `{'model': …}` như bản gốc, kèm khoá của module bản gốc đã bỏ)."""
     import torch
@@ -129,6 +139,9 @@ def fake_ckpt(cfg, path, seed=0):
         sd = {k: v for k, v in m.state_dict().items() if not k.startswith(("backbone.", "text_proj."))}
         sd.update({"class_embed.weight": torch.randn(len(HO_CLASSES), cfg["model"]["hidden_dim"]), "input_proj.weight": torch.zeros(1)})
         torch.save({"model": sd, "classes": HO_CLASSES, "num_queries": cfg["model"]["num_queries"]}, path)
+        return path
+    if cfg["method"] == "bootplace" and "detr" in os.path.basename(cfg["finetune"].get("init", "")):
+        torch.save({"model": detr_state(m.state_dict(), cfg["model"]["hidden_dim"])}, path)            # ZETA1.1: khởi tạo từ DETR COCO
         return path
     if cfg["method"] == "bootplace":
         sd = {**m.state_dict(), "transformer.patch_decoder.deconv1.weight": torch.zeros(1)}

@@ -1,0 +1,17 @@
+# ZETA1.1 = BootPlace train lại từ DETR-R50 COCO trên CE-130 train (người dùng chốt 2026-11-08). Checkpoint Cityscapes công bố suy biến
+# (encoder sụp, docs/EXPERIMENT_ZETA.md mục 11.4) ⇒ đi lại đúng đường README BootPlace: `main.py --resume detr-r50-e632da11.pth`,
+# num_queries 120, set_cost_class 1, ce_loss_coef 1, eos_coef 0.1. Phần BootPlace thêm vào (loc_proj, patch_encoder, logit_scale) + đầu
+# lớp + query khởi tạo mới (`methods.detr_to_bootplace`). lr: công thức gốc DETR ở batch 64 (1e-4 / backbone 1e-5) — không nhân √ từ
+# batch 2 của README (5,7e-4 vượt mức DETR ổn định). Còn lại như zeta1.yaml (batch 64, 10 epoch, AMP, scale / size ảnh).
+base: zeta1.yaml
+model:
+  num_queries: 120             # DETR có 100 query ⇒ lấy từ đây (không đọc từ checkpoint)
+loss:
+  set_cost_class: 1
+  ce_loss_coef: 1
+  eos_coef: 0.1
+finetune:
+  init: ../weights/add/zeta1/pretrained/detr-r50-e632da11.pth
+  drop_keys: []
+  lr: 1.0e-4
+  lr_backbone: 1.0e-5
