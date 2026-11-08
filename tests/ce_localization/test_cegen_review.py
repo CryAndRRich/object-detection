@@ -187,6 +187,41 @@ def test_hub_acts_on_shown_screen(man, tmp_path):
     assert hub.sessions[("CE-130", "user2")].pos == 0                                       # phiên user khác không đổi
 
 
+def test_hub_filter_and_progress(tmp_path):
+    src = fake_src(str(tmp_path / "src"), n_models=2)
+    ti, cc = fake_refs(str(tmp_path))
+    man = prepare(src, str(tmp_path / "out"), ti, cc, workers=1, top_k=1, expect_runs=8, log=lambda m: None)
+    hub = Hub(man, str(tmp_path / "res"))
+    assert hub.models == ["M0", "M1"]
+    a = hub.sessions[("CE-CoCount", "user1")]
+    f = {"model": "M1", "setting": "finetune", "task": "all"}
+    head, page = hub.act("CE-CoCount", "user1", "", "show", filt=f)
+    want = [it["key"] for it in a.items if it["model"] == "M1" and it["setting"] == "finetune"]
+    assert [a.items[p]["key"] for p in a.view] == want and len(want) == 2 and "M1 · finetune" in head
+    assert a.cur()["key"] == want[0] and "M1" in page and "finetune" in page
+    pre = page.split('data-pre="')[1].split('"')[0]
+    assert all(it["out"] not in pre for it in a.items if it["model"] == "M0")              # tải trước chỉ màn trong bộ lọc
+    hub.act("CE-CoCount", "user1", json.dumps({"key": want[0], "box": [2, 2, 9, 9], "src": "drawn"}), "ok", filt=f)
+    assert want[0] in a.store.latest and a.cur()["key"] == want[1]
+    hub.act("CE-CoCount", "user1", json.dumps({"key": want[1]}), "fail", filt=f)
+    assert set(a.store.latest) == set(want)
+    other = next(it["key"] for it in a.items if it["model"] == "M0")                         # màn ngoài bộ lọc: không lưu
+    head, _ = hub.act("CE-CoCount", "user1", json.dumps({"key": other, "box": [2, 2, 9, 9], "src": "drawn"}), "ok", filt=f)
+    assert other not in a.store.latest and "not saved" in head
+    head, page = hub.act("CE-CoCount", "user1", "", "show", filt={"model": "M9"})
+    assert "no screens" in head and page == ""
+    hub.act("CE-CoCount", "user1", "", "show", filt={})                                      # bỏ lọc: màn chưa chấm đầu tiên
+    assert len(a.view) == len(a.items) and a.cur()["key"] not in a.store.latest
+    prog = hub.progress("CE-CoCount")
+    assert "| M1 · finetune · add | 1/1 | 0/1 | 50% |" in prog and "| M1 · finetune · remove | 1/1 | 0/1 | 50% |" in prog
+    for (d, u), s in hub.sessions.items():                                                   # chấm hết user2 phần M1 · finetune
+        if d == "CE-CoCount" and u == "user2":
+            for it in s.items:
+                if it["model"] == "M1" and it["setting"] == "finetune":
+                    s.store.put({"key": it["key"], "success": False})
+    assert "| M1 · finetune · add | 1/1 | 1/1 | **done** |" in hub.progress("CE-CoCount")
+
+
 def test_html_prefill_and_prefetch(man, tmp_path):
     hub = Hub(man, str(tmp_path / "res"))
     a = hub.sessions[("CE-CoCount", "user1")]

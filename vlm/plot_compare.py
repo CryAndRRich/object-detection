@@ -13,6 +13,13 @@ box) gộp lại khi vẽ. Box dump là pixel canvas 512 (letterbox góc trên t
   cd object-detection/vlm
   python plot_compare.py --dataset ce130 --pilot 20 --n 1      # thử 1 ảnh
   python plot_compare.py --dataset all --pilot 20              # 20 ảnh pilot (hash seed 0, như run.py --pilot 20) cả hai tập
+
+`--grid`: hình bài báo 2 hàng (1 ảnh CE-130 | 1 ảnh CoCount) × 8 cột — CE-Loc | 7 baseline (`GRID`),
+mỗi ô 5 box C-NLL thấp nhất, viền đỏ đậm, tiêu đề = tên phương pháp. Ra `output/add/viz/method_grid/<ce130 id>__<cocount id>.png`.
+
+  python plot_compare.py --grid --seed 0                        # ảnh ngẫu nhiên mỗi tập
+  python plot_compare.py --grid --ids 1050_b1_t1 <cocount_id>   # chọn ảnh
+  python plot_compare.py --grid --rank 50 --dataset all         # 50 ứng viên / tập CE-Loc vượt trội -> method_grid/candidates/
 """
 
 import argparse
@@ -43,6 +50,14 @@ NAMES = {"glm-5.3-flash": "GLM-5.3-Flash", "gpt-4.1-mini": "gpt-4.1-mini", "gpt-
 MODELS = [(m, NAMES[m]) for m in ("glm-5.3-flash", "gpt-4.1-mini", "gpt-6-luna", "llava-ov2-8b", "qwen3-vl-4b")]
 DSET = {"ce130": ("ce130_test_all", "inpainted"), "cocount": ("cocount_review5", "cocount")}
 BLUE, GREEN, RED = "#1e6fff", "#00b050", "#e8000b"
+# --grid: cột (tên trong hình, nguồn) — nguồn ("vlm", model) | ("run", run, snapshot) = output/add/<run>/<tập>/<snapshot>_boxes.json.
+# CE-Loc bắt buộc (cột đầu); còn lại: closed-source, open-source (chọn theo C-NLL min / 30 tốt), finetune. Không cột Groundtruth.
+# CE-Loc = bản qua lọc tay (box `selected` của output/add/review/delta8_ep010/pred_<ce130|cocount>_celoc.jsonl, pixel ảnh gốc).
+GRID = [("CE-Loc", ("celoc", "delta8_ep010")),                       # thứ tự cột: closed -> open-source -> finetune, trong nhóm cũ -> mới
+        ("gpt-4.1-mini", ("vlm", "gpt-4.1-mini")), ("GPT-6 Luna", ("vlm", "gpt-6-luna")),
+        ("Qwen3-VL-4B", ("vlm", "qwen3-vl-4b")), ("GLM-5.3-Flash", ("vlm", "glm-5.3-flash")),
+        ("CSANet", ("run", "zeta2", "ep010")), ("BootPlace", ("run", "zeta1_1", "ep006")),
+        ("HiddenObjects", ("run", "zeta3", "ep009"))]
 
 
 def load_vlm(root, model, dset_dir, name, key):
@@ -160,6 +175,95 @@ def scene_class(dataset, image_id, a, cache={}):
         return json.load(f)["class_name"].rstrip(". ")
 
 
+def load_grid(a, dset_dir, key):
+    """-> {tên: {image_id: {"boxes" (canvas 512), "cnll"}}} cho mọi phương pháp của GRID."""
+    out = {}
+    for name, src in GRID:
+        if src[0] == "vlm":
+            out[name] = load_vlm(a.vlm_root, src[1], dset_dir, a.name, key)
+        elif src[0] == "celoc":                                  # chỉ box đã chọn (lọc tay), pixel ảnh gốc
+            ds = "ce130" if dset_dir.startswith("ce130") else "cocount"
+            out[name] = {}
+            for r in iter_jsonl(os.path.join(OUT, "review", src[1], f"pred_{ds}_celoc.jsonl")):
+                sel, c = r.get("selected") or [], r.get("cnll") or []          # cnll None: ảnh < 5 vật (không chấm)
+                out[name][r["image_id"]] = {"boxes": r.get("selected_boxes") or [], "orig": True,
+                                            "cnll": [c[i] if i < len(c) else float("nan") for i in sel],
+                                            "cnll_gt": r.get("cnll_gt")}
+        else:
+            with open(os.path.join(OUT, src[1], dset_dir, f"{src[2]}_boxes.json")) as f:
+                out[name] = {r["image_id"]: r for r in json.load(f)["results"][key]}
+    return out
+
+
+def _iou(a, b):
+    x1, y1 = np.maximum(a[0], b[:, 0]), np.maximum(a[1], b[:, 1])
+    x2, y2 = np.minimum(a[2], b[:, 2]), np.minimum(a[3], b[:, 3])
+    i = np.clip(x2 - x1, 0, None) * np.clip(y2 - y1, 0, None)
+    return i / ((a[2] - a[0]) * (a[3] - a[1]) + (b[:, 2] - b[:, 0]) * (b[:, 3] - b[:, 1]) - i + 1e-9)
+
+
+def pick(r, top=5, nms_iou=0.3):
+    """-> chỉ số `top` box của r["boxes"]: C-NLL thấp nhất trước, bỏ box IoU > nms_iou với box đã lấy (box trùng / dí sát nhau —
+    kể cả trong box `selected` lọc tay của CE-Loc), bỏ C-NLL nan. IoU không đổi theo thang ⇒ dùng thẳng toạ độ dump."""
+    b = np.asarray(r.get("boxes") or [], dtype=float).reshape(-1, 4)
+    c = np.asarray(r.get("cnll") or [np.nan] * len(b), dtype=float)
+    keep = []
+    for i in np.argsort(np.where(np.isfinite(c), c, np.inf), kind="stable"):
+        if not np.isfinite(c[i]) or len(keep) == top:
+            break
+        if not keep or _iou(b[i], b[keep]).max() <= nms_iou:
+            keep.append(i)
+    return keep
+
+
+def rank_ids(preds, max_obj, top=5):
+    """Ảnh CE-Loc vượt trội: điểm = (TB C-NLL 5 box `pick` của phương pháp khác TỐT NHẤT) / (của CE-Loc), chỉ giữ ảnh CE-Loc còn đủ 5
+    box `selected` (lọc tay) sau `pick`, TB 5 box CE-Loc <= TB C-NLL box GT, n vật <= max_obj. -> [(điểm, image_id)] giảm dần."""
+    def m(r):
+        k = pick(r, top)
+        return np.mean(np.asarray(r["cnll"], dtype=float)[k]) if len(k) == top else np.inf
+    out = []
+    nobj = preds["CSANet"]                                       # n_obj có trong dump baseline
+    for k, r in preds["CE-Loc"].items():
+        if k not in nobj or nobj[k].get("n_obj", 0) > max_obj or not all(k in v for v in preds.values()):
+            continue
+        ce = m(r)
+        if not np.isfinite(ce) or ce > np.mean(r.get("cnll_gt") or [np.inf]):
+            continue
+        others = min(m(v[k]) for name, v in preds.items() if name != "CE-Loc")
+        out.append((others / max(ce, 1e-3), k))
+    return sorted(out, reverse=True)
+
+
+def grid_figure(rows, a, out_path, top=5):
+    """rows = [(dataset, image_id, preds)] — mỗi hàng một ảnh (CE-130, CoCount); cột = GRID; tiêu đề chỉ ở hàng đầu."""
+    cw, gap, head, pad = 2.6, 0.06, 0.28, 0.03                 # inch: rộng ô | khe hàng | tiêu đề | khe cột; ô = đúng tỉ lệ ảnh
+    scenes = [scene(dataset, image_id, a) for dataset, image_id, _ in rows]
+    hs = [cw * sc[1][1] / sc[1][0] for sc in scenes]
+    ncol = len(GRID)
+    W, H = ncol * cw + (ncol - 1) * pad, head + sum(hs) + gap * (len(rows) - 1)
+    fig = plt.figure(figsize=(W, H))
+    axes, y = np.empty((len(rows), ncol), dtype=object), H - head
+    for ri, h in enumerate(hs):
+        y -= h
+        for ci in range(ncol):
+            axes[ri, ci] = fig.add_axes([ci * (cw + pad) / W, y / H, cw / W, h / H])
+        y -= gap
+    for ri, ((dataset, image_id, preds), (path, wh, _, _)) in enumerate(zip(rows, scenes)):
+        img = Image.open(path).convert("RGB")
+        for ci, name in enumerate(g[0] for g in GRID):
+            ax = axes[ri, ci]
+            panel(ax, img, name if ri == 0 else "")
+            r = preds[name].get(image_id)
+            if r is None or not r.get("boxes"):
+                continue
+            b = np.asarray(r["boxes"], dtype=float).reshape(-1, 4)
+            draw_boxes(ax, (b if r.get("orig") else to_orig(b, wh))[pick(r, top)], RED, 2.0)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dataset", default="ce130", choices=["ce130", "cocount", "all"])
@@ -169,6 +273,10 @@ def main(argv=None):
     ap.add_argument("--models", nargs="+", default=None, choices=list(NAMES), help="tối đa 5 model (mặc định: 5 model ZETA5 / 6 đã chạy)")
     ap.add_argument("--n", type=int, default=None, help="chỉ vẽ n ảnh đầu (theo thứ tự trong dump VLM)")
     ap.add_argument("--ids", nargs="*", default=None, help="chỉ vẽ các image_id này")
+    ap.add_argument("--grid", action="store_true", help="hình 2 hàng (CE-130 | CoCount) × GRID (8 cột), 5 box C-NLL thấp nhất")
+    ap.add_argument("--rank", type=int, default=None, help="--grid: vẽ N ảnh ứng viên / tập CE-Loc vượt trội (1 hàng / hình)")
+    ap.add_argument("--max-obj", type=int, nargs=2, default=[40, 80], help="--rank: số vật tối đa CE-130, CoCount")
+    ap.add_argument("--seed", type=int, default=None, help="--grid: seed chọn ảnh ngẫu nhiên (không --ids)")
     ap.add_argument("--vlm-root", default=os.path.join(OUT, "vlm"))
     ap.add_argument("--out", default=os.path.join(OUT, "viz", "vlm_compare"))
     ap.add_argument("--turn-index", default=os.path.join(ROOT, "data", "turn_index.json"))
@@ -176,6 +284,28 @@ def main(argv=None):
     ap.add_argument("--cocount-root", default=os.path.join(ROOT, "data", "cocount"))
     ap.add_argument("--cocount-review", default=os.path.join(ROOT, "data", "cocount_review.jsonl"))
     a = ap.parse_args(argv)
+    if a.grid:                                                   # hàng 1 CE-130, hàng 2 CoCount; ảnh ngẫu nhiên (--seed) nếu không --ids
+        if a.rank:                                               # ứng viên: a.rank ảnh / tập CE-Loc vượt trội, mỗi hình 1 hàng
+            for dataset in (["ce130", "cocount"] if a.dataset == "all" else [a.dataset]):
+                dset_dir, key = DSET[dataset]
+                preds = load_grid(a, dset_dir, key)
+                ranked = rank_ids(preds, a.max_obj[dataset == "cocount"])
+                print(f"[{dataset}] {len(ranked)} ảnh qua lọc -> vẽ {min(a.rank, len(ranked))}")
+                for i, (sc, image_id) in enumerate(ranked[:a.rank], 1):
+                    grid_figure([(dataset, image_id, preds)], a,
+                                os.path.join(OUT, "viz", "method_grid", "candidates", dset_dir, f"{i:02d}_{image_id}.png"))
+            return
+        import random
+        rng, rows = random.Random(a.seed), []
+        for i, dataset in enumerate(("ce130", "cocount")):
+            dset_dir, key = DSET[dataset]
+            preds = load_grid(a, dset_dir, key)
+            ids = [k for k in preds["CE-Loc"] if all(k in v for v in preds.values())]
+            rows.append((dataset, a.ids[i] if a.ids else rng.choice(sorted(ids)), preds))
+        out = os.path.join(OUT, "viz", "method_grid", "__".join(r[1] for r in rows) + ".png")
+        grid_figure(rows, a, out)
+        print(out)
+        return
     for dataset in (["ce130", "cocount"] if a.dataset == "all" else [a.dataset]):
         dset_dir, key = DSET[dataset]
         models = [(m, NAMES[m]) for m in a.models[:5]] if a.models else MODELS

@@ -34,7 +34,7 @@ def hold(gib, log=print):
         return 0.0
     try:
         x = torch.empty(int(gib * 2 ** 30), dtype=torch.uint8, device="cuda")
-    except torch.OutOfMemoryError:
+    except torch.cuda.OutOfMemoryError:       # torch cũ (server 1) không có torch.OutOfMemoryError
         free = torch.cuda.mem_get_info()[0] / 2 ** 30
         log(f"[giữ GPU] KHÔNG đủ chỗ giữ {gib:g} GiB (trống {free:.1f} GiB) -> thoát 1 (run_on_free_gpu thử lại nếu còn lượt)",
             flush=True)

@@ -18,7 +18,9 @@ KHÔNG import torch — chạy bằng env `imgedit` (numpy + Pillow; `serve` th�
             vài chục KB / ảnh thay cho PNG output 1–2 MB) + `manifest.json` (mọi màn, lớp, box gợi ý). Song song `--workers`, chạy lại
             chỉ làm phần còn thiếu (`--force` làm lại hết). In thống kê từng run (status, không có box gợi ý, output lệch tỉ lệ, cỡ
             input khác ảnh gốc).
-  serve     app Gradio (`--share`: link *.gradio.live; luôn mở cả cổng LAN `--host`): chọn Data + User trên giao diện. Mọi phiên
+  serve     app Gradio (`--share`: link *.gradio.live; luôn mở cả cổng LAN `--host`): chọn Data + User trên giao diện, lọc tuỳ
+            chọn theo Model / Setting / Task (chấm hết một run trước để có số sớm; bảng "Progress per run" = số màn đã chấm của
+            từng run, cả hai user — run đủ cả hai phần là dùng được). Mọi phiên
             (2 tập × 2 user) dựng sẵn lúc mở app; trình duyệt tải trước + giải mã sẵn ảnh 8 màn kế; vẽ / chọn box chạy hoàn toàn ở
             trình duyệt, chỉ lúc lưu / chuyển màn mới gọi server (một lượt đi về).
 
@@ -77,6 +79,8 @@ TASK_RE = re.compile(r"(?:^|[_\-])(add|remove)(?=$|[_\-])", re.I)
 SKIP_DIRS = {"img", "input", "mask_l1", "mask_l2", "visual"}
 IMG_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 PREFETCH = 8
+ALL = "all"
+FILTER_KEYS = ("model", "setting", "task")
 FILE_ROUTE = "/gradio_api/file="
 LANCZOS = getattr(Image, "Resampling", Image).LANCZOS
 
@@ -372,22 +376,42 @@ class Annotator:
         self.index = {it["key"]: p for p, it in enumerate(items)}
         self.store = Store(path)
         self.lock = threading.RLock()
-        self.pos, self.t_show = -1, time.time()
-        self.first_unsaved()
+        self.views, self.filt = {}, None
+        self.pos, self.t_show = -1, time.time()        # `pos`: vị trí trong `view` (= số màn − 1 trên giao diện)
+        self.set_filter({})
+
+    def set_filter(self, filt):
+        """`filt`: {model / setting / task: giá trị | None | "all"} -> chỉ đi qua các màn khớp (`view` = vị trí trong `items`).
+        Đổi bộ lọc: sang màn chưa chấm đầu tiên của bộ lọc mới. -> False khi bộ lọc không có màn nào."""
+        f = tuple((k, filt[k]) for k in FILTER_KEYS if filt.get(k) not in (None, "", ALL))
+        if f != self.filt:
+            if f not in self.views:
+                view = [p for p, it in enumerate(self.items) if all(it[k] == v for k, v in f)]
+                self.views[f] = (view, {p: i for i, p in enumerate(view)})
+            self.filt = f
+            self.view, self.vindex = self.views[f]
+            self.pos = -1
+            if self.view:
+                self.first_unsaved()
+        return bool(self.view)
+
+    def filter_name(self):
+        return " · ".join(v for _, v in self.filt) or ALL
 
     def cur(self):
-        return self.items[self.pos]
+        return self.items[self.view[self.pos]]
 
     def go(self, pos):
-        pos = min(max(int(pos), 0), len(self.items) - 1)
+        pos = min(max(int(pos), 0), len(self.view) - 1)
         if pos != self.pos:
             self.pos, self.t_show = pos, time.time()
 
     def first_unsaved(self):
-        self.go(next((p for p, it in enumerate(self.items) if it["key"] not in self.store.latest), len(self.items) - 1))
+        self.go(next((i for i, p in enumerate(self.view) if self.items[p]["key"] not in self.store.latest), len(self.view) - 1))
 
-    def n_saved(self):
-        return sum(it["key"] in self.store.latest for it in self.items)
+    def n_saved(self, all_items=False):
+        ps = range(len(self.items)) if all_items else self.view
+        return sum(self.items[p]["key"] in self.store.latest for p in ps)
 
     def save(self, success, box=None, src=None):
         """Lưu màn hiện tại rồi sang màn sau. Thành công cần box hợp lệ (không: không lưu, trả câu báo)."""
@@ -406,13 +430,16 @@ class Annotator:
 
     def eta(self):
         secs = [r["sec"] for r in list(self.store.latest.values())[-200:] if 0 < r.get("sec", 0) <= 300]
-        left = len(self.items) - self.n_saved()
+        left = len(self.view) - self.n_saved()
         return _fmt(statistics.median(secs) * left) if secs and left else "-"
 
     def header(self, warn=""):
-        n, done = len(self.items), self.n_saved()
-        return (f"**{self.name}** · screen {self.pos + 1} / {n} · saved {done} ({100 * done / n:.1f}%) · ETA {self.eta()}"
-                + (f"\n\n**⚠ {warn}**" if warn else ""))
+        n, done = len(self.view), self.n_saved()
+        head = (f"**{self.name}** · filter **{self.filter_name()}** · screen {self.pos + 1} / {n} · saved {done} "
+                f"({100 * done / n:.1f}%) · ETA {self.eta()}")
+        if self.filt:
+            head += f" · all runs: saved {self.n_saved(True)} / {len(self.items)}"
+        return head + (f"\n\n**⚠ {warn}**" if warn else "")
 
     def html(self, url, nonce=0):
         """`nonce`: số lần vẽ — trang luôn khác bản trước ⇒ Gradio luôn vẽ lại (trình duyệt bỏ cờ chờ `busy` kể cả khi màn không đổi)."""
@@ -433,7 +460,7 @@ class Annotator:
         if it["status"] != "processed":
             meta.append(f'<span class="cg_bad">diff: {html.escape(it["status"])}</span>')
         meta.append(state)
-        nxt = [p for p in range(max(self.pos - 1, 0), min(self.pos + 1 + PREFETCH, len(self.items))) if p != self.pos]
+        nxt = [self.view[i] for i in range(max(self.pos - 1, 0), min(self.pos + 1 + PREFETCH, len(self.view))) if i != self.pos]
         pre = "|".join(url(self.items[p][k]) for p in nxt for k in ("in", "out", "hm") if self.items[p][k])
         width = f"min(100%, calc(72vh * {W / H:.4f}))"
 
@@ -469,14 +496,35 @@ class Hub:
                     self.sessions[(LABELS[ds], u)] = Annotator(mine, os.path.join(out_dir, f"annot_{ds}_{u}.jsonl"),
                                                                f"{LABELS[ds]} · {u}", u)
         self.users = list(users)
+        self.models = sorted({it["model"] for it in manifest["items"]})
         self.datasets = [LABELS[ds] for ds in DATASETS.values() if any(k[0] == LABELS[ds] for k in self.sessions)]
         self.renders = itertools.count(1)
 
     def url(self, rel):
         return FILE_ROUTE + quote(os.path.join(os.path.abspath(self.cache), rel))
 
-    def act(self, data, user, payload, action, goto=None):
-        """-> (header markdown, html). `payload` (JSON từ trình duyệt): key màn đang hiện + box đang chọn."""
+    def progress(self, data):
+        """Bảng markdown: mỗi run (model × setting × task) của tập `data` — số màn đã chấm của từng user / tổng."""
+        cnt = collections.defaultdict(lambda: collections.Counter())
+        for (d, u), a in self.sessions.items():
+            if d != data:
+                continue
+            for it in a.items:
+                c = cnt[(it["model"], it["setting"], it["task"])]
+                c[u + "_n"] += 1
+                c[u] += it["key"] in a.store.latest
+        if not cnt:
+            return ""
+        rows = ["| run | " + " | ".join(self.users) + " | all |", "|---|" + "---:|" * (len(self.users) + 1)]
+        for (m, st, t), c in sorted(cnt.items(), key=lambda kv: (kv[0][0], SETTINGS.index(kv[0][1]), TASKS.index(kv[0][2]))):
+            done, n = sum(c[u] for u in self.users), sum(c[u + "_n"] for u in self.users)
+            rows.append(f"| {m} · {st} · {t} | " + " | ".join(f"{c[u]}/{c[u + '_n']}" for u in self.users)
+                        + f" | {'**done**' if done == n else f'{100 * done / n:.0f}%'} |")
+        return "**Progress per run** (both users)\n\n" + "\n".join(rows)
+
+    def act(self, data, user, payload, action, goto=None, filt=None):
+        """-> (header markdown, html). `payload` (JSON từ trình duyệt): key màn đang hiện + box đang chọn; `filt`: bộ lọc
+        {model, setting, task} trình duyệt đang chọn (None / "all" = không lọc)."""
         a = self.sessions.get((data, user))
         if a is None:
             return "**Choose Data and User on the right to start.**", ""
@@ -487,8 +535,15 @@ class Hub:
         p = p if isinstance(p, dict) else {}
         warn = ""
         with a.lock:
+            if not a.set_filter(filt or {}):
+                return a.name + f" · filter **{a.filter_name()}**: no screens — change Model / Setting / Task.", ""
             if action != "show" and p.get("key") in a.index:
-                a.go(a.index[p["key"]])              # thao tác áp lên ĐÚNG màn đang hiện ở trình duyệt
+                v = a.vindex.get(a.index[p["key"]])  # thao tác áp lên ĐÚNG màn đang hiện ở trình duyệt
+                if v is not None:
+                    a.go(v)
+                elif action in ("ok", "fail"):       # màn đang hiện không thuộc bộ lọc (vừa đổi lọc): không lưu nhầm màn
+                    return (a.header("Filter changed — not saved, check this screen and press again."),
+                            a.html(self.url, next(self.renders)))
             if action == "ok":
                 warn = a.save(True, p.get("box"), p.get("src"))
             elif action == "fail":
@@ -641,6 +696,9 @@ def build_ui(hub, gr):
             with gr.Column(scale=1, min_width=230):
                 data = gr.Radio(hub.datasets, value=None, label="Data")
                 user = gr.Radio(hub.users, value=None, label="User")
+                model = gr.Radio([ALL] + hub.models, value=ALL, label="Model")
+                setting = gr.Radio([ALL, *SETTINGS], value=ALL, label="Setting")
+                task = gr.Radio([ALL, *TASKS], value=ALL, label="Task")
                 ok = gr.Button("Success (Enter)", variant="primary", elem_id="cg_ok")
                 fail = gr.Button("Fail (f)", variant="stop", elem_id="cg_fail")
                 with gr.Row():
@@ -652,17 +710,23 @@ def build_ui(hub, gr):
                     go = gr.Button("Go", size="sm", min_width=40)
                 gr.Markdown(HELP)
                 payload = gr.Textbox(**hidden)
-        outs = [head, img]
+        prog = gr.Markdown()
+        outs = [head, img, prog]
+        sel = [data, user, model, setting, task]
         q = {"queue": False, "show_progress": "hidden"}
-        js = "(d, u, p) => [d, u, window.cgPayload ? window.cgPayload() : '']"
+        js = "(d, u, m, s, t, p) => [d, u, m, s, t, window.cgPayload ? window.cgPayload() : '']"
+
+        def run(d, u, m, s, t, p, action, goto=None):
+            return (*hub.act(d, u, p, action, goto, {"model": m, "setting": s, "task": t}), hub.progress(d))
+
         def mk(action):
-            return lambda d, u, p: hub.act(d, u, p, action)
+            return lambda d, u, m, s, t, p: run(d, u, m, s, t, p, action)
         for b, action in ((ok, "ok"), (fail, "fail"), (prev, "prev"), (nxt, "next"), (first, "first")):
-            b.click(mk(action), [data, user, payload], outs, js=js, **q)
-        go.click(lambda d, u, n: hub.act(d, u, "", "goto", n), [data, user, num], outs, **q)
-        for r in (data, user):
-            r.input(lambda d, u: hub.act(d, u, "", "show"), [data, user], outs, **q)
-        demo.load(lambda: hub.act(None, None, "", "show"), None, outs, **q)
+            b.click(mk(action), sel + [payload], outs, js=js, **q)
+        go.click(lambda d, u, m, s, t, n: run(d, u, m, s, t, "", "goto", n), sel + [num], outs, **q)
+        for r in sel:
+            r.input(lambda d, u, m, s, t: run(d, u, m, s, t, "", "show"), sel, outs, **q)
+        demo.load(lambda: (*hub.act(None, None, "", "show"), ""), None, outs, **q)
     return demo, launch_kw
 
 

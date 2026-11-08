@@ -106,12 +106,12 @@ def test_gpu_hold_runs_script_like_python(tmp_path):
 def _fake_torch(oom=False):
     t = types.ModuleType("torch")
     t.uint8 = "u8"
-    t.OutOfMemoryError = type("OutOfMemoryError", (RuntimeError,), {})
+    oom_t = type("OutOfMemoryError", (RuntimeError,), {})
     st = {"reserved": 0, "emptied": 0}
 
     def empty(n, dtype=None, device=None):
         if oom:
-            raise t.OutOfMemoryError("oom")
+            raise oom_t("oom")
         st["reserved"] = n
         return object()
 
@@ -121,7 +121,7 @@ def _fake_torch(oom=False):
 
     t.empty = empty
     t.cuda = types.SimpleNamespace(is_available=lambda: True, memory_reserved=lambda: st["reserved"], empty_cache=empty_cache,
-                                   mem_get_info=lambda: (3 * 2 ** 30, 48 * 2 ** 30))
+                                   mem_get_info=lambda: (3 * 2 ** 30, 48 * 2 ** 30), OutOfMemoryError=oom_t)
     return t, st
 
 
