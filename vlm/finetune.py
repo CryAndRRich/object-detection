@@ -59,6 +59,17 @@ def lora_model(cfg, dev):
     return model, proc, n
 
 
+def answer_loss(model, inp):
+    """CE TB trên token câu trả lời — bằng hệt `model(**inp).loss` của HF nhưng chỉ chiếu `lm_head` ở vị trí có nhãn (~100 token / mẫu)
+    thay vì cả chuỗi (~1–1,5k token): logits 152k từ × fp32 × cả chuỗi là phần lớn bộ nhớ đỉnh (full ZETA4.1 2026-11-08 đỉnh 44,75 GiB
+    ở micro 8). `model.model` = thân Qwen2.5-VL (ảnh + LLM, tự tính M-RoPE), `model.lm_head` = đầu từ vựng."""
+    inp = dict(inp)
+    tgt = inp.pop("labels")[:, 1:]
+    keep = tgt != -100
+    h = model.model(**inp).last_hidden_state[:, :-1][keep]
+    return torch.nn.functional.cross_entropy(model.lm_head(h).float(), tgt[keep])
+
+
 def lr_at(it, n_iter, warmup):
     """Hệ số lr của bước `it` (0-based): tăng tuyến tính trong `warmup` bước đầu, rồi cosine về 0 tới bước cuối."""
     if it < warmup:
@@ -162,9 +173,9 @@ def main(argv=None):
             for b in buf:
                 inp = {k: v.to(dev, non_blocking=True) for k, v in b.items() if k != "n_label"}
                 with torch.autocast(device_type=dev.type, dtype=torch.bfloat16, enabled=amp):
-                    out = model(**inp)
-                (out.loss.float() * (b["n_label"] / total)).backward()
-                loss_sum += out.loss.item() * b["n_label"]
+                    loss = answer_loss(model, inp)
+                (loss * (b["n_label"] / total)).backward()
+                loss_sum += loss.item() * b["n_label"]
             torch.nn.utils.clip_grad_norm_(params, f.get("clip", 1.0))
             opt.step()
             opt.zero_grad(set_to_none=True)

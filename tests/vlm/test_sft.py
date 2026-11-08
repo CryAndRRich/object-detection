@@ -68,6 +68,16 @@ class Proc:
         open(os.path.join(d, "preprocessor_config.json"), "w").write("{}")
 
 
+class _Body:
+    """`Tiny.model` (không phải nn.Module ⇒ không lặp tham số): thân -> `.last_hidden_state`."""
+
+    def __init__(self, m):
+        self.m = m
+
+    def __call__(self, **kw):
+        return SimpleNamespace(last_hidden_state=self.m.hidden(**kw))
+
+
 class Tiny(nn.Module):
     """Giao diện Qwen2.5-VL tối thiểu: forward(input_ids, attention_mask, pixel_values, image_grid_thw, labels) -> .loss."""
 
@@ -80,13 +90,17 @@ class Tiny(nn.Module):
         self.lm_head = nn.Linear(16, 120)
         self.config = SimpleNamespace(use_cache=True)
 
-    def forward(self, input_ids, attention_mask, pixel_values, image_grid_thw, labels=None):
+        self.model = _Body(self)                                                  # như HF: `.model` = thân, `.lm_head` = đầu từ vựng
+
+    def hidden(self, input_ids, attention_mask, pixel_values, image_grid_thw):
         n = [int(t * hh * ww) for t, hh, ww in image_grid_thw.tolist()]               # patch của từng ảnh (như Qwen2.5-VL)
         v = torch.stack([x.mean(0) for x in self.visual.up_proj(pixel_values).split(n)])
         h = self.embed(input_ids) + v[:, None]
         h = h + self.q_proj(h)
-        h = h + self.down_proj(torch.relu(self.up_proj(h)))
-        logits = self.lm_head(h)
+        return h + self.down_proj(torch.relu(self.up_proj(h)))
+
+    def forward(self, input_ids, attention_mask, pixel_values, image_grid_thw, labels=None):
+        logits = self.lm_head(self.hidden(input_ids, attention_mask, pixel_values, image_grid_thw))
         loss = nn.functional.cross_entropy(logits[:, :-1].reshape(-1, 120), labels[:, 1:].reshape(-1), ignore_index=-100)
         return SimpleNamespace(loss=loss, logits=logits)
 
@@ -141,6 +155,24 @@ def test_collate_labels_only_answer():
         ids = b["input_ids"][j][b["attention_mask"][j].bool()].tolist()
         assert ids[-len(lab):] == lab and 3 in ids[:-len(lab)]                       # nối sau prompt có token ảnh
     assert b["n_label"] == sum(len(tok.encode(t)) for t in ans) and b["image_grid_thw"].shape == (2, 3)
+
+
+def test_answer_loss_equals_full_logits_loss():
+    """Chỉ chiếu lm_head ở vị trí có nhãn (tiết kiệm bộ nhớ) phải ra đúng loss + grad như loss HF trên logits cả chuỗi (đệm phải,
+    độ dài câu trả lời khác nhau)."""
+    torch.manual_seed(0)
+    img = Image.fromarray(np.random.default_rng(0).integers(0, 255, (100, 150, 3), dtype=np.uint8))
+    ans = [target_text("cup", [1, 2, 30, 40]) + END, target_text("cup", [5, 6, 7, 8]) + END + "xyz"]
+    b = collate([{"image": img, "user": "U", "target": t} for t in ans], Proc())
+    inp = {k: v for k, v in b.items() if k != "n_label"}
+    m = Tiny()
+    ref = m(**inp).loss
+    g_ref = torch.autograd.grad(ref, m.q_proj.weight)[0]
+    got = ft.answer_loss(m, inp)
+    g_got = torch.autograd.grad(got, m.q_proj.weight)[0]
+    torch.testing.assert_close(got, ref)
+    torch.testing.assert_close(g_got, g_ref)
+    assert "labels" in inp                                                           # không sửa dict của người gọi
 
 
 # ----------------------------------------------------------------------------- LoRA
