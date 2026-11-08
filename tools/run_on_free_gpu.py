@@ -17,6 +17,10 @@ Ba quy tắc, mỗi quy tắc từng gây sự cố thật:
      `--retries` thử lại, mỗi lần đọc lại nvidia-smi.
   3. Job bị `kill` (rc < 0) là người dùng CỐ Ý dừng -> KHÔNG retry (2026-09-04: wrapper
      từng hồi sinh chính job vừa bị kill).
+
+`--reserve-gib G` (người dùng 2026-11-08): job GIỮ TRƯỚC G GiB ngay lúc khởi động và giữ
+tới hết (`tools/gpu_hold.py`) — không ai chen vào lúc bộ nhớ dùng tạm giảm. G = đỉnh đo
+được + một khoảng nhỏ. Không dùng cho job vLLM (tự giữ `gpu_mem_gib`).
 """
 
 import argparse
@@ -50,6 +54,14 @@ def pick_gpu(gpus):
     return max(gpus, key=lambda g: g[1])
 
 
+def build_cmd(target, reserve_gib=0.0):
+    """script + tham số -> lệnh con; giữ trước bộ nhớ thì chạy qua `gpu_hold.py` (cùng tiến trình)."""
+    if reserve_gib and reserve_gib > 0:
+        hold = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gpu_hold.py")
+        return [sys.executable, hold, f"{reserve_gib:g}"] + list(target)
+    return [sys.executable] + list(target)
+
+
 def run_once(cmd, forced_gpu=None):
     """Chọn GPU rồi chạy `cmd` trong thư mục hiện tại -> return code."""
     env = os.environ.copy()
@@ -81,6 +93,8 @@ def main():
                     help="số lần thử lại khi job chết (GPU có thể bị chiếm giữa lúc đọc "
                          "nvidia-smi và lúc cấp phát)")
     ap.add_argument("--retry-wait", type=int, default=60, help="giây chờ trước mỗi lần thử")
+    ap.add_argument("--reserve-gib", type=float, default=0.0,
+                    help="giữ trước G GiB cho cả job (đỉnh đo được + khoảng nhỏ); 0 = không giữ")
     ap.add_argument("target", nargs=argparse.REMAINDER,
                     help="script + tham số của nó, đặt sau --")
     a = ap.parse_args()
@@ -88,7 +102,7 @@ def main():
     target = a.target[1:] if a.target and a.target[0] == "--" else a.target
     if not target:
         ap.error("chưa có script — đặt sau --, vd: -- train.py --save-dir ../weights/detection/x")
-    cmd = [sys.executable] + target
+    cmd = build_cmd(target, a.reserve_gib)
 
     for attempt in range(1, a.retries + 2):
         rc = run_once(cmd, a.gpu)

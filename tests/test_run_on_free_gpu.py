@@ -59,3 +59,93 @@ def test_no_utilization_threshold_survives_anywhere():
         "pick_gpu reads the utilization field again -- it must choose on g[1] "
         "(free memory) alone")
 
+
+
+# ============================================================================
+# --reserve-gib / tools/gpu_hold.py (người dùng 2026-11-08: giữ trước bộ nhớ cho cả job)
+# ============================================================================
+
+import json
+import subprocess
+import sys
+import types
+
+import pytest
+
+
+def _hold_mod():
+    spec = importlib.util.spec_from_file_location("gpu_hold", os.path.join(_HERE, "tools", "gpu_hold.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_build_cmd_reserve_goes_through_gpu_hold():
+    m = _load()
+    assert m.build_cmd(["train.py", "--x", "1"]) == [sys.executable, "train.py", "--x", "1"]
+    cmd = m.build_cmd(["train.py", "--x", "1"], 40.5)
+    assert cmd[0] == sys.executable and cmd[1].endswith(os.path.join("tools", "gpu_hold.py")) and os.path.isfile(cmd[1])
+    assert cmd[2:] == ["40.5", "train.py", "--x", "1"]
+
+
+def test_gpu_hold_runs_script_like_python(tmp_path):
+    """Script chạy như `python script.py`: argv, __name__, sys.path[0] = thư mục script, mã thoát giữ nguyên."""
+    out = tmp_path / "out.json"
+    (tmp_path / "helper_mod.py").write_text("X = 7\n")
+    (tmp_path / "s.py").write_text(
+        "import json, sys\nimport helper_mod\n"
+        f"json.dump({{'argv': sys.argv, 'name': __name__, 'p0': sys.path[0], 'x': helper_mod.X}}, open({str(out)!r}, 'w'))\n"
+        "if __name__ == '__main__':\n    sys.exit(3)\n")
+    r = subprocess.run([sys.executable, os.path.join(_HERE, "tools", "gpu_hold.py"), "0", str(tmp_path / "s.py"), "a", "--b", "3"],
+                       cwd=str(_HERE), capture_output=True, text=True)
+    assert r.returncode == 3, r.stderr
+    d = json.loads(out.read_text())
+    assert d == {"argv": [str(tmp_path / "s.py"), "a", "--b", "3"], "name": "__main__", "p0": str(tmp_path), "x": 7}
+
+
+def _fake_torch(oom=False):
+    t = types.ModuleType("torch")
+    t.uint8 = "u8"
+    t.OutOfMemoryError = type("OutOfMemoryError", (RuntimeError,), {})
+    st = {"reserved": 0, "emptied": 0}
+
+    def empty(n, dtype=None, device=None):
+        if oom:
+            raise t.OutOfMemoryError("oom")
+        st["reserved"] = n
+        return object()
+
+    def empty_cache():
+        st["emptied"] += 1
+        st["reserved"] = 0
+
+    t.empty = empty
+    t.cuda = types.SimpleNamespace(is_available=lambda: True, memory_reserved=lambda: st["reserved"], empty_cache=empty_cache,
+                                   mem_get_info=lambda: (3 * 2 ** 30, 48 * 2 ** 30))
+    return t, st
+
+
+def test_hold_reserves_and_disables_empty_cache(monkeypatch):
+    t, st = _fake_torch()
+    monkeypatch.setitem(sys.modules, "torch", t)
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
+    got = _hold_mod().hold(40, log=lambda *a, **k: None)
+    assert st["reserved"] == 40 * 2 ** 30 and got == 40
+    t.cuda.empty_cache()                                   # code của job gọi empty_cache -> không nhả chỗ giữ
+    assert st["reserved"] == 40 * 2 ** 30 and st["emptied"] == 0
+    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "expandable_segments:True"
+
+
+def test_hold_oom_exits_1_for_retry(monkeypatch):
+    t, _ = _fake_torch(oom=True)
+    monkeypatch.setitem(sys.modules, "torch", t)
+    msgs = []
+    with pytest.raises(SystemExit) as e:
+        _hold_mod().hold(40, log=lambda *a, **k: msgs.append(a[0]))
+    assert e.value.code == 1 and "KHÔNG đủ" in msgs[0]
+
+
+def test_hold_zero_is_noop(monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", None)       # không được import torch khi G = 0
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
+    assert _hold_mod().hold(0) == 0.0
