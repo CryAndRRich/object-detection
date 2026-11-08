@@ -12,7 +12,8 @@ from baseline.scoring import records_from_boxes, score_records
 from ce_localization.data.cocount import CoCountAddDataset, load_review
 from ce_localization.data.turns import CE130AddDataset, collate_add
 from ce_localization.engine.add_eval import add_metrics, prior_records, prior_unit_boxes
-from tests.baseline.helpers import fake_ce130, fake_cocount
+from tests.baseline.helpers import fake_ce130
+from tests.fakes import fake_cocount_review
 
 
 def _eval_geo(ds):
@@ -49,7 +50,7 @@ def test_ce130_geometry_scale_prior_match_eval(tmp_path):
 
 def test_cocount_geometry_and_keys(tmp_path):
     croot = str(tmp_path / "cocount")
-    rv = load_review(fake_cocount(croot))
+    rv = load_review(fake_cocount_review(croot))
     samples, _ = load_samples("cocount", cocount_root=croot, review=rv, min_obj=5)
     ds = CoCountAddDataset(croot, review=rv, min_obj=5)
     assert [s["image_id"] for s in samples] == ds.keys and len(samples) == 3                 # file < 5 vật sau rà bị loại

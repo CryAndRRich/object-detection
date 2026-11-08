@@ -101,7 +101,7 @@ def probe(model, samples, p, seed):
     finally:
         for h in hooks:
             h.remove()
-    I, Le, Ld = len(samples), len(tr.encoder.layers), len(tr.decoder.layers)
+    Le, Ld = len(tr.encoder.layers), len(tr.decoder.layers)
     log(f"  {'tầng':14s} {'RMS':>9s} {'std/token':>10s} {'std/ảnh':>9s}   (/RMS; token = vị trí ảnh hoặc query)")
     log("  {:14s} {:9.4f} {:10.4f} {:9.4f}".format("backbone→proj", *spread(rec["proj"])))
     for j in range(Le):
@@ -128,7 +128,6 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if a.limit is None:
         a.limit = 8
-    torch.set_grad_enabled(False)
     cfg = load_config(a.config)
     samples, _, _ = load_data(a)
     log(f"[probe] {a.dataset}: {len(samples)} ảnh | CPU | {cfg['predict']}")

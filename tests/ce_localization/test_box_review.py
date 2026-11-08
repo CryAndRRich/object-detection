@@ -14,7 +14,7 @@ from ce_localization.box_review.sources import (ce130_pred_screens, ce130_screen
                                                dedup_boxes, preselect)
 
 
-def _fake_cocount(root):
+def fake_cocount(root):
     """Hai frame × hai lớp; frame A lớp positive 4 box (box 1 / 2 trùng nhau), lớp negative 1 box; frame B lớp negative 0 box."""
     for sub in ("Anno", "Anno_with_exam_bbox", "Image"):
         os.makedirs(os.path.join(root, sub))
@@ -46,7 +46,7 @@ def _fake_ce130(root):
 
 
 def test_cocount_screens_one_per_file(tmp_path):
-    sc = cocount_screens(_fake_cocount(str(tmp_path / "cc")))
+    sc = cocount_screens(fake_cocount(str(tmp_path / "cc")))
     assert [s["id"] for s in sc] == ["INTRA_A_1_2_0_0_negative", "INTRA_A_1_2_0_0_positive", "INTRA_B_1_2_0_0_negative",
                                      "INTRA_B_1_2_0_0_positive"]
     a = sc[1]
@@ -69,7 +69,7 @@ def test_ce130_screens_holes_tags_gone(tmp_path):
 
 
 def test_box_svg_removed_boxes_disappear(tmp_path):
-    sc = cocount_screens(_fake_cocount(str(tmp_path / "cc")))[1]
+    sc = cocount_screens(fake_cocount(str(tmp_path / "cc")))[1]
     key = sc["groups"][0]["key"]
     s = box_svg(sc, (100, 80), {key: set()})
     assert s.count("data-b=") == 4 and s.index('data-b="0:3"') < s.index('data-b="0:0"')      # box to vẽ trước
@@ -85,7 +85,7 @@ def test_box_svg_removed_boxes_disappear(tmp_path):
 
 def test_session_remove_save_undo_resume(tmp_path):
     out = str(tmp_path / "out" / "r.jsonl")
-    sc = cocount_screens(_fake_cocount(str(tmp_path / "cc")))
+    sc = cocount_screens(fake_cocount(str(tmp_path / "cc")))
     s = Session(sc, out)
     assert s.pos == 0
     s.go(1)
@@ -154,7 +154,7 @@ def test_dedup_boxes_keeps_smaller_or_median():
 
 
 def test_session_dedup_hides_and_migrates_saved(tmp_path):
-    sc = cocount_screens(_fake_cocount(str(tmp_path / "cc")))
+    sc = cocount_screens(fake_cocount(str(tmp_path / "cc")))
     out = str(tmp_path / "r.jsonl")
     key, neg = sc[1]["id"], sc[0]["id"]
     ReviewStore(out).put({"id": key, "bad": {key: [1]}, "n": {key: 4}, "share": {}, "time": "t0", "sec": 1})   # rà trước khi lọc trùng
@@ -178,7 +178,7 @@ def test_session_dedup_hides_and_migrates_saved(tmp_path):
 
 def test_build_ui(tmp_path):
     gr = pytest.importorskip("gradio")
-    sc = cocount_screens(_fake_cocount(str(tmp_path / "cc")))
+    sc = cocount_screens(fake_cocount(str(tmp_path / "cc")))
     demo, launch_kw = build_ui(Session(sc, str(tmp_path / "r.jsonl"), "CE-CoCount"), gr)
     assert demo is not None and isinstance(launch_kw, dict)
 
@@ -226,7 +226,7 @@ def test_ce130_pred_screens_and_select_mode(tmp_path):
 
 def test_cocount_pred_screens(tmp_path):
     """Ảnh 100×80 (canvas 512: s = 5,12, vùng 512×409); box vật = bản rà (loại box 1 + lọc trùng box 2), box model chia về ảnh gốc."""
-    root = _fake_cocount(str(tmp_path / "cc"))
+    root = fake_cocount(str(tmp_path / "cc"))
     rev = tmp_path / "rev.jsonl"
     rev.write_text("".join(json.dumps(r) + "\n" for r in (
         {"id": "INTRA_A_1_2_0_0_positive", "bad": {"INTRA_A_1_2_0_0_positive": [1]}, "auto": {"INTRA_A_1_2_0_0_positive": [2]},

@@ -14,7 +14,6 @@ epoch có chỉ số `Trainer.select` TB thấp nhất (cộng qua mọi GPU; Bo
 """
 
 import argparse
-import json
 import os
 import random
 import sys
@@ -32,9 +31,24 @@ from baseline.data import train_items  # noqa: E402
 from baseline.dist import all_sum, sync_grads  # noqa: E402
 from baseline.methods import batch_len, load_model, make_trainer, split_batch  # noqa: E402
 from ce_localization.data.turns import TurnIndex  # noqa: E402
-from ce_localization.engine.train_utils import EpochBatches, PthCheckpoints, fmt_gpu_peak, gpu_peak, setup_dist  # noqa: E402
+from ce_localization.engine.train_utils import (EpochBatches, PthCheckpoints, config_mismatch, fmt_gpu_peak, gpu_peak,  # noqa: E402
+                                                setup_dist, write_json_atomic)
 from ce_localization.utils.config import load_config  # noqa: E402
 from ce_localization.utils.log import fmt_time  # noqa: E402
+
+
+def rng_state():
+    """Trạng thái RNG của tiến trình (python / numpy / torch CPU + CUDA) — ghi vào last.pth."""
+    return {"py": random.getstate(), "np": np.random.get_state(), "torch": torch.get_rng_state(),
+            "cuda": torch.cuda.get_rng_state() if torch.cuda.is_available() else None}
+
+
+def set_rng_state(st):
+    random.setstate(st["py"])
+    np.random.set_state(st["np"])
+    torch.set_rng_state(st["torch"])
+    if st.get("cuda") is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state(st["cuda"])
 
 
 def main():
@@ -94,14 +108,16 @@ def main():
     history, best = [], float("inf")
     if state:
         free = ("micro_batch", "num_workers", "init", "log_every")              # khoá đổi được giữa các phiên (không đổi kết quả)
-        key = lambda c: (c["method"], c["model"], c.get("loss"), {k: v for k, v in c["finetune"].items() if k not in free})  # noqa: E731
-        if key(state["config"]) != key(cfg):
-            sys.exit(f"KHÔNG resume được: config của {ck.last_path} khác {a.config} (ngoài {free}) — dùng --save-dir khác")
+        bad = config_mismatch(state["config"], cfg, ("method", "model", "loss", "finetune"), {"finetune": free})
+        if bad:
+            sys.exit(f"KHÔNG resume được: config của {ck.last_path} khác {a.config} ở {bad} (ngoài finetune.{free}) — dùng --save-dir khác")
         tr.load_state_dict(state["model"])
         for o, s in zip(tr.optimizers, state["optimizers"]):
             o.load_state_dict(s)
         scaler.load_state_dict(state["scaler"])
         epoch, step, it, history, best = state["epoch"], state["step"], state["iter"], state["history"], state["best"]
+        if world == 1 and state.get("rng"):                              # 1 GPU: resume rút cùng dãy ngẫu nhiên như chạy liền
+            set_rng_state(state["rng"])
         if main_proc:                                                  # tổng dở dang đã cộng qua mọi GPU, giữ ở rank 0
             ep_acc += torch.tensor(state["ep_acc"], dtype=torch.float64, device=dev)
     elif a.resume:
@@ -124,8 +140,8 @@ def main():
         acc = all_sum(ep_acc, world)
         if main_proc:
             ck.save({"model": tr.state_dict(), "optimizers": [o.state_dict() for o in tr.optimizers], "scaler": scaler.state_dict(),
-                     "epoch": epoch, "step": step, "iter": it, "ep_acc": acc.tolist(), "history": history, "best": best, "config": cfg},
-                    is_best)
+                     "epoch": epoch, "step": step, "iter": it, "ep_acc": acc.tolist(), "history": history, "best": best, "config": cfg,
+                     "rng": rng_state()}, is_best)
 
     if main_proc and not state:
         ck.save_snapshot({**tr.weights(), "config": cfg, "epoch": 0}, "ep000.pth")
@@ -167,25 +183,26 @@ def main():
                     + fmt_gpu_peak(gpu_peak(dev, reset=False)) + (f" | AMP scale {scaler.get_scale():.0f}" if amp else f" | scale {scaler.get_scale():g}" if scaler.is_enabled() else ""))
                 win = {"loss": torch.zeros((), dtype=torch.float64, device=dev), "n": 0, "data": 0.0, "t": time.time()}
             over = bool(a.max_hours and time.time() - t0 > a.max_hours * 3600) or bool(a.max_steps and it >= a.max_steps)
-            flag = torch.tensor(float(over), device=dev)
-            stop = bool(all_sum(flag, world).item())
+            stop = over if world == 1 else bool(all_sum(torch.tensor(float(over), device=dev), world).item())   # 1 GPU: không đồng bộ
             if stop or step == ipe:
                 break
             t_data = time.time()
         if step == ipe:                                                # hết epoch
             acc = all_sum(ep_acc, world)
-            mean, loss_mean = (acc[0] / acc[1].clamp(min=1)).item(), (acc[2] / acc[1].clamp(min=1)).item()
-            is_best = getattr(tr, "best_last", False) or mean < best
-            best = min(best, mean)
+            n_ok = int(acc[1].item())
+            mean, loss_mean = ((acc[0] / acc[1]).item(), (acc[2] / acc[1]).item()) if n_ok else (float("nan"), float("nan"))
+            if not n_ok:
+                log(f"[CẢNH BÁO] epoch {epoch + 1}: không bước nào hữu hạn (NaN / inf) — không chọn làm best")
+            is_best = getattr(tr, "best_last", False) or (n_ok > 0 and mean < best)
+            best = min(best, mean) if n_ok else best
             history.append({"epoch": epoch + 1, "iter": it, "loss": loss_mean, "select": mean, "select_by": tr.select,
-                            "steps_ok": int(acc[1].item()), "sec": time.time() - t0})
+                            "steps_ok": n_ok, "sec": time.time() - t0})
             epoch, step = epoch + 1, 0
             ep_acc.zero_()
             save(is_best)
             if main_proc:
                 ck.save_snapshot({**tr.weights(), "config": cfg, "epoch": epoch}, f"ep{epoch:03d}.pth")
-                with open(os.path.join(a.save_dir, "history.json"), "w") as fh:
-                    json.dump(history, fh, indent=1)
+                write_json_atomic(os.path.join(a.save_dir, "history.json"), history)
             log(f"[epoch {epoch}/{epochs}] loss TB {loss_mean:.4f} | {tr.select} TB {mean:.4f}{' (best)' if is_best else ''} | "
                 f"{fmt_time(time.time() - t0)}"
                 + fmt_gpu_peak(gpu_peak(dev)))

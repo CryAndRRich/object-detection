@@ -125,10 +125,11 @@ def test_plot_cnll_worst_cocount_and_ce130(tmp_path, monkeypatch):
     from ce_localization.data.cocount import CoCountAddDataset, load_review
     from ce_localization.data.turns import CE130AddDataset, ce130_geometry
     from ce_localization.tools import plot_cnll_worst as pw
-    from tests.ce_localization.helpers import _fake_cocount, _fake_review, _fake_turn_index
+    from tests.ce_localization.helpers import _fake_turn_index
+    from tests.fakes import fake_cocount, fake_review
     rng = np.random.default_rng(0)
-    cc = _fake_cocount(str(tmp_path / "cc"))
-    rvp = _fake_review(cc, str(tmp_path / "rv.jsonl"))
+    cc = fake_cocount(str(tmp_path / "cc"))
+    rvp = fake_review(cc, str(tmp_path / "rv.jsonl"))
     ds = CoCountAddDataset(cc, 128, review=load_review(rvp), min_obj=5)
     items = []
     for i in range(len(ds)):
@@ -195,7 +196,7 @@ def test_plot_cnll_worst_cocount_and_ce130(tmp_path, monkeypatch):
 def test_rescore_cnll_shift():
     """C-NLL cũ (trừ min NLL trên vật) + `calib_shift` (½·min D² của vật) == C-NLL mới (trừ NLL tại μ); lượng ∈ [0, 2]; < 5 vật -> None."""
     from scipy.stats import multivariate_normal
-    from ce_localization.engine.add_eval import CNLL_RIDGE, _features, cnll
+    from ce_localization.engine.add_eval import CNLL_RIDGE, cnll_features, cnll
     from ce_localization.tools.rescore_cnll import calib_shift
     rng = np.random.default_rng(3)
     wh = (200.0, 150.0)
@@ -203,9 +204,9 @@ def test_rescore_cnll_shift():
         xy = rng.uniform(0, 160, (n, 2))
         objs = np.concatenate([xy, xy + rng.uniform(8, 30, (n, 2))], 1)
         boxes = np.concatenate([xy[:4] + 5, xy[:4] + 25], 1)
-        z = _features(objs, objs, wh, is_objects=True)
+        z = cnll_features(objs, objs, wh, is_objects=True)
         mvn = multivariate_normal(z.mean(0), np.cov(z.T, bias=True) + CNLL_RIDGE * np.eye(4))
-        old = -mvn.logpdf(_features(boxes, objs, wh)) - (-mvn.logpdf(z)).min()
+        old = -mvn.logpdf(cnll_features(boxes, objs, wh)) - (-mvn.logpdf(z)).min()
         s = calib_shift(objs, wh)
         assert 0 <= s <= 2 and np.allclose(old + s, cnll(boxes, objs, wh), atol=1e-6)
     assert calib_shift(objs[:4], wh) is None

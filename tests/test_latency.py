@@ -7,7 +7,8 @@ import os
 
 import pytest
 
-from tests.baseline.helpers import fake_ce130, fake_ckpt, fake_cocount, fake_clip, tiny_cfg
+from tests.baseline.helpers import fake_ce130, fake_ckpt, fake_clip, tiny_cfg
+from tests.fakes import fake_cocount_review
 
 _spec = importlib.util.spec_from_file_location("latency_tool", os.path.join(os.path.dirname(__file__), "..", "tools", "latency.py"))
 lat = importlib.util.module_from_spec(_spec)
@@ -53,7 +54,7 @@ def test_measure_one_by_one_prefetch_first_errors_out_of_mean():
 def data(tmp_path):
     _, samples_root, ti = fake_ce130(str(tmp_path / "data"))
     croot = str(tmp_path / "cocount")
-    review = fake_cocount(croot)
+    review = fake_cocount_review(croot)
     return ["--turn-index", ti, "--samples-root", samples_root, "--cocount-root", croot, "--cocount-review", review,
             "--n", "2", "--warmup", "1", "--out-root", str(tmp_path / "lat")]
 
@@ -105,8 +106,8 @@ def test_vlm_flow(tmp_path, monkeypatch, data):
 def test_latency_celoc_flow(tmp_path, monkeypatch):
     """SLOW: train DELTA8 tí hon 1 iter -> `celoc` trên CE-130 + CoCount giả: box 30 = eval.n_samples, về pixel ảnh gốc."""
     import ce_localization.train as ta
-    from tests.ce_localization.helpers import (_fake_cocount, _fake_review, _fake_text_table, _fake_turn_index, _patch_clip,
-                                               _run_train, run_cfg)
+    from tests.ce_localization.helpers import _fake_text_table, _fake_turn_index, _patch_clip, _run_train, run_cfg
+    from tests.fakes import fake_cocount, fake_review
     base = str(tmp_path / "d")
     os.makedirs(base)
     _fake_turn_index(base)
@@ -115,8 +116,8 @@ def test_latency_celoc_flow(tmp_path, monkeypatch):
     _run_train(monkeypatch, ["--config", c_path, "--save-dir", w, "--max-iter", "1"])
     monkeypatch.setattr(ta, "build_text_table", _fake_text_table)
     _patch_clip(monkeypatch)
-    cc = _fake_cocount(str(tmp_path / "cc"))
-    rv = _fake_review(cc, str(tmp_path / "rv.jsonl"))
+    cc = fake_cocount(str(tmp_path / "cc"))
+    rv = fake_review(cc, str(tmp_path / "rv.jsonl"))
     lat.main(["celoc", "--ckpt", os.path.join(w, "last.pth"), "--device", "cpu", "--turn-index", os.path.join(base, "turn_index.json"),
               "--samples-root", os.path.join(base, "samples"), "--ce130-root", os.path.join(base, "all_phase2_V2"),
               "--cocount-root", cc, "--cocount-review", rv, "--n", "1", "--warmup", "1", "--out-root", str(tmp_path / "lat")])

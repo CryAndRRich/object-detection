@@ -12,7 +12,8 @@ from baseline.methods import load_model, make_trainer, split_batch
 from baseline.methods import hiddenobjects as ho
 from baseline.models.hiddenobjects import hungarian_loss, pairwise_giou, xywh_to_xyxy
 from ce_localization.data.turns import TurnIndex, letterbox
-from tests.baseline.helpers import HO_CLASSES, fake_ce130, fake_ckpt, fake_clip, fake_cocount, tiny_cfg
+from tests.baseline.helpers import HO_CLASSES, fake_ce130, fake_ckpt, fake_clip, tiny_cfg
+from tests.fakes import fake_cocount_review
 
 
 @pytest.fixture
@@ -130,7 +131,7 @@ def test_predict_sorted_by_score_and_samples_have_class(setup, tmp_path):
     cfg, init, items, (samples_root, ti) = setup
     assert {it["class"] for it in items} == {"apple"}
     test, _ = load_samples("ce130", turn_index=ti, samples_root=samples_root)
-    review = fake_cocount(str(tmp_path / "cc"))
+    review = fake_cocount_review(str(tmp_path / "cc"))
     cc, _ = load_samples("cocount", cocount_root=str(tmp_path / "cc"), review=load_review(review), min_obj=0)
     assert {s["class"] for s in test} == {"cup"} and all(s["class"] for s in cc)
     rows = ho.predict(load_model(cfg, init), test, 5, cfg["predict"])

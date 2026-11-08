@@ -11,13 +11,18 @@ import torch
 import yaml
 from PIL import Image
 
-from ce_localization.data.density import JET, build_index
 from ce_localization.models.text import TextTable
+
+# Bảng jet 256 mức như `matplotlib` `cmap(x, bytes=True)` (nhân 255 rồi cắt) — density giả kiểu CountGD (PNG jet).
+_JET_SEG = (((0.0, 0.0), (0.35, 0.0), (0.66, 1.0), (0.89, 1.0), (1.0, 0.5)),
+            ((0.0, 0.0), (0.125, 0.0), (0.375, 1.0), (0.64, 1.0), (0.91, 0.0), (1.0, 0.0)),
+            ((0.0, 0.5), (0.11, 1.0), (0.34, 1.0), (0.65, 0.0), (1.0, 0.0)))
+_X = np.linspace(0.0, 1.0, 256)
+JET = (np.stack([np.interp(_X, [p[0] for p in s], [p[1] for p in s]) for s in _JET_SEG], 1) * 255).astype(np.uint8)
 
 CFG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "ce_localization", "config", "delta")
 RUNS = ("delta4", "delta5", "delta5_1", "delta5_2", "delta5_3", "delta5_4", "delta5_5", "delta6", "delta6_1", "delta6_2", "delta7",
         "delta7_0_1", "delta7_0_2", "delta7_1", "delta8", "delta8_1")
-COCOUNT_NAMES = ("INTRA_FOO_TOM1_TOM2_00008_00006_0_200", "INTER_OFF_PEN0_PNC0_00007_00005_0_40")
 FAKE_TEXT_SHA = hashlib.sha256(b"fake CLIP text").digest()
 # ViT thật -> (ảnh, patch, hidden giả): cùng lưới g = ảnh / patch như bản thật
 FAKE_VIT = {"openai/clip-vit-base-patch16": (224, 16, 32), "openai/clip-vit-base-patch32": (224, 32, 32)}
@@ -120,15 +125,13 @@ def _fake_ce130_turns(base, seed=0):
 
 
 def _fake_turn_index(base):
-    """CE-130 + samples giả, chỉ mục (nhánh, lượt) + chỉ mục density. -> (root, samples, đường dẫn chỉ mục, TurnIndex, report)."""
+    """CE-130 + samples giả, chỉ mục (nhánh, lượt). -> (root, samples, đường dẫn chỉ mục, TurnIndex, report)."""
     from ce_localization.data.turns import TurnIndex, build_turn_index
     root, samples = _fake_ce130_turns(base)
     idx = build_turn_index(root, samples, workers=0, log=lambda *a: None)
     p = os.path.join(base, "turn_index.json")
     with open(p, "w") as f:
         json.dump(idx, f)
-    with open(os.path.join(base, "density_index.json"), "w") as f:
-        json.dump(build_index(samples, workers=0, log=lambda *a: None), f)
     return root, samples, p, TurnIndex(p), idx["report"]
 
 
@@ -152,36 +155,6 @@ def _fake_positives(base, path):
 
 # ----------------------------------------------------------------------------- CE-CoCount giả
 
-def _fake_cocount(root, seed=0):
-    """Mỗi frame hai file `_positive` / `_negative`, vật hai lớp xen kẽ, 10 loc_bbox ở chỗ trống."""
-    rng = np.random.default_rng(seed)
-    for d in ("Image", "Anno", "Anno_with_exam_bbox"):
-        os.makedirs(os.path.join(root, d), exist_ok=True)
-    for fi, stem in enumerate(COCOUNT_NAMES):
-        W, H = (200, 120) if fi == 0 else (90, 160)
-        for pol in ("positive", "negative"):
-            Image.fromarray(rng.integers(0, 255, (H, W, 3), dtype=np.uint8)).save(os.path.join(root, "Image", f"{stem}_{pol}.jpg"))
-        na, nb = int(stem.split("_")[4]), int(stem.split("_")[5])
-        for pol, n, cls, off in (("positive", na, "normal tomato(Big round tomato).", 0), ("negative", nb, "baby tomato.", 9)):
-            objs = [[float(5 + 11 * k), float(5 + off), float(13 + 11 * k), float(13 + off)] for k in range(n)]
-            loc = [[float(4 + 8 * k), float(40 + (k % 2) * 10), float(12 + 8 * k), float(48 + (k % 2) * 10)] for k in range(10)]
-            anno = {"class_name": cls, "loc_bbox": loc, "counting_anno": {"count": n, "exemplars": [list(map(int, o)) for o in objs[:3]]}}
-            with open(os.path.join(root, "Anno", f"{stem}_{pol}.json"), "w") as f:
-                json.dump(anno, f)
-            with open(os.path.join(root, "Anno_with_exam_bbox", f"{stem}_{pol}.json"), "w") as f:
-                json.dump({"class_name": cls, "exam_bbox": [{"bbox": o, "score": 0.9} for o in objs]}, f)
-    return root
-
-
-def _fake_review(root, path, drop_auto=None):
-    """Bản rà giả (khuôn `box_review/app.py`): mỗi file loại tay box 0; `drop_auto` {tên: [chỉ số]} = lọc trùng tự động."""
-    with open(path, "w") as f:
-        for n in sorted(x[:-5] for x in os.listdir(os.path.join(root, "Anno_with_exam_bbox"))):
-            m = len(json.load(open(os.path.join(root, "Anno_with_exam_bbox", n + ".json")))["exam_bbox"])
-            f.write(json.dumps({"id": n, "bad": {n: [0]}, "auto": {n: (drop_auto or {}).get(n, [])}, "n": {n: m}}) + "\n")
-    return path
-
-
 # ----------------------------------------------------------------------------- config / chạy train, eval
 
 def run_cfg(tmp_path, base, run, name="", **training):
@@ -190,8 +163,7 @@ def run_cfg(tmp_path, base, run, name="", **training):
     from ce_localization.utils.config import load_config
     cfg = load_config(os.path.join(CFG_DIR, f"{run}.yaml"))
     cfg["data"].update(root=os.path.join(base, "all_phase2_V2"), samples_root=os.path.join(base, "samples"),
-                       turn_index=os.path.join(base, "turn_index.json"), density_index=os.path.join(base, "density_index.json"),
-                       density_root=os.path.join(base, "samples"), image_size=128, num_workers=0)
+                       turn_index=os.path.join(base, "turn_index.json"), image_size=128, num_workers=0)
     if cfg["data"].get("train_target") == "positive":
         cfg["data"]["positive_file"] = os.path.join(base, "ce130_train.jsonl")
         _fake_positives(base, cfg["data"]["positive_file"])

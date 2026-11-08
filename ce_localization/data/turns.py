@@ -7,7 +7,7 @@ của bài = đúng các ảnh inpaint đó, kèm `density/` (density CountGD c�
 
 Split như CE-Loc gốc: train = mọi mẫu `samples/train`; val / test = mẫu `samples/test` có ảnh gốc thuộc val / test CE-130 (1.174 / 4.948);
 `test_all` = toàn bộ `samples/test` (6.122, như tác giả). Đầu vào kiểu bài: letterbox góc trên-trái (BILINEAR, đệm đen), ảnh /255,
-density `.convert("L")` (NEAREST). `image="original"` = `ground_truth.jpg` của nhánh (không lỗ) + density `full` của ảnh gốc.
+density `.convert("L")` (NEAREST).
 Dataset trả ảnh uint8 HWC; `to_device_add` mới /255 trên thiết bị. `AddCache` (Kaggle): ảnh + density đã letterbox, uint8 [T,T,4] trong
 một file (zlib hoặc memmap raw).
 """
@@ -28,13 +28,12 @@ from torch.utils.data import Dataset
 
 from ce_localization.utils.box_ops_np import box_iou, filter_degenerate
 
-__all__ = ["SPLITS", "IMAGE_KINDS", "letterbox_size", "letterbox", "scale_boxes", "present_objects", "ce130_geometry", "iter_jsonl",
+__all__ = ["SPLITS", "letterbox_size", "letterbox", "scale_boxes", "present_objects", "ce130_geometry", "iter_jsonl",
            "read_annotation", "pixel_hash", "assign_removed", "build_turn_index",
            "TurnIndex", "AddCache", "build_add_cache", "convert_add_cache", "CE130AddDataset", "collate_add", "to_device_add",
            "paper_to_float", "load_positives", "hand_positives", "POSITIVE_SAMPLING"]
 
 SPLITS = ("train", "val", "test")
-IMAGE_KINDS = ("inpainted", "original")
 # đích train khi có box positive (`CE130AddDataset.set_positives`, `train.step_loss`): random = 1 box ngẫu nhiên / ảnh / bước (DELTA7);
 # all = mọi box của ảnh trong cùng bước, loss TB trong ảnh (DELTA7.0.1); pair = mỗi cặp (ảnh, box) là một phần tử (DELTA7.0.2)
 POSITIVE_SAMPLING = ("random", "all", "pair")
@@ -401,23 +400,19 @@ def convert_add_cache(src_dir, out_dir, workers=4, log=print):
 
 
 class CE130AddDataset(Dataset):
-    """Một phần tử = một (nhánh, lượt): ảnh uint8 [4,T,T] (RGB + density kiểu bài), box xyxy PIXEL CANVAS. Density: ảnh inpaint =
-    density của chính mẫu; ảnh gốc = bản `full` của ảnh gốc (`density_index`, `data/density.py`). Box positive (`set_positives`):
+    """Một phần tử = một (nhánh, lượt): ảnh inpaint uint8 [4,T,T] (RGB + density của chính mẫu, kiểu bài), box xyxy PIXEL CANVAS.
+    (Eval ảnh gốc của GAMMA đã bỏ 2026-11-08 — branch `new`.) Box positive (`set_positives`):
     tập đích = mọi lỗ tới lượt t + box gán tay không trùng lỗ (`hand_positives`); `random` / `all`: thêm khoá `positives` (cả tập);
     `pair`: mỗi phần tử = một cặp (mẫu, box), `target` = box đó."""
 
-    def __init__(self, index, ce130_root, samples_root, split, image_size=512, image="inpainted", density_index=None, cache=None,
-                 positives=None, positive_hole_iou=None, positive_sampling="random"):
-        if image not in IMAGE_KINDS:
-            raise ValueError(f"image {image!r} không thuộc {IMAGE_KINDS}")
-        if image == "original" and density_index is None:
-            raise ValueError("ảnh gốc cần density_index (density `full` của ảnh gốc)")
+    def __init__(self, index, ce130_root, samples_root, split, image_size=512, cache=None, positives=None, positive_hole_iou=None,
+                 positive_sampling="random"):
         self.index, self.ce130_root, self.samples_root = index, ce130_root, samples_root
         self.keys = index.keys(split)
-        self.image_size, self.image, self.density_index = image_size, image, density_index
+        self.image_size = image_size
         if cache is not None and cache.size != image_size:
             raise ValueError(f"cache image_size {cache.size} != {image_size}")
-        self.cache = cache if image == "inpainted" else None          # cache = ảnh inpaint + density của mẫu
+        self.cache = cache                                             # cache = ảnh inpaint + density của mẫu
         self.clip_cache = None                                         # token CLIP tính sẵn (`data/clip_cache.py`, train gán sau)
         self.positives = self.positive_hole_iou = self.positive_sampling = self.pairs = None
         if positives is not None:
@@ -456,18 +451,14 @@ class CE130AddDataset(Dataset):
         if self.cache is not None and key in self.cache:
             x, scale, nw, nh = self.cache.get(key)
         else:
-            path = (os.path.join(self.samples_root, e["sample"]) if self.image == "inpainted" else
-                    os.path.join(self.ce130_root, e["branch"], "ground_truth.jpg"))
-            x, scale, nw, nh = letterbox(Image.open(path).convert("RGB"), self.image_size)
-            path_d = (os.path.join(self.samples_root, e["density"]) if self.image == "inpainted" else
-                      self.density_index.full(e["branch"].split("/")[1].split("_b")[0]))
-            den = _letterbox_l_u8(np.asarray(Image.open(path_d).convert("L"), dtype=np.uint8), nw, nh, self.image_size)
+            x, scale, nw, nh = letterbox(Image.open(os.path.join(self.samples_root, e["sample"])).convert("RGB"), self.image_size)
+            den = _letterbox_l_u8(np.asarray(Image.open(os.path.join(self.samples_root, e["density"])).convert("L"), dtype=np.uint8),
+                                  nw, nh, self.image_size)
             x = np.concatenate([x, den[..., None]], axis=-1)
         holes = scale_boxes(b["holes"][:t], scale, nw, nh)
         if len(holes) != t:
             raise ValueError(f"{key}: lỗ rơi ra ngoài vùng ảnh thật sau letterbox")
-        objs = (present_objects(b, t) if self.image == "inpainted"           # vật còn trong ảnh lượt t: chưa bị xoá tới lượt t
-                else np.asarray(b["objects"], dtype=np.float64).reshape(-1, 4))
+        objs = present_objects(b, t)                                     # vật còn trong ảnh lượt t: chưa bị xoá tới lượt t
         target = holes[-1]                               # lỗ MỚI NHẤT = đích train (mặc định)
         if self.positives is not None:
             raw = self.positive_boxes(key)

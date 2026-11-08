@@ -23,19 +23,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from ce_localization.data.cocount import cocount_geometry, load_review  # noqa: E402
 from ce_localization.data.turns import TurnIndex, ce130_geometry  # noqa: E402
-from ce_localization.engine.add_eval import CNLL_MIN_OBJ, _cnll_fit, _features, other_class  # noqa: E402
+from ce_localization.engine.add_eval import cnll, other_class  # noqa: E402
 
 __all__ = ["calib_shift", "shift_for"]
 
 
 def calib_shift(objects, wh, others=None):
     """½·min_i D²(z_i) của ảnh (C-NLL mới − C-NLL cũ), None nếu < CNLL_MIN_OBJ vật."""
-    if len(objects) < CNLL_MIN_OBJ:
-        return None
-    ref = objects if others is None or not len(others) else np.concatenate([objects, others])
-    mu, inv = _cnll_fit(objects, ref, wh)
-    d = _features(objects, ref, wh, is_objects=True) - mu
-    return float(0.5 * np.einsum("ni,ij,nj->n", d, inv, d).min())
+    c = cnll(objects, objects, wh, others, is_objects=True)
+    return None if c is None else float(c.min())
 
 
 def shift_for(key, means):
@@ -58,7 +54,6 @@ def main():
     ap.add_argument("--samples-root", default="../data/samples")
     ap.add_argument("--cocount-root", default="../data/cocount")
     ap.add_argument("--cocount-review", default=None)
-    ap.add_argument("--cocount-obj-filter", type=float, default=None)
     ap.add_argument("--image-size", type=int, default=512)
     a = ap.parse_args()
     index, review, cache = None, None, {}
@@ -75,9 +70,9 @@ def main():
             else:
                 if a.cocount_review and review is None:
                     review = load_review(a.cocount_review)
-                g = cocount_geometry(a.cocount_root, x["image_id"], a.image_size, a.cocount_obj_filter, review)
+                g = cocount_geometry(a.cocount_root, x["image_id"], a.image_size, review=review)
             if not np.allclose(g["wh"], x["wh"], atol=1e-3) or len(g["objects"]) != x["n_obj"]:
-                sys.exit(f"{x['image_id']}: hình học khác dump (wh / số vật) — sai --cocount-review / --cocount-obj-filter?")
+                sys.exit(f"{x['image_id']}: hình học khác dump (wh / số vật) — sai --cocount-review?")
             oth = other_class(g["objects"], g["objects_all"]) if "objects_all" in g else None
             cache[ck] = calib_shift(g["objects"], tuple(g["wh"]), oth)
         return cache[ck]

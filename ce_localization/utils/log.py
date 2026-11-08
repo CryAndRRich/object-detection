@@ -7,6 +7,7 @@ phân biệt được với treo.
 import os
 import socket
 import sys
+import time
 from datetime import datetime
 
 import torch
@@ -42,3 +43,17 @@ def print_banner(title, env):
     for k, v in env.items():
         print(f"  {k:22s} {v}", flush=True)
     print("=" * 78, flush=True)
+
+
+class Progress:
+    """Log tiến độ suy luận dùng chung (baseline ZETA): `update(done, prev)` in "[name done/total] x ms/ảnh | còn ~ETA" khi số ảnh xong
+    vượt một bội số của `every` (hoặc xong hết). `every` 0 / None = im lặng."""
+
+    def __init__(self, name, total, every=500, log=print):
+        self.name, self.total, self.every, self.log, self.t0 = name, total, every, log, time.time()
+
+    def update(self, done, prev=None):
+        prev = done - 1 if prev is None else prev
+        if self.every and done and (done // self.every != prev // self.every or done == self.total):
+            el = time.time() - self.t0
+            self.log(f"    [{self.name} {done:5d}/{self.total}] {el / done * 1000:.0f} ms/ảnh | còn ~{fmt_time(el / done * (self.total - done))}")

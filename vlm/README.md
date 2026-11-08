@@ -26,6 +26,7 @@ Quyết định, lý do chọn model, kết quả: `docs/EXPERIMENT_ZETA.md` m�
 | nhóm | config | model | chạy ở đâu | ghi chú |
 |---|---|---|---|---|
 | **ZETA4** RePlan | `config/server2/replan-7b.yaml` | `TainU/RePlan-Qwen2.5-VL-7B` (planner) | server 2, vLLM | prompt / parse riêng (`prompt: replan`): greedy = box chính + 29 sample; ZETA mục 14 |
+| **ZETA4.1 / 8.x** finetune | `config/server2/{replan-7b,qwen3-vl-4b,internvl3.5-8b,llava-ov2-8b}-sft.yaml` | snapshot LoRA đã merge (`--model DIR`) | server 2 | SFT + LoRA (`finetune.py`, mục dưới); ZETA8: prompt tác giả zero-shot, `ask_k: 1` + `samples` (greedy + 29) |
 | **ZETA5** thương mại | `config/openrouter/gpt-6-luna.yaml` | `openai/gpt-6-luna` | OpenRouter | họ OpenAI; tắt suy nghĩ; không nhận temperature |
 | | `config/openrouter/gpt-4.1-mini.yaml` | `openai/gpt-4.1-mini` | OpenRouter | đúng model tác giả dùng; $0,4 / $1,6 |
 | **ZETA6** open-source | `config/kaggle/qwen3-vl-4b.yaml` (+ `server2/`, cùng hash) | `Qwen/Qwen3-VL-4B-Instruct` | Kaggle 2 × T4 / server 2, vLLM | fp16, `coord: norm1000` |
@@ -119,11 +120,20 @@ python plot_compare.py --dataset all --pilot 10 --bold top --models replan-7b gl
   rồi chạy `HF_HUB_OFFLINE=1`; cache compile vào `haitn/` (`VLLM_CACHE_ROOT`, `TRITON_CACHE_DIR`). GPU dùng chung ⇒ `vllm.gpu_mem_gib`
   vừa số GPU đang trống. Latency 1 ảnh mọi method chạy local đo ở đây (ZETA mục 4).
 
-## Finetune planner RePlan — ZETA4.1 (`finetune.py`, server 2, venv vLLM)
+## Finetune VLM — ZETA4.1 RePlan, ZETA8.x open-source (`finetune.py`, server 2, venv vLLM)
 
-SFT + LoRA (tự viết, `lora.py`) trên CE-130 train; dữ liệu / câu đích / gom batch ở `sft.py` (ZETA mục 14.1). Snapshot mỗi epoch
-`weights/add/zeta4_1/snapshots/epNNN.pth` (chỉ LoRA), `last.pth` (+ optimizer, `--resume` ở biên epoch); `--limit N --max-steps M`
-cho pilot (ghi `itNNNNN.pth`).
+SFT + LoRA (tự viết, `lora.py`) trên CE-130 train (ZETA mục 14.1, 16). Phụ thuộc kiến trúc ở `adapters.py` (`finetune.adapter`: `qwen`
+= Qwen2.5-VL / Qwen3-VL, `internvl` = InternVL3.5 (tile 448 + `<IMG_CONTEXT>`), `llava_ov2` = LLaVA-OV-2 (code remote); merge chép file
+gốc không phải weight để vLLM nạp được); dữ liệu / câu đích / gom batch ở
+`sft.py` — prompt = đúng đường suy luận (`prompt.build_messages`, thứ tự text / ảnh như `backends.chat_messages`), ảnh cùng
+`engine.mm_processor_kwargs` với vLLM; đích RePlan (`prompt: replan`, toạ độ `qwen_resized`) hoặc JSON tác giả 1 candidate (`coord`).
+Loss chỉ chiếu `lm_head` ở token có nhãn; mỗi batch sắp theo độ dài ước (token ảnh, cache `lengths.json`) trước khi chia micro
+(`group_by_length`); resume kiểm config (`RESUME_KEYS`). Snapshot mỗi epoch `snapshots/epNNN.pth` (chỉ LoRA), `last.pth`
+(+ optimizer, `--resume` ở biên epoch); `--limit N --max-steps M` cho pilot (ghi `itNNNNN.pth`). Giữ trước bộ nhớ GPU:
+`run_on_free_gpu.py --reserve-gib` (đỉnh pilot + khoảng nhỏ).
+
+Eval greedy + N câu sample cho mọi prompt: khối `samples: {n, temperature, top_p}` (tên cũ `replan: {samples, …}` vẫn đọc); `k` = số box
+CHẤM (30), `ask_k` = số box prompt / schema xin mỗi câu (ZETA8: 1); vLLM ràng buộc schema cho cả câu greedy lẫn câu sample.
 
 ```bash
 python ../tools/run_on_free_gpu.py -- finetune.py --config config/server2/replan-7b-sft.yaml --save-dir ../weights/add/zeta4_1
@@ -132,6 +142,7 @@ python ../tools/run_on_free_gpu.py -- run.py --config config/server2/replan-7b-s
     --model ../weights/add/zeta4_1/merged_ep001 --name ep001 --out-root ../../output/add/vlm/replan-7b-sft
 ```
 `run.py --model` / `--name` ghi đè model / tên thư mục (model vào prompt_hash ⇒ mỗi snapshot một hash).
+
 
 ## Dữ liệu gửi đi
 

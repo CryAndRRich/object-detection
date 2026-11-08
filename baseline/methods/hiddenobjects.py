@@ -23,13 +23,14 @@ import torch
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 
+from ce_localization.utils.log import Progress
+from baseline.data import IMAGENET_MEAN, IMAGENET_STD, to_u8
 from baseline.models.hiddenobjects import PlacementDETR, hungarian_loss, xywh_to_xyxy
 from ce_localization.data.turns import letterbox, letterbox_size
 from ce_localization.models.text import encode_class_names
 
 __all__ = ["build", "class_texts", "to_canvas", "to_orig", "ensure_cache", "HOTrain", "Trainer", "predict"]
 
-MEAN, STD = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
 
 
 def build(cfg):
@@ -154,7 +155,7 @@ class HOTrain(Dataset):
             img = np.array(self._mm[i])
         else:
             img = _canvas_u8(it["image"], self.S)
-        return {"image": torch.from_numpy(img).permute(2, 0, 1).contiguous(), "cls": self.cls_idx[it["class"]],
+        return {"image": to_u8(img), "cls": self.cls_idx[it["class"]],
                 "boxes": to_canvas(it["holes"], it["wh"], self.S)}
 
 
@@ -165,8 +166,8 @@ def collate(batch):
 
 def prep(x_u8, dev, channels_last=False):
     """uint8 [B,3,S,S] -> float chuẩn hoá ImageNet trên `dev`."""
-    m = torch.tensor(MEAN, device=dev).view(1, 3, 1, 1)
-    s = torch.tensor(STD, device=dev).view(1, 3, 1, 1)
+    m = torch.tensor(IMAGENET_MEAN, device=dev).view(1, 3, 1, 1)
+    s = torch.tensor(IMAGENET_STD, device=dev).view(1, 3, 1, 1)
     x = (x_u8.to(dev, non_blocking=True).float() / 255 - m) / s
     return x.contiguous(memory_format=torch.channels_last) if channels_last else x
 
@@ -235,7 +236,7 @@ class _TestImages(Dataset):
         return len(self.samples)
 
     def __getitem__(self, i):
-        return torch.from_numpy(_canvas_u8(self.samples[i]["image"], self.S)).permute(2, 0, 1).contiguous()
+        return to_u8(_canvas_u8(self.samples[i]["image"], self.S))
 
 
 @torch.no_grad()
@@ -251,7 +252,7 @@ def predict(model, samples, k, p, seed=0, dev="cpu", log=print, log_every=500, t
     idx, text = texts or class_texts([s["class"] for s in samples], model.clip_text, dev)
     amp = dev.type == "cuda"
     loader = DataLoader(_TestImages(samples, S), batch_size=n_img, num_workers=nw, pin_memory=amp)
-    out, t0 = [], time.time()
+    out, prog = [], Progress("hiddenobjects", len(samples), log_every, log)
     for x in loader:
         ss = samples[len(out):len(out) + len(x)]
         with torch.autocast(device_type=dev.type, dtype=torch.float16, enabled=amp):
@@ -261,7 +262,5 @@ def predict(model, samples, k, p, seed=0, dev="cpu", log=print, log_every=500, t
         for s, b, sc, o in zip(ss, boxes.float(), score, order):
             out.append({"image_id": s["image_id"], "boxes": to_orig(b[o], s["wh"], S).round(2).tolist(),
                         "score": sc[o].cpu().numpy().round(5).tolist()})
-        if log_every and (len(out) // log_every != (len(out) - len(ss)) // log_every or len(out) == len(samples)):
-            el = time.time() - t0
-            log(f"    [hiddenobjects {len(out):5d}/{len(samples)}] {el / len(out) * 1000:.0f} ms/ảnh | còn ~{el / len(out) * (len(samples) - len(out)):.0f} s")
+        prog.update(len(out), len(out) - len(ss))
     return out

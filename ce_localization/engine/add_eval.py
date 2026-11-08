@@ -19,6 +19,8 @@ suy biến) — C-NLL TỪNG box mọi ảnh nằm trong dump (`record_cnll`) đ
 """
 
 import hashlib
+import json
+import os
 import time
 
 import numpy as np
@@ -30,7 +32,7 @@ from ce_localization.utils.box_ops_np import box_iou, ioa
 from ce_localization.utils.log import fmt_time
 
 __all__ = ["CNLL_MIN_OBJ", "SIZE_STATS", "predict_batch", "predict_add", "prior_unit_boxes", "prior_records", "resize_to_objects", "clip_boxes", "cnll",
-           "select_nms", "other_class", "record_cnll", "add_metrics"]
+           "cnll_features", "cnll_fit", "select_nms", "other_class", "record_cnll", "add_metrics", "trim_mean", "dump_rows", "write_json"]
 
 HIT = 0.5
 CNLL_MIN_OBJ = 5                 # Gaussian 4-D cần >= 5 điểm để hiệp phương sai có hạng đủ
@@ -145,7 +147,7 @@ def _knn_mean(centers, ref, k, exclude_self=False):
     return np.sort(d, axis=1)[:, :kk].mean(1)
 
 
-def _features(boxes, ref, wh, is_objects=False):
+def cnll_features(boxes, ref, wh, is_objects=False):
     """[w, h, IoU lớn nhất với `ref`, TB khoảng cách tới tâm 3 vật gần nhất]. `is_objects`: boxes = ref[:len(boxes)] ⇒ bỏ chính nó."""
     nw, nh = wh
     c = np.stack([(boxes[:, 0] + boxes[:, 2]) / 2, (boxes[:, 1] + boxes[:, 3]) / 2], 1)
@@ -158,21 +160,21 @@ def _features(boxes, ref, wh, is_objects=False):
     return np.stack([w / nw, h / nh, iou.max(1) if iou.size else np.zeros(len(boxes)), knn / np.sqrt(nw * nh)], 1)
 
 
-def cnll(boxes, objects, wh, others=None):
+def cnll(boxes, objects, wh, others=None, is_objects=False):
     """C-NLL của từng box [K] (đã kẹp). None nếu < CNLL_MIN_OBJ vật cùng lớp. `others`: box vật lớp KHÁC (đặc trưng quan hệ tính trên
-    [objects ; others], Gaussian + hiệu chỉnh chỉ trên `objects`)."""
+    [objects ; others], Gaussian + hiệu chỉnh chỉ trên `objects`). `is_objects`: `boxes` chính là `objects` (bỏ chính nó khi đo quan hệ)."""
     if len(objects) < CNLL_MIN_OBJ:
         return None
     ref = objects if others is None or not len(others) else np.concatenate([objects, others])
-    mu, inv = _cnll_fit(objects, ref, wh)
-    d = _features(boxes, ref, wh) - mu
+    mu, inv = cnll_fit(objects, ref, wh)
+    d = cnll_features(boxes, ref, wh, is_objects=is_objects) - mu
     return 0.5 * np.einsum("ni,ij,nj->n", d, inv, d)                 # −log q(x) − (−log q(μ)): logdet / 2π triệt tiêu
 
 
 _FIT, _FIT_MAX = {}, 4096
 
 
-def _cnll_fit(objects, ref, wh):
+def cnll_fit(objects, ref, wh):
     """Gaussian của C-NLL trên box vật (chỉ phụ thuộc ảnh) — nhớ theo nội dung (mỗi ảnh chấm nhiều lần: model / prior / box GT / đổi
     cỡ). -> (mu, Σ⁻¹)."""
     objects, ref = np.ascontiguousarray(objects), np.ascontiguousarray(ref)
@@ -184,7 +186,7 @@ def _cnll_fit(objects, ref, wh):
     hit = _FIT.get(key)
     if hit is not None:
         return hit
-    z = _features(objects, ref, wh, is_objects=True)                # objects = ref[:M] ⇒ bỏ chính nó = đường chéo
+    z = cnll_features(objects, ref, wh, is_objects=True)                # objects = ref[:M] ⇒ bỏ chính nó = đường chéo
     mu = z.mean(0)
     cov = np.cov(z.T, bias=True) + CNLL_RIDGE * np.eye(4)
     if len(_FIT) >= _FIT_MAX:
@@ -266,3 +268,31 @@ def add_metrics(records, with_holes=True, latest=True):
             res.update({f"best_iou@{K}_latest": m(acc["best_latest"]), f"hit50@{K}_latest": m(np.asarray(acc["best_latest"]) >= HIT),
                         "mean_iou_latest": m(acc["mean_latest"]), "box_hit50_latest": m(acc["boxhit_latest"])})
     return res
+
+
+def trim_mean(values, pct):
+    """TB sau khi bỏ `pct` % giá trị LỚN nhất (giữ round(n · (1 − pct / 100)) giá trị nhỏ nhất, ít nhất 1) — "TB bỏ 1 %" của bảng."""
+    v = np.sort(np.asarray(values, dtype=np.float64))
+    return float(v[:max(1, int(round(len(v) * (1 - pct / 100))))].mean())
+
+
+def dump_rows(rec):
+    """Box + C-NLL từng box / từng lỗ GT của mỗi mẫu (dump `<out>_boxes.json`)."""
+    rows = []
+    for r in rec:
+        row = {"image_id": r["image_id"], "t": int(r["t"]), "wh": r["wh"].round(3).tolist(), "boxes": r["boxes"].round(2).tolist(),
+               "n_obj": int(len(r["objects"]))}
+        rc = record_cnll(r)
+        if rc is not None:
+            row["cnll"] = np.round(rc[0], 4).tolist()
+            if rc[1] is not None:
+                row["cnll_gt"] = np.round(rc[1], 4).tolist()
+        rows.append(row)
+    return rows
+
+
+def write_json(path, obj, compact=False, note=""):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(obj, f) if compact else json.dump(obj, f, indent=2, ensure_ascii=False, default=float)
+    print(f"  -> {note + ' ' if note else ''}{path}", flush=True)

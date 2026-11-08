@@ -1,0 +1,41 @@
+# ZETA8.1 = Qwen3-VL-4B (ZETA6) + SFT LoRA trên CE-130 train (docs/EXPERIMENT_ZETA.md mục 16; người dùng chốt 2026-11-08).
+# Prompt system + user NGUYÊN VĂN của tác giả, ZERO-SHOT (icl 0), xin MỘT box (`ask_k: 1`, schema maxItems 1); đích = JSON 1 candidate =
+# một lỗ GT rút mỗi epoch, toạ độ thang 0–1000 (`coord: norm1000`, như ZETA6 đọc Qwen3-VL). Eval như ZETA4 / 4.1: 1 câu greedy (box
+# chính, score 1) + 29 câu sample (t 1,0, top_p 0,99) ⇒ K = 30 box / ảnh; mọi câu ràng buộc schema. Ảnh `max_pixels` 1.048.576 (như
+# ZETA6) — train dùng CÙNG giới hạn (adapter `qwen` đọc `engine.mm_processor_kwargs`). Snapshot: `finetune.py --merge epNNN --out DIR`
+# rồi `run.py --model DIR --name epNNN --out-root ../../output/add/vlm/qwen3-vl-4b-sft`.
+base: qwen3-vl-4b.yaml
+name: qwen3-vl-4b-sft
+icl: 0
+k: 30                          # số box CHẤM / ảnh (greedy + 29 sample)
+ask_k: 1                       # số box prompt / schema xin mỗi câu
+max_tokens: 256                # 1 candidate ~40 token
+sampling: {temperature: 0.0}   # câu greedy
+samples: {n: 29, temperature: 1.0, top_p: 0.99}
+chunk: 32                      # ảnh / khối = 32 × 30 chuỗi
+engine:
+  dtype: bfloat16              # server 2 (Blackwell) — model học bf16
+  max_model_len: 8192          # system + user ~0,8k + ảnh <= ~1k token + câu trả lời
+  max_num_seqs: 256
+  limit_mm_per_prompt: {image: 1, video: 0}
+finetune:
+  adapter: qwen
+  epochs: 3                    # 4B: 3 epoch (người dùng 2026-11-08), lưu snapshot mọi epoch, eval snapshot cuối
+  batch_size: 64               # toàn cục như CE-Loc ⇒ 312 bước / epoch (19.998 mẫu)
+  micro_batch: 16              # pilot đo 8 vs 16 rồi chốt (không đổi kết quả)
+  group_by_length: true        # trong mỗi batch sắp theo số token ảnh trước khi chia micro (đệm ít; loss bước không đổi)
+  lr: 1.0e-4
+  warmup: 0.03
+  weight_decay: 0.0
+  clip: 1.0
+  grad_ckpt: true
+  attn: sdpa
+  num_workers: 8
+  log_every: 10
+  seed: 0
+  lora:
+    r: 64
+    alpha: 128
+    dropout: 0.05
+    targets: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+    skip: [visual]

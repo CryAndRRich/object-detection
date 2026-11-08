@@ -12,7 +12,6 @@ Lỗi API (sau khi backend đã thử lại) KHÔNG ghi ⇒ chạy lại sẽ h�
 (`n_valid` = 0, chấm bằng box cả ảnh)."""
 
 import glob
-import hashlib
 import json
 import os
 import time
@@ -20,7 +19,8 @@ import time
 import numpy as np
 
 from ce_localization.data.turns import iter_jsonl
-from vlm.backends import Fatal, token_cost
+from ce_localization.utils.log import fmt_time
+from vlm.backends import Fatal, stable_int, token_cost
 from vlm.parse import fill, parse_candidates, parse_scored
 from vlm.prompt import author_turns, build_messages, encode_image
 
@@ -34,7 +34,7 @@ def dataset_dir(ns):
 
 
 def _rank(seed, image_id):
-    return hashlib.blake2b(f"{seed}:{image_id}".encode(), digest_size=8).digest()
+    return stable_int(f"{seed}:{image_id}", 8)
 
 
 def select(samples, seed, pilot=None):
@@ -51,7 +51,7 @@ def in_shard(image_id, shard):
     if not shard:
         return True
     i, n = shard
-    return int.from_bytes(hashlib.blake2b(f"shard:{image_id}".encode(), digest_size=8).digest(), "little") % n == i
+    return stable_int(f"shard:{image_id}", 8, "little") % n == i
 
 
 def load_responses(path, phash):
@@ -92,11 +92,6 @@ def record_cost(res, cfg):
     if res.get("cost") is not None:
         return float(res["cost"])
     return token_cost(res, cfg.get("price"))
-
-
-def _fmt_sec(s):
-    s = int(round(s))
-    return f"{s // 3600}h{s % 3600 // 60:02d}m" if s >= 3600 else f"{s // 60}m{s % 60:02d}s"
 
 
 def _k(n):
@@ -222,7 +217,7 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
                 recs = [done[s["image_id"]] for s in sel if s["image_id"] in done]
                 sm = summarize(recs, cfg, len(sel), par)
                 left = len(pending) - n_new
-                log(f"{tag} {len(recs)}/{len(sel)} | {_fmt_sec(el)} | ETA {_fmt_sec(left * el / n_new)} | ${spent:.4f} lần này "
+                log(f"{tag} {len(recs)}/{len(sel)} | {fmt_time(el)} | ETA {fmt_time(left * el / n_new)} | ${spent:.4f} lần này "
                     f"(TB ${sm['cost_per_image_mean']:.5f}/ảnh) | vào {_k(sm['tokens_in_mean'])} / ra {_k(sm['tokens_out_mean'])} "
                     f"(nghĩ {_k(sm['tokens_reasoning_mean'])}) tok/ảnh | "
                     f"0 box {sm['n_fail']} thiếu {sm['n_short']} | lỗi API liên tiếp {n_api_err}")
@@ -245,7 +240,7 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
             "this_run": {"new": n_new, "sec": el, "spent": spent, "stopped": stopped},
             "date": time.strftime("%Y-%m-%d %H:%M")}
     if recs and "est_full_cost" in sm_full:
-        log(f"{tag} xong {len(recs)}/{len(sel)} ảnh, lần này {n_new} ảnh mới trong {_fmt_sec(el)}, ${spent:.4f} | TB "
+        log(f"{tag} xong {len(recs)}/{len(sel)} ảnh, lần này {n_new} ảnh mới trong {fmt_time(el)}, ${spent:.4f} | TB "
             f"${sm['cost_per_image_mean']:.5f}/ảnh (p90 ${sm['cost_per_image_p90']:.5f}) | 0 box {sm['n_fail']}, thiếu {sm['n_short']}")
         log(f"{tag} ƯỚC cả tập {len(samples)} ảnh: ${sm_full['est_full_cost']:.2f} (p90 ${sm_full['est_full_cost_p90']:.2f}), "
             f"~{sm_full['est_full_hours']:.1f} giờ ở song song {par}" + (f" × {n_par} bản" if n_par > 1 else ""))

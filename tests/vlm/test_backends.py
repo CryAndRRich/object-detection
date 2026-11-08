@@ -205,3 +205,14 @@ def test_vllm_replan_greedy_plus_samples_joined(monkeypatch):
     assert g["temperature"] == 0.0 and "n" not in g and s["n"] == 2 and s["temperature"] == 1.0 and s["top_p"] == 0.99
     assert s["seed"] == b.sample_params(job)["seed"] != b.sample_params({**job, "attempt": 1})["seed"]
     assert [c["type"] for c in seen["convs"][0][0]["content"]] == ["image_url", "text"] and seen["convs"][0] is seen["convs"][1]
+    # ZETA8: prompt tác giả + khối `samples` ⇒ cả câu greedy lẫn N câu sample ràng buộc schema; system = chuỗi, user = text rồi ảnh
+    b.cfg = {"max_tokens": 256, "sampling": {"temperature": 0.0}, "samples": {"n": 2, "temperature": 1.0, "top_p": 0.99}}
+    b._so = {"structured_outputs": "S"}
+    job = {"image_id": "x", "attempt": 0, "temperature": None,
+           "messages": [{"role": "system", "text": "SYS", "image": None, "mime": None},
+                        {"role": "user", "text": "T", "image": "b64", "mime": "image/png"}]}
+    (res,) = b.batch([job])
+    g, s = seen["params"]
+    assert res["text"] == REPLAN_SEP.join(["G", "s1", "s22"]) and g["structured_outputs"] == s["structured_outputs"] == "S" and s["n"] == 2
+    conv = seen["convs"][0]
+    assert conv[0] == {"role": "system", "content": "SYS"} and [c["type"] for c in conv[1]["content"]] == ["text", "image_url"]

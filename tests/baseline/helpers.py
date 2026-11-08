@@ -6,7 +6,7 @@ import os
 import numpy as np
 from PIL import Image
 
-COCOUNT_NAMES = ("INTRA_FOO_TOM1_TOM2_00008_00006_0_200", "INTER_OFF_PEN0_PNC0_00007_00005_0_40")
+
 TINY = {
     "zeta1": {"model": {"backbone": "resnet18", "dilation": False, "hidden_dim": 32, "dropout": 0.0, "nheads": 2, "dim_feedforward": 64,
                             "enc_layers": 1, "dec_layers": 2, "num_queries": 12},
@@ -16,7 +16,7 @@ TINY = {
     "zeta2": {"model": {"img_size": 32, "d_noise": 16, "mid": 16},
                "finetune": {"batch_size": 2, "micro_batch": 1, "epochs": 2, "num_workers": 0, "log_every": 1, "amp": False},
                "predict": {"k": 4, "batch_images": 3}},
-    "zeta7": {"predict": {"k": 5, "stride": 4, "workers": 2}},
+    "zeta7": {"predict": {"k": 5, "stride": 4, "workers": 1}},     # 1 tiến trình: spawn macOS tốn ~6 s, kết quả không phụ thuộc
     "zeta3": {"model": {"hidden_dim": 32, "nheads": 2, "enc_layers": 1, "dec_layers": 1, "dim_feedforward": 64, "dropout": 0.0,
                         "num_queries": 8, "image_size": 64, "backbone_weights": None},
               "finetune": {"batch_size": 2, "micro_batch": 1, "epochs": 2, "num_workers": 0, "log_every": 1, "amp": False},
@@ -73,36 +73,6 @@ def fake_ce130(base, seed=0):
     with open(p, "w") as f:
         json.dump({"branches": branches, "turns": turns, "report": {}}, f)
     return root, samples, p
-
-
-# ----------------------------------------------------------------------------- CE-CoCount giả
-
-def fake_cocount(root, seed=0):
-    """Hai frame × (`_positive`, `_negative`), vật hai lớp hai hàng, 10 loc_bbox; bản rà: loại tay box 0 mỗi file. -> review path."""
-    rng = np.random.default_rng(seed)
-    for d in ("Image", "Anno", "Anno_with_exam_bbox"):
-        os.makedirs(os.path.join(root, d), exist_ok=True)
-    review = []
-    for fi, stem in enumerate(COCOUNT_NAMES):
-        W, H = (200, 120) if fi == 0 else (90, 160)
-        na, nb = int(stem.split("_")[4]), int(stem.split("_")[5])
-        for pol, n, cls, off in (("positive", na, "normal tomato(Big round tomato).", 0), ("negative", nb, "baby tomato.", 30)):
-            name = f"{stem}_{pol}"
-            Image.fromarray(rng.integers(0, 255, (H, W, 3), dtype=np.uint8)).save(os.path.join(root, "Image", name + ".jpg"))
-            objs = [[float(5 + 10 * (k % 8)), float(5 + off + 12 * (k // 8)), float(13 + 10 * (k % 8)), float(14 + off + 12 * (k // 8))]
-                    for k in range(n)]
-            loc = [[float(4 + 8 * k), float(70 + (k % 2) * 10), float(12 + 8 * k), float(78 + (k % 2) * 10)] for k in range(10)]
-            with open(os.path.join(root, "Anno", name + ".json"), "w") as f:
-                json.dump({"class_name": cls, "loc_bbox": loc,
-                           "counting_anno": {"count": n, "exemplars": [list(map(int, o)) for o in objs[:3]]}}, f)
-            with open(os.path.join(root, "Anno_with_exam_bbox", name + ".json"), "w") as f:
-                json.dump({"class_name": cls, "exam_bbox": [{"bbox": o, "score": 0.9} for o in objs]}, f)
-            review.append({"id": name, "bad": {name: [0]}, "auto": {name: []}, "n": {name: n}})
-    p = os.path.join(root, "review.jsonl")
-    with open(p, "w") as f:
-        for r in review:
-            f.write(json.dumps(r) + "\n")
-    return p
 
 
 # ----------------------------------------------------------------------------- config / checkpoint tí hon

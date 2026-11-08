@@ -13,10 +13,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
 
+from baseline.data import IMAGENET_MEAN, IMAGENET_STD
+
 __all__ = ["CSANetConfig", "SysNet", "Discriminator", "gan_losses"]
 
 BN_MOMENTUM = 0.1
-_MEAN, _STD = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
 
 
 class CSANetConfig:
@@ -28,8 +29,8 @@ class CSANetConfig:
 
 
 def _norm(img):
-    mean = torch.tensor(_MEAN, device=img.device, dtype=img.dtype).view(1, 3, 1, 1)
-    std = torch.tensor(_STD, device=img.device, dtype=img.dtype).view(1, 3, 1, 1)
+    mean = torch.tensor(IMAGENET_MEAN, device=img.device, dtype=img.dtype).view(1, 3, 1, 1)
+    std = torch.tensor(IMAGENET_STD, device=img.device, dtype=img.dtype).view(1, 3, 1, 1)
     return (img - mean) / std
 
 

@@ -16,7 +16,8 @@ from baseline.data import train_items
 from baseline.methods import bootplace, load_model, make_trainer, split_batch
 from baseline.models.csanet import _bce, gan_losses
 from ce_localization.data.turns import TurnIndex
-from tests.baseline.helpers import fake_ce130, fake_ckpt, fake_cocount, tiny_cfg
+from tests.baseline.helpers import fake_ce130, fake_ckpt, tiny_cfg
+from tests.fakes import fake_cocount_review
 
 
 def _run(monkeypatch, mod, argv):
@@ -24,14 +25,14 @@ def _run(monkeypatch, mod, argv):
     mod.main()
 
 
-@pytest.mark.parametrize("run", ["zeta1", "zeta1_1", "zeta2", "zeta3"])
+@pytest.mark.parametrize("run", ["zeta1", "zeta2", "zeta3"])   # zeta1_1 = kiến trúc zeta1 (nạp DETR: test_bootplace_init_from_detr)
 def test_finetune_resume_predict(tmp_path, monkeypatch, run):
     """BootPlace / HiddenObjects: dừng giữa epoch -> resume -> hết 2 epoch -> predict CE-130 + CoCount. CSANet (vòng lặp chung đã test ở trên): 1 bước ->
     predict CE-130 từ `last.pth`."""
     import baseline.finetune as finetune
     import baseline.predict as predict
     root, samples, ti = fake_ce130(str(tmp_path / "data"))
-    review = fake_cocount(str(tmp_path / "data" / "cocount"))
+    review = fake_cocount_review(str(tmp_path / "data" / "cocount"))
     cfg_path, cfg = tiny_cfg(tmp_path, run)
     init = fake_ckpt(cfg, tmp_path / "init.pth")
     w = tmp_path / "w"
@@ -93,7 +94,9 @@ def test_bootplace_accumulation_equals_full_batch(tmp_path):
         torch.testing.assert_close(a, b, rtol=1e-3, atol=1e-5)    # fp32 cộng theo thứ tự khác (đích [0, 1] ⇒ grad nhỏ, lệch ~2e-4 tương đối)
 
 
-def test_csanet_generator_loss_not_in_discriminator(tmp_path):
+def test_csanet_trainer(tmp_path):
+    """CSANet (một lần dựng model): (1) loss G không lọt vào grad D (cùng nhiễu); (2) ảnh thật = ảnh vật dán ở trans GT (mask phủ
+    đúng lỗ trên ô S×S), gamma khối chú ý đứng yên + ngoài optimizer, `eval_mode` ⇒ G / D eval cả lúc train, best = epoch cuối."""
     _, cfg = tiny_cfg(tmp_path, "zeta2")
     tr, batch = _batch(cfg, tmp_path)
     tr.train()
@@ -107,20 +110,11 @@ def test_csanet_generator_loss_not_in_discriminator(tmp_path):
     _, d_loss, _ = gan_losses(tr.G, tr.D, f("bg"), f("fg"), f("msk"), batch["fg_bbox"], comp, comp_msk, batch["trans"], blend_msk=f("bmsk"))
     for a, b in zip(got, torch.autograd.grad(d_loss, tr.d_params)):
         torch.testing.assert_close(a, b, rtol=1e-4, atol=1e-7)
-
-
-def test_csanet_real_composite_gamma_eval_mode_best_last(tmp_path):
-    """Ảnh thật = ảnh vật dán ở trans GT (mask phủ đúng lỗ trên ô S×S); gamma khối chú ý đứng yên + ngoài optimizer; `eval_mode` ⇒ G / D
-    eval cả lúc train; best = epoch cuối."""
-    _, cfg = tiny_cfg(tmp_path, "zeta2")
-    tr, batch = _batch(cfg, tmp_path)
-    tr.train()
     assert cfg["finetune"]["eval_mode"] and not tr.G.training and not tr.D.training and tr.best_last
     gam = [p for n, p in tr.G.named_parameters() if n.endswith(("gamma1", "gamma2"))]
     assert gam and all(not p.requires_grad for p in gam)
     opt_ids = {id(p) for o in tr.optimizers for g in o.param_groups for p in g["params"]}
     assert not any(id(p) in opt_ids for p in gam) and all(id(p) in opt_ids for p in tr.g_params + tr.d_params)
-    f = lambda k: batch[k].float() / 255  # noqa: E731
     comp, m = tr.real_composite(f("bg"), f("fg"), f("msk"), batch["fg_bbox"], batch["trans"])
     S = cfg["model"]["img_size"]
     from baseline.methods.csanet import trans_to_box

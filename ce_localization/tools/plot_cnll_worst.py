@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from ce_localization.data.cocount import clean_class, cocount_geometry, load_review, twin_name  # noqa: E402
 from ce_localization.data.turns import TurnIndex, ce130_geometry  # noqa: E402
+from ce_localization.utils.plot import draw_boxes  # noqa: E402
 from ce_localization.engine.add_eval import clip_boxes, cnll, other_class, select_nms  # noqa: E402
 
 __all__ = ["score_samples", "plot_sample", "plot_trend"]
@@ -66,11 +67,6 @@ def score_samples(rows, geo, k=5, nms_iou=0.5):
     return out
 
 
-def _rect(ax, b, color, lw=1.5, ls="-"):
-    import matplotlib.patches as patches
-    ax.add_patch(patches.Rectangle((b[0], b[1]), b[2] - b[0], b[3] - b[1], fill=False, edgecolor=color, linewidth=lw, linestyle=ls))
-
-
 def _image(g):
     nw, nh = (int(round(v)) for v in g["wh"])
     with Image.open(g["image"]) as im:
@@ -81,17 +77,17 @@ def _draw(ax, g, img, boxes=(), faint=(), holes=True):
     """Ảnh + box vật (+ lớp kia, cam) + chỗ trống / lỗ GT (xanh lá nét đứt, `holes`) + `boxes` của model (đỏ) + `faint` (đỏ nhạt, mảnh)."""
     nw, nh = g["wh"]
     ax.imshow(img)
-    _rect(ax, (0, 0, nw, nh), "#333333", lw=1.2)                         # viền ảnh (ảnh nền trắng đặt cạnh nhau)
+    draw_boxes(ax, [(0, 0, nw, nh)], "#333333", lw=1.2)                         # viền ảnh (ảnh nền trắng đặt cạnh nhau)
     for b in other_class(g["objects"], g["objects_all"]) if "objects_all" in g else ():
-        _rect(ax, b, "orange", lw=1.0)
+        draw_boxes(ax, [b], "orange", lw=1.0)
     for b in g["objects"]:
-        _rect(ax, b, "cyan", lw=1.2)
+        draw_boxes(ax, [b], "cyan", lw=1.2)
     for b in g["holes"] if holes else ():
-        _rect(ax, b, "lime", lw=1.6, ls="--")
+        draw_boxes(ax, [b], "lime", lw=1.6, ls="--")
     for b in faint:
-        _rect(ax, b, (1.0, 0.25, 0.25, 0.45), lw=0.8)
+        draw_boxes(ax, [b], (1.0, 0.25, 0.25, 0.45), lw=0.8)
     for b in boxes:
-        _rect(ax, b, "red", lw=2.4)
+        draw_boxes(ax, [b], "red", lw=2.4)
     ax.set_xlim(-2, nw + 2)                                                # chừa lề cho viền
     ax.set_ylim(nh + 2, -2)
     ax.axis("off")
@@ -212,7 +208,6 @@ def main():
     ap.add_argument("--key", default=None, help="khoá trong dump (mặc định cocount | inpainted; vd cocount_mock, inpainted_ddim)")
     ap.add_argument("--cocount-root", default="../data/cocount")
     ap.add_argument("--cocount-review", default=None, help="PHẢI giống lúc eval (review5)")
-    ap.add_argument("--cocount-obj-filter", type=float, default=None, help="PHẢI giống lúc eval (filt3: 3)")
     ap.add_argument("--turn-index", default="../data/turn_index.json", help="CE-130")
     ap.add_argument("--samples-root", default="../data/samples", help="CE-130: ảnh inpaint của mẫu")
     ap.add_argument("--image-size", type=int, default=512)
@@ -234,8 +229,6 @@ def main():
     ap.add_argument("--nms-iou", type=float, default=0.5, help="NMS trước khi chọn: bỏ box IoU > ngưỡng với box C-NLL thấp hơn")
     ap.add_argument("--out", required=True, help="thư mục ghi hình + rank.json")
     a = ap.parse_args()
-    if a.cocount_review and a.cocount_obj_filter is not None:
-        sys.exit("--cocount-review thay cho --cocount-obj-filter: chọn một (giống lúc eval)")
     a.key = a.key or ("inpainted" if a.dataset == "ce130" else "cocount")
     dumps = []
     for spec in a.dump:
@@ -256,12 +249,12 @@ def main():
         for x in rows:
             n = x["image_id"]
             cls = _class(a.cocount_root, n)
-            geo[n] = {**cocount_geometry(a.cocount_root, n, a.image_size, a.cocount_obj_filter, review),
+            geo[n] = {**cocount_geometry(a.cocount_root, n, a.image_size, review=review),
                       "image": os.path.join(a.cocount_root, "Image", n + ".jpg"), "cls": cls,
                       "labels": [(cls, "cyan"), (_class(a.cocount_root, twin_name(n)), "orange"), (f"GT empty spots ({cls})", "lime")]}
     os.makedirs(a.out, exist_ok=True)
     meta = {"dataset": a.dataset, "key": a.key, "rank_by": a.rank_by, "order": a.order, "review": a.cocount_review,
-            "obj_filter": a.cocount_obj_filter, "select": a.select, "nms_iou": a.nms_iou}
+            "select": a.select, "nms_iou": a.nms_iou}
     if a.trend:
         return trend(a, dumps, geo, meta)
     if len(dumps) > 1:

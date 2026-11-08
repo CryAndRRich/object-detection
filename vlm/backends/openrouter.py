@@ -12,27 +12,13 @@ from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
-from vlm.backends import FATAL_STATUS, RETRY_STATUS, Fatal, backoff, result
+from vlm.backends import FATAL_STATUS, RETRY_STATUS, Fatal, backoff, chat_messages, result
 from vlm.env import key_source, mask, require_key
-from vlm.prompt import box_schema
+from vlm.prompt import ask_k, box_schema
 
-__all__ = ["OpenRouter", "API", "chat_messages"]
+__all__ = ["OpenRouter", "API"]
 
 API = "https://openrouter.ai/api/v1"
-
-
-def chat_messages(job, detail=None):
-    """Hội thoại OpenAI chat (OpenRouter + OpenAI trực tiếp dùng chung): system / assistant = chuỗi; user = text rồi ảnh data URL."""
-    msgs = []
-    for t in job["messages"]:
-        content = [{"type": "text", "text": t["text"]}]
-        if t["image"]:
-            img = {"url": f"data:{t.get('mime') or 'image/jpeg'};base64,{t['image']}"}
-            if detail:
-                img["detail"] = detail
-            content.append({"type": "image_url", "image_url": img})
-        msgs.append({"role": t["role"], "content": content if t["role"] == "user" else t["text"]})
-    return msgs
 
 
 class OpenRouter:
@@ -104,7 +90,7 @@ class OpenRouter:
             elif k not in self._dropped:
                 self._dropped.add(k)
                 self.log(f"[openrouter] {self.cfg['model']} không nhận `{k}` -> bỏ")
-        body["response_format"] = {"type": "json_schema", "json_schema": box_schema(self.cfg["k"])}
+        body["response_format"] = {"type": "json_schema", "json_schema": box_schema(ask_k(self.cfg))}
         body["provider"] = {"require_parameters": True, **(self.o.get("provider") or {})}  # chỉ route tới provider nhận response_format
         return body
 

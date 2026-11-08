@@ -8,8 +8,14 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from vlm.parse import extract, fill, parse_boxes, parse_candidates, parse_scored, strip_think
+from vlm.parse import REPLAN_SEP, fill, parse_candidates, parse_scored, strip_think
 from vlm.prompt import author_turns, box_schema, build_messages, encode_image, prompt_hash, system_text, user_text
+
+SQ = (100, 100)
+
+
+def _boxes(text, cfg, canvas_wh, orig_wh):
+    return parse_scored(text, cfg, canvas_wh, orig_wh)[0]
 
 ORIG, SENT = (2000, 1000), (1000, 500)
 
@@ -24,14 +30,14 @@ def _cfg(k=5):
     '[{"label": "cup", "y": 200, "x": 100, "y2": 400, "x2": 300}, {"label": "cup", "x1": 0, "y1": 0, "x2": 500, "y2": 500}]',
 ])
 def test_generic_json_canvas_to_original_pixels(text):
-    np.testing.assert_allclose(parse_boxes(text, _cfg(), SENT, ORIG), [[200, 400, 600, 800], [0, 0, 1000, 1000]])
+    np.testing.assert_allclose(_boxes(text, _cfg(), SENT, ORIG), [[200, 400, 600, 800], [0, 0, 1000, 1000]])
 
 
 def test_author_candidates_sorted_by_score_and_bad_key_kept():
     text = json.dumps({"candidates": [{"name": "cup", "box": [0, 0, 10, 10], "score": 0.2},
                                       {"name": "chair", "seashell": [20, 20, 30, 30], "score": 0.9},
                                       {"name": "cup", "box": [40, 40, 50, 50], "score": 0.5, "reason": "x [1,2,3,4]"}]})
-    assert parse_boxes(text, _cfg(), (100, 100), (100, 100)) == [[20, 20, 30, 30], [40, 40, 50, 50], [0, 0, 10, 10]]
+    assert _boxes(text, _cfg(), (100, 100), (100, 100)) == [[20, 20, 30, 30], [40, 40, 50, 50], [0, 0, 10, 10]]
     assert parse_scored(text, _cfg(), (100, 100), (100, 100))[1] == [0.9, 0.5, 0.2]
 
 
@@ -50,21 +56,21 @@ def test_top_score_first_invalid_skipped_missing_score_last():
 
 def test_pixel_format_uses_canvas_and_think_is_stripped():
     text = '<think>maybe [[1,1,2,2]]</think>{"boxes": [[10, 20, 30, 40.5]]}'
-    np.testing.assert_allclose(parse_boxes(text, _cfg(), SENT, ORIG), [[20, 40, 60, 81]])
+    np.testing.assert_allclose(_boxes(text, _cfg(), SENT, ORIG), [[20, 40, 60, 81]])
     assert strip_think("reasoning [[1,2,3,4]] </think>[[5,6,7,8]]") == "[[5,6,7,8]]"            # template tự mở <think>
 
 
 def test_fallback_regex():
-    assert extract("Boxes: (1, 2, 3, 4) and (5,6,7,8.5) trailing") == [[1, 2, 3, 4], [5, 6, 7, 8.5]]
-    assert extract("first [[1,2,3,4]] then broken [9,9") == [[1, 2, 3, 4]]
+    assert _boxes("Boxes: (1, 2, 3, 4) and (5,6,7,8.5) trailing", _cfg(), SQ, SQ) == [[1, 2, 3, 4], [5, 6, 7, 8.5]]
+    assert _boxes("first [[1,2,3,4]] then broken [9,9", _cfg(), SQ, SQ) == [[1, 2, 3, 4]]
 
 
 def test_invalid_dropped_reversed_fixed_truncated_to_k():
     text = json.dumps([[30, 40, 10, 20], [5, 5, 5, 9], [0, 0, 1, 1]] + [[0, 0, 2, 2]] * 10)
-    boxes = parse_boxes(text, _cfg(k=4), (1000, 1000), (1000, 1000))
+    boxes = _boxes(text, _cfg(k=4), (1000, 1000), (1000, 1000))
     assert boxes[0] == [10, 20, 30, 40] and len(boxes) == 4 and [5, 5, 5, 9] not in boxes
-    assert parse_boxes("I cannot help with that.", _cfg(), SENT, ORIG) == []
-    assert parse_boxes('{"boxes": [[1, 2, true, 4]]}', _cfg(), SENT, ORIG) == []
+    assert _boxes("I cannot help with that.", _cfg(), SENT, ORIG) == []
+    assert _boxes('{"boxes": [[1, 2, true, 4]]}', _cfg(), SENT, ORIG) == []
 
 
 def test_fill_cycles_and_full_image_fallback():
@@ -126,9 +132,9 @@ def test_author_icl_turns():
     assert t[0]["image"].endswith("data/all_phase2_V2/test/2_b1/ground_truth.jpg")
     assert t[2]["text"].startswith("Your seashell boxes are too small")
     assert "as boxes [x1,y1,x2,y2]." in t[0]["text"]
-    fix = parse_boxes(t[3]["text"], _cfg(), (633, 384), (633, 384))
+    fix = _boxes(t[3]["text"], _cfg(), (633, 384), (633, 384))
     np.testing.assert_allclose(fix, [[380, 154, 454, 234], [424, 137, 522, 233], [360, 290, 430, 405]], atol=1)    # đã sửa khoá chair
-    car = parse_boxes(t[5]["text"], _cfg(), (576, 384), (576, 384))
+    car = _boxes(t[5]["text"], _cfg(), (576, 384), (576, 384))
     np.testing.assert_allclose(car, [[53, 180, 210, 305], [292, 61, 402, 112], [238, 118, 319, 194]], atol=1)
     assert json.loads(t[1]["text"])["candidates"][0] == {"name": "seashell", "box": [425, 280, 470, 325], "score": 0.86,
                                                         "placement_type": "empty_ground", "reason": "Inferred typical seashell "
@@ -225,3 +231,15 @@ def test_replan_keys_do_not_change_existing_hashes():
     rp = load_config(os.path.join(vlm_dir, "server2", "replan-7b.yaml"))
     assert prompt_hash({**rp, "replan": {**rp["replan"], "samples": 9}}) != prompt_hash(rp)
     assert prompt_hash({**rp, "instruction": "Add a {cls}."}) != prompt_hash(rp)
+
+
+def test_author_samples_one_box_per_answer():
+    """ZETA8: prompt tác giả + khối `samples` ⇒ text = câu greedy + câu sample nối REPLAN_SEP; mỗi câu MỘT box (candidate score cao
+    nhất), box câu greedy score 1 (box chính), câu không có box bị bỏ; toạ độ 0–1000."""
+    cfg = {"k": 30, "coord": "norm1000", "samples": {"n": 3, "temperature": 1.0}}
+    js = lambda *c: json.dumps({"candidates": [{"name": "cup", "box": b, "score": s} for b, s in c]})  # noqa: E731
+    text = REPLAN_SEP.join([js(([100, 100, 200, 300], 0.2)), js(([0, 0, 10, 10], 0.1), ([500, 500, 600, 700], 0.9)), "no box", js(([1, 2, 3, 4], 1))])
+    boxes, scores = parse_scored(text, cfg, None, (500, 400))
+    np.testing.assert_allclose(boxes, [[50, 40, 100, 120], [250, 200, 300, 280], [0.5, 0.8, 1.5, 1.6]])
+    assert scores == [1.0, None, None]
+    assert parse_scored(text, {**cfg, "samples": None}, None, (500, 400))[1] == [0.2]          # không samples: JSON đầu như cũ

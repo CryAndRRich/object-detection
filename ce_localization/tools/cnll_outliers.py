@@ -20,8 +20,13 @@ Ghi `<out>/summary.json` + 3 hình: `sorted_sel.png` (đuôi phân bố), `trimm
 import argparse
 import json
 import os
+import sys
 
 import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from ce_localization.engine.add_eval import trim_mean  # noqa: E402
 
 __all__ = ["per_sample", "summarize", "outlier_overlap"]
 
@@ -49,7 +54,7 @@ def summarize(sel, trims=TRIMS):
     out = {"n": n, "mean": float(v.mean()), "median": float(np.median(v)), "max": float(v[0]),
            "top1pct_share": float(v[:k1].sum() / v.sum()) if v.sum() > 0 else float("nan")}
     for p in trims:
-        out[f"mean_trim{p:g}"] = float(v[int(round(n * p / 100)):].mean())
+        out[f"mean_trim{p:g}"] = trim_mean(v, p)
     return out
 
 

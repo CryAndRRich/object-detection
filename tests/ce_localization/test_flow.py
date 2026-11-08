@@ -9,8 +9,8 @@ import numpy as np
 import pytest
 import torch
 
-from tests.ce_localization.helpers import (_fake_cocount, _fake_load_clip, _fake_review, _fake_text_table, _fake_turn_index, _run_eval,
-                                           _run_train, run_cfg)
+from tests.ce_localization.helpers import _fake_load_clip, _fake_text_table, _fake_turn_index, _run_eval, _run_train, run_cfg
+from tests.fakes import fake_cocount, fake_review
 
 
 def _same_state(a, b):
@@ -40,18 +40,18 @@ def test_flow_val_select_resume_eval(tmp_path, monkeypatch):
     assert [h["iter"] for h in ev] == [2, 4] and kb["best"]["mean_iou_any"] == max(h["eval"]["mean_iou_any"] for h in ev)
     ck = os.path.join(b, "best.pth")
     out = str(tmp_path / "ce.json")
-    res, dump = _run_eval(monkeypatch, ["--ckpt", ck, "--image", "inpainted", "original", "--add-samplers", "mock", "ddim",
+    res, dump = _run_eval(monkeypatch, ["--ckpt", ck, "--add-samplers", "mock", "ddim",
                                         "--ddim-steps", "7", "--ablation", "--obj-size", "mean", "--out", out])
-    keys = {f"{img}_{s}{v}" for img in ("inpainted", "original") for s in ("mock", "ddim") for v in ("", "_noobj", "_norefine")}
+    keys = {f"inpainted_{s}{v}" for s in ("mock", "ddim") for v in ("", "_noobj", "_norefine")}
     assert set(res["results"]) == keys | {k + "_objsize" for k in keys} and set(dump["results"]) == set(res["results"])
-    assert set(res["prior"]) == {"inpainted", "original", "inpainted_objsize", "original_objsize"}
+    assert set(res["prior"]) == {"inpainted", "inpainted_objsize"}
     r = res["results"]["inpainted_mock"]
-    assert r["n"] == len(dump["results"]["inpainted_mock"]) > 0 and "best_iou@3_latest" in r and "mean_iou_any" not in res["results"]["original_mock"]
+    assert r["n"] == len(dump["results"]["inpainted_mock"]) > 0 and "best_iou@3_latest" in r
     rows = [x for x in dump["results"]["inpainted_mock"] if "cnll" in x]
     assert len(rows) == r["n_cnll"] > 0 and len(rows[0]["cnll"]) == 3 and len(rows[0]["cnll_gt"]) == rows[0]["t"]
     assert np.isclose(np.mean([min(x["cnll"]) for x in rows]), r["cnll"], rtol=1e-3, atol=1e-3)
-    cc = _fake_cocount(str(tmp_path / "cc"))
-    rv = _fake_review(cc, str(tmp_path / "rv.jsonl"))
+    cc = fake_cocount(str(tmp_path / "cc"))
+    rv = fake_review(cc, str(tmp_path / "rv.jsonl"))
     res_c, _ = _run_eval(monkeypatch, ["--ckpt", ck, "--dataset", "cocount", "--cocount-root", cc, "--cocount-review", rv,
                                        "--cocount-min-obj", "5", "--obj-size", "mean", "exemplar", "--out", str(tmp_path / "cc.json")])
     assert set(res_c["results"]) == {"cocount", "cocount_objsize", "cocount_objsize_exemplar"} and res_c["cocount_files"] == 3

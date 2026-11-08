@@ -13,7 +13,8 @@ from vlm import run as vlm_run
 from vlm.backends import Fatal, result
 from vlm.prompt import prompt_hash
 from vlm.runner import run_dataset, select
-from tests.baseline.helpers import fake_ce130, fake_cocount
+from tests.baseline.helpers import fake_ce130
+from tests.fakes import fake_cocount_review
 
 CFG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "vlm", "config", "openrouter", "gpt-6-luna.yaml")
 
@@ -46,7 +47,7 @@ class FakeBackend:
 def env(tmp_path):
     _, samples_root, ti = fake_ce130(str(tmp_path / "data"))
     croot = str(tmp_path / "cocount")
-    review = fake_cocount(croot)
+    review = fake_cocount_review(croot)
     cfg = load_config(CFG)
     cfg.update(k=5, chunk=2, icl=0, _path=CFG)                     # few-shot tác giả (ảnh thật) test riêng ở test_parse_prompt
 

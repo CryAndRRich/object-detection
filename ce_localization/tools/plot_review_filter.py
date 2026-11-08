@@ -24,6 +24,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, ROOT)
 
 from ce_localization.box_review.sources import preselect  # noqa: E402
+from ce_localization.utils.plot import draw_boxes  # noqa: E402
 from ce_localization.data.cocount import load_review, read_cocount  # noqa: E402
 from ce_localization.data.turns import TurnIndex  # noqa: E402
 
@@ -48,13 +49,7 @@ def holes_of(r, dataset, index, cocount_root, review):
     if dataset == "ce130":
         e = index.turns[r["id"]]
         return np.asarray(index.branches[e["branch"]]["holes"][:e["t"]], dtype=np.float64).reshape(-1, 4)
-    return np.asarray(read_cocount(cocount_root, r["id"], None, review)["loc"], dtype=np.float64).reshape(-1, 4)
-
-
-def draw(ax, boxes, color, lw, ls="-", alpha=1.0):
-    from matplotlib.patches import Rectangle
-    for x1, y1, x2, y2 in boxes:
-        ax.add_patch(Rectangle((x1, y1), x2 - x1, y2 - y1, fill=False, ec=color, lw=lw, ls=ls, alpha=alpha))
+    return np.asarray(read_cocount(cocount_root, r["id"], review)["loc"], dtype=np.float64).reshape(-1, 4)
 
 
 def plot(r, k, holes, path):
@@ -74,10 +69,10 @@ def plot(r, k, holes, path):
     fig, axes = plt.subplots(1, 2, figsize=(2 * pw, pw * H / W + 0.9))
     for ax, (title, bold, val) in zip(axes, panels):
         ax.imshow(im)
-        draw(ax, r["objects"], C_OBJ, 0.8, alpha=0.8)
-        draw(ax, holes, C_HOLE, 1.2, ls="--")
-        draw(ax, boxes[[i for i in range(len(boxes)) if i not in bold]], C_BOX, 0.6, alpha=0.45)
-        draw(ax, boxes[bold], C_BOX, 2.0)
+        draw_boxes(ax, r["objects"], C_OBJ, 0.8, alpha=0.8)
+        draw_boxes(ax, holes, C_HOLE, 1.2, ls="--")
+        draw_boxes(ax, boxes[[i for i in range(len(boxes)) if i not in bold]], C_BOX, 0.6, alpha=0.45)
+        draw_boxes(ax, boxes[bold], C_BOX, 2.0)
         ax.set_title(f"{title} - CNLL: {val:.2f}", fontsize=10)
         ax.set_xlim(0, W)
         ax.set_ylim(H, 0)

@@ -2,9 +2,9 @@
 
 Bài: "privileged access to the mean feature vector µ computed from the ground-truth annotated objects … exhaustive search over image
 locations to identify the box center whose feature vector best matches µ, while the box width and height are directly determined by µ".
-Đặc trưng = đúng 4-D của C-NLL (`ce_localization/engine/add_eval._features`: [w / nw, h / nh, IoU lớn nhất với vật, TB khoảng cách tới tâm
+Đặc trưng = đúng 4-D của C-NLL (`ce_localization/engine/add_eval.cnll_features`: [w / nw, h / nh, IoU lớn nhất với vật, TB khoảng cách tới tâm
 3 vật gần nhất / √(nw·nh)]) trên CANVAS 512 như lúc chấm; μ (+ Σ) fit trên vật cùng lớp (CoCount: quan hệ tính cả vật lớp kia) bằng
-chính `_cnll_fit` của code chấm.
+chính `cnll_fit` của code chấm.
 
 - Cỡ box = μ (w, h TB của mọi vật cùng lớp trong ảnh); quét tâm trên lưới bước `predict.stride` px canvas, box nằm trọn trong ảnh.
 - "best matches µ" bài không nói theo khoảng cách nào (`predict.criterion`, chạy cả hai rồi chốt — người dùng 2026-11-07):
@@ -15,13 +15,13 @@ chính `_cnll_fit` của code chấm.
 """
 
 import os
-import time
 from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 
+from ce_localization.utils.log import Progress
 from ce_localization.data.turns import letterbox_size
-from ce_localization.engine.add_eval import CNLL_MIN_OBJ, _cnll_fit, _features, other_class, select_nms
+from ce_localization.engine.add_eval import CNLL_MIN_OBJ, cnll_fit, cnll_features, other_class, select_nms
 
 __all__ = ["CRITERIA", "grid_boxes", "scores", "search", "predict"]
 
@@ -59,10 +59,10 @@ def search(objects, wh, k, stride, criteria=CRITERIA, others=None, nms_iou=0.5):
         b = np.array([[(nw - bw) / 2, (nh - bh) / 2, (nw + bw) / 2, (nh + bh) / 2]])
         return {c: np.repeat(b, k, 0) for c in criteria}
     ref = objects if others is None or not len(others) else np.concatenate([objects, others])
-    mu, inv = _cnll_fit(objects, ref, wh)
+    mu, inv = cnll_fit(objects, ref, wh)
     cand = grid_boxes(wh, mu[0] * nw, mu[1] * nh, stride)
     step = max(256, CHUNK // len(ref))
-    feats = np.concatenate([_features(cand[i:i + step], ref, wh) for i in range(0, len(cand), step)])
+    feats = np.concatenate([cnll_features(cand[i:i + step], ref, wh) for i in range(0, len(cand), step)])
     out = {}
     for c in criteria:
         s = scores(feats, mu, inv, c)
@@ -93,16 +93,14 @@ def predict(samples, geo_fn, k, p, log=print, log_every=500):
         jobs.append((g["objects"], tuple(float(v) for v in g["wh"]), k, p["stride"], crit, others, p.get("nms_iou", 0.5)))
     workers = int(p.get("workers") or min(16, os.cpu_count() or 1))
     log(f"    [oracleloc] {len(jobs)} ảnh | lưới {p['stride']} px | {crit} | {workers} tiến trình")
-    out, t0 = {c: [] for c in crit}, time.time()
+    out, prog = {c: [] for c in crit}, Progress("oracleloc", len(samples), log_every, log)
     ex = ProcessPoolExecutor(workers) if workers > 1 else None
     it = ex.map(_job, jobs, chunksize=4) if ex else map(_job, jobs)
     for n, (s, res) in enumerate(zip(samples, it), 1):
         scale = letterbox_size(s["wh"], 512)[0]
         for c in crit:
             out[c].append({"image_id": s["image_id"], "boxes": (res[c] / scale).round(4).tolist()})
-        if log_every and (n % log_every == 0 or n == len(samples)):
-            el = time.time() - t0
-            log(f"    [oracleloc {n:5d}/{len(samples)}] {el / n * 1000:.0f} ms/ảnh | còn ~{el / n * (len(samples) - n):.0f} s")
+        prog.update(n)
     if ex:
         ex.shutdown()
     return out

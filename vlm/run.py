@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """ZETA5 / ZETA6: một VLM trả 30 box chỗ thêm vật / ảnh trên CE-130 `test_all` + CE-CoCount `review5`, chấm bằng code chấm CE-Loc
-(`baseline/score.py`). Một config = một model (`config/{openrouter,kaggle,server,server2}/`). Key: `vlm/.env` (mẫu `.env.example`).
+(`baseline/score.py`). Một config = một model (`config/{openrouter,kaggle,server2}/`). Key: `vlm/.env` (mẫu `.env.example`).
 
   cd /mnt/disk1/aiotlab/haitn/object-detection/vlm
   python run.py --config config/openrouter/gpt-6-luna.yaml --pilot 5 --dry-run       # xem prompt, KHÔNG gọi API
@@ -41,32 +41,25 @@ def parse_args(argv=None):
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--pilot", type=int, help="K ảnh / tập (cố định theo seed, là tập con của --all)")
     mode.add_argument("--all", action="store_true", help="toàn bộ tập test")
-    ap.add_argument("--dataset", default="all", choices=["ce130", "cocount", "all"])
     ap.add_argument("--max-cost", type=float, default=None, help="USD tối đa cho lần chạy này (cả hai tập); chạm thì dừng êm")
     ap.add_argument("--dry-run", action="store_true", help="in prompt 2 ảnh đầu, không gọi model, không cần key")
     ap.add_argument("--no-score", action="store_true", help="chỉ sinh câu trả lời (venv vLLM)")
     ap.add_argument("--score-only", action="store_true", help="chỉ chấm từ responses.jsonl, không gọi model")
-    ap.add_argument("--coord", default=None, choices=["pixel", "norm1000"],
+    ap.add_argument("--coord", default=None, choices=["pixel", "norm1000", "qwen_resized"],
                     help="đọc toạ độ theo thang này thay `coord` của config (chỉ lúc parse / chấm; file ra thêm hậu tố _<coord>)")
     ap.add_argument("--shard", default=None, help="i/n — nội bộ: bản thứ i trong n bản song song (`vllm.data_parallel`, tự đặt)")
     ap.add_argument("--out-root", default="../../output/add/vlm")
     ap.add_argument("--model", default=None, help="ghi đè `model` của config (vd thư mục HF đã merge LoRA của finetune.py; vào hash)")
     ap.add_argument("--name", default=None, help="ghi đè `name` (thư mục con trong --out-root; vd epNNN của một snapshot)")
-    ap.add_argument("--split", default="test_all", choices=["test", "test_all", "val"])
-    ap.add_argument("--turn-index", default="../data/turn_index.json")
-    ap.add_argument("--samples-root", default="../data/samples")
-    ap.add_argument("--cocount-root", default="../data/cocount")
-    ap.add_argument("--cocount-review", default="../data/cocount_review.jsonl")
-    ap.add_argument("--cocount-min-obj", type=int, default=5)
-    ap.add_argument("--obj-size", nargs="+", default=["mean", "exemplar"], choices=["mean", "exemplar"])
-    ap.add_argument("--seed", type=int, default=0, help="seed mốc prior khi chấm (0 như eval CE-Loc)")
+    from baseline.score import add_data_args                 # đường dẫn dữ liệu + mốc chấm dùng chung với baseline/predict.py
+    add_data_args(ap, dataset_default="all")
     return ap.parse_args(argv)
 
 
 def data_ns(a, dataset):
     return argparse.Namespace(dataset=dataset, split=a.split, turn_index=a.turn_index, samples_root=a.samples_root,
                               cocount_root=a.cocount_root, cocount_review=a.cocount_review, cocount_min_obj=a.cocount_min_obj,
-                              obj_size=a.obj_size, seed=a.seed, limit=None, out=None)
+                              obj_size=a.obj_size, seed=a.seed, limit=a.limit, out=None)
 
 
 def dry_run(cfg, a, datasets):

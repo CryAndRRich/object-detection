@@ -17,9 +17,10 @@ U-Net 1D nhận [x_t ; refined] -> ε̂ ;  loss = ε-MSE + aux_loss_weight · [M
 | `train.py` / `eval.py` | điểm vào duy nhất (1 GPU hoặc `torchrun`); docstring đầu file = cách dùng |
 | `config/delta/` | `delta4.yaml` đầy đủ; config khác kế thừa qua `base` (`utils/config.py`) — bảng dưới |
 | `models/` | `box_policy` (BoxPolicy, sampler mock / ddim, `build_model` / `load_checkpoint`), `unet1d`, `clip_refiner` (port `refs/CE-Loc-update/`), `text` |
-| `data/` | `turns` (CE-130 theo (nhánh, lượt), split như CE-Loc gốc, cache uint8), `density` (bản `full` cho ảnh gốc), `cocount` (CE-CoCount, lọc box) |
+| `data/` | `turns` (CE-130 theo (nhánh, lượt), split như CE-Loc gốc, cache uint8), `cocount` (CE-CoCount, bản rà box tay) — eval ảnh gốc GAMMA (`density`) + lọc filt3 bỏ 2026-11-08 (git / branch `new`) |
 | `engine/` | `add_eval` (suy luận K mẫu, IoU, on_object, C-NLL), `train_utils` (DDP, lịch lr, checkpoint nguyên tử) |
-| `tools/` | `build_turn_index`, `build_density_index`, `build_add_cache`, `build_clip_cache` (dữ liệu / cache, một lần); `cnll_outliers`, `plot_cnll_worst`, `plot_snapshots`, `plot_snapshot_compare`, `rescore_cnll` (đọc / đổi dump eval, `history.json`) |
+| `tools/` | `build_turn_index`, `build_add_cache`, `build_clip_cache` (dữ liệu / cache, một lần); `cnll_outliers`, `plot_cnll_worst`, `plot_snapshots`, `plot_snapshot_compare`, `rescore_cnll`, `plot_review_filter` (đọc / đổi dump eval, `history.json`, hình trước / sau lọc tay) |
+| `utils/` | `config` (YAML + `base`), `log` (`fmt_time`, `Progress` — log tiến độ suy luận dùng chung), `plot` (`draw_boxes` dùng chung), box / diffusion |
 | `box_review/` | web Gradio rà box bằng tay (local): box vật CE-CoCount -> `data/cocount_review.jsonl`, chọn box model -> `output/add/review/` — docstring `box_review/app.py` |
 | `../notebooks/add_kaggle.ipynb` | train một run trên Kaggle T4×2 (`object-detection/notebooks/`, gitignore, chỉ ở local; tự clone branch `delta`) |
 

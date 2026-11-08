@@ -9,11 +9,10 @@ import pytest
 import torch
 from PIL import Image
 
-from ce_localization.data.density import JET, DensityIndex, decode_jet
 from ce_localization.data.turns import (AddCache, CE130AddDataset, build_add_cache, build_turn_index, collate_add, convert_add_cache,
                                         letterbox, load_positives, paper_to_float, scale_boxes, to_device_add)
-from tests.ce_localization.helpers import (COCOUNT_NAMES, _fake_ce130_turns, _fake_cocount, _fake_positives, _fake_review,
-                                           _fake_turn_index)
+from tests.ce_localization.helpers import _fake_ce130_turns, _fake_positives, _fake_turn_index
+from tests.fakes import COCOUNT_NAMES, fake_cocount, fake_review
 
 
 def _paper_resize_and_pad(img, density, target=512):
@@ -69,20 +68,17 @@ def test_turn_index_and_splits(ce130, tmp_path):
     assert not r2["ok"] and len(r2["target_mismatch"]) == 1 and len(r2["match_issues"]) == 1
 
 
-@pytest.mark.parametrize("image", ["inpainted", "original"])
-def test_add_dataset_item_paper_inputs(ce130, image):
-    """Mẫu (nhánh, lượt): t lỗ đầu, đích = lỗ mới nhất, vật còn lại (ảnh gốc: mọi vật); đầu vào = `resize_and_pad` + `to_tensor` của bài,
-    density `.convert("L")` (ảnh inpaint: của mẫu; ảnh gốc: bản `full`). /255 sau `to_device_add` trùng từng bit; NHWC liền."""
+def test_add_dataset_item_paper_inputs(ce130):
+    """Mẫu (nhánh, lượt): t lỗ đầu, đích = lỗ mới nhất, vật còn lại; đầu vào = `resize_and_pad` + `to_tensor` của bài, density
+    `.convert("L")` của mẫu. /255 sau `to_device_add` trùng từng bit; NHWC liền."""
     base, root, samples, _, index, _ = ce130
-    dindex = DensityIndex(os.path.join(base, "density_index.json"), samples)
-    ds = CE130AddDataset(index, root, samples, "train", 128, image=image, density_index=dindex)
+    ds = CE130AddDataset(index, root, samples, "train", 128)
     s = ds[ds.keys.index("1001_b1_t2")]
     b, e = index.branches["train/1001_b1"], index.turns["1001_b1_t2"]
     assert s["image"].shape == (4, 128, 128) and s["image"].dtype == torch.uint8 and s["valid_hw"] == (96, 128) and s["t"] == 2
     assert torch.allclose(s["holes"], torch.tensor(b["holes"][:2], dtype=torch.float32) * 0.64, atol=1e-4)
-    assert torch.equal(s["target"], s["holes"][-1]) and len(s["objects"]) == (7 if image == "original" else 5)
-    src = os.path.join(samples, e["sample"]) if image == "inpainted" else os.path.join(root, e["branch"], "ground_truth.jpg")
-    den = os.path.join(samples, e["density"]) if image == "inpainted" else dindex.full("1001")
+    assert torch.equal(s["target"], s["holes"][-1]) and len(s["objects"]) == 5
+    src, den = os.path.join(samples, e["sample"]), os.path.join(samples, e["density"])
     ri, rd, _ = _paper_resize_and_pad(Image.open(src).convert("RGB"), Image.open(den).convert("L"), 128)
     ref = torch.from_numpy(np.concatenate([np.asarray(ri, np.float32).transpose(2, 0, 1), np.asarray(rd, np.float32)[None]]) / 255.0)
     bt = to_device_add(collate_add([s, ds[0]]), torch.device("cpu"))
@@ -165,18 +161,12 @@ def test_uint8_cache_bitwise(ce130, tmp_path):
         convert_add_cache(rdir, str(tmp_path / "x"), workers=0)
 
 
-def test_density_jet_and_full():
-    lv = np.arange(256, dtype=np.uint8).reshape(16, 16)
-    dec, dist = decode_jet(JET[lv])
-    assert dist == 0 and np.abs(dec.astype(int) - lv).max() <= 3       # mức 29–32 cùng màu (0, 0, 255)
-
-
 def test_cocount_dataset_filters(tmp_path):
-    """CE-CoCount: lớp sạch / tên cặp; density trống = 14/255 trên vùng thật; filt3 bỏ box SAM khổng lồ ở cả hai lớp; bản rà tay bỏ `bad`
+    """CE-CoCount: lớp sạch / tên cặp; density trống = 14/255 trên vùng thật; bản rà tay bỏ `bad`
     ∪ `auto` ở cả hai lớp, `min_obj` giữ file đủ vật; hình học `cocount_geometry` == dataset; lệch bản rà -> lỗi."""
     from ce_localization.data.cocount import CoCountAddDataset, clean_class, cocount_geometry, load_review, read_cocount, twin_name
     assert clean_class("normal tomato(Big round tomato).") == "normal tomato" and twin_name("A_B_positive") == "A_B_negative"
-    root = _fake_cocount(str(tmp_path / "cc"))
+    root = fake_cocount(str(tmp_path / "cc"))
     name = COCOUNT_NAMES[0] + "_positive"
     ds = CoCountAddDataset(root, 128)
     s = ds[ds.keys.index(name)]
@@ -185,20 +175,12 @@ def test_cocount_dataset_filters(tmp_path):
     assert len(s["holes"]) == 10 and len(s["objects"]) == 8 and len(s["objects_all"]) == 14 and s["text"] == "normal tomato"
     g = cocount_geometry(root, name, 128)
     assert np.array_equal(g["objects"], s["objects"].double().numpy()) and np.array_equal(g["wh"], [nw, nh])
-    for n in (name, twin_name(name)):                                  # thêm 2 box khổng lồ mỗi lớp
-        f = os.path.join(root, "Anno_with_exam_bbox", n + ".json")
-        e = json.load(open(f))
-        e["exam_bbox"] += [{"bbox": [0, 0, 150, 110], "score": 0.9}, {"bbox": [1, 1, 149, 109], "score": 0.9}]
-        json.dump(e, open(f, "w"))
-    raw, filt = read_cocount(root, name), read_cocount(root, name, 3)
-    assert len(raw["objects"]) == 10 and len(filt["objects"]) == 8 and len(raw["objects_all"]) - len(filt["objects_all"]) == 4
-    rv = load_review(_fake_review(root, str(tmp_path / "rv.jsonl"), drop_auto={name: [9]}))
+    raw = read_cocount(root, name)
+    rv = load_review(fake_review(root, str(tmp_path / "rv.jsonl"), drop_auto={name: [7]}))
     r = read_cocount(root, name, review=rv)
-    assert np.array_equal(r["objects"], raw["objects"][1:9]) and len(r["objects_all"]) == 8 + 7
-    ds5 = CoCountAddDataset(root, 128, review=rv, min_obj=7)
-    assert ds5.n_all == 4 and ds5.keys == sorted([name, twin_name(name)])         # frame 2 còn 6 / 4 vật
-    with pytest.raises(ValueError, match="chọn MỘT"):
-        CoCountAddDataset(root, 128, max_obj_ratio=3, review=rv)
+    assert np.array_equal(r["objects"], raw["objects"][1:7]) and len(r["objects_all"]) == 6 + 5     # bỏ tay box 0, tự động box 7
+    ds5 = CoCountAddDataset(root, 128, review=rv, min_obj=6)
+    assert ds5.n_all == 4 and ds5.keys == sorted([name, COCOUNT_NAMES[1] + "_positive"])           # frame 1 còn 6 / 5, frame 2 còn 6 / 4
     rv[name] = (3, set())
     with pytest.raises(ValueError, match="không khớp"):
         read_cocount(root, name, review=rv)

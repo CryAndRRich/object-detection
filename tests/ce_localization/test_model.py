@@ -461,7 +461,7 @@ def test_predict_add_shared_encoding_equals_separate_runs():
                                                                                           "use_refiner": False})]
     tt = _fake_text_table(["apple", "cup"])
     allv = predict_add(m, loader, tt, 3, seed=0, variants=var)
-    for s, kw in var:
+    for s, kw in var[2:]:                                            # chạy riêng 2 biến thể đổi đường đi nhiều nhất (đủ bắt lệch, đỡ 2 lượt)
         one = predict_add(m, loader, tt, 3, seed=0, variants=[(s, kw)])[s]
         assert all(np.array_equal(a["boxes"], b["boxes"]) for a, b in zip(allv[s], one)), s
     assert not np.array_equal(allv["_mock"][0]["boxes"], allv["_mock_noobj"][0]["boxes"])

@@ -1,5 +1,6 @@
 """Tiện ích train: DDP, lịch lr, chia batch tái lập được, checkpoint .pth ghi nguyên tử, đỉnh bộ nhớ GPU."""
 
+import json
 import math
 import datetime
 import inspect
@@ -9,7 +10,8 @@ import shutil
 import torch
 import torch.distributed as dist
 
-__all__ = ["setup_dist", "PthCheckpoints", "lr_factor", "epoch_batches", "EpochBatches", "noise_seed", "gpu_peak", "fmt_gpu_peak"]
+__all__ = ["setup_dist", "PthCheckpoints", "lr_factor", "epoch_batches", "EpochBatches", "noise_seed", "gpu_peak", "fmt_gpu_peak",
+           "config_mismatch", "write_json_atomic"]
 
 
 def setup_dist(device=None):
@@ -102,6 +104,15 @@ def fmt_gpu_peak(peak):
     return "" if peak is None else f" | GPU đỉnh {peak[0]:.2f} GB (giữ {peak[1]:.2f})"
 
 
+def config_mismatch(saved, cfg, keys, free=None):
+    """Kiểm resume (CE-Loc / baseline / VLM dùng chung): -> các nhánh `keys` khác nhau giữa config trong checkpoint và config lần
+    chạy này. `free` {nhánh: (khoá con, …)}: khoá con đổi được giữa các phiên (đường dẫn, worker, micro-batch — không đổi kết quả)."""
+    def strip(branch, v):
+        drop = (free or {}).get(branch, ())
+        return {k: x for k, x in v.items() if k not in drop} if isinstance(v, dict) else v
+    return [k for k in keys if strip(k, saved.get(k)) != strip(k, cfg.get(k))]
+
+
 def lr_factor(it, tr):
     """Hệ số lr: cosine theo ITERATION tới `cosine_t_max` (CosineAnnealingLR của CE-Loc gốc), nhân warmup tuyến tính (it + 1) / W trong
     `cosine_warmup_iters` W iter đầu (vắng = không warmup — DELTA4 / 5.x)."""
@@ -147,3 +158,11 @@ class EpochBatches:
 def noise_seed(seed, it, rank):
     """Seed của t / nhiễu khuếch tán ở iteration `it` — tái lập khi resume."""
     return (seed * 1000003 + it * 101 + rank) % (2 ** 63 - 1)
+
+
+def write_json_atomic(path, obj):
+    """Ghi file tạm rồi đổi tên: bị kill giữa chừng không để lại JSON hỏng (history.json …)."""
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(obj, fh, indent=1)
+    os.replace(tmp, path)

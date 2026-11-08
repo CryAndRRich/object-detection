@@ -9,8 +9,6 @@ data:
   root: "../data/all_phase2_V2"
   samples_root: "../data/samples"
   turn_index: "../data/turn_index.json"
-  density_index: "../data/density_index.json"   # eval ảnh gốc: density `full` của ảnh gốc
-  density_root: "../data/samples"
   cache_dir: null                   # Kaggle: --cache-dir (tools/build_add_cache.py)
   image_size: 512
   num_workers: 4

@@ -47,7 +47,7 @@ from ce_localization.data.clip_cache import ClipCache  # noqa: E402
 from ce_localization.data.turns import (AddCache, CE130AddDataset, TurnIndex, collate_add, load_positives,  # noqa: E402
                                         to_device_add)
 from ce_localization.engine.add_eval import add_metrics, predict_add  # noqa: E402
-from ce_localization.engine.train_utils import (EpochBatches, PthCheckpoints, fmt_gpu_peak, gpu_peak, lr_factor,  # noqa: E402
+from ce_localization.engine.train_utils import (EpochBatches, PthCheckpoints, config_mismatch, fmt_gpu_peak, gpu_peak, lr_factor,  # noqa: E402
                                                noise_seed, setup_dist)
 from ce_localization.models.box_policy import boxes_to_unit, build_model  # noqa: E402
 from ce_localization.models.clip_refiner import refiner_config, text_model_name  # noqa: E402
@@ -67,8 +67,7 @@ EXTRA_LOG = {"loss_eps": "ε", "loss_aux": "aux", "delta_abs": "|Δ|", "aux_rati
 
 def config_diff(saved, cfg):
     """-> (lỗi, cảnh báo): nhánh config khác nhau giữa checkpoint và lần chạy này."""
-    strip = lambda b, d: {k: v for k, v in (d or {}).items() if not (b == "data" and k in DATA_FREE)}  # noqa: E731
-    errors = [k for k in MUST_MATCH if strip(k, saved.get(k)) != strip(k, cfg.get(k))]
+    errors = config_mismatch(saved, cfg, MUST_MATCH, {"data": DATA_FREE})
     warns = [k for k in ("training", "eval") if saved.get(k) != cfg.get(k)]
     return errors, warns
 

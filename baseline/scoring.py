@@ -12,11 +12,14 @@ import os
 import numpy as np
 
 from ce_localization.data.turns import iter_jsonl, letterbox_size
-from ce_localization.engine.add_eval import SIZE_STATS, add_metrics, prior_records, prior_unit_boxes, resize_to_objects
-from ce_localization.eval import dump_rows, write_json
+from ce_localization.engine.add_eval import (SIZE_STATS, add_metrics, dump_rows, prior_records, prior_unit_boxes, resize_to_objects,
+                                             trim_mean, write_json)
 
 __all__ = ["result_key", "records_from_boxes", "cnll_summary", "score_records", "read_boxes", "write_jsonl", "write_json",
            "write_outputs"]
+
+
+_PRIOR = {}                                       # mốc prior lần chấm gần nhất (score_records)
 
 
 def result_key(dataset):
@@ -47,7 +50,7 @@ def cnll_summary(rows):
     gt = [min(r["cnll_gt"]) for r in rows if "cnll_gt" in r]
     out = {}
     if len(best):
-        out.update(cnll_median=float(np.median(best)), cnll_mean_trim1=float(best[:max(1, int(round(len(best) * 0.99)))].mean()))
+        out.update(cnll_median=float(np.median(best)), cnll_mean_trim1=trim_mean(best, 1))
     if gt:
         out["cnll_gt_median"] = float(np.median(gt))
     return out
@@ -59,8 +62,10 @@ def score_records(recs, dataset, K, *, index=None, obj_size=None, seed=0):
     for st in obj_size or ():
         if st not in SIZE_STATS:
             raise ValueError(f"obj_size {st!r} không thuộc {SIZE_STATS}")
-    pri_base = prior_records(recs, prior_unit_boxes(index, "train"), K, seed=seed) if index is not None else None
-    results, prior, dump = {}, {}, {}
+    pkey = (dataset, K, seed, tuple(obj_size or ()), id(index), tuple(r["image_id"] for r in recs))
+    known = _PRIOR.get(pkey)                      # mốc prior chỉ phụ thuộc mẫu (không phụ thuộc box) ⇒ nhiều tiêu chí / lần chấm dùng lại
+    pri_base = None if index is None or known else prior_records(recs, prior_unit_boxes(index, "train"), K, seed=seed)
+    results, prior, dump = {}, dict(known or {}), {}
     for suffix, st in [("", None)] + [(f"_objsize{'' if st == 'mean' else '_' + st}", st) for st in (obj_size or ())]:
         key = result_key(dataset) + suffix
         rec = recs if st is None else resize_to_objects(recs, st)
@@ -68,6 +73,9 @@ def score_records(recs, dataset, K, *, index=None, obj_size=None, seed=0):
         results[key] = {**add_metrics(rec, with_holes=True, latest=not cocount), **cnll_summary(dump[key])}
         if pri_base is not None:
             prior[key] = add_metrics(pri_base if st is None else resize_to_objects(pri_base, st), with_holes=True, latest=not cocount)
+    if pri_base is not None:
+        _PRIOR.clear()
+        _PRIOR[pkey] = prior
     return results, prior, dump
 
 

@@ -32,7 +32,7 @@ import matplotlib  # noqa: E402
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
-from matplotlib.patches import Rectangle  # noqa: E402
+from ce_localization.utils.plot import draw_boxes  # noqa: E402
 from PIL import Image  # noqa: E402
 
 from ce_localization.data.turns import TurnIndex, iter_jsonl, letterbox_size, present_objects  # noqa: E402
@@ -103,12 +103,6 @@ def unique(boxes, cnll):
     return boxes[keep], np.asarray(cnll, dtype=float)[keep]
 
 
-def draw(ax, img, boxes, color, lw, ls="-", alpha=1.0):
-    for b in boxes:
-        ax.add_patch(Rectangle((b[0], b[1]), b[2] - b[0], b[3] - b[1], fill=False, edgecolor=color, linewidth=lw, linestyle=ls,
-                               alpha=alpha))
-
-
 def panel(ax, img, title):
     ax.imshow(img)
     ax.set_title(title, fontsize=10)
@@ -124,8 +118,8 @@ def model_panel(ax, img, name, boxes, cnll, bold="min"):
     # box[0] = score cao nhất; min = box C-NLL thấp nhất (nan -> không chọn)
     i = int(np.nanargmin(cnll)) if bold == "min" and np.isfinite(cnll).any() else 0
     panel(ax, img, f"{name}, CNLL = {cnll[i]:.2f}")
-    draw(ax, img, np.delete(boxes, i, axis=0), RED, 0.7, alpha=0.75)
-    draw(ax, img, boxes[i:i + 1], RED, 2.4)
+    draw_boxes(ax, np.delete(boxes, i, axis=0), RED, 0.7, alpha=0.75)
+    draw_boxes(ax, boxes[i:i + 1], RED, 2.4)
 
 
 def figure(dataset, image_id, a, vlm, out_path, models=MODELS):
@@ -139,8 +133,8 @@ def figure(dataset, image_id, a, vlm, out_path, models=MODELS):
     fig.subplots_adjust(left=0.01, right=0.99, bottom=0.01, top=1 - (top + 0.3) / H, wspace=0.03, hspace=gap / ph)
     gt = [min(r["cnll_gt"]) for r in (v.get(image_id) for v in vlm.values()) if r and r.get("cnll_gt")]
     panel(axes[0, 0], img, f"Original, CNLL = {gt[0]:.2f}" if gt else "Original")
-    draw(axes[0, 0], img, objs, BLUE, 0.9)
-    draw(axes[0, 0], img, holes, GREEN, 1.6, ls="--")
+    draw_boxes(axes[0, 0], objs, BLUE, 0.9)
+    draw_boxes(axes[0, 0], holes, GREEN, 1.6, ls="--")
     for ax, (key, name) in zip(axes.flat[1:], models):
         r = vlm[key].get(image_id)
         if r is None:

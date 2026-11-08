@@ -7,15 +7,16 @@ hữu hạn, diện tích > 0 (cạnh ngược thì đảo). KHÔNG kẹp vào �
 ZETA4 RePlan (`prompt: replan`): `text` = các câu trả lời của planner nối bằng `REPLAN_SEP` (câu 0 = greedy, sau đó các câu sample).
 Mỗi câu -> box `bbox_2d` của region "thêm" đầu tiên trong `<region>[...]</region>` (khối đầu tiên, `json.loads` như
 `RePlanPipeline.extract_bbox_from_response`; bỏ region có hint bắt đầu "keep" — template mẫu của tác giả dùng chúng để khoanh vật GIỮ
-nguyên). Box câu greedy có score 1 (= box chính), box câu sample không có score (xếp sau, theo thứ tự). Toạ độ `coord: qwen_resized`
+nguyên). Box câu greedy có score 1 (= box chính), box câu sample không có score (xếp sau, theo thứ tự). ZETA8 (prompt tác giả + khối
+`samples`): cùng cách, mỗi câu lấy candidate đầu (score cao nhất) của JSON `candidates`. Toạ độ `coord: qwen_resized`
 = pixel ảnh sau `smart_resize` của Qwen2.5-VL (bội số 28, giới hạn số pixel) -> đổi về pixel ảnh gốc."""
 
 import json
 import math
 import re
 
-__all__ = ["strip_think", "extract", "extract_scored", "to_pixel", "parse_candidates", "parse_scored", "parse_boxes", "fill",
-           "REPLAN_SEP", "replan_box", "qwen_resized_wh"]
+__all__ = ["strip_think", "to_pixel", "parse_candidates", "parse_scored", "fill", "REPLAN_SEP", "sample_cfg", "replan_box",
+           "qwen_resized_wh"]
 
 REPLAN_SEP = "\n<|replan_sample|>\n"
 
@@ -103,16 +104,6 @@ def _extract(text):
     return [([float(g) for g in m.groups()], None) for m in _QUAD.finditer(text)]
 
 
-def extract_scored(text):
-    """Text -> [(box xyxy pixel canvas, score | None)], chưa lọc, đã xếp theo score."""
-    return [(b, _score(c)) for b, c in _extract(text)]
-
-
-def extract(text):
-    """Text -> box xyxy pixel canvas, chưa lọc."""
-    return [b for b, _ in _extract(text)]
-
-
 def to_pixel(boxes, canvas_wh, orig_wh):
     """Pixel canvas đã khai trong prompt (= ảnh gốc, như tác giả) -> pixel ảnh gốc."""
     sx, sy = orig_wh[0] / canvas_wh[0], orig_wh[1] / canvas_wh[1]
@@ -145,10 +136,21 @@ def replan_box(text):
     return None
 
 
-def _extract_replan(text):
+def sample_cfg(cfg):
+    """Khối "greedy + N câu sample" của config: `samples` (mọi prompt, ZETA8) | `replan` (tên cũ, ZETA4 / 4.1) | None."""
+    return cfg.get("samples") or cfg.get("replan")
+
+
+def _first_candidate(text):
+    pairs = _extract(text)
+    return pairs[0][0] if pairs else None
+
+
+def _extract_samples(text, one):
+    """`text` = câu greedy + các câu sample nối bằng REPLAN_SEP -> mỗi câu MỘT box (`one`); box câu greedy score 1, câu sample None."""
     out = []
     for i, t in enumerate((text or "").split(REPLAN_SEP)):
-        b = replan_box(t)
+        b = one(t)
         if b is not None:
             out.append((b, {"score": 1.0} if i == 0 else None))
     return out
@@ -182,7 +184,12 @@ def parse_candidates(text, cfg, canvas_wh, orig_wh):
         canvas_wh = (1000, 1000)
     elif coord == "qwen_resized":
         canvas_wh = qwen_resized_wh(orig_wh, **(cfg.get("smart_resize") or {}))
-    pairs = _extract_replan(text) if cfg.get("prompt") == "replan" else _extract(text)
+    if cfg.get("prompt") == "replan":
+        pairs = _extract_samples(text, replan_box)
+    elif sample_cfg(cfg):
+        pairs = _extract_samples(text, _first_candidate)
+    else:
+        pairs = _extract(text)
     out = []
     for b, c in zip(to_pixel([b for b, _ in pairs], canvas_wh, orig_wh), (c for _, c in pairs)):
         v = _valid(b)
@@ -195,11 +202,6 @@ def parse_scored(text, cfg, canvas_wh, orig_wh):
     """-> (box hợp lệ xyxy pixel ảnh gốc, score | None) — tối đa K, xếp theo score giảm dần (box[0] = confidence cao nhất)."""
     cands = parse_candidates(text, cfg, canvas_wh, orig_wh)
     return [c["box"] for c in cands], [c["score"] for c in cands]
-
-
-def parse_boxes(text, cfg, canvas_wh, orig_wh):
-    """-> box hợp lệ xyxy pixel ảnh gốc (tối đa K, xếp theo score)."""
-    return parse_scored(text, cfg, canvas_wh, orig_wh)[0]
 
 
 def fill(boxes, k, orig_wh):

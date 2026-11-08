@@ -14,7 +14,6 @@ chọn), rồi các vùng xác suất lớp 0 cao tiếp theo.
 """
 
 import random
-import time
 
 import numpy as np
 import torch
@@ -22,7 +21,8 @@ import torch.nn.functional as F
 from PIL import Image
 from torch.utils.data import Dataset
 
-from baseline.data import int_box, pick_objects, sample_rng
+from ce_localization.utils.log import Progress
+from baseline.data import int_box, pick_objects, sample_rng, to_u8
 from baseline.models.bootplace import build_bootplace, build_criterion
 from baseline.models.detr import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh, nested
 
@@ -91,10 +91,6 @@ def target_boxes(boxes_xyxy, wh):
     return box_xyxy_to_cxcywh(b) / torch.tensor([w, h, w, h], dtype=torch.float32)
 
 
-def _u8(img):
-    return torch.from_numpy(np.array(img, dtype=np.uint8)).permute(2, 0, 1).contiguous()
-
-
 class BootPlaceTrain(Dataset):
     """Mẫu `data.train_items` -> dict uint8 / box chuẩn hoá (gom bằng `collate` = list, không đệm trên CPU)."""
 
@@ -111,7 +107,7 @@ class BootPlaceTrain(Dataset):
         holes = np.asarray(it["holes"], dtype=np.float64).reshape(-1, 4)
         objs = np.asarray(it["objects"], dtype=np.float64).reshape(-1, 4)
         patches = _patches(Image.open(it["gt"]).convert("RGB"), holes)
-        x = _u8(img)
+        x = to_u8(img)
         if random.random() < self.flip:
             x, patches = x.flip(-1), patches.flip(2)
             fl = lambda b: b[:, [2, 1, 0, 3]] * np.array([-1, 1, -1, 1]) + np.array([W, 0, W, 0])  # noqa: E731
@@ -152,10 +148,12 @@ class Trainer:
 
     def context(self, batch, world):
         """Số box TB / GPU của cả bước (chia loss box, như DETR all-reduce `num_boxes`)."""
-        n = torch.tensor(float(sum(len(s["boxes"]) for s in batch)), device=self.dev)
-        if world > 1:
-            torch.distributed.all_reduce(n)
-        return max(n.item() / world, 1.0)
+        n = float(sum(len(s["boxes"]) for s in batch))
+        if world > 1:                                                  # 1 GPU: số Python, không đồng bộ GPU mỗi bước
+            t = torch.tensor(n, device=self.dev)
+            torch.distributed.all_reduce(t)
+            n = t.item()
+        return max(n / world, 1.0)
 
     def backward(self, chunk, num_boxes, frac, amp, scaler):
         """Micro-batch: forward (autocast), loss fp32, backward có thang. `frac` = phần ảnh của micro trong batch / rank. -> thành phần."""
@@ -197,7 +195,7 @@ def sample_inputs(model, s, p, seed=0, dev="cpu"):
     W, H = img.size
     objs = np.asarray(s["objects"], dtype=np.float64).reshape(-1, 4)
     fg = pick_objects(objs, 1, p["fg_select"], sample_rng(seed, s["image_id"]))[0]
-    x, mask = prep_images([_u8(img)], [resize_size(FRAME, p["test_size"], p["test_max_size"])], dev)
+    x, mask = prep_images([to_u8(img)], [resize_size(FRAME, p["test_size"], p["test_max_size"])], dev)
     args = (x, mask, patch_canvas([_patches(img, objs[fg:fg + 1])], dev), [scene_boxes(objs, (W, H), model.num_queries).to(dev)])
     return args, (W, H), fg
 
@@ -209,7 +207,7 @@ def predict(model, samples, k, p, seed=0, dev="cpu", log=print, log_every=500):
     q = model.num_queries
     if k > q:
         raise ValueError(f"K {k} > num_queries {q}")
-    out, t0 = [], time.time()
+    out, prog = [], Progress("bootplace", len(samples), log_every, log)
     for n, s in enumerate(samples, 1):
         args, (W, H), fg = sample_inputs(model, s, p, seed, dev)
         o = model(*args)
@@ -217,9 +215,7 @@ def predict(model, samples, k, p, seed=0, dev="cpu", log=print, log_every=500):
         b = box_cxcywh_to_xyxy(o["pred_boxes"][0, idx]) * torch.tensor([W, H, W, H], dtype=torch.float32, device=dev)
         out.append({"image_id": s["image_id"], "boxes": b.cpu().double().numpy().round(2).tolist(), "fg": fg,
                     "prob": o["pred_logits"][0, idx].softmax(-1)[:, 0].cpu().numpy().round(5).tolist()})
-        if log_every and (n % log_every == 0 or n == len(samples)):
-            el = time.time() - t0
-            log(f"    [bootplace {n:5d}/{len(samples)}] {el / n * 1000:.0f} ms/ảnh | còn ~{el / n * (len(samples) - n):.0f} s")
+        prog.update(n)
     return out
 
 

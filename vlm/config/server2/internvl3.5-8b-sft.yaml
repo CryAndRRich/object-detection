@@ -1,0 +1,41 @@
+# ZETA8.2 = InternVL3.5-8B (ZETA6) + SFT LoRA trên CE-130 train (docs/EXPERIMENT_ZETA.md mục 16; người dùng chốt 2026-11-08).
+# Cùng cách ZETA8.1: prompt tác giả zero-shot, xin 1 box / câu (`ask_k: 1`), đích JSON 1 candidate thang 0–1000, eval greedy + 29 câu
+# sample ⇒ K = 30. Ảnh = tile 448 tối đa `max_dynamic_patch` 4 (+ thumbnail) như ZETA6 — adapter `internvl` đọc `engine.hf_overrides`
+# ⇒ train cùng tile với vLLM. 8B: 2 epoch.
+base: internvl3.5-8b.yaml
+name: internvl3.5-8b-sft
+icl: 0
+k: 30
+ask_k: 1
+max_tokens: 256
+sampling: {temperature: 0.0}
+samples: {n: 29, temperature: 1.0, top_p: 0.99}
+chunk: 32
+vllm:
+  gpu_mem_gib: 34.0
+  kv_cache_gib: 14.0
+engine:
+  max_model_len: 8192            # system + user ~0,8k + ảnh <= 5 tile × 256 + câu trả lời
+  max_num_seqs: 256
+  limit_mm_per_prompt: {image: 1, video: 0}
+finetune:
+  adapter: internvl
+  epochs: 2                      # 8B: 2 epoch (người dùng 2026-11-08), lưu snapshot mọi epoch, eval snapshot cuối
+  batch_size: 64
+  micro_batch: 8                 # pilot đo 8 vs 16 rồi chốt
+  group_by_length: true
+  lr: 1.0e-4
+  warmup: 0.03
+  weight_decay: 0.0
+  clip: 1.0
+  grad_ckpt: true
+  attn: sdpa
+  num_workers: 8
+  log_every: 10
+  seed: 0
+  lora:
+    r: 64
+    alpha: 128
+    dropout: 0.05
+    targets: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+    skip: [vision_model, mlp1]

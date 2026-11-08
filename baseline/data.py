@@ -19,12 +19,16 @@ import hashlib
 import os
 
 import numpy as np
+import torch
 from PIL import Image
 
 from ce_localization.data.cocount import CoCountAddDataset, cocount_geometry, read_cocount
 from ce_localization.data.turns import TurnIndex, ce130_geometry, present_objects
 
-__all__ = ["DATASETS", "FG_SELECT", "load_samples", "geometry", "train_items", "sample_rng", "pick_objects", "int_box"]
+__all__ = ["DATASETS", "FG_SELECT", "IMAGENET_MEAN", "IMAGENET_STD", "load_samples", "geometry", "train_items", "sample_rng", "pick_objects",
+           "int_box", "to_u8"]
+
+IMAGENET_MEAN, IMAGENET_STD = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)     # chuẩn hoá ảnh ResNet ImageNet (CSANet, HiddenObjects)
 
 DATASETS = ("ce130", "cocount")
 FG_SELECT = ("median", "random")
@@ -46,7 +50,7 @@ def load_samples(dataset, *, turn_index=None, samples_root=None, split="test_all
                         "holes": np.asarray(b["holes"][:e["t"]], dtype=np.float64).reshape(-1, 4)})
     else:
         for key in CoCountAddDataset(cocount_root, review=review, min_obj=min_obj).keys:
-            r = read_cocount(cocount_root, key, None, review)
+            r = read_cocount(cocount_root, key, review)
             path = os.path.join(cocount_root, "Image", key + ".jpg")
             with Image.open(path) as im:
                 wh = im.size
@@ -101,3 +105,8 @@ def int_box(box, wh):
     x1 = int(np.clip(np.floor(box[0]), 0, W - 1))
     y1 = int(np.clip(np.floor(box[1]), 0, H - 1))
     return x1, y1, int(np.clip(np.ceil(box[2]), x1 + 1, W)), int(np.clip(np.ceil(box[3]), y1 + 1, H))
+
+
+def to_u8(img):
+    """Ảnh PIL / mảng HWC -> tensor uint8 [3,H,W] liền bộ nhớ (dataset / suy luận của các baseline)."""
+    return torch.from_numpy(np.asarray(img, dtype=np.uint8)).permute(2, 0, 1).contiguous()

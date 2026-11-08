@@ -5,19 +5,18 @@
 - `engine.tensor_parallel_size` 2 (Kaggle 2 × T4, `config/kaggle/`): `vllm.gpu_mem_gib` / `kv_cache_gib` tính MỖI card, kiểm card trống ít nhất;
 - `LLM.chat` nhận ảnh base64 data URL (chỉ base64); structured outputs JSON theo schema tác giả. Tiền = 0; `sec` = thời gian khối /
   số prompt.
-- ZETA4 RePlan (`replan: {samples, temperature, top_p}`): mỗi ảnh 2 request cùng prompt (prefix cache dùng chung) — greedy
-  (`sampling`, như `generate` của tác giả) + `samples` câu sample (`n`, seed theo ảnh) — không schema (planner tự viết thẻ
-  `<think>/<gen_image>/<region>`); `text` = các câu nối bằng `REPLAN_SEP` (câu 0 = greedy), token ra = tổng."""
-
-import hashlib
+- Greedy + N câu sample (`samples: {n, temperature, top_p}`, ZETA8; tên cũ `replan: {samples, …}` của ZETA4 / 4.1): mỗi ảnh 2 request
+  cùng prompt (prefix cache dùng chung) — greedy (`sampling`) + N câu sample (`n`, seed theo ảnh); `text` = các câu nối bằng
+  `REPLAN_SEP` (câu 0 = greedy), token ra = tổng. Prompt tác giả: cả hai request ràng buộc schema; RePlan: không schema (planner tự
+  viết thẻ `<think>/<gen_image>/<region>`)."""
 
 import os
 import subprocess
 import time
 
-from vlm.backends import Fatal, result
-from vlm.parse import REPLAN_SEP
-from vlm.prompt import box_schema
+from vlm.backends import Fatal, chat_messages, result, stable_int
+from vlm.parse import REPLAN_SEP, sample_cfg
+from vlm.prompt import ask_k, box_schema
 
 __all__ = ["VLLMLocal", "gpu_free_total_mib", "memory_utilization"]
 
@@ -59,7 +58,7 @@ class VLLMLocal:
 
     def _structured(self):
         """Ràng buộc JSON theo schema tác giả lúc sinh (structured outputs của vLLM; tên lớp đổi theo bản)."""
-        schema = box_schema(self.cfg["k"])["schema"]
+        schema = box_schema(ask_k(self.cfg))["schema"]
         try:
             from vllm.sampling_params import StructuredOutputsParams
             return {"structured_outputs": StructuredOutputsParams(json=schema)}
@@ -80,33 +79,19 @@ class VLLMLocal:
         return SamplingParams(max_tokens=int(self.cfg["max_tokens"]), **s)
 
     def sample_params(self, job):
-        """RePlan: `samples` câu sample cho một ảnh; seed cố định theo ảnh + lần thử (chạy lại cho cùng câu trả lời)."""
+        """N câu sample cho một ảnh; seed cố định theo ảnh + lần thử (chạy lại cho cùng câu trả lời)."""
         from vllm import SamplingParams
-        rp = self.cfg["replan"]
-        seed = int.from_bytes(hashlib.blake2b(f"{job['image_id']}#{job.get('attempt', 0)}".encode(), digest_size=4).digest(), "big")
-        return SamplingParams(n=int(rp["samples"]), temperature=float(rp["temperature"]), top_p=float(rp.get("top_p", 1.0)),
-                              max_tokens=int(self.cfg["max_tokens"]), seed=seed)
-
-    @staticmethod
-    def conversation(job):
-        conv = []
-        for t in job["messages"]:
-            if t["image"]:
-                content = [{"type": "text", "text": t["text"]},
-                           {"type": "image_url", "image_url": {"url": f"data:{t.get('mime') or 'image/jpeg'};base64,{t['image']}"}}]
-                if t.get("image_first"):
-                    content.reverse()
-            else:
-                content = t["text"]
-            conv.append({"role": t["role"], "content": content})
-        return conv
+        sp = sample_cfg(self.cfg)
+        return SamplingParams(n=int(sp.get("n", sp.get("samples"))), temperature=float(sp["temperature"]), top_p=float(sp.get("top_p", 1.0)),
+                              max_tokens=int(self.cfg["max_tokens"]), seed=stable_int(f"{job['image_id']}#{job.get('attempt', 0)}"),
+                              **self._so)
 
     def batch(self, jobs):
         t0 = time.time()
-        rp = bool(self.cfg.get("replan"))
+        rp = bool(sample_cfg(self.cfg))
         convs, params = [], []
         for j in jobs:
-            c = self.conversation(j)
+            c = chat_messages(j)
             convs += [c, c] if rp else [c]
             params += [self.params(j), self.sample_params(j)] if rp else [self.params(j)]
         outs = self.llm.chat(convs, sampling_params=params, use_tqdm=False, chat_template_kwargs=self.cfg.get("chat_template_kwargs"))

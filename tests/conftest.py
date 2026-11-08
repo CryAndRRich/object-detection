@@ -13,7 +13,8 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 SLOW = {"test_flow_val_select_resume_eval", "test_flow_train_loss_select_resume", "test_ddp_two_processes",
-        "test_flow_positive_all_pair_resume", "test_latency_celoc_flow"}
+        "test_flow_positive_all_pair_resume", "test_latency_celoc_flow",
+        "test_build_ui", "test_build_ui_pred_hub", "test_plot_snapshot_compare_tool"}              # tool cục bộ (Gradio, hình) — hỏng thì lộ ngay lúc dùng
 
 
 def pytest_addoption(parser):
@@ -41,6 +42,15 @@ def pytest_runtest_makereport(item, call):
     rep = (yield).get_result()
     if rep.when == "call":
         item._call_passed = rep.passed
+
+
+@pytest.fixture(autouse=True)
+def _restore_grad_mode():
+    """Test gọi `main()` trong cùng tiến trình có thể tắt autograd toàn cục — trả lại sau mỗi test (lỗi chỉ hiện khi chạy cả bộ)."""
+    import torch
+    mode = torch.is_grad_enabled()
+    yield
+    torch.set_grad_enabled(mode)
 
 
 @pytest.fixture(autouse=True)

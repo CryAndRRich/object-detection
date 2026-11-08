@@ -1,7 +1,8 @@
 """LoRA tối giản cho finetune VLM (ZETA4.1) — không phụ thuộc `peft` (venv vLLM đã ghim, khỏi cài thêm).
 
 `add_lora` bọc mọi `nn.Linear` có tên lá thuộc `targets` (trong phạm vi `scope`, vd chỉ LLM) bằng `LoRALinear`: y = W x + (α / r) · B A
-drop(x); A ~ Kaiming, B = 0 ⇒ lúc khởi tạo ra y hệt model gốc. Chỉ A, B được train (fp32, kể cả khi W bf16). `merge_lora` cộng
+drop(x); A ~ Kaiming, B = 0 ⇒ lúc khởi tạo ra y hệt model gốc. Chỉ A, B được train (tham số fp32, kể cả khi W bf16; dưới autocast
+phép nhân LoRA chạy bf16 như phần còn lại, ngoài autocast thì fp32). `merge_lora` cộng
 (α / r) · B A vào W rồi gỡ lớp bọc ⇒ model HF thường (lưu `save_pretrained` cho vLLM).
 """
 
@@ -11,6 +12,13 @@ import torch
 from torch import nn
 
 __all__ = ["LoRALinear", "add_lora", "lora_parameters", "lora_state_dict", "load_lora", "merge_lora"]
+
+
+def _autocast_on(device_type):
+    try:
+        return torch.is_autocast_enabled(device_type)
+    except TypeError:                                  # torch < 2.4: không nhận device_type
+        return torch.is_autocast_enabled() if device_type == "cuda" else torch.is_autocast_cpu_enabled()
 
 
 class LoRALinear(nn.Module):
@@ -24,7 +32,10 @@ class LoRALinear(nn.Module):
 
     def forward(self, x):
         y = self.base(x)
-        z = self.drop(x).to(self.lora_A.dtype) @ self.lora_A.t() @ self.lora_B.t()
+        z = self.drop(x)
+        if not _autocast_on(z.device.type):            # autocast bf16: phép nhân tự chạy bf16, KHÔNG tạo / lưu bản sao fp32 của x
+            z = z.to(self.lora_A.dtype)
+        z = z @ self.lora_A.t() @ self.lora_B.t()
         return y + (self.scale * z).to(y.dtype)
 
     def delta(self):

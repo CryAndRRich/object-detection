@@ -16,14 +16,14 @@ theo mẫu.
 """
 
 import os
-import time
 
 import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from baseline.data import int_box, pick_objects, sample_rng
+from ce_localization.utils.log import Progress
+from baseline.data import int_box, pick_objects, sample_rng, to_u8
 from baseline.models.csanet import CSANetConfig, Discriminator, SysNet, gan_losses
 
 __all__ = ["trans_to_box", "get_trans_label", "fg_inputs", "CSANetTrain", "Trainer", "predict", "build"]
@@ -49,7 +49,7 @@ def get_trans_label(bg_wh, fg_wh, box_xywh):
 
 
 def _resize_sq(img, S):
-    return torch.from_numpy(np.array(img.resize((S, S), Image.BILINEAR), dtype=np.uint8)).permute(2, 0, 1).contiguous()
+    return to_u8(img.resize((S, S), Image.BILINEAR))
 
 
 def fg_inputs(fg, bg_wh, S):
@@ -67,7 +67,7 @@ def fg_inputs(fg, bg_wh, S):
     out[y:y + h, x:x + w] = np.asarray(fg.resize((w, h), Image.BILINEAR))
     msk = np.zeros((1, S, S), np.uint8)
     msk[0, y:y + h, x:x + w] = 255
-    return torch.from_numpy(out).permute(2, 0, 1).contiguous(), torch.from_numpy(msk), torch.tensor(box, dtype=torch.float32)
+    return to_u8(out), torch.from_numpy(msk), torch.tensor(box, dtype=torch.float32)
 
 
 BLEND_MASKS = ("rect", "object")
@@ -175,7 +175,7 @@ def predict(G, samples, k, p, seed=0, dev="cpu", log=print, log_every=500):
     """-> list {"image_id", "boxes" [K,4] pixel ảnh gốc, "fg" [K], "trans" [K,3]}. `p` = khối `predict` của config."""
     G.eval()
     S, n_img = G.img_size, p.get("batch_images", 4)
-    out, t0 = [], time.time()
+    out, prog = [], Progress("csanet", len(samples), log_every, log)
     for b0 in range(0, len(samples), n_img):
         rows, metas, noise = {"bg": [], "fg": [], "msk": [], "fb": []}, [], []
         for s in samples[b0:b0 + n_img]:
@@ -197,11 +197,9 @@ def predict(G, samples, k, p, seed=0, dev="cpu", log=print, log_every=500):
             tr = trans[i * k:(i + 1) * k]
             out.append({"image_id": s["image_id"], "boxes": [trans_to_box(tr[j], wh, sizes[j]) for j in range(k)], "fg": fgs,
                         "trans": tr.round(5).tolist()})
-        if log_every and (len(out) // log_every != (len(out) - len(metas)) // log_every or len(out) == len(samples)):
-            el = time.time() - t0
-            log(f"    [csanet {len(out):5d}/{len(samples)}] {el / len(out) * 1000:.0f} ms/ảnh | còn ~{el / len(out) * (len(samples) - len(out)):.0f} s")
+        prog.update(len(out), len(out) - len(metas))
     return out
 
 
-def build(cfg, train_backbone=False):
+def build(cfg):
     return SysNet(CSANetConfig(**cfg["model"])), Discriminator()

@@ -1,0 +1,39 @@
+# ZETA8.3 = LLaVA-OneVision-2-8B (ZETA6) + SFT LoRA trên CE-130 train (docs/EXPERIMENT_ZETA.md mục 16; người dùng chốt 2026-11-08).
+# Cùng cách ZETA8.1: prompt tác giả zero-shot, xin 1 box / câu (`ask_k: 1`), đích JSON 1 candidate thang 0–1000, eval greedy + 29 câu
+# sample ⇒ K = 30. Ảnh Qwen2VL smart_resize, `max_pixels` 1.048.576 như ZETA6 (adapter `llava_ov2` đặt vào image processor). Code
+# remote cần transformers >= 5.7. 8B: 2 epoch.
+base: llava-ov2-8b.yaml
+name: llava-ov2-8b-sft
+icl: 0
+k: 30
+ask_k: 1
+max_tokens: 256
+sampling: {temperature: 0.0}
+samples: {n: 29, temperature: 1.0, top_p: 0.99}
+chunk: 32
+engine:
+  dtype: bfloat16                # server 2 (Blackwell) — model học bf16
+  max_model_len: 8192
+  max_num_seqs: 256
+  limit_mm_per_prompt: {image: 1, video: 0}
+finetune:
+  adapter: llava_ov2
+  epochs: 2
+  batch_size: 64
+  micro_batch: 8
+  group_by_length: true
+  lr: 1.0e-4
+  warmup: 0.03
+  weight_decay: 0.0
+  clip: 1.0
+  grad_ckpt: true
+  attn: sdpa
+  num_workers: 8
+  log_every: 10
+  seed: 0
+  lora:
+    r: 64
+    alpha: 128
+    dropout: 0.05
+    targets: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+    skip: [visual]                 # ViT + merger (merger cũng có Linear) đóng băng

@@ -20,7 +20,7 @@ import os
 
 from PIL import Image
 
-__all__ = ["PROMPT_VERSION", "FORMAT", "SYSTEM", "USER", "AUTHOR_ICL", "box_schema", "encode_image", "system_text", "user_text",
+__all__ = ["PROMPT_VERSION", "FORMAT", "SYSTEM", "USER", "AUTHOR_ICL", "box_schema", "encode_image", "system_text", "ask_k", "user_text",
            "author_turns", "build_messages", "prompt_hash", "REPLAN_INSTRUCTION", "replan_template", "replan_text"]
 
 PROMPT_VERSION = 3
@@ -104,6 +104,11 @@ def system_text():
     return SYSTEM.format(frame=FORMAT["frame"], output=FORMAT["output"])
 
 
+def ask_k(cfg):
+    """Số box prompt / schema XIN model: `ask_k` (ZETA8: 1 box / câu, 30 box = greedy + 29 câu sample) — mặc định = `k` (số box chấm)."""
+    return int(cfg.get("ask_k") or cfg["k"])
+
+
 def user_text(k, cls, canvas_wh):
     w, h = canvas_wh
     return USER.format(w=w, h=h, cls=cls, k=k, ask=FORMAT["ask"])
@@ -151,7 +156,7 @@ def build_messages(sample, image, cfg, examples=()):
                  "image_first": True}]
     return ([{"role": "system", "text": system_text(), "image": None, "mime": None}]
             + list(examples)
-            + [{"role": "user", "text": user_text(cfg["k"], sample["class"], image["canvas_wh"]), "image": image["b64"],
+            + [{"role": "user", "text": user_text(ask_k(cfg), sample["class"], image["canvas_wh"]), "image": image["b64"],
                 "mime": image["mime"]}])
 
 
@@ -179,4 +184,6 @@ def prompt_hash(cfg):
     if cfg.get("prompt") == "replan":                      # chỉ config RePlan có các khoá này ⇒ hash model cũ không đổi
         key.update(prompt="replan", replan_template=replan_template(), instruction=cfg.get("instruction") or REPLAN_INSTRUCTION,
                    replan=cfg.get("replan"))
+    elif cfg.get("samples"):                               # ZETA8: greedy + N câu sample (không có ⇒ hash model cũ không đổi)
+        key.update(samples=cfg["samples"], ask_k=ask_k(cfg))
     return hashlib.sha1(json.dumps(key, sort_keys=True, default=str).encode()).hexdigest()[:12]

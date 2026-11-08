@@ -23,9 +23,13 @@ SHOW = ("cnll", "cnll_median", "cnll_mean_trim1", "cnll_gt", "best_iou@{K}_any",
         "in_image", "degenerate")
 
 
-def add_data_args(ap):
-    """Đường dẫn dữ liệu test dùng chung với `predict.py` (mặc định: chạy trong `object-detection/baseline/`)."""
-    ap.add_argument("--dataset", required=True, choices=DATASETS)
+def add_data_args(ap, dataset_default=None):
+    """Đường dẫn dữ liệu test dùng chung với `predict.py` / `vlm/run.py` (mặc định: chạy trong `object-detection/<package>/`).
+    `dataset_default` (vd "all" của vlm/run.py): `--dataset` không bắt buộc, thêm lựa chọn đó."""
+    if dataset_default is None:
+        ap.add_argument("--dataset", required=True, choices=DATASETS)
+    else:
+        ap.add_argument("--dataset", default=dataset_default, choices=[*DATASETS, dataset_default])
     ap.add_argument("--split", default="test_all", choices=["test", "test_all", "val"])
     ap.add_argument("--turn-index", default="../data/turn_index.json", help="CE-130; cũng là nguồn mốc `prior` (lỗ train)")
     ap.add_argument("--samples-root", default="../data/samples")
@@ -43,7 +47,13 @@ def load_data(a):
     samples, index = load_samples(a.dataset, turn_index=a.turn_index if os.path.exists(a.turn_index) else None,
                                   samples_root=a.samples_root, split=a.split, cocount_root=a.cocount_root, review=review,
                                   min_obj=a.cocount_min_obj, limit=a.limit)
-    return samples, index, lambda s: geometry(s, index=index, samples_root=a.samples_root, cocount_root=a.cocount_root, review=review)
+    cache = {}
+
+    def geo(s):                                   # nhớ theo ảnh: predict (OracleLoc) + chấm từng tiêu chí dùng lại, không đọc JPEG lại
+        if s["image_id"] not in cache:
+            cache[s["image_id"]] = geometry(s, index=index, samples_root=a.samples_root, cocount_root=a.cocount_root, review=review)
+        return cache[s["image_id"]]
+    return samples, index, geo
 
 
 def run_score(a, samples, index, geo, boxes, meta, log=print):
