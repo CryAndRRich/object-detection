@@ -1,0 +1,712 @@
+#!/usr/bin/env python3
+"""Web chấm kết quả CE-Gen (người dùng 2026-11-08): mỗi màn một (tập, model, zeroshot / finetune, add / remove, ảnh) — người chấm xem
+ảnh input + ảnh output của model (+ heatmap khác biệt), ghi THÀNH CÔNG (thêm / xoá đúng MỘT vật cùng loại) hay THẤT BẠI, kèm MỘT box
+bao vật được thêm / bị xoá (thành công: bắt buộc). Thành công / thất bại -> metric user study; box -> C-NLL.
+
+Dữ liệu (server 2, thư mục `hachi/`): `<src>/FSC_final` (CE-130, lượt 1: 1.679 nhánh = 1.335 test + 344 val, chia 4 subset
+`FSC_{easy,difficult}_{overlap,no_overlap}`) và `<src>/processed_dataset` (CE-CoCount, 1.484 file lớp); mỗi tập 3 model × zeroshot /
+finetune × add / remove = 12 run, mỗi run (hoặc subset) có `img/` (output), `input/` và `results_diff_boxes_v2/` (`records.jsonl`:
+box khác biệt `candidates` xếp theo điểm, pixel ẢNH INPUT, xyxy cạnh phải / dưới không tính; `<id>/heatmap.png`) — sinh bằng
+`hachi/Image_Editing/code/osor/SAVP/core/eval_difference_boxes_strong_v2.py` (CPU, không model; chạy trong `core/`, tham số như
+`eval_diffrence_boxes.sh`: `--input <run>/input --output <run>/img --save-dir <run>/results_diff_boxes_v2 --threshold 0.07
+--min-area 200`). Box gợi ý = vùng khác biệt MẠNH (heatmap > 0,35) — heatmap chuẩn hoá theo phân vị 99 của từng ảnh nên output không
+đổi gì vẫn có box gợi ý; box có thể chỉ phủ một phần vật ⇒ người chấm sửa.
+
+KHÔNG import torch — chạy bằng env `imgedit` (numpy + Pillow; `serve` thêm gradio). Hai bước:
+
+  prepare   quét 2 tập × 12 run, đọc `records.jsonl`, dựng SẴN cache JPEG (input, output resize về cỡ input, heatmap tô màu turbo —
+            vài chục KB / ảnh thay cho PNG output 1–2 MB) + `manifest.json` (mọi màn, lớp, box gợi ý). Song song `--workers`, chạy lại
+            chỉ làm phần còn thiếu (`--force` làm lại hết). In thống kê từng run (status, không có box gợi ý, output lệch tỉ lệ, cỡ
+            input khác ảnh gốc).
+  serve     app Gradio (`--share`: link *.gradio.live; luôn mở cả cổng LAN `--host`): chọn Data + User trên giao diện. Mọi phiên
+            (2 tập × 2 user) dựng sẵn lúc mở app; trình duyệt tải trước + giải mã sẵn ảnh 8 màn kế; vẽ / chọn box chạy hoàn toàn ở
+            trình duyệt, chỉ lúc lưu / chuyển màn mới gọi server (một lượt đi về).
+
+Chia việc: theo ẢNH (`image_id`), xen kẽ theo thứ tự ảnh -> user1 / user2; mỗi ảnh chấm đủ 12 run (6 add rồi 6 remove, liền nhau —
+ảnh input chỉ tải một lần). Hiện tên model / zeroshot / finetune (không chấm mù — người dùng 2026-11-08).
+
+Thao tác (màn chưa chấm mở ra đã chọn sẵn box gợi ý số 1 = vùng khác biệt mạnh nhất):
+  Enter       THÀNH CÔNG + lưu box đang chọn, sang màn sau (chưa có box: không lưu, báo)
+  f           THẤT BẠI, sang màn sau (không lưu box)
+  kéo chuột   vẽ box mới (trên ảnh input hoặc output — cùng hệ toạ độ)
+  bấm / 1–9   chọn box gợi ý (bấm gần viền / trong box; phím số = box số đó)
+  r / x       về box ban đầu của màn / bỏ box
+  h           ẩn / hiện heatmap
+  ← / →       màn trước / sau (không lưu; lưu lại màn đã chấm = ghi đè)
+
+Kết quả: `<out-dir>/annot_<ce130|cocount>_<user>.jsonl` — chỉ GHI NỐI, dòng sau cùng của mỗi `key` là bản chấm (tắt app mở lại: tiếp
+từ màn chưa chấm đầu tiên). Mỗi dòng: {"key", "dataset", "model", "setting", "task", "subset", "image_id", "class", "success",
+"box": [x1, y1, x2, y2] | null (pixel ẢNH INPUT, toạ độ liên tục 0..W / 0..H — cùng hệ với box vật CE-130 / CE-CoCount),
+"box_src": "cand<k>" (box gợi ý thứ k+1) | "drawn" | null, "wh": [W, H], "user", "time", "sec"}.
+
+  python box_review/cegen.py prepare --workers 8
+  python box_review/cegen.py serve --share
+"""
+
+import argparse
+import collections
+import functools
+import hashlib
+import html
+import io
+import itertools
+import json
+import os
+import re
+import statistics
+import sys
+import threading
+import time
+from datetime import datetime
+from urllib.parse import quote
+
+import numpy as np
+from PIL import Image
+
+OD = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))      # object-detection/
+SRC = "/mnt/disk1/aiotlab/hachi/Image_Editing/output"
+OUT_DIR = os.path.join(os.path.dirname(OD), "output", "cegen", "annot")
+DATASETS = {"FSC_final": "ce130", "processed_dataset": "cocount"}
+LABELS = {"ce130": "CE-130", "cocount": "CE-CoCount"}
+USERS = ("user1", "user2")
+TASKS = ("add", "remove")
+SETTINGS = ("zeroshot", "finetune")
+V2 = "results_diff_boxes_v2"
+SUBSET_RE = re.compile(r"FSC_(easy|difficult)_(no_)?overlap$")
+TASK_RE = re.compile(r"(?:^|[_\-])(add|remove)(?=$|[_\-])", re.I)
+SKIP_DIRS = {"img", "input", "mask_l1", "mask_l2", "visual"}
+IMG_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+PREFETCH = 8
+FILE_ROUTE = "/gradio_api/file="
+LANCZOS = getattr(Image, "Resampling", Image).LANCZOS
+
+__all__ = ["find_runs", "run_task", "prepare", "split_items", "Store", "Annotator", "Hub", "build_ui", "clean_class", "TURBO"]
+
+
+# ---------------------------------------------------------------- prepare
+
+def clean_class(name):
+    """Như `ce_localization.data.cocount.clean_class` (module đó import torch): bỏ phần trong ngoặc, dấu chấm cuối, khoảng trắng thừa."""
+    return re.sub(r"\s+", " ", re.sub(r"\(.*?\)", "", name)).strip().rstrip(".").strip()
+
+
+def _turbo_lut():
+    """Bảng màu turbo 256 × 3 uint8 (xấp xỉ đa thức của Google, cùng bảng `cv2.COLORMAP_TURBO` của preview.jpg)."""
+    x = np.linspace(0, 1, 256)
+    poly = lambda c: sum(ci * x ** i for i, ci in enumerate(c))  # noqa: E731
+    r = poly([0.13572138, 4.61539260, -42.66032258, 132.13108234, -152.94239396, 59.28637943])
+    g = poly([0.09140261, 2.19418839, 4.84296658, -14.18503333, 4.27729857, 2.82956604])
+    b = poly([0.10667330, 12.64194608, -60.58204836, 110.36276771, -89.90310912, 27.34824973])
+    return (np.clip(np.stack([r, g, b], 1), 0, 1) * 255).round().astype(np.uint8)
+
+
+TURBO = _turbo_lut()
+
+
+def _nat(s):
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s)]
+
+
+def run_task(name):
+    """Tên thư mục run -> "add" | "remove" (đúng một trong hai, đứng riêng giữa `_` / `-`)."""
+    found = {m.lower() for m in TASK_RE.findall(name)}
+    if len(found) != 1:
+        raise ValueError(f"không rút được add / remove từ tên run {name!r}")
+    return found.pop()
+
+
+def find_runs(src):
+    """Mọi thư mục có cả `img/` và `input/` dưới `<src>/<FSC_final|processed_dataset>/<model>/<zeroshot|finetune>/<run>/...` -> list
+    dict(ds, model, setting, task, subset, run_dir, path); subset = tên `FSC_*` hoặc "". Một (tập, model, setting, task) đúng một run."""
+    out, seen = [], {}
+    for dname, ds in DATASETS.items():
+        root = os.path.join(src, dname)
+        if not os.path.isdir(root):
+            raise FileNotFoundError(root)
+        for dirpath, dirs, _ in os.walk(root):
+            dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not d.startswith("results_diff"))
+            if not (os.path.isdir(os.path.join(dirpath, "img")) and os.path.isdir(os.path.join(dirpath, "input"))):
+                continue
+            rel = os.path.relpath(dirpath, root).split(os.sep)
+            if len(rel) < 3 or rel[1] not in SETTINGS:
+                raise ValueError(f"không hiểu bố cục {dirpath}: cần <model>/<zeroshot|finetune>/<run>/...")
+            subset = rel[-1] if SUBSET_RE.match(rel[-1]) else ""
+            run_dir = os.path.dirname(dirpath) if subset else dirpath
+            unit = (ds, rel[0], rel[1], run_task(rel[2]))
+            if seen.setdefault(unit, run_dir) != run_dir:
+                raise ValueError(f"hai run cùng {unit}: {seen[unit]} và {run_dir}")
+            out.append(dict(ds=ds, model=rel[0], setting=rel[1], task=unit[3], subset=subset, run_dir=run_dir, path=dirpath))
+    return out
+
+
+def _list_images(d):
+    out = {}
+    for f in os.listdir(d):
+        stem, ext = os.path.splitext(f)
+        if ext.lower() in IMG_EXT:
+            if stem in out:
+                raise ValueError(f"trùng tên ảnh {stem} trong {d}")
+            out[stem] = os.path.join(d, f)
+    return out
+
+
+def _load_records(path):
+    f = os.path.join(path, V2, "records.jsonl")
+    if not os.path.exists(f):
+        return None
+    with open(f) as fh:
+        return {r["id"]: r for r in (json.loads(line) for line in fh if line.strip())}
+
+
+def _save_jpeg(im, path, quality):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.tmp{os.getpid()}"
+    im.save(tmp, format="JPEG", quality=quality, optimize=True)
+    os.replace(tmp, path)              # nhiều worker cùng ghi một ảnh input: bản nào thay sau cũng nguyên vẹn
+
+
+def _prep(job, cache, force=False):
+    """Một màn: cache JPEG input (đặt tên theo md5 nội dung ⇒ 12 run chung ảnh input chỉ lưu một lần), output resize về cỡ input,
+    heatmap tô màu. -> dict thêm wh, out_wh, in, out, hm (đường dẫn tương đối trong cache)."""
+    with open(job["src_in"], "rb") as f:
+        data = f.read()
+    rel_in = f"{job['ds']}/input/{job['id']}_{hashlib.md5(data).hexdigest()[:12]}.jpg"
+    with Image.open(io.BytesIO(data)) as im:
+        W, H = im.size
+        if force or not os.path.exists(os.path.join(cache, rel_in)):
+            _save_jpeg(im.convert("RGB"), os.path.join(cache, rel_in), 90)
+    base = f"{job['ds']}/{job['model']}/{job['setting']}/{job['task']}/{job['id']}"
+    with Image.open(job["src_out"]) as im:
+        out_wh = list(im.size)
+        if force or not os.path.exists(os.path.join(cache, base + ".jpg")):
+            im = im.convert("RGB")
+            if im.size != (W, H):
+                im = im.resize((W, H), LANCZOS, reducing_gap=3.0)
+            _save_jpeg(im, os.path.join(cache, base + ".jpg"), 85)
+    rel_hm = None
+    if job["src_hm"] and os.path.exists(job["src_hm"]):
+        rel_hm = base + "_hm.jpg"
+        if force or not os.path.exists(os.path.join(cache, rel_hm)):
+            with Image.open(job["src_hm"]) as im:
+                g = im.convert("L")
+                if g.size != (W, H):
+                    g = g.resize((W, H), LANCZOS)
+                _save_jpeg(Image.fromarray(TURBO[np.asarray(g)]), os.path.join(cache, rel_hm), 80)
+    out = {k: v for k, v in job.items() if not k.startswith("src_")}
+    out.update(wh=[W, H], out_wh=out_wh, **{"in": rel_in, "out": base + ".jpg", "hm": rel_hm})
+    return out
+
+
+def _fmt(sec):
+    sec = int(sec)
+    return f"{sec // 3600}h{sec % 3600 // 60:02d}m{sec % 60:02d}s" if sec >= 3600 else f"{sec // 60}m{sec % 60:02d}s"
+
+
+def _ref_sizes(turn_index, cocount_root, ids):
+    """Lớp + cỡ ảnh gốc: CE-130 từ `turn_index.json` (nhánh `<split>/<id>`), CE-CoCount từ `Anno/<id>.json` + `Image/<id>.jpg`."""
+    ref = {}
+    if ids.get("ce130"):
+        with open(turn_index) as f:
+            br = json.load(f)["branches"]
+        for k, v in br.items():
+            ref.setdefault(("ce130", k.split("/", 1)[1]), (v["class"], v.get("wh")))
+    for i in ids.get("cocount", ()):
+        with open(os.path.join(cocount_root, "Anno", i + ".json")) as f:
+            cls = clean_class(json.load(f)["class_name"])
+        img = os.path.join(cocount_root, "Image", i + ".jpg")
+        wh = None
+        if os.path.exists(img):
+            with Image.open(img) as im:
+                wh = list(im.size)
+        ref[("cocount", i)] = (cls, wh)
+    return ref
+
+
+def prepare(src, out_dir, turn_index, cocount_root, workers=8, top_k=5, force=False, allow_missing_v2=False, expect_runs=12,
+            log=print):
+    """Quét run, dựng cache + `<out_dir>/manifest.json`. -> manifest (dict)."""
+    t0 = time.time()
+    cache = os.path.join(out_dir, "cache")
+    runs = find_runs(src)
+    units = collections.defaultdict(list)
+    for r in runs:
+        units[(r["ds"], r["model"], r["setting"], r["task"])].append(r)
+    for ds in DATASETS.values():
+        n = sum(u[0] == ds for u in units)
+        if expect_runs and n != expect_runs:
+            raise ValueError(f"{LABELS[ds]}: {n} run, cần {expect_runs}")
+    jobs, missing, ids = [], [], collections.defaultdict(set)
+    for r in runs:
+        imgs, inps = _list_images(os.path.join(r["path"], "img")), _list_images(os.path.join(r["path"], "input"))
+        if set(imgs) != set(inps):
+            raise ValueError(f"img / input lệch tên ở {r['path']}: {sorted(set(imgs) ^ set(inps))[:5]}")
+        recs = _load_records(r["path"])
+        if recs is None:
+            missing.append(r["path"])
+            recs = {}
+        for i in sorted(imgs, key=_nat):
+            rec = recs.get(i, {})
+            cands = [c["xyxy"] for c in rec.get("candidates", [])[:top_k]]
+            hm = rec.get("heatmap_path") or os.path.join(r["path"], V2, i, "heatmap.png")
+            jobs.append(dict(ds=r["ds"], model=r["model"], setting=r["setting"], task=r["task"], subset=r["subset"], id=i,
+                             key=f"{r['ds']}|{r['model']}|{r['setting']}|{r['task']}|{i}", cands=cands,
+                             status=rec.get("status", "no_v2"),
+                             audit=(rec.get("quality_audit_for_review_only") or {}).get("reason"),
+                             src_in=inps[i], src_out=imgs[i], src_hm=hm if recs else None))
+            ids[r["ds"]].add(i)
+    if missing and not allow_missing_v2:
+        raise FileNotFoundError(f"{len(missing)} thư mục chưa có {V2}/records.jsonl (sinh trước, xem README):\n  "
+                                + "\n  ".join(missing))
+    ref = _ref_sizes(turn_index, cocount_root, ids)
+    log(f"[prepare] {len(runs)} thư mục, {len(units)} run, {len(jobs)} màn ({_fmt(time.time() - t0)}); cache -> {cache}")
+    fn = functools.partial(_prep, cache=cache, force=force)
+    done, items, t1 = 0, [], time.time()
+    step = max(1, len(jobs) // 50)
+
+    def tick():
+        el = time.time() - t1
+        eta = el / done * (len(jobs) - done) if done else 0
+        log(f"[prepare] {done}/{len(jobs)} ({100 * done / max(len(jobs), 1):.0f}%) · {_fmt(el)} · ETA {_fmt(eta)} · "
+            f"{datetime.now():%H:%M:%S}")
+    log(f"[prepare] bắt đầu, {workers} worker · {datetime.now():%H:%M:%S}")
+    if workers <= 1:
+        for j in jobs:
+            items.append(fn(j))
+            done += 1
+            if done % step == 0:
+                tick()
+    else:
+        from multiprocessing import get_context
+        with get_context("fork" if sys.platform.startswith("linux") else "spawn").Pool(workers) as pool:
+            for it in pool.imap_unordered(fn, jobs, chunksize=8):
+                items.append(it)
+                done += 1
+                if done % step == 0:
+                    tick()
+    for it in items:
+        it["cls"], it["ref_wh"] = ref.get((it["ds"], it["id"]), (None, None))
+    order = {}
+    for ds in DATASETS.values():
+        for k, i in enumerate(sorted(ids[ds], key=_nat)):
+            order[(ds, i)] = k
+    items.sort(key=lambda it: (list(DATASETS.values()).index(it["ds"]), order[(it["ds"], it["id"])], TASKS.index(it["task"]),
+                               it["model"], SETTINGS.index(it["setting"])))
+    stats = collections.OrderedDict()
+    for it in items:
+        s = stats.setdefault(f"{LABELS[it['ds']]} {it['model']} {it['setting']} {it['task']}", collections.Counter())
+        s["n"] += 1
+        s["status=" + it["status"]] += 1
+        s["no_cand"] += not it["cands"]
+        s["no_heatmap"] += it["hm"] is None
+        (W, H), (ow, oh) = it["wh"], it["out_wh"]
+        s["out_aspect>2%"] += abs((ow / oh) / (W / H) - 1) > 0.02
+        s["input!=ref_size"] += it["ref_wh"] is not None and list(it["ref_wh"]) != it["wh"]
+        s["no_class"] += it["cls"] is None
+    log("[prepare] thống kê từng run:")
+    for k, s in stats.items():
+        log(f"  {k}: " + ", ".join(f"{a}={b}" for a, b in sorted(s.items()) if b))
+    man = {"version": 1, "time": datetime.now().isoformat(timespec="seconds"), "src": os.path.abspath(src), "cache": cache,
+           "top_k": top_k, "items": items, "stats": {k: dict(v) for k, v in stats.items()}}
+    os.makedirs(out_dir, exist_ok=True)
+    tmp = os.path.join(out_dir, "manifest.json.tmp")
+    with open(tmp, "w") as f:
+        json.dump(man, f, ensure_ascii=False)
+    os.replace(tmp, os.path.join(out_dir, "manifest.json"))
+    log(f"[prepare] xong {len(items)} màn trong {_fmt(time.time() - t0)} -> {os.path.join(out_dir, 'manifest.json')}")
+    return man
+
+
+# ---------------------------------------------------------------- serve
+
+def split_items(items, user_idx, n_users=len(USERS)):
+    """Phần việc của người thứ `user_idx` (0..n−1): đánh số ảnh (`id`) theo thứ tự xuất hiện, người k nhận ảnh k, k+n, k+2n…
+    (mọi run của một ảnh về cùng một người)."""
+    order = {}
+    for it in items:
+        order.setdefault(it["id"], len(order))
+    return [it for it in items if order[it["id"]] % n_users == user_idx]
+
+
+class Store:
+    """jsonl chỉ GHI NỐI (fsync mỗi lần lưu); đọc lại: dòng sau cùng của mỗi `key` thắng."""
+
+    def __init__(self, path):
+        self.path, self.latest = path, {}
+        if os.path.exists(path):
+            with open(path) as f:
+                for line in f:
+                    if line.strip():
+                        rec = json.loads(line)
+                        self.latest[rec["key"]] = rec
+
+    def put(self, rec):
+        os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+        with open(self.path, "a") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        self.latest[rec["key"]] = rec
+
+
+def clean_box(box, wh, min_side=2.0):
+    """[x1, y1, x2, y2] (số bất kỳ thứ tự) -> kẹp trong ảnh, làm tròn 1 chữ số; cạnh < `min_side` px hoặc sai dạng -> None."""
+    try:
+        x1, y1, x2, y2 = (float(v) for v in box)
+    except (TypeError, ValueError):
+        return None
+    W, H = wh
+    x1, x2 = sorted((min(max(x1, 0), W), min(max(x2, 0), W)))
+    y1, y2 = sorted((min(max(y1, 0), H), min(max(y2, 0), H)))
+    if x2 - x1 < min_side or y2 - y1 < min_side:
+        return None
+    return [round(x1, 1), round(y1, 1), round(x2, 1), round(y2, 1)]
+
+
+class Annotator:
+    """Phiên chấm của một (tập, user): danh sách màn, vị trí, file kết quả. Thao tác gọi trong `lock` (Hub)."""
+
+    def __init__(self, items, path, name, user):
+        if not items:
+            raise ValueError("không có màn nào")
+        self.items, self.name, self.user = items, name, user
+        self.index = {it["key"]: p for p, it in enumerate(items)}
+        self.store = Store(path)
+        self.lock = threading.RLock()
+        self.pos, self.t_show = -1, time.time()
+        self.first_unsaved()
+
+    def cur(self):
+        return self.items[self.pos]
+
+    def go(self, pos):
+        pos = min(max(int(pos), 0), len(self.items) - 1)
+        if pos != self.pos:
+            self.pos, self.t_show = pos, time.time()
+
+    def first_unsaved(self):
+        self.go(next((p for p, it in enumerate(self.items) if it["key"] not in self.store.latest), len(self.items) - 1))
+
+    def n_saved(self):
+        return sum(it["key"] in self.store.latest for it in self.items)
+
+    def save(self, success, box=None, src=None):
+        """Lưu màn hiện tại rồi sang màn sau. Thành công cần box hợp lệ (không: không lưu, trả câu báo)."""
+        it = self.cur()
+        box = clean_box(box, it["wh"]) if success else None
+        if success and box is None:
+            return "Success needs a box: drag on the image, click a suggested box or press 1-9."
+        src = src if box is not None and isinstance(src, str) and re.fullmatch(r"cand\d+|drawn", src) else None
+        rec = {"key": it["key"], "dataset": it["ds"], "model": it["model"], "setting": it["setting"], "task": it["task"],
+               "subset": it["subset"], "image_id": it["id"], "class": it["cls"], "success": bool(success), "box": box,
+               "box_src": src, "wh": it["wh"], "user": self.user, "time": datetime.now().isoformat(timespec="milliseconds"),
+               "sec": round(time.time() - self.t_show, 1)}
+        self.store.put(rec)
+        self.go(self.pos + 1)
+        return ""
+
+    def eta(self):
+        secs = [r["sec"] for r in list(self.store.latest.values())[-200:] if 0 < r.get("sec", 0) <= 300]
+        left = len(self.items) - self.n_saved()
+        return _fmt(statistics.median(secs) * left) if secs and left else "-"
+
+    def header(self, warn=""):
+        n, done = len(self.items), self.n_saved()
+        return (f"**{self.name}** · screen {self.pos + 1} / {n} · saved {done} ({100 * done / n:.1f}%) · ETA {self.eta()}"
+                + (f"\n\n**⚠ {warn}**" if warn else ""))
+
+    def html(self, url, nonce=0):
+        """`nonce`: số lần vẽ — trang luôn khác bản trước ⇒ Gradio luôn vẽ lại (trình duyệt bỏ cờ chờ `busy` kể cả khi màn không đổi)."""
+        it = self.cur()
+        rec = self.store.latest.get(it["key"])
+        W, H = it["wh"]
+        if rec and rec.get("box"):
+            box, src = rec["box"], rec.get("box_src") or "drawn"
+        elif it["cands"]:
+            box, src = it["cands"][0], "cand0"
+        else:
+            box, src = None, ""
+        state = ("not saved" if rec is None else
+                 f'saved: <b class="{"cg_ok" if rec["success"] else "cg_bad"}">{"SUCCESS" if rec["success"] else "FAIL"}</b>')
+        meta = [f"<b>{html.escape(it['model'])}</b> · <b>{it['setting']}</b>", f"id {html.escape(it['id'])}"]
+        if it["subset"]:
+            meta.append(html.escape(it["subset"]))
+        if it["status"] != "processed":
+            meta.append(f'<span class="cg_bad">diff: {html.escape(it["status"])}</span>')
+        meta.append(state)
+        nxt = [p for p in range(max(self.pos - 1, 0), min(self.pos + 1 + PREFETCH, len(self.items))) if p != self.pos]
+        pre = "|".join(url(self.items[p][k]) for p in nxt for k in ("in", "out", "hm") if self.items[p][k])
+        width = f"min(100%, calc(72vh * {W / H:.4f}))"
+
+        def panel(cap, rel, cls):
+            if not rel:
+                return f'<div class="cg_panel {cls}"><div class="cg_cap">{cap}: none</div></div>'
+            return (f'<div class="cg_panel {cls}"><div class="cg_cap">{cap}</div><div class="cg_wrap" style="width: {width}">'
+                    f'<img src="{url(rel)}" draggable="false" alt=""><svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" '
+                    f'xmlns="http://www.w3.org/2000/svg"></svg></div></div>')
+        verb = "ADD" if it["task"] == "add" else "REMOVE"
+        return (f'<div class="cg_root" data-n="{nonce}" data-key="{html.escape(it["key"])}" data-wh="{W},{H}" '
+                f'data-box="{",".join(str(v) for v in box) if box else ""}" data-src="{src}" '
+                f'data-cands="{html.escape(json.dumps(it["cands"]))}" data-pre="{html.escape(pre)}">'
+                f'<div><span class="cg_task cg_{it["task"]}">{verb} one {html.escape(it["cls"] or "?")}</span> '
+                f'<span class="cg_meta">{" · ".join(meta)}</span></div>'
+                f'<div class="cg_meta" id="cg_boxinfo"></div><div class="cg_row">'
+                + panel("INPUT", it["in"], "cg_draw") + panel("OUTPUT", it["out"], "cg_draw") + panel("DIFF HEATMAP", it["hm"], "cg_hm")
+                + "</div></div>")
+
+
+class Hub:
+    """Mọi phiên (tập × user) dựng sẵn từ manifest lúc mở app; trình duyệt gửi kèm Data + User ở mỗi thao tác ⇒ hai người dùng cùng
+    lúc không lẫn trạng thái."""
+
+    def __init__(self, manifest, out_dir, users=USERS):
+        self.cache = manifest["cache"]
+        self.sessions = {}
+        for ds in DATASETS.values():
+            items = [it for it in manifest["items"] if it["ds"] == ds]
+            for k, u in enumerate(users):
+                mine = split_items(items, k, len(users))
+                if mine:
+                    self.sessions[(LABELS[ds], u)] = Annotator(mine, os.path.join(out_dir, f"annot_{ds}_{u}.jsonl"),
+                                                               f"{LABELS[ds]} · {u}", u)
+        self.users = list(users)
+        self.datasets = [LABELS[ds] for ds in DATASETS.values() if any(k[0] == LABELS[ds] for k in self.sessions)]
+        self.renders = itertools.count(1)
+
+    def url(self, rel):
+        return FILE_ROUTE + quote(os.path.join(os.path.abspath(self.cache), rel))
+
+    def act(self, data, user, payload, action, goto=None):
+        """-> (header markdown, html). `payload` (JSON từ trình duyệt): key màn đang hiện + box đang chọn."""
+        a = self.sessions.get((data, user))
+        if a is None:
+            return "**Choose Data and User on the right to start.**", ""
+        try:
+            p = json.loads(payload or "{}")
+        except ValueError:
+            p = {}
+        p = p if isinstance(p, dict) else {}
+        warn = ""
+        with a.lock:
+            if action != "show" and p.get("key") in a.index:
+                a.go(a.index[p["key"]])              # thao tác áp lên ĐÚNG màn đang hiện ở trình duyệt
+            if action == "ok":
+                warn = a.save(True, p.get("box"), p.get("src"))
+            elif action == "fail":
+                warn = a.save(False)
+            elif action == "prev":
+                a.go(a.pos - 1)
+            elif action == "next":
+                a.go(a.pos + 1)
+            elif action == "first":
+                a.first_unsaved()
+            elif action == "goto" and goto:
+                a.go(int(goto) - 1)
+            return a.header(warn), a.html(self.url, next(self.renders))
+
+
+KEYS_JS = """<script>
+window.__cg = window.__cg || {box: null, src: '', key: null, busy: 0, img: new Map()};
+const CG_HIT = 10;
+function cgRoot() { return document.querySelector('.cg_root'); }
+function cgWH() { const r = cgRoot(); return r ? r.dataset.wh.split(',').map(Number) : [1, 1]; }
+function cgCands() { const r = cgRoot(); try { return JSON.parse(r.dataset.cands || '[]'); } catch (e) { return []; } }
+function cgDraw() {
+  const r = cgRoot(); if (!r) return;
+  const C = cgCands(), [W, H] = cgWH(), fs = Math.max(W, H) / 32, b = window.__cg.box;
+  let s = '';
+  C.forEach((c, i) => {
+    s += `<rect class="cg_cand" x="${c[0]}" y="${c[1]}" width="${c[2] - c[0]}" height="${c[3] - c[1]}" vector-effect="non-scaling-stroke"/>`;
+    s += `<text class="cg_lab" x="${c[0]}" y="${Math.max(c[1] - fs * 0.15, fs)}" font-size="${fs}" stroke-width="${fs * 0.08}">${i + 1}</text>`;
+  });
+  if (b) s += `<rect class="cg_cur" x="${b[0]}" y="${b[1]}" width="${b[2] - b[0]}" height="${b[3] - b[1]}" vector-effect="non-scaling-stroke"/>`;
+  r.querySelectorAll('svg').forEach((svg) => { svg.innerHTML = s; });
+  const info = document.getElementById('cg_boxinfo');
+  if (info) info.textContent = b ? `box (${window.__cg.src === 'drawn' ? 'drawn' : 'suggestion ' + (+window.__cg.src.slice(4) + 1)}): `
+      + b.map((v) => Math.round(v)).join(', ') : 'no box (Enter needs one: drag on the image or press 1-9)';
+}
+function cgReset() {
+  const r = cgRoot(); if (!r) return;
+  window.__cg.box = r.dataset.box ? r.dataset.box.split(',').map(Number) : null;
+  window.__cg.src = r.dataset.src || '';
+  cgDraw();
+}
+function cgSetCand(k) { const C = cgCands(); if (k >= 0 && k < C.length) { window.__cg.box = C[k].slice(); window.__cg.src = 'cand' + k; cgDraw(); } }
+window.cgPayload = function () { return JSON.stringify({key: window.__cg.key, box: window.__cg.box, src: window.__cg.src}); };
+function cgPt(e, svg) {
+  const rc = svg.getBoundingClientRect(), vb = svg.viewBox.baseVal;
+  return [(e.clientX - rc.left) * vb.width / rc.width, (e.clientY - rc.top) * vb.height / rc.height, rc.width / vb.width];
+}
+function cgPick(px, py, sc) {               // box gợi ý có viền gần nhất (<= CG_HIT px màn hình), không thì box nhỏ nhất chứa điểm
+  let best = -1, bd = Infinity, inner = -1, ia = Infinity;
+  cgCands().forEach((c, i) => {
+    const [x1, y1, x2, y2] = c, a = (x2 - x1) * (y2 - y1);
+    const dx = Math.max(x1 - px, 0, px - x2) * sc, dy = Math.max(y1 - py, 0, py - y2) * sc;
+    const d = (dx || dy) ? Math.hypot(dx, dy) : Math.min(px - x1, x2 - px, py - y1, y2 - py) * sc;
+    if (d < bd) { bd = d; best = i; }
+    if (!dx && !dy && a < ia) { ia = a; inner = i; }
+  });
+  return bd <= CG_HIT ? best : inner;
+}
+let cgDrag = null;
+document.addEventListener('mousedown', (e) => {
+  const w = e.button === 0 && e.target.closest && e.target.closest('.cg_draw .cg_wrap');
+  if (!w) return;
+  const svg = w.querySelector('svg'), [x, y, sc] = cgPt(e, svg);
+  cgDrag = {svg, x0: x, y0: y, sc, cx: e.clientX, cy: e.clientY, moved: false, prev: [window.__cg.box, window.__cg.src]};
+  e.preventDefault();
+});
+document.addEventListener('mousemove', (e) => {
+  if (!cgDrag) return;
+  if (!cgDrag.moved && Math.hypot(e.clientX - cgDrag.cx, e.clientY - cgDrag.cy) < 4) return;
+  cgDrag.moved = true;
+  const [W, H] = cgWH(), [x, y] = cgPt(e, cgDrag.svg), cx = Math.min(Math.max(x, 0), W), cy = Math.min(Math.max(y, 0), H);
+  window.__cg.box = [Math.min(cgDrag.x0, cx), Math.min(cgDrag.y0, cy), Math.max(cgDrag.x0, cx), Math.max(cgDrag.y0, cy)];
+  window.__cg.src = 'drawn';
+  cgDraw();
+});
+document.addEventListener('mouseup', () => {
+  if (!cgDrag) return;
+  const d = cgDrag; cgDrag = null;
+  if (!d.moved) { cgSetCand(cgPick(d.x0, d.y0, d.sc)); return; }
+  const b = window.__cg.box;
+  if (!b || b[2] - b[0] < 2 || b[3] - b[1] < 2) { [window.__cg.box, window.__cg.src] = d.prev; }
+  else window.__cg.box = b.map((v) => Math.round(v));
+  cgDraw();
+});
+function cgPrefetch(r) {
+  (r.dataset.pre || '').split('|').filter(Boolean).forEach((u) => {
+    const m = window.__cg.img;
+    if (m.has(u)) { const im = m.get(u); m.delete(u); m.set(u, im); return; }
+    const im = new Image(); im.src = u; if (im.decode) im.decode().catch(() => {});
+    m.set(u, im);
+    while (m.size > 80) m.delete(m.keys().next().value);
+  });
+}
+document.addEventListener('keydown', (e) => {
+  const t = e.target;
+  if (t && (t.tagName === 'TEXTAREA' || (t.tagName === 'INPUT' && t.type !== 'checkbox' && t.type !== 'radio'))) return;
+  if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
+  const id = ({Enter: 'cg_ok', f: 'cg_fail', F: 'cg_fail', ArrowLeft: 'cg_prev', ArrowRight: 'cg_next'})[e.key];
+  if (id) {
+    e.preventDefault();
+    if (window.__cg.busy && Date.now() - window.__cg.busy < 2000) return;      // chờ màn mới (giữ phím / bấm dồn không nhảy màn)
+    const el = document.getElementById(id);
+    if (el) { window.__cg.busy = Date.now(); el.click(); }
+    return;
+  }
+  if (/^[1-9]$/.test(e.key)) { e.preventDefault(); cgSetCand(+e.key - 1); }
+  else if (e.key === 'r') cgReset();
+  else if (e.key === 'x') { window.__cg.box = null; window.__cg.src = ''; cgDraw(); }
+  else if (e.key === 'h') document.body.classList.toggle('cg_nohm');
+});
+new MutationObserver(() => {
+  const r = cgRoot();
+  if (!r || r.dataset.seen) return;
+  r.dataset.seen = '1';
+  window.__cg.busy = 0;
+  if (r.dataset.key !== window.__cg.key) { window.__cg.key = r.dataset.key; cgReset(); } else cgDraw();
+  cgPrefetch(r);
+}).observe(document.documentElement, {childList: true, subtree: true});
+</script>"""
+
+CSS = (".cg_hidden {display: none !important;} "
+       ".cg_task {font-size: 1.2em; font-weight: 700; padding: 3px 10px; border-radius: 6px; color: #fff; display: inline-block;} "
+       ".cg_add {background: #1b7f3b;} .cg_remove {background: #b3261e;} .cg_ok {color: #1b7f3b;} .cg_bad {color: #b3261e;} "
+       ".cg_meta {margin: 4px 0 4px 6px;} #cg_boxinfo {margin: 4px 0; font-family: monospace;} "
+       ".cg_row {display: flex; gap: 8px; align-items: flex-start;} .cg_panel {flex: 1 1 0; min-width: 0;} "
+       ".cg_cap {font-size: 0.8em; opacity: 0.7; margin-bottom: 2px;} "
+       ".cg_wrap {position: relative; line-height: 0; user-select: none;} "
+       ".cg_wrap img {display: block; width: 100%; height: auto; -webkit-user-drag: none;} "
+       ".cg_wrap svg {position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible;} "
+       ".cg_draw .cg_wrap {cursor: crosshair;} body.cg_nohm .cg_hm {display: none;} "
+       ".cg_cand {fill: none; stroke: #ff3b30; stroke-width: 1.5; stroke-dasharray: 5 3;} "
+       ".cg_cur {fill: rgba(255, 230, 0, 0.10); stroke: #ffe600; stroke-width: 3;} "
+       ".cg_lab {fill: #ff3b30; font-weight: 700; font-family: sans-serif; paint-order: stroke; stroke: #000;}")
+
+HELP = ("**Enter** success (saves the yellow box) · **f** fail · **drag** draw box · **click / 1-9** pick a suggestion · "
+        "**r** reset box · **x** no box · **h** heatmap · **← →** prev / next (re-saving overwrites)")
+
+
+def build_ui(hub, gr):
+    import inspect
+    kw = {"title": "CE-Gen review", "css": CSS, "head": KEYS_JS}
+    bparams = inspect.signature(gr.Blocks.__init__).parameters
+    launch_kw = {k: v for k, v in kw.items() if k not in bparams and k != "title"}       # gradio >= 6: css / head ở launch
+    hidden = {"elem_classes": "cg_hidden"}
+    with gr.Blocks(**{k: v for k, v in kw.items() if k in bparams}) as demo:
+        head = gr.Markdown()
+        with gr.Row():
+            with gr.Column(scale=6):
+                img = gr.HTML()
+            with gr.Column(scale=1, min_width=230):
+                data = gr.Radio(hub.datasets, value=None, label="Data")
+                user = gr.Radio(hub.users, value=None, label="User")
+                ok = gr.Button("Success (Enter)", variant="primary", elem_id="cg_ok")
+                fail = gr.Button("Fail (f)", variant="stop", elem_id="cg_fail")
+                with gr.Row():
+                    prev = gr.Button("← prev", elem_id="cg_prev", min_width=60)
+                    nxt = gr.Button("next →", elem_id="cg_next", min_width=60)
+                first = gr.Button("Go to first unsaved", size="sm")
+                with gr.Row():
+                    num = gr.Number(value=None, label="Go to #", precision=0, minimum=1, min_width=80)
+                    go = gr.Button("Go", size="sm", min_width=40)
+                gr.Markdown(HELP)
+                payload = gr.Textbox(**hidden)
+        outs = [head, img]
+        q = {"queue": False, "show_progress": "hidden"}
+        js = "(d, u, p) => [d, u, window.cgPayload ? window.cgPayload() : '']"
+        def mk(action):
+            return lambda d, u, p: hub.act(d, u, p, action)
+        for b, action in ((ok, "ok"), (fail, "fail"), (prev, "prev"), (nxt, "next"), (first, "first")):
+            b.click(mk(action), [data, user, payload], outs, js=js, **q)
+        go.click(lambda d, u, n: hub.act(d, u, "", "goto", n), [data, user, num], outs, **q)
+        for r in (data, user):
+            r.input(lambda d, u: hub.act(d, u, "", "show"), [data, user], outs, **q)
+        demo.load(lambda: hub.act(None, None, "", "show"), None, outs, **q)
+    return demo, launch_kw
+
+
+def serve(out_dir, host="0.0.0.0", port=7860, share=False):
+    import gradio as gr
+    path = os.path.join(out_dir, "manifest.json")
+    if not os.path.exists(path):
+        sys.exit(f"thiếu {path} — chạy `cegen.py prepare` trước")
+    t0 = time.time()
+    with open(path) as f:
+        man = json.load(f)
+    hub = Hub(man, out_dir)
+    for (d, u), a in hub.sessions.items():
+        print(f"[{d} · {u}] {len(a.items)} màn, đã chấm {a.n_saved()} -> {a.store.path}", flush=True)
+    print(f"[serve] manifest {len(man['items'])} màn ({man['time']}), dựng phiên {time.time() - t0:.1f}s", flush=True)
+    demo, launch_kw = build_ui(hub, gr)
+    demo.launch(server_name=host, server_port=port, share=share, allowed_paths=[man["cache"]], **launch_kw)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("prepare", help="dựng cache JPEG + manifest.json")
+    p.add_argument("--src", default=SRC, help="thư mục chứa FSC_final/ và processed_dataset/")
+    p.add_argument("--out-dir", default=OUT_DIR)
+    p.add_argument("--turn-index", default=os.path.join(OD, "data", "turn_index.json"))
+    p.add_argument("--cocount-root", default=os.path.join(OD, "data", "cocount"))
+    p.add_argument("--workers", type=int, default=8)
+    p.add_argument("--top-k", type=int, default=5, help="số box gợi ý mỗi màn (theo điểm của records.jsonl)")
+    p.add_argument("--force", action="store_true", help="làm lại cả ảnh cache đã có")
+    p.add_argument("--allow-missing-v2", action="store_true", help="vẫn dựng khi thiếu results_diff_boxes_v2 (màn đó không có gợi ý)")
+    p.add_argument("--expect-runs", type=int, default=12, help="số run mỗi tập (0 = không kiểm)")
+    s = sub.add_parser("serve", help="mở app Gradio")
+    s.add_argument("--out-dir", default=OUT_DIR)
+    s.add_argument("--host", default="0.0.0.0")
+    s.add_argument("--port", type=int, default=7860)
+    s.add_argument("--share", action="store_true", help="tạo link công khai *.gradio.live (hết hạn sau 72 giờ)")
+    a = ap.parse_args()
+    if a.cmd == "prepare":
+        prepare(a.src, a.out_dir, a.turn_index, a.cocount_root, a.workers, a.top_k, a.force, a.allow_missing_v2, a.expect_runs,
+                log=lambda m: print(m, flush=True))
+    else:
+        serve(a.out_dir, a.host, a.port, a.share)
+
+
+if __name__ == "__main__":
+    main()

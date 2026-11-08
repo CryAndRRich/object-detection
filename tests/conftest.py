@@ -14,7 +14,7 @@ if ROOT not in sys.path:
 
 SLOW = {"test_flow_val_select_resume_eval", "test_flow_train_loss_select_resume", "test_ddp_two_processes",
         "test_flow_positive_all_pair_resume", "test_latency_celoc_flow",
-        "test_build_ui", "test_build_ui_pred_hub", "test_plot_snapshot_compare_tool"}              # tool cục bộ (Gradio, hình) — hỏng thì lộ ngay lúc dùng
+        "test_build_ui", "test_build_ui_pred_hub", "test_cegen_build_ui", "test_plot_snapshot_compare_tool"}              # tool cục bộ (Gradio, hình) — hỏng thì lộ ngay lúc dùng
 
 
 def pytest_addoption(parser):

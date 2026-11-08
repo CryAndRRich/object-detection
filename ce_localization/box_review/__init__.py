@@ -2,4 +2,5 @@
 
   sources.py   nguồn dữ liệu -> danh sách màn (CE-CoCount theo frame; CE-130 theo nhánh: box vật + box lỗ)
   app.py       phiên rà (lưu jsonl, nháp, hoàn tác) + giao diện Gradio + dòng lệnh
+  cegen.py     chấm kết quả CE-Gen (thành công / thất bại + box vật thêm / xoá; server 2, link share): `prepare` cache + `serve`
 """
