@@ -149,3 +149,96 @@ def test_hold_zero_is_noop(monkeypatch):
     monkeypatch.setitem(sys.modules, "torch", None)       # không được import torch khi G = 0
     monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
     assert _hold_mod().hold(0) == 0.0
+
+
+# ============================================================================
+# --grab-margin-gib (người dùng 2026-11-08: GPU bị job khác chiếm -> gom dần, chừa lề cho người khác)
+# ============================================================================
+
+def _grab_torch(frees):
+    """torch giả: lần đọc thứ i thấy `frees[i]` GiB trống (trước khi trừ phần đã giữ)."""
+    t = types.ModuleType("torch")
+    t.uint8 = "u8"
+    oom_t = type("OutOfMemoryError", (RuntimeError,), {})
+    st = {"live": 0, "cached": 0, "reads": 0, "emptied": 0, "allocs": []}
+
+    def mem_get_info():
+        i = min(st["reads"], len(frees) - 1)
+        st["reads"] += 1
+        return (frees[i] * 2 ** 30 - st["live"] - st["cached"], 48 * 2 ** 30)
+
+    class Block:
+        def __init__(self, n):
+            self.n = n
+            st["live"] += n
+
+        def __del__(self):
+            st["live"] -= self.n
+            st["cached"] += self.n
+
+    def empty(n, dtype=None, device=None):
+        st["allocs"].append(n / 2 ** 30)
+        return Block(n)
+
+    def empty_cache():
+        st["emptied"] += 1
+        st["cached"] = 0
+
+    t.empty = empty
+    t.cuda = types.SimpleNamespace(is_available=lambda: True, memory_reserved=lambda: st["cached"] + st["live"],
+                                   empty_cache=empty_cache, mem_get_info=mem_get_info, OutOfMemoryError=oom_t)
+    return t, st
+
+
+def test_grab_waits_and_keeps_margin(monkeypatch):
+    """Trống 23,5 -> 23,5 -> 34 -> 48: gom 20 rồi thêm khi job khác nhả, luôn chừa 3,5 GiB; đủ 40 thì giữ trong cache."""
+    t, st = _grab_torch([23.5, 23.5, 34.0, 48.0])
+    monkeypatch.setitem(sys.modules, "torch", t)
+    sleeps = []
+    got = _hold_mod().grab(40, 3.5, poll=10, log=lambda *a, **k: None, sleep=sleeps.append, clock=lambda: 0.0)
+    assert st["allocs"] == [20.0, 10.5, 9.5] and got == 40
+    assert len(sleeps) == 3                                # đọc 4 lần, ngủ giữa các lần
+    assert st["live"] == 0 and st["cached"] == 40 * 2 ** 30  # nhả vào cache, không về driver
+    t.cuda.empty_cache()
+    assert st["cached"] == 40 * 2 ** 30 and st["emptied"] == 0
+
+
+def test_grab_release_returns_memory(monkeypatch):
+    t, st = _grab_torch([48.0])
+    monkeypatch.setitem(sys.modules, "torch", t)
+    got = _hold_mod().grab(35, 3.5, release=True, log=lambda *a, **k: None, sleep=lambda s: None, clock=lambda: 0.0)
+    assert got == 0.0 and st["allocs"] == [35.0] and st["emptied"] == 1 and st["cached"] == 0
+
+
+def test_grab_skips_tiny_and_survives_race(monkeypatch):
+    """Trống chỉ hơn lề 0,1 GiB -> không xin mẩu vụn; OOM giữa lúc đọc và lúc xin -> đọc lại, không thoát."""
+    t, st = _grab_torch([3.6, 20.0, 20.0])
+    calls = {"n": 0}
+    real = t.empty
+
+    def flaky(n, dtype=None, device=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise t.cuda.OutOfMemoryError("race")
+        return real(n, dtype, device)
+
+    t.empty = flaky
+    monkeypatch.setitem(sys.modules, "torch", t)
+    got = _hold_mod().grab(10, 3.5, log=lambda *a, **k: None, sleep=lambda s: None, clock=lambda: 0.0)
+    assert got == 10 and st["allocs"] == [10.0] and calls["n"] == 2
+
+
+def test_build_cmd_grab_flags():
+    m = _load()
+    cmd = m.build_cmd(["finetune.py", "--x"], 40, 3.5)
+    assert cmd[2:] == ["--grab", "3.5", "40", "finetune.py", "--x"]
+    cmd = m.build_cmd(["run.py"], 35, 3.5, release=True)
+    assert cmd[2:] == ["--grab", "3.5", "--release", "35", "run.py"]
+
+
+def test_gpu_hold_release_runs_child(tmp_path):
+    """--release: script chạy ở tiến trình con như `python script.py`, mã thoát giữ nguyên (G = 0 -> không chạm torch)."""
+    (tmp_path / "s.py").write_text("import sys\nsys.exit(5 if sys.argv[1:] == ['a'] else 9)\n")
+    r = subprocess.run([sys.executable, os.path.join(_HERE, "tools", "gpu_hold.py"), "--grab", "3", "--release", "0",
+                        str(tmp_path / "s.py"), "a"], cwd=str(_HERE), capture_output=True, text=True)
+    assert r.returncode == 5, r.stderr

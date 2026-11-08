@@ -21,6 +21,9 @@ Ba quy tắc, mỗi quy tắc từng gây sự cố thật:
 `--reserve-gib G` (người dùng 2026-11-08): job GIỮ TRƯỚC G GiB ngay lúc khởi động và giữ
 tới hết (`tools/gpu_hold.py`) — không ai chen vào lúc bộ nhớ dùng tạm giảm. G = đỉnh đo
 được + một khoảng nhỏ. Không dùng cho job vLLM (tự giữ `gpu_mem_gib`).
+`--grab-margin-gib M` (người dùng 2026-11-08): GPU chưa đủ G thì GOM DẦN (giữ phần đang trống
+trừ M GiB, xin thêm khi job khác nhả) tới đủ G rồi mới chạy; job vLLM thêm `--release` (gom đủ
+rồi nhả cho vLLM tự giữ).
 """
 
 import argparse
@@ -54,11 +57,12 @@ def pick_gpu(gpus):
     return max(gpus, key=lambda g: g[1])
 
 
-def build_cmd(target, reserve_gib=0.0):
-    """script + tham số -> lệnh con; giữ trước bộ nhớ thì chạy qua `gpu_hold.py` (cùng tiến trình)."""
+def build_cmd(target, reserve_gib=0.0, grab_margin=None, release=False):
+    """script + tham số -> lệnh con; giữ trước bộ nhớ thì chạy qua `gpu_hold.py` (cùng tiến trình; `grab_margin` = gom dần)."""
     if reserve_gib and reserve_gib > 0:
         hold = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gpu_hold.py")
-        return [sys.executable, hold, f"{reserve_gib:g}"] + list(target)
+        opt = ["--grab", f"{grab_margin:g}"] + (["--release"] if release else []) if grab_margin is not None else []
+        return [sys.executable, hold] + opt + [f"{reserve_gib:g}"] + list(target)
     return [sys.executable] + list(target)
 
 
@@ -95,6 +99,10 @@ def main():
     ap.add_argument("--retry-wait", type=int, default=60, help="giây chờ trước mỗi lần thử")
     ap.add_argument("--reserve-gib", type=float, default=0.0,
                     help="giữ trước G GiB cho cả job (đỉnh đo được + khoảng nhỏ); 0 = không giữ")
+    ap.add_argument("--grab-margin-gib", type=float, default=None,
+                    help="cùng --reserve-gib: GOM DẦN tới G (chờ job khác nhả), luôn chừa M GiB trống cho người khác")
+    ap.add_argument("--release", action="store_true",
+                    help="cùng --grab-margin-gib: gom đủ G rồi nhả hết trước khi chạy (job vLLM tự giữ bộ nhớ)")
     ap.add_argument("target", nargs=argparse.REMAINDER,
                     help="script + tham số của nó, đặt sau --")
     a = ap.parse_args()
@@ -102,7 +110,11 @@ def main():
     target = a.target[1:] if a.target and a.target[0] == "--" else a.target
     if not target:
         ap.error("chưa có script — đặt sau --, vd: -- train.py --save-dir ../weights/detection/x")
-    cmd = build_cmd(target, a.reserve_gib)
+    if (a.grab_margin_gib is not None or a.release) and not a.reserve_gib:
+        ap.error("--grab-margin-gib / --release cần --reserve-gib G")
+    if a.release and a.grab_margin_gib is None:
+        ap.error("--release chỉ đi với --grab-margin-gib")
+    cmd = build_cmd(target, a.reserve_gib, a.grab_margin_gib, a.release)
 
     for attempt in range(1, a.retries + 2):
         rc = run_once(cmd, a.gpu)
