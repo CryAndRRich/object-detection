@@ -303,6 +303,42 @@ def test_keeper_need_ready_then_takes_rest(monkeypatch, tmp_path):
     th.join(5)
 
 
+def test_keeper_partial_release_keeps_rest(monkeypatch, tmp_path):
+    """Bước GPU xin 26 / 32 GiB (want = "PID 26", như vLLM): người giữ chỉ nhả 26, GIỮ LẠI 6 suốt bước; bước xong gom lại đủ 32."""
+    import threading
+    import time as _t
+    t, st = _grab_torch([48.0])
+    monkeypatch.setitem(sys.modules, "torch", t)
+    d = str(tmp_path / "k")
+    th = threading.Thread(target=_hold_mod().keeper, args=(d, 32, 1), kwargs=dict(poll=0.01, log=lambda *a, **k: None), daemon=True)
+    th.start()
+    p = lambda n: os.path.join(d, n)
+
+    def until(c, sec=5):
+        end = _t.time() + sec
+        while not c():
+            assert _t.time() < end, f"quá giờ: giữ {st['live'] / 2 ** 30}"
+            _t.sleep(0.01)
+    until(lambda: os.path.exists(p("ready")) and st["live"] == 32 * 2 ** 30)
+    open(p("want"), "w").write("123 26")
+    until(lambda: os.path.exists(p("freed")))
+    assert st["live"] == 6 * 2 ** 30 and st["cached"] == 0 and not os.path.exists(p("ready"))
+    os.remove(p("want"))
+    until(lambda: os.path.exists(p("ready")))
+    assert st["live"] == 32 * 2 ** 30
+    open(p("stop"), "w").close()
+    th.join(5)
+    assert not th.is_alive() and st["live"] == 0
+
+
+def test_take_over_writes_ask(tmp_path):
+    mod = _hold_mod()
+    (tmp_path / "keeper.pid").write_text("999999999")      # người giữ không sống -> không chờ
+    mod._take_over(str(tmp_path), 1.0, lambda *a, **k: None, lambda _: None, ask=28.3)
+    assert (tmp_path / "want").read_text() == f"{os.getpid()} 28.3"
+    assert mod._asked(str(tmp_path / "want")) == (str(os.getpid()), 28.3)
+
+
 def test_take_over_waits_for_keeper_then_cleans_want(tmp_path):
     """Bước GPU: tạo want, chờ freed; người giữ chỗ không còn sống -> không chờ mãi."""
     mod = _hold_mod()

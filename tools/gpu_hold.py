@@ -21,6 +21,8 @@ nằm ở pool riêng, ngoài khối giữ).
 `--keeper DIR` (người dùng 2026-11-08: giữ chỗ suốt CẢ chuỗi pilot, kể cả lúc merge / chấm chạy CPU): tiến trình riêng gom tới G,
 ghi `DIR/ready` khi đủ (xoá lúc nhả — chuỗi chờ `ready` trước MỖI bước GPU); bước GPU (`--handoff DIR`) khởi tạo CUDA xong thì tạo `DIR/want` -> người giữ nhả, ghi `DIR/freed` -> bước gom
 (khe hở ~1 s); bước thoát (xoá `want`) -> người giữ gom lại. Bước bị `kill -9` không xoá được `want` -> xoá tay.
+`want` = "PID GiB": người giữ chỉ nhả phần bước cần (GiB), GIỮ LẠI phần dư suốt bước (người dùng 2026-11-09: bước vLLM chỉ cần
+~20 / 32 GiB, nhả hết thì người khác chen vào phần dư); `want` chỉ có PID -> nhả hết.
 KHÔNG dùng chế độ thường cho vLLM: nó sinh tiến trình con (spawn) nên cache của tiến trình này vô ích.
 `PYTORCH_CUDA_ALLOC_CONF` phải đặt TRƯỚC lần chạm CUDA đầu tiên ⇒ đặt mặc định `expandable_segments:True` như train / eval / finetune.
 """
@@ -105,17 +107,27 @@ def _wait(cond, poll, sleep):
         sleep(poll)
 
 
-def _take_over(handoff, poll, log, sleep):
-    """Bước GPU trong chuỗi có người giữ chỗ (`keeper`): xin người giữ nhả, chờ nhả xong; lúc thoát thì trả lại lượt."""
+def _take_over(handoff, poll, log, sleep, ask=None):
+    """Bước GPU trong chuỗi có người giữ chỗ (`keeper`): xin người giữ nhả `ask` GiB (None = hết), chờ nhả xong; lúc thoát thì trả
+    lại lượt."""
     import atexit
     want, freed, pid = (os.path.join(handoff, f) for f in ("want", "freed", "keeper.pid"))
-    open(want, "w").write(str(os.getpid()))
+    open(want, "w").write(f"{os.getpid()}" + ("" if ask is None else f" {ask:g}"))
     atexit.register(lambda: os.path.exists(want) and os.remove(want))
     alive = lambda: os.path.exists(pid) and _pid_alive(int(open(pid).read() or 0))
-    log(f"[gom GPU] xin người giữ chỗ ({handoff}) nhả", flush=True)
+    log(f"[gom GPU] xin người giữ chỗ ({handoff}) nhả {'hết' if ask is None else f'{ask:g} GiB'}", flush=True)
     _wait(lambda: os.path.exists(freed) or not alive(), poll, sleep)
     log("[gom GPU] người giữ chỗ đã nhả" if os.path.exists(freed) else "[gom GPU] không có người giữ chỗ -> gom như thường",
         flush=True)
+
+
+def _asked(path):
+    """Nội dung `want` -> (PID, GiB bước cần | None = nhả hết)."""
+    try:
+        parts = open(path).read().split()
+    except OSError:
+        return "?", None
+    return (parts[0] if parts else "?"), (float(parts[1]) if len(parts) > 1 else None)
 
 
 def _pid_alive(pid):
@@ -135,7 +147,8 @@ def grab(gib, margin, poll=10.0, release=False, log=print, sleep=time.sleep, clo
     log(f"[gom GPU] cần {gib:g} GiB, chừa {margin:g} GiB cho người khác, đọc lại mỗi {poll:g} s", flush=True)
     if handoff:
         torch.cuda.mem_get_info()                  # khởi tạo CUDA trước (vài giây) rồi mới xin nhả
-        _take_over(handoff, min(poll, 1.0), log, sleep)
+        # xin đủ gom `gib` (chừa `margin`) + khoảng cho CUDA context: vLLM (`release`) còn tiến trình chính + EngineCore, mỗi cái ~0,5
+        _take_over(handoff, min(poll, 1.0), log, sleep, ask=gib + margin + (2.0 if release else 0.5))
         poll = min(poll, 1.0)
     t0 = clock()
     blocks, held = _gather(torch, gib, margin, poll, log, sleep, clock, heartbeat)
@@ -170,8 +183,11 @@ def keeper(d, gib, margin, poll=10.0, log=print, sleep=time.sleep, clock=time.ti
     log(f"[giữ chỗ] {d}: gom tới {gib:g} GiB (ready khi đủ {need:g}), chừa {margin:g} GiB", flush=True)
     m, p = margin, poll
     busy = lambda: stop() or want()
+    kept, kheld = [], 0.0                          # phần giữ lại trong lúc bước GPU chạy
     while not stop():
-        blocks, held = _gather(torch, need, m, p, log, sleep, clock, heartbeat, stop=busy, tag="giữ chỗ")
+        blocks, held = (_gather(torch, need - kheld, m, p, log, sleep, clock, heartbeat, stop=busy, tag="giữ chỗ")
+                        if need > kheld else ([], 0.0))
+        blocks, held, kept = kept + blocks, kheld + held, []
         if held >= need and not os.path.exists(f("ready")):
             open(f("ready"), "w").close()
             log(f"[giữ chỗ] đủ {held:.1f} GiB -> ready", flush=True)
@@ -181,18 +197,28 @@ def keeper(d, gib, margin, poll=10.0, log=print, sleep=time.sleep, clock=time.ti
             held += extra
             del more                               # chỉ `blocks` giữ khối ⇒ `del blocks` nhả hết
         _wait(lambda: stop() or want(), min(poll, 1.0), sleep)
+        pid, ask = _asked(f("want"))
         del blocks
         real_empty()
         if os.path.exists(f("ready")):
             os.remove(f("ready"))
         if stop():
             break
+        kheld = 0.0 if ask is None else held - ask
+        if kheld >= STEP:                          # giữ lại phần dư (cấp lại ngay sau khi nhả: khe hở vài µs)
+            try:
+                kept = [torch.empty(int(kheld * GIB), dtype=torch.uint8, device="cuda")]
+            except torch.cuda.OutOfMemoryError:
+                kept, kheld = [], 0.0
+        else:
+            kheld = 0.0
         open(f("freed"), "w").close()
-        log(f"[giữ chỗ] nhả {held:.1f} GiB cho bước GPU (PID {open(f('want')).read() if want() else '?'})", flush=True)
+        log(f"[giữ chỗ] nhả {held - kheld:.1f} GiB cho bước GPU (PID {pid}), giữ lại {kheld:.1f}", flush=True)
         _wait(lambda: stop() or not want(), min(poll, 1.0), sleep)
         os.remove(f("freed"))
         m, p = min(margin, reclaim_margin), min(poll, 1.0)
         log(f"[giữ chỗ] bước GPU xong -> gom lại (chừa {m:g} GiB, đọc mỗi {p:g} s)", flush=True)
+    del kept
     for n in ("ready", "freed", "keeper.pid"):
         if os.path.exists(f(n)):
             os.remove(f(n))

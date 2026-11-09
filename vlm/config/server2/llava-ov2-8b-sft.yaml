@@ -12,7 +12,7 @@ sampling: {temperature: 0.0}
 samples: {n: 29, temperature: 1.0, top_p: 0.99}
 chunk: 32
 vllm:                            # đo pilot 2026-11-09: KV dùng ~21 % của 14 GiB ở 256 chuỗi song song ⇒ 6 GiB dư; cần ≈ weight + KV + ~3
-  gpu_mem_gib: 26.0
+  gpu_mem_gib: 24.0               # pilot: 29,0 GiB ở KV 14 ⇒ ~21 ở KV 6 (+3 dư)
   kv_cache_gib: 6.0
 engine:
   dtype: bfloat16                # server 2 (Blackwell) — model học bf16
