@@ -11,9 +11,9 @@ max_tokens: 256
 sampling: {temperature: 0.0}
 samples: {n: 29, temperature: 1.0, top_p: 0.99}
 chunk: 32
-vllm:
-  gpu_mem_gib: 34.0
-  kv_cache_gib: 14.0
+vllm:                            # đo pilot 2026-11-09: KV dùng ~21 % của 14 GiB ở 256 chuỗi song song ⇒ 6 GiB dư; cần ≈ weight + KV + ~3
+  gpu_mem_gib: 26.0
+  kv_cache_gib: 6.0
 engine:
   max_model_len: 8192            # system + user ~0,8k + ảnh <= 5 tile × 256 + câu trả lời
   max_num_seqs: 256

@@ -22,7 +22,7 @@ from ce_localization.utils.config import load_config
 from tests.baseline.helpers import fake_ce130
 from tests.fakes import fake_cocount_review
 from vlm import finetune as ft
-from vlm.adapters import (IMG_CONTEXT, InternVLAdapter, InternVLProcessor, LlavaOV2Adapter, QwenAdapter, hf_messages, internvl_grid,
+from vlm.adapters import (IMG_CONTEXT, remote_v5_compat, InternVLAdapter, InternVLProcessor, LlavaOV2Adapter, QwenAdapter, hf_messages, internvl_grid,
                           internvl_tiles)
 from vlm.backends import result
 from vlm.lora import LoRALinear, add_lora, lora_parameters, merge_lora
@@ -567,3 +567,14 @@ def test_copy_aux_files(tmp_path):
     (out / "config.json").write_text("mới")
     assert ft.copy_aux_files(str(src), str(out)) == ["a.py", "tokenizer.json"]
     assert (out / "config.json").read_text() == "mới"                               # file save_pretrained vừa ghi không bị đè
+
+
+def test_remote_v5_compat_sets_tied_keys_once():
+    """InternVL code remote thiếu `all_tied_weights_keys` (không gọi post_init) -> đặt {} ở class; class đã có thì giữ nguyên."""
+    class M(nn.Module):
+        pass
+
+    m = remote_v5_compat(M)()
+    assert m.all_tied_weights_keys == {}
+    M.all_tied_weights_keys = {"a": "b"}
+    assert remote_v5_compat(M).all_tied_weights_keys == {"a": "b"}

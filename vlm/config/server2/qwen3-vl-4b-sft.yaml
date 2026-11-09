@@ -13,6 +13,9 @@ max_tokens: 256                # 1 candidate ~40 token
 sampling: {temperature: 0.0}   # câu greedy
 samples: {n: 29, temperature: 1.0, top_p: 0.99}
 chunk: 32                      # ảnh / khối = 32 × 30 chuỗi
+vllm:                            # đo pilot 2026-11-09: KV dùng ~21 % của 14 GiB ở 256 chuỗi song song ⇒ 6 GiB dư; cần ≈ weight + KV + ~3
+  gpu_mem_gib: 19.0
+  kv_cache_gib: 6.0
 engine:
   dtype: bfloat16              # server 2 (Blackwell) — model học bf16
   max_model_len: 8192          # system + user ~0,8k + ảnh <= ~1k token + câu trả lời

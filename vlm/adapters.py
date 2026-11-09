@@ -201,6 +201,15 @@ def _repo_file(name, fname):
     return hf_hub_download(name, fname)
 
 
+def remote_v5_compat(cls):
+    """Code remote InternVL (`InternVLChatModel`) không gọi `post_init()` trong `__init__` ⇒ transformers 5 thiếu
+    `all_tied_weights_keys` lúc `from_pretrained` (ZETA8.2 2026-11-09). Model không buộc trọng số nào (lm_head của Qwen3-8B riêng,
+    có trong checkpoint) ⇒ đặt rỗng ở mức class; instance nào tự có (post_init chuẩn) thì vẫn dùng của nó."""
+    if "all_tied_weights_keys" not in vars(cls):
+        cls.all_tied_weights_keys = {}
+    return cls
+
+
 class InternVLProcessor:
     """'Processor' tối thiểu cho InternVL (repo không có processor chia tile): tokenizer + biến ảnh (tile -> resize 448 bicubic ->
     tensor -> chuẩn hoá ImageNet, như `build_transform` của README / vLLM)."""
@@ -237,12 +246,19 @@ class InternVLAdapter:
         self.tok_per_tile = 256
 
     def load(self, dev, attn="sdpa"):
-        from transformers import AutoModel, AutoTokenizer
+        from transformers import AutoTokenizer
         tok = AutoTokenizer.from_pretrained(self.cfg["model"], trust_remote_code=True, use_fast=False)
         if not getattr(tok, "chat_template", None):                                # repo để template ở chat_template.jinja
             tok.chat_template = open(_repo_file(self.cfg["model"], "chat_template.jinja")).read()
-        model = AutoModel.from_pretrained(self.cfg["model"], trust_remote_code=True, torch_dtype=torch.bfloat16, use_flash_attn=False,
-                                          low_cpu_mem_usage=True)
+        from transformers import AutoConfig
+        from transformers.dynamic_module_utils import get_class_from_dynamic_module
+        conf = AutoConfig.from_pretrained(self.cfg["model"], trust_remote_code=True)
+        cls = remote_v5_compat(get_class_from_dynamic_module(conf.auto_map["AutoModel"], self.cfg["model"]))
+        model = cls.from_pretrained(self.cfg["model"], config=conf, torch_dtype=torch.bfloat16, use_flash_attn=False, low_cpu_mem_usage=True)
+        try:                                       # code remote ép LLM về 'eager' khi không có flash-attn -> đổi lại sdpa (cùng phép tính, nhanh hơn)
+            model.language_model.set_attn_implementation(attn)
+        except Exception as e:                     # noqa: BLE001 — bản transformers không hỗ trợ thì giữ eager
+            print(f"[internvl] giữ attention {model.language_model.config._attn_implementation} ({type(e).__name__}: {e})", flush=True)
         model.img_context_token_id = tok.convert_tokens_to_ids(IMG_CONTEXT)         # forward của model không tự đặt
         self.tok_per_tile = int(model.num_image_token)
         return model.to(dev), InternVLProcessor(tok, self.max_num)
