@@ -278,6 +278,31 @@ def test_keeper_hands_off_to_step_and_regrabs(monkeypatch, tmp_path):
     assert not th.is_alive() and st["live"] == 0 and not os.path.exists(p("keeper.pid"))
 
 
+def test_keeper_need_ready_then_takes_rest(monkeypatch, tmp_path):
+    """--need 30, G 47, chừa 1, GPU trống 48: ready khi đủ 30 rồi gom tiếp hết (47); bước xin -> nhả hết."""
+    import threading
+    import time as _t
+    t, st = _grab_torch([30.5, 48.0])
+    monkeypatch.setitem(sys.modules, "torch", t)
+    d = str(tmp_path / "k")
+    th = threading.Thread(target=_hold_mod().keeper, args=(d, 47, 1), kwargs=dict(poll=0.01, need=30, log=lambda *a, **k: None),
+                          daemon=True)
+    th.start()
+    p = lambda n: os.path.join(d, n)
+    end = _t.time() + 5
+    while not (os.path.exists(p("ready")) and st["live"] == 47 * 2 ** 30):
+        assert _t.time() < end, f"quá giờ: giữ {st['live'] / 2 ** 30}"
+        _t.sleep(0.01)
+    assert st["allocs"][:2] == [29.5, 0.5]                                             # đủ 30 (chừa 1) -> ready, rồi thêm 17
+    open(p("want"), "w").write("1")
+    while not os.path.exists(p("freed")):
+        assert _t.time() < end
+        _t.sleep(0.01)
+    assert st["live"] == 0
+    open(p("stop"), "w").close()
+    th.join(5)
+
+
 def test_take_over_waits_for_keeper_then_cleans_want(tmp_path):
     """Bước GPU: tạo want, chờ freed; người giữ chỗ không còn sống -> không chờ mãi."""
     mod = _hold_mod()

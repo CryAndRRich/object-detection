@@ -5,7 +5,8 @@ mà bộ nhớ dùng tạm giảm thì người khác chen vào, tới đỉnh s
     python gpu_hold.py G script.py [tham số...]                    # thường gọi qua run_on_free_gpu.py --reserve-gib G
     python gpu_hold.py --grab M G script.py [...]                  # GOM DẦN: chờ tới khi giữ đủ G, luôn chừa M GiB cho người khác
     python gpu_hold.py --grab M --release G script.py [...]        # gom đủ G rồi NHẢ hết trước khi chạy (job vLLM)
-    python gpu_hold.py --keeper DIR --grab M G                      # NGƯỜI GIỮ CHỖ cho cả chuỗi (chạy nền), `DIR/stop` để thoát
+    python gpu_hold.py --keeper DIR --grab M [--need N] G           # NGƯỜI GIỮ CHỖ cho cả chuỗi (chạy nền), `DIR/stop` để thoát;
+                                                                   # --need: ready khi đủ N, vẫn gom tiếp tới G (G lớn = lấy hết)
     python gpu_hold.py --grab M --handoff DIR G script.py [...]    # bước GPU trong chuỗi: lấy chỗ từ người giữ, xong trả lại
 
 Cấp một khối G GiB rồi trả về CACHE của PyTorch (không trả driver): nvidia-smi vẫn thấy job giữ G GiB suốt thời gian chạy, mọi cấp
@@ -147,9 +148,11 @@ def grab(gib, margin, poll=10.0, release=False, log=print, sleep=time.sleep, clo
     return _keep(torch, log, "gom dần")
 
 
-def keeper(d, gib, margin, poll=10.0, log=print, sleep=time.sleep, clock=time.time, heartbeat=600.0, reclaim_margin=1.0):
-    """Người giữ chỗ cho CẢ chuỗi job: gom tới `gib` (chừa `margin`), ghi `d/ready` khi đủ; bước GPU tạo `d/want` thì nhả hết,
-    ghi `d/freed`, chờ bước đó xong (xoá `want`) rồi gom lại. `d/stop` -> thoát.
+def keeper(d, gib, margin, poll=10.0, log=print, sleep=time.sleep, clock=time.time, heartbeat=600.0, reclaim_margin=1.0,
+           need=None):
+    """Người giữ chỗ cho CẢ chuỗi job: gom tới `gib` (chừa `margin`), ghi `d/ready` khi giữ được `need` (mặc định = `gib`) rồi vẫn
+    gom tiếp tới `gib` (người dùng 2026-11-09: "còn bao nhiêu lấy hết, chừa 1 GB" ⇒ `gib` lớn, `need` = bước cần); bước GPU tạo
+    `d/want` thì nhả hết, ghi `d/freed`, chờ bước đó xong (xoá `want`) rồi gom lại. `d/stop` -> thoát.
 
     Gom LẠI sau một bước GPU là lấy về chỗ của chính chuỗi (bước vừa thoát trả ra) ⇒ chỉ chừa `reclaim_margin` (như bước GPU) và đọc
     mỗi giây — KHÔNG chừa lại `margin`: người khác lấn vào phần trống trong lúc bước chạy thì chừa 8 GiB sẽ làm chuỗi kẹt hàng giờ
@@ -163,14 +166,20 @@ def keeper(d, gib, margin, poll=10.0, log=print, sleep=time.sleep, clock=time.ti
     open(f("keeper.pid"), "w").write(str(os.getpid()))
     real_empty = torch.cuda.empty_cache
     stop, want = (lambda: os.path.exists(f("stop"))), (lambda: os.path.exists(f("want")))
-    log(f"[giữ chỗ] {d}: gom tới {gib:g} GiB, chừa {margin:g} GiB", flush=True)
+    need = gib if need is None else min(need, gib)
+    log(f"[giữ chỗ] {d}: gom tới {gib:g} GiB (ready khi đủ {need:g}), chừa {margin:g} GiB", flush=True)
     m, p = margin, poll
+    busy = lambda: stop() or want()
     while not stop():
-        blocks, held = _gather(torch, gib, m, p, log, sleep, clock, heartbeat,
-                               stop=lambda: stop() or want(), tag="giữ chỗ")
-        if held >= gib and not os.path.exists(f("ready")):
+        blocks, held = _gather(torch, need, m, p, log, sleep, clock, heartbeat, stop=busy, tag="giữ chỗ")
+        if held >= need and not os.path.exists(f("ready")):
             open(f("ready"), "w").close()
             log(f"[giữ chỗ] đủ {held:.1f} GiB -> ready", flush=True)
+        if held >= need and gib > held:            # phần thêm: gom tiếp, không chặn ready, dừng ngay khi bước GPU xin
+            more, extra = _gather(torch, gib - held, m, p, log, sleep, clock, float("inf"), stop=busy, tag="giữ chỗ thêm")
+            blocks += more
+            held += extra
+            del more                               # chỉ `blocks` giữ khối ⇒ `del blocks` nhả hết
         _wait(lambda: stop() or want(), min(poll, 1.0), sleep)
         del blocks
         real_empty()
@@ -198,7 +207,7 @@ def _run_here(script, args):
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    margin, release, poll, handoff, keep = None, False, 10.0, None, None
+    margin, release, poll, handoff, keep, need = None, False, 10.0, None, None, None
     while argv and argv[0].startswith("--"):
         flag = argv.pop(0)
         if flag == "--grab":
@@ -211,11 +220,13 @@ def main(argv=None):
             handoff = argv.pop(0)
         elif flag == "--keeper":
             keep = argv.pop(0)
+        elif flag == "--need":
+            need = float(argv.pop(0))
         else:
             raise SystemExit(f"cờ lạ {flag}")
     if keep:
         os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-        return keeper(keep, float(argv[0]), 8.0 if margin is None else margin, poll=poll)
+        return keeper(keep, float(argv[0]), 8.0 if margin is None else margin, poll=poll, need=need)
     if len(argv) < 2:
         raise SystemExit("cách dùng: gpu_hold.py [--grab M [--release] [--poll S]] G script.py [tham số...]")
     gib, script, args = float(argv[0]), argv[1], argv[2:]
