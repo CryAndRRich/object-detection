@@ -147,9 +147,13 @@ def grab(gib, margin, poll=10.0, release=False, log=print, sleep=time.sleep, clo
     return _keep(torch, log, "gom dần")
 
 
-def keeper(d, gib, margin, poll=10.0, log=print, sleep=time.sleep, clock=time.time, heartbeat=600.0):
+def keeper(d, gib, margin, poll=10.0, log=print, sleep=time.sleep, clock=time.time, heartbeat=600.0, reclaim_margin=1.0):
     """Người giữ chỗ cho CẢ chuỗi job: gom tới `gib` (chừa `margin`), ghi `d/ready` khi đủ; bước GPU tạo `d/want` thì nhả hết,
-    ghi `d/freed`, chờ bước đó xong (xoá `want`) rồi gom lại. `d/stop` -> thoát."""
+    ghi `d/freed`, chờ bước đó xong (xoá `want`) rồi gom lại. `d/stop` -> thoát.
+
+    Gom LẠI sau một bước GPU là lấy về chỗ của chính chuỗi (bước vừa thoát trả ra) ⇒ chỉ chừa `reclaim_margin` (như bước GPU) và đọc
+    mỗi giây — KHÔNG chừa lại `margin`: người khác lấn vào phần trống trong lúc bước chạy thì chừa 8 GiB sẽ làm chuỗi kẹt hàng giờ
+    dù vừa có đủ (pilot ZETA8 2026-11-09: sau bước 1 chỉ gom lại 31 / 37, chờ 98 phút)."""
     import torch
     os.makedirs(d, exist_ok=True)
     f = lambda n: os.path.join(d, n)
@@ -160,8 +164,9 @@ def keeper(d, gib, margin, poll=10.0, log=print, sleep=time.sleep, clock=time.ti
     real_empty = torch.cuda.empty_cache
     stop, want = (lambda: os.path.exists(f("stop"))), (lambda: os.path.exists(f("want")))
     log(f"[giữ chỗ] {d}: gom tới {gib:g} GiB, chừa {margin:g} GiB", flush=True)
+    m, p = margin, poll
     while not stop():
-        blocks, held = _gather(torch, gib, margin, poll, log, sleep, clock, heartbeat,
+        blocks, held = _gather(torch, gib, m, p, log, sleep, clock, heartbeat,
                                stop=lambda: stop() or want(), tag="giữ chỗ")
         if held >= gib and not os.path.exists(f("ready")):
             open(f("ready"), "w").close()
@@ -177,7 +182,8 @@ def keeper(d, gib, margin, poll=10.0, log=print, sleep=time.sleep, clock=time.ti
         log(f"[giữ chỗ] nhả {held:.1f} GiB cho bước GPU (PID {open(f('want')).read() if want() else '?'})", flush=True)
         _wait(lambda: stop() or not want(), min(poll, 1.0), sleep)
         os.remove(f("freed"))
-        log("[giữ chỗ] bước GPU xong -> gom lại", flush=True)
+        m, p = min(margin, reclaim_margin), min(poll, 1.0)
+        log(f"[giữ chỗ] bước GPU xong -> gom lại (chừa {m:g} GiB, đọc mỗi {p:g} s)", flush=True)
     for n in ("ready", "freed", "keeper.pid"):
         if os.path.exists(f(n)):
             os.remove(f(n))

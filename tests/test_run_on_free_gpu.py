@@ -245,10 +245,12 @@ def test_gpu_hold_release_runs_child(tmp_path):
 
 
 def test_keeper_hands_off_to_step_and_regrabs(monkeypatch, tmp_path):
-    """Người giữ chỗ: gom đủ -> ready; bước GPU xin (want) -> nhả hết + freed; bước xong -> gom lại -> ready; stop -> thoát."""
+    """Người giữ chỗ: gom đủ -> ready; bước GPU xin (want) -> nhả hết + freed; bước xong -> gom lại -> ready; stop -> thoát.
+    Trong lúc bước chạy người khác lấn 8 GiB (còn 40 trống cho chuỗi): gom lại vẫn đủ 37 (chỉ chừa 1, không chừa lại 8)."""
     import threading
     import time as _t
-    t, st = _grab_torch([48.0])
+    frees = [48.0]
+    t, st = _grab_torch(frees)
     monkeypatch.setitem(sys.modules, "torch", t)
     mod = _hold_mod()
     d = str(tmp_path / "k")
@@ -267,6 +269,7 @@ def test_keeper_hands_off_to_step_and_regrabs(monkeypatch, tmp_path):
     open(p("want"), "w").write("123")
     until(lambda: os.path.exists(p("freed")))
     assert st["live"] == 0 and st["cached"] == 0 and not os.path.exists(p("ready"))   # nhả về driver cho bước GPU
+    frees[0] = 40.0                                                                    # người khác lấn 8 GiB lúc bước chạy
     os.remove(p("want"))
     until(lambda: os.path.exists(p("ready")))
     assert st["live"] == 37 * 2 ** 30 and not os.path.exists(p("freed"))
