@@ -145,7 +145,8 @@ def merge(a, cfg):
     load_lora(model, torch.load(path, map_location="cpu", weights_only=False)["lora"])
     k = merge_lora(model)
     model.save_pretrained(a.out, safe_serialization=True, max_shard_size="5GB")
-    proc.save_pretrained(a.out)
+    if hasattr(proc, "save_pretrained"):              # processor code remote của LLaVA-OV-2 là lớp thường: file gốc do copy_aux_files chép
+        proc.save_pretrained(a.out)
     extra = copy_aux_files(cfg["model"], a.out)
     log(f"[merge] {path}: gộp {k}/{n} lớp LoRA -> {a.out} (+ {len(extra)} file gốc: {extra[:8]})")
 

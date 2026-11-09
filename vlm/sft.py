@@ -114,4 +114,13 @@ def collate(batch, processor, adapter):
     att = torch.zeros((len(rows), L), dtype=torch.long)
     for j, (x, y) in enumerate(rows):
         ids[j, :len(x)], lab[j, :len(y)], att[j, :len(x)] = torch.tensor(x), torch.tensor(y), 1
-    return {"input_ids": ids, "attention_mask": att, **adapter.collate_mm(mms), "labels": lab, "n_label": int((lab[:, 1:] != -100).sum())}
+    per_tok = {}
+    for k in getattr(adapter, "token_keys", ()):           # khoá theo token của prompt (vd. mm_token_type_ids): đệm 0 tới L
+        vals = [m.pop(k, None) for m in mms]
+        if all(v is not None for v in vals):
+            t = torch.zeros((len(rows), L), dtype=torch.long)
+            for j, v in enumerate(vals):
+                t[j, :len(v)] = torch.tensor(v)
+            per_tok[k] = t
+    return {"input_ids": ids, "attention_mask": att, **per_tok, **adapter.collate_mm(mms), "labels": lab,
+            "n_label": int((lab[:, 1:] != -100).sum())}

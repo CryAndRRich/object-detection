@@ -55,6 +55,7 @@ class QwenAdapter:
     skip = ("visual",)
     end = "<|im_end|>"
     mm_keys = ("pixel_values", "image_grid_thw")
+    token_keys = ("mm_token_type_ids",)       # theo từng token (Qwen3-VL cần cho M-RoPE) -> `collate` đệm cùng input_ids, câu trả lời = 0
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -98,7 +99,9 @@ class QwenAdapter:
     def encode(self, proc, msgs, image):
         prompt = proc.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True, **self.chat_kwargs)
         enc = proc(text=[prompt], images=[image], return_tensors="pt", **self.call_kwargs())
-        return enc["input_ids"][0].tolist(), {k: enc[k] for k in self.mm_keys}
+        mm = {k: enc[k] for k in self.mm_keys}
+        mm.update({k: enc[k][0].tolist() for k in self.token_keys if k in enc})
+        return enc["input_ids"][0].tolist(), mm
 
     @staticmethod
     def collate_mm(mms):
@@ -129,6 +132,7 @@ class LlavaOV2Adapter(QwenAdapter):
     ảnh lúc gọi) ⇒ đặt `max_pixels` / `min_pixels` vào thuộc tính image processor (vLLM cũng truyền vào lúc dựng image processor)."""
 
     mm_keys = ("pixel_values", "image_grid_thw", "patch_positions")
+    token_keys = ()                           # RoPE 1-D, forward không nhận mm_token_type_ids
 
     def load(self, dev, attn="sdpa"):
         from transformers import AutoModelForImageTextToText

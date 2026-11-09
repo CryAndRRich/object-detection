@@ -217,6 +217,44 @@ def test_collate_labels_only_answer():
     assert b["n_label"] == sum(len(tok.encode(t)) for t in ans) and b["image_grid_thw"].shape == (2, 3)
 
 
+class ProcTT(Proc):
+    """Như Proc nhưng trả thêm `mm_token_type_ids` (1 ở token ảnh) như processor Qwen3-VL."""
+
+    def __call__(self, text, images, return_tensors="pt", **kw):
+        enc = super().__call__(text, images, return_tensors, **kw)
+        enc["mm_token_type_ids"] = (enc["input_ids"] == 3).long()
+        return enc
+
+
+def test_collate_pads_token_type_ids():
+    """ZETA8.1 (Qwen3-VL) vỡ vì thiếu `mm_token_type_ids`: phải đi kèm, cùng cỡ input_ids, 1 đúng ở token ảnh, câu trả lời / đệm = 0;
+    processor không trả khoá này (Qwen2.5 cũ) thì không thêm."""
+    cfg, img = load_config(CFG), _img()
+    items = [_item(cfg, img, t) for t in (target_text("cup", [1, 2, 30, 40]) + END, target_text("cup", [5, 6, 7, 8]) + END + "xyz")]
+    b = collate(items, ProcTT(), QwenAdapter(cfg))
+    tt = b["mm_token_type_ids"]
+    assert tt.shape == b["input_ids"].shape and torch.equal(tt, ((b["input_ids"] == 3) & b["attention_mask"].bool()).long())
+    assert "mm_token_type_ids" not in collate(items, Proc(), QwenAdapter(cfg))
+
+
+def test_merge_processor_without_save_pretrained(tmp_path, monkeypatch):
+    """ZETA8.3: processor code remote của LLaVA-OV-2 không có `save_pretrained` -> merge vẫn xong, file processor chép từ bản gốc."""
+    src, w = tmp_path / "orig", tmp_path / "w"
+    src.mkdir()
+    (w / "snapshots").mkdir(parents=True)
+    for f in ("preprocessor_config.json", "processing_llava_onevision2.py", "model-00001.safetensors"):
+        (src / f).write_text("x")
+    torch.save({"lora": {}}, w / "snapshots" / "it00020.pth")
+    model = SimpleNamespace(save_pretrained=lambda d, **k: (os.makedirs(d, exist_ok=True), open(os.path.join(d, "config.json"), "w")))
+    monkeypatch.setattr(ft, "lora_model", lambda cfg, dev, ad: (model, SimpleNamespace(), 0))
+    monkeypatch.setattr(ft, "load_lora", lambda m, sd: None)
+    monkeypatch.setattr(ft, "merge_lora", lambda m: 0)
+    out = tmp_path / "merged"
+    a = SimpleNamespace(device="cpu", save_dir=str(w), merge="it00020", out=str(out))
+    ft.merge(a, {**load_config(CFG), "model": str(src)})
+    assert sorted(os.listdir(out)) == ["config.json", "preprocessor_config.json", "processing_llava_onevision2.py"]
+
+
 def test_answer_loss_equals_full_logits_loss():
     """Chỉ chiếu lm_head ở vị trí có nhãn (tiết kiệm bộ nhớ) phải ra đúng loss + grad như loss HF trên logits cả chuỗi (đệm phải,
     độ dài câu trả lời khác nhau)."""

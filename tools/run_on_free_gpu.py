@@ -132,9 +132,8 @@ def main():
             print(f"\nJob stopped by {name} (rc={rc}) -- CỐ Ý dừng, KHÔNG retry.", flush=True)
             raise SystemExit(128 + (-rc))
         if attempt > a.retries:
-            print(f"EXHAUSTED {a.retries} retries -- bỏ cuộc. Traceback là CUDA OOM thì GPU "
-                  f"đang bị chiếm (chờ, --gpu <id>, hoặc hạ batch); lỗi khác thì phải sửa "
-                  f"code, retry không giúp.", flush=True)
+            print(f"JOB LỖI (code {rc}), hết {a.retries} lần thử lại -- bỏ cuộc. Đọc traceback ở trên: chỉ khi "
+                  f"nó là CUDA OOM thì mới là thiếu bộ nhớ GPU; lỗi khác là lỗi code / env, retry không giúp.", flush=True)
             raise SystemExit(rc)
         print(f"\n[retry {attempt}/{a.retries}] job thoát với code {rc}. Thường là OOM trên "
               f"server dùng chung, nhưng mã thoát không phân biệt được với lỗi code — nếu "
