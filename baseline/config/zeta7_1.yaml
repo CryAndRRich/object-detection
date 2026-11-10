@@ -1,0 +1,7 @@
+# ZETA7.1 = OracleLoc biến thể (người dùng 2026-11-10): đặc trưng / code chấm GIỮ NGUYÊN, chỉ đổi cách OracleLoc dò để xem kiểu nào ra số
+# cỡ bài (4,76; ZETA7 dò sát μ ⇒ ≈ 0). Tiêu chí `<gốc>[-free][-sNN][-k1]` (baseline/methods/oracleloc.py): euclid_px = Euclid trên
+# đặc trưng thô pixel (IoU gần như bị bỏ qua); free = box không đè vật; sNN = lưới thô NN px; k1 = chỉ một box tốt nhất (lặp K lần).
+base: zeta7.yaml
+predict:
+  criteria: [euclid-k1, cnll-k1, euclid_px, euclid_px-k1, euclid-free, euclid-free-k1, euclid_px-free-k1,
+             euclid-s32-k1, euclid-s64-k1, euclid_px-s64-k1, cnll-s64-k1]

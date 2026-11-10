@@ -61,3 +61,26 @@ def test_predict_without_ckpt(tmp_path, monkeypatch):
             assert all(len(r["boxes"]) == cfg["predict"]["k"] for r in raw)
             got[c] = d["results"][key]["cnll"]
         assert got["cnll"] <= got["euclid"] + 1e-6
+
+
+def test_variant_specs():
+    """ZETA7.1: euclid_px = min Euclid đặc trưng thô pixel; -free: box không đè vật; -s32: góc chia hết 32; -k1: một box lặp K lần."""
+    import pytest
+    from baseline.methods.oracleloc import parse_spec
+    objs, wh = _scene()
+    specs = ["euclid_px", "euclid-free", "cnll-s32", "euclid_px-free-s32-k1", "cnll", "euclid"]
+    res = search(objs, wh, 8, 2, criteria=specs)
+    mu, _ = cnll_fit(objs, objs, wh)
+    cand = grid_boxes(wh, mu[0] * wh[0], mu[1] * wh[1], 2)
+    px = np.array([wh[0], wh[1], 1.0, np.sqrt(wh[0] * wh[1])])
+    e_px = np.linalg.norm((cnll_features(cand, objs, wh) - mu) * px, axis=1)
+    assert np.isclose(np.linalg.norm((cnll_features(res["euclid_px"][:1], objs, wh) - mu) * px), e_px.min())
+    assert (cnll_features(res["euclid-free"], objs, wh)[:, 2] == 0).all()
+    assert (np.mod(res["cnll-s32"][:, :2], 32) == 0).all()
+    b = res["euclid_px-free-s32-k1"]
+    assert (b == b[0]).all() and (np.mod(b[0, :2], 32) == 0).all() and cnll_features(b[:1], objs, wh)[0, 2] == 0
+    old = search(objs, wh, 8, 2)                                            # tiêu chí cũ không đổi
+    assert np.allclose(old["cnll"], res["cnll"]) and np.allclose(old["euclid"], res["euclid"])
+    for bad in ("foo", "cnll-x", "cnll-s0"):
+        with pytest.raises(ValueError):
+            parse_spec(bad)

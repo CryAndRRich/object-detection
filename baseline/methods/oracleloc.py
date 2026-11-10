@@ -10,6 +10,11 @@ chính `cnll_fit` của code chấm.
 - "best matches µ" bài không nói theo khoảng cách nào (`predict.criterion`, chạy cả hai rồi chốt — người dùng 2026-11-07):
   `euclid` = ‖z − μ‖₂ trên đặc trưng đã chuẩn hoá như code chấm (bám câu chữ: chỉ dùng μ); `cnll` = ½ (z − μ)ᵀ Σ⁻¹ (z − μ) = tối ưu
   thẳng metric chấm (cận dưới thật của C-NLL với cỡ cố định).
+- ZETA7.1 (người dùng 2026-11-10: thử OracleLoc kiểu nào ra số cỡ bài, 4,76; đặc trưng chấm GIỮ NGUYÊN) — tiêu chí viết dạng
+  `<gốc>[-free][-sNN][-k1]`: gốc thêm `euclid_px` = ‖z − μ‖₂ trên đặc trưng THÔ pixel canvas ([w, h, IoU, k/c] chưa chia cỡ ảnh ⇒ IoU
+  0–1 gần như bị bỏ qua so với w / h / k/c hàng chục px — cài đặt "best matches µ" ngây thơ); `-free` = chỉ vị trí box KHÔNG đè vật
+  nào (IoU max = 0); `-sNN` = lưới thô NN px (góc trên trái chia hết NN); `-k1` = chỉ MỘT box tốt nhất (lặp K lần — bài: OracleLoc
+  "highly constrained", một vị trí). Không còn vị trí nào thoả `-free` / `-sNN` ⇒ bỏ ràng buộc đó cho ảnh ấy.
 - K box = K vị trí điểm thấp nhất sau NMS IoU `predict.nms_iou` (box[0] = vị trí tốt nhất); thiếu chỗ không trùng thì lặp lại theo thứ tự.
 - Ảnh < `CNLL_MIN_OBJ` vật cùng lớp (không chấm C-NLL): box cỡ TB vật (hoặc 1/4 cạnh ảnh nếu không có vật) ở giữa ảnh, lặp K lần.
 """
@@ -23,9 +28,10 @@ from ce_localization.utils.log import Progress
 from ce_localization.data.turns import letterbox_size
 from ce_localization.engine.add_eval import CNLL_MIN_OBJ, cnll_fit, cnll_features, other_class, select_nms
 
-__all__ = ["CRITERIA", "grid_boxes", "scores", "search", "predict"]
+__all__ = ["CRITERIA", "BASES", "parse_spec", "grid_boxes", "scores", "search", "predict"]
 
 CRITERIA = ("euclid", "cnll")
+BASES = ("euclid", "cnll", "euclid_px")
 CHUNK = 4_000_000                 # số cặp (vị trí × vật tham chiếu) mỗi lượt tính đặc trưng (IoU + kNN ~ vài chục MB)
 
 
@@ -40,13 +46,34 @@ def grid_boxes(wh, bw, bh, stride):
     return np.stack([x, y, x + bw, y + bh], 1)
 
 
-def scores(feats, mu, inv, criterion):
+def parse_spec(spec):
+    """`<gốc>[-free][-sNN][-k1]` -> (gốc, free, lưới thô | None, k1)."""
+    base, *mods = spec.split("-")
+    if base not in BASES:
+        raise ValueError(f"criterion {spec!r}: gốc phải thuộc {BASES}")
+    free, coarse, k1 = False, None, False
+    for m in mods:
+        if m == "free":
+            free = True
+        elif m == "k1":
+            k1 = True
+        elif m.startswith("s") and m[1:].isdigit() and int(m[1:]) > 0:
+            coarse = int(m[1:])
+        else:
+            raise ValueError(f"criterion {spec!r}: hậu tố lạ {m!r} (free | sNN | k1)")
+    return base, free, coarse, k1
+
+
+def scores(feats, mu, inv, criterion, wh=None):
     d = feats - mu
     if criterion == "euclid":
         return np.linalg.norm(d, axis=1)
+    if criterion == "euclid_px":                                    # đặc trưng thô pixel canvas: [w, h, IoU, k/c]
+        nw, nh = wh
+        return np.linalg.norm(d * np.array([nw, nh, 1.0, np.sqrt(nw * nh)]), axis=1)
     if criterion == "cnll":
         return 0.5 * np.einsum("ni,ij,nj->n", d, inv, d)
-    raise ValueError(f"criterion {criterion!r} không thuộc {CRITERIA}")
+    raise ValueError(f"criterion {criterion!r} không thuộc {BASES}")
 
 
 def search(objects, wh, k, stride, criteria=CRITERIA, others=None, nms_iou=0.5):
@@ -65,11 +92,22 @@ def search(objects, wh, k, stride, criteria=CRITERIA, others=None, nms_iou=0.5):
     feats = np.concatenate([cnll_features(cand[i:i + step], ref, wh) for i in range(0, len(cand), step)])
     out = {}
     for c in criteria:
-        s = scores(feats, mu, inv, c)
-        keep = select_nms(cand, s, k=k, iou=nms_iou)
-        if len(keep) < k:                                            # ảnh nhỏ / box to: không đủ chỗ không trùng
-            rest = [int(i) for i in np.argsort(s, kind="stable") if int(i) not in set(keep)]
-            keep = (keep + rest)[:k] if len(keep) + len(rest) >= k else (keep * k)[:k]
+        base, free, coarse, k1 = parse_spec(c)
+        s = scores(feats, mu, inv, base, wh)
+        idx = np.arange(len(cand))
+        if free and (feats[:, 2] <= 0).any():
+            idx = idx[feats[idx, 2] <= 0]
+        if coarse:
+            on = (np.mod(cand[idx, 0], coarse) == 0) & (np.mod(cand[idx, 1], coarse) == 0)
+            idx = idx[on] if on.any() else idx
+        if k1:
+            keep = [int(idx[np.argmin(s[idx])])] * k
+        else:
+            keep = [int(idx[i]) for i in select_nms(cand[idx], s[idx], k=k, iou=nms_iou)]
+            if len(keep) < k:                                        # ảnh nhỏ / box to: không đủ chỗ không trùng
+                seen = set(keep)
+                rest = [int(i) for i in idx[np.argsort(s[idx], kind="stable")] if int(i) not in seen]
+                keep = (keep + rest)[:k] if len(keep) + len(rest) >= k else (keep * k)[:k]
         out[c] = cand[keep]
     return out
 
@@ -84,8 +122,7 @@ def predict(samples, geo_fn, k, p, log=print, log_every=500):
     định min(16, số CPU); kết quả không phụ thuộc số tiến trình)."""
     crit = tuple(p.get("criteria", CRITERIA))
     for c in crit:
-        if c not in CRITERIA:
-            raise ValueError(f"criterion {c!r} không thuộc {CRITERIA}")
+        parse_spec(c)
     jobs = []
     for s in samples:
         g = geo_fn(s)
