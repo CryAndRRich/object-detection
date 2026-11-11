@@ -32,8 +32,9 @@ Chia việc: theo ẢNH (`image_id`), xen kẽ theo thứ tự ảnh -> user1 / 
 Thao tác (box gợi ý: số 1 = khung đỏ liền, số 2.. = đỏ đứt nét; box đang chọn / đã vẽ = vàng):
   s           nhận box gợi ý số 1 (vùng khác biệt mạnh nhất) làm box của màn
   kéo chuột   vẽ box (trên cả 3 ảnh — cùng hệ toạ độ); vẽ lại = thay box
-  lăn chuột   phóng / thu quanh con trỏ, + / - phóng / thu, 0 về vừa khung; chuột phải kéo (hoặc giữ Space + kéo) = dịch ảnh — 3
-              ảnh cùng phóng, cùng dịch; sang màn cùng ảnh input (12 run liền nhau) giữ nguyên zoom, ảnh khác về vừa khung
+  lăn chuột   phóng / thu (+ / - cũng được), 0 về vừa khung; đã phóng thì ảnh chạy theo chuột, không cần bấm gì (con trỏ ở mép
+              nào của khung thì nhìn mép đó của ảnh) — 3 ảnh cùng phóng, cùng dịch; sang màn cùng ảnh input (12 run liền nhau)
+              giữ nguyên zoom, ảnh khác về vừa khung
   Enter       THÀNH CÔNG + lưu box vàng   } đủ kết luận + box: màn XONG, sang màn sau; chưa có box vàng: vẫn lưu kết luận,
   f           THẤT BẠI + lưu box vàng     } ở lại màn, báo "chưa xong" (vẽ / bấm s rồi bấm lại)
   r / x       về box đã lưu của màn / bỏ box
@@ -578,7 +579,7 @@ class Hub:
 
 
 KEYS_JS = """<script>
-window.__cg = window.__cg || {box: null, src: '', key: null, img_key: null, busy: 0, img: new Map(), space: false,
+window.__cg = window.__cg || {box: null, src: '', key: null, img_key: null, busy: 0, img: new Map(),
                               view: {z: 1, cx: null, cy: null}};
 function cgRoot() { return document.querySelector('.cg_root'); }
 function cgWH() { const r = cgRoot(); return r ? r.dataset.wh.split(',').map(Number) : [1, 1]; }
@@ -605,11 +606,14 @@ function cgApply() {
   });
   cgDraw();
 }
-function cgZoom(vp, f, mx, my) {        // mx, my: điểm giữ cố định, tính từ tâm khung (px màn hình)
-  const v = window.__cg.view, s = cgScale(vp), ix = v.cx + mx / s, iy = v.cy + my / s;
-  v.z = Math.min(Math.max(v.z * f, 1), 40);
-  const s2 = cgScale(vp);
-  v.cx = ix - mx / s2; v.cy = iy - my / s2;
+function cgZoom(f) { const v = window.__cg.view; v.z = Math.min(Math.max(v.z * f, 1), 40); cgApply(); }
+// ảnh chạy theo chuột: vị trí con trỏ trong khung (0..1) = vị trí nhìn trên ảnh (mép trái khung = mép trái ảnh) — điểm dưới con
+// trỏ luôn là điểm fx * W của ảnh ở mọi mức zoom, nên vừa di chuột vừa kéo vẽ box vẫn đúng chỗ
+function cgFollow(vp, X, Y) {
+  const [W, H] = cgWH(), v = window.__cg.view, rc = vp.getBoundingClientRect(), s = cgScale(vp);
+  const fx = Math.min(Math.max((X - rc.left) / vp.clientWidth, 0), 1), fy = Math.min(Math.max((Y - rc.top) / vp.clientHeight, 0), 1);
+  const hw = vp.clientWidth / (2 * s), hh = vp.clientHeight / (2 * s);
+  v.cx = hw + fx * (W - 2 * hw); v.cy = hh + fy * (H - 2 * hh);
   cgApply();
 }
 function cgDraw() {
@@ -628,7 +632,7 @@ function cgDraw() {
   const info = document.getElementById('cg_boxinfo');
   if (info) info.textContent = (b ? `your box (${window.__cg.src === 'picked' ? 'suggestion 1' : 'drawn'}): `
       + b.map((v) => Math.round(v)).join(', ') : 'no box yet: press s for suggestion 1 or drag to draw')
-      + ` | zoom ${window.__cg.view.z.toFixed(1)}x (wheel, + / -, 0 = fit; right drag or space + drag = move)`;
+      + ` | zoom ${window.__cg.view.z.toFixed(1)}x (wheel or + / -, 0 = fit; move the mouse to look around)`;
 }
 function cgReset() {
   const r = cgRoot(); if (!r) return;
@@ -641,37 +645,25 @@ function cgPt(e, svg) {
   const x = (e.clientX - rc.left) * vb.width / rc.width, y = (e.clientY - rc.top) * vb.height / rc.height;
   return [Math.min(Math.max(x, 0), W), Math.min(Math.max(y, 0), H)];
 }
-let cgDrag = null, cgPan = null;
+let cgDrag = null;
 document.addEventListener('mousedown', (e) => {
   const vp = e.target.closest && e.target.closest('.cg_vp');
-  if (!vp) return;
+  if (!vp || e.button !== 0) return;
   e.preventDefault();
-  if (e.button === 1 || e.button === 2 || (e.button === 0 && window.__cg.space)) {
-    cgPan = {x: e.clientX, y: e.clientY, s: cgScale(vp)};
-    document.body.classList.add('cg_panning');
-    return;
-  }
-  if (e.button !== 0) return;
   const svg = vp.querySelector('svg'), [x, y] = cgPt(e, svg);
-  cgDrag = {svg, x0: x, y0: y, cx: e.clientX, cy: e.clientY, moved: false, prev: [window.__cg.box, window.__cg.src]};
+  cgDrag = {vp, svg, x0: x, y0: y, cx: e.clientX, cy: e.clientY, moved: false, prev: [window.__cg.box, window.__cg.src]};
 });
-document.addEventListener('contextmenu', (e) => { if (e.target.closest && e.target.closest('.cg_vp')) e.preventDefault(); });
 document.addEventListener('wheel', (e) => {
   const vp = e.target.closest && e.target.closest('.cg_vp');
   if (!vp) return;
   e.preventDefault();
-  const rc = vp.getBoundingClientRect(), d = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
-  cgZoom(vp, Math.exp(-Math.max(Math.min(d, 100), -100) * 0.002),
-         e.clientX - rc.left - vp.clientWidth / 2, e.clientY - rc.top - vp.clientHeight / 2);
+  const v = window.__cg.view, d = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+  v.z = Math.min(Math.max(v.z * Math.exp(-Math.max(Math.min(d, 100), -100) * 0.002), 1), 40);
+  cgFollow(vp, e.clientX, e.clientY);
 }, {passive: false});
 document.addEventListener('mousemove', (e) => {
-  if (cgPan) {
-    const v = window.__cg.view;
-    v.cx -= (e.clientX - cgPan.x) / cgPan.s; v.cy -= (e.clientY - cgPan.y) / cgPan.s;
-    cgPan.x = e.clientX; cgPan.y = e.clientY;
-    cgApply();
-    return;
-  }
+  const vp = cgDrag ? cgDrag.vp : (e.target.closest && e.target.closest('.cg_vp'));
+  if (vp && window.__cg.view.z > 1) cgFollow(vp, e.clientX, e.clientY);
   if (!cgDrag) return;
   if (!cgDrag.moved && Math.hypot(e.clientX - cgDrag.cx, e.clientY - cgDrag.cy) < 4) return;
   cgDrag.moved = true;
@@ -681,7 +673,6 @@ document.addEventListener('mousemove', (e) => {
   cgDraw();
 });
 document.addEventListener('mouseup', () => {
-  if (cgPan) { cgPan = null; document.body.classList.remove('cg_panning'); return; }
   if (!cgDrag) return;
   const d = cgDrag; cgDrag = null;
   if (!d.moved) return;
@@ -702,17 +693,8 @@ function cgPrefetch(r) {
 function cgTyping(t) {
   return t && (t.tagName === 'TEXTAREA' || (t.tagName === 'INPUT' && t.type !== 'checkbox' && t.type !== 'radio'));
 }
-document.addEventListener('keyup', (e) => {
-  if (e.key === ' ') { window.__cg.space = false; document.body.classList.remove('cg_space'); }
-});
 document.addEventListener('keydown', (e) => {
   if (cgTyping(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
-  if (e.key === ' ') {            // giữ Space + kéo = dịch ảnh (không để Space bấm nút đang focus)
-    e.preventDefault();
-    if (document.activeElement && document.activeElement.tagName === 'BUTTON') document.activeElement.blur();
-    window.__cg.space = true; document.body.classList.add('cg_space');
-    return;
-  }
   if (e.repeat) return;
   const id = ({Enter: 'cg_ok', f: 'cg_fail', F: 'cg_fail', ArrowLeft: 'cg_prev', ArrowRight: 'cg_next'})[e.key];
   if (id) {
@@ -722,13 +704,12 @@ document.addEventListener('keydown', (e) => {
     if (el) { window.__cg.busy = Date.now(); el.click(); }
     return;
   }
-  const vp = cgVps()[0];
   if (e.key === 's' || e.key === 'S') { const C = cgCands(); if (C.length) { window.__cg.box = C[0].slice(); window.__cg.src = 'picked'; cgDraw(); } }
   else if (e.key === 'r') { cgReset(); cgDraw(); }
   else if (e.key === 'x') { window.__cg.box = null; window.__cg.src = ''; cgDraw(); }
   else if (e.key === 'h') { document.body.classList.toggle('cg_nohm'); cgApply(); }
-  else if ((e.key === '+' || e.key === '=') && vp) cgZoom(vp, 1.5, 0, 0);
-  else if (e.key === '-' && vp) cgZoom(vp, 1 / 1.5, 0, 0);
+  else if (e.key === '+' || e.key === '=') cgZoom(1.5);
+  else if (e.key === '-') cgZoom(1 / 1.5);
   else if (e.key === '0') { window.__cg.view = {z: 1, cx: null, cy: null}; cgApply(); }
 });
 window.addEventListener('resize', () => cgApply());
@@ -759,7 +740,6 @@ CSS = (".gradio-container {max-width: 100% !important;} .cg_hidden {display: non
        ".cg_cap {font-size: 0.8em; opacity: 0.7; margin-bottom: 2px;} "
        ".cg_vp {position: relative; width: 100%; max-height: 80vh; overflow: hidden; "
        "background: #000; cursor: crosshair; user-select: none; overscroll-behavior: contain;} "
-       "body.cg_space .cg_vp {cursor: grab;} body.cg_panning .cg_vp {cursor: grabbing;} "
        ".cg_wrap {position: absolute; left: 0; top: 0; transform-origin: 0 0; line-height: 0;} "
        ".cg_wrap img {display: block; width: 100%; height: 100%; -webkit-user-drag: none;} "
        ".cg_wrap svg {position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible;} "
