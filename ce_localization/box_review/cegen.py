@@ -32,9 +32,9 @@ Chia việc: theo ẢNH (`image_id`), xen kẽ theo thứ tự ảnh -> user1 / 
 Thao tác (box gợi ý: số 1 = khung đỏ liền, số 2.. = đỏ đứt nét; box đang chọn / đã vẽ = vàng):
   s           nhận box gợi ý số 1 (vùng khác biệt mạnh nhất) làm box của màn
   kéo chuột   vẽ box (trên cả 3 ảnh — cùng hệ toạ độ); vẽ lại = thay box
-  lăn chuột   phóng / thu (+ / - cũng được), 0 về vừa khung; đã phóng thì ảnh chạy theo chuột, không cần bấm gì (con trỏ ở mép
-              nào của khung thì nhìn mép đó của ảnh) — 3 ảnh cùng phóng, cùng dịch; sang màn cùng ảnh input (12 run liền nhau)
-              giữ nguyên zoom, ảnh khác về vừa khung
+  + / -       phóng / thu quanh điểm chuột đang trỏ trên ảnh (lăn chuột cũng vậy; muốn xem chỗ khác: thu lại rồi phóng ở chỗ đó),
+              0 về vừa khung — 3 ảnh cùng phóng, cùng vùng; sang màn cùng ảnh input (12 run liền nhau) giữ nguyên zoom, ảnh
+              khác về vừa khung
   Enter       THÀNH CÔNG + lưu box vàng   } đủ kết luận + box: màn XONG, sang màn sau; chưa có box vàng: vẫn lưu kết luận,
   f           THẤT BẠI + lưu box vàng     } ở lại màn, báo "chưa xong" (vẽ / bấm s rồi bấm lại)
   r / x       về box đã lưu của màn / bỏ box
@@ -606,14 +606,16 @@ function cgApply() {
   });
   cgDraw();
 }
-function cgZoom(f) { const v = window.__cg.view; v.z = Math.min(Math.max(v.z * f, 1), 40); cgApply(); }
-// ảnh chạy theo chuột: vị trí con trỏ trong khung (0..1) = vị trí nhìn trên ảnh (mép trái khung = mép trái ảnh) — điểm dưới con
-// trỏ luôn là điểm fx * W của ảnh ở mọi mức zoom, nên vừa di chuột vừa kéo vẽ box vẫn đúng chỗ
-function cgFollow(vp, X, Y) {
-  const [W, H] = cgWH(), v = window.__cg.view, rc = vp.getBoundingClientRect(), s = cgScale(vp);
-  const fx = Math.min(Math.max((X - rc.left) / vp.clientWidth, 0), 1), fy = Math.min(Math.max((Y - rc.top) / vp.clientHeight, 0), 1);
-  const hw = vp.clientWidth / (2 * s), hh = vp.clientHeight / (2 * s);
-  v.cx = hw + fx * (W - 2 * hw); v.cy = hh + fy * (H - 2 * hh);
+// phóng / thu f lần, giữ nguyên điểm ảnh dưới con trỏ (con trỏ ngoài ảnh: quanh tâm khung) — cả 3 khung cùng đổi
+function cgZoom(f) {
+  const vps = cgVps(); if (!vps.length) return;
+  const m = window.__cg.mouse, el = m && document.elementFromPoint(m.x, m.y), hit = el && vps.find((p) => p.contains(el));
+  const vp = hit || vps[0], rc = vp.getBoundingClientRect();
+  const mx = hit ? m.x - rc.left - vp.clientWidth / 2 : 0, my = hit ? m.y - rc.top - vp.clientHeight / 2 : 0;
+  const v = window.__cg.view, s = cgScale(vp), ix = v.cx + mx / s, iy = v.cy + my / s;
+  v.z = Math.min(Math.max(v.z * f, 1), 40);
+  const s2 = cgScale(vp);
+  v.cx = ix - mx / s2; v.cy = iy - my / s2;
   cgApply();
 }
 function cgDraw() {
@@ -632,7 +634,7 @@ function cgDraw() {
   const info = document.getElementById('cg_boxinfo');
   if (info) info.textContent = (b ? `your box (${window.__cg.src === 'picked' ? 'suggestion 1' : 'drawn'}): `
       + b.map((v) => Math.round(v)).join(', ') : 'no box yet: press s for suggestion 1 or drag to draw')
-      + ` | zoom ${window.__cg.view.z.toFixed(1)}x (wheel or + / -, 0 = fit; move the mouse to look around)`;
+      + ` | zoom ${window.__cg.view.z.toFixed(1)}x (+ / - or wheel at the mouse, 0 = fit)`;
 }
 function cgReset() {
   const r = cgRoot(); if (!r) return;
@@ -651,19 +653,18 @@ document.addEventListener('mousedown', (e) => {
   if (!vp || e.button !== 0) return;
   e.preventDefault();
   const svg = vp.querySelector('svg'), [x, y] = cgPt(e, svg);
-  cgDrag = {vp, svg, x0: x, y0: y, cx: e.clientX, cy: e.clientY, moved: false, prev: [window.__cg.box, window.__cg.src]};
+  cgDrag = {svg, x0: x, y0: y, cx: e.clientX, cy: e.clientY, moved: false, prev: [window.__cg.box, window.__cg.src]};
 });
 document.addEventListener('wheel', (e) => {
   const vp = e.target.closest && e.target.closest('.cg_vp');
   if (!vp) return;
   e.preventDefault();
-  const v = window.__cg.view, d = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
-  v.z = Math.min(Math.max(v.z * Math.exp(-Math.max(Math.min(d, 100), -100) * 0.002), 1), 40);
-  cgFollow(vp, e.clientX, e.clientY);
+  const d = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+  window.__cg.mouse = {x: e.clientX, y: e.clientY};
+  cgZoom(Math.exp(-Math.max(Math.min(d, 100), -100) * 0.002));
 }, {passive: false});
 document.addEventListener('mousemove', (e) => {
-  const vp = cgDrag ? cgDrag.vp : (e.target.closest && e.target.closest('.cg_vp'));
-  if (vp && window.__cg.view.z > 1) cgFollow(vp, e.clientX, e.clientY);
+  window.__cg.mouse = {x: e.clientX, y: e.clientY};      // vị trí chuột cho + / -
   if (!cgDrag) return;
   if (!cgDrag.moved && Math.hypot(e.clientX - cgDrag.cx, e.clientY - cgDrag.cy) < 4) return;
   cgDrag.moved = true;
