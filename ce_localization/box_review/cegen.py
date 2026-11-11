@@ -19,9 +19,10 @@ KHÔNG import torch — chạy bằng env `imgedit` (numpy + Pillow; `serve` th�
             vài chục KB / ảnh thay cho PNG output 1–2 MB) + `manifest.json` (mọi màn, lớp, box gợi ý). Song song `--workers`, chạy lại
             chỉ làm phần còn thiếu (`--force` làm lại hết). In thống kê từng run (status, không có box gợi ý, output lệch tỉ lệ, cỡ
             input khác ảnh gốc).
-  serve     app Gradio (`--share`: link *.gradio.live; luôn mở cả cổng LAN `--host`): chọn Data + User + Model + Setting + Task
-            (= MỘT run; chấm hết một run trước để có số sớm; bảng "Progress per run" = số màn đã chấm của
-            từng run, cả hai user — run đủ cả hai phần là dùng được). Mọi phiên
+  serve     app Gradio (`--share`: link *.gradio.live; luôn mở cả cổng LAN `--host`): thanh trên = 5 menu Data / User / Model /
+            Setting / Task (= MỘT run; chấm hết một run trước để có số sớm) + 5 nút; 3 ảnh chia đều cả trang; cuối trang 2 bảng
+            "Progress per run" (CE130, CoCount — số màn đã chấm của từng run, cả hai user; hiện ngay từ đầu). Chữ trên giao diện
+            chỉ dùng ký tự ASCII (người dùng 2026-11-12). Mọi phiên
             (2 tập × 2 user) dựng sẵn lúc mở app; trình duyệt tải trước + giải mã sẵn ảnh 8 màn kế; vẽ / chọn box chạy hoàn toàn ở
             trình duyệt, chỉ lúc lưu / chuyển màn mới gọi server (một lượt đi về).
 
@@ -30,7 +31,9 @@ Chia việc: theo ẢNH (`image_id`), xen kẽ theo thứ tự ảnh -> user1 / 
 
 Thao tác (box gợi ý: số 1 = khung đỏ liền, số 2.. = đỏ đứt nét; box đang chọn / đã vẽ = vàng):
   s           nhận box gợi ý số 1 (vùng khác biệt mạnh nhất) làm box của màn
-  kéo chuột   vẽ box (trên ảnh input hoặc output — cùng hệ toạ độ); vẽ lại = thay box
+  kéo chuột   vẽ box (trên cả 3 ảnh — cùng hệ toạ độ); vẽ lại = thay box
+  lăn chuột   phóng / thu quanh con trỏ, + / - phóng / thu, 0 về vừa khung; chuột phải kéo (hoặc giữ Space + kéo) = dịch ảnh — 3
+              ảnh cùng phóng, cùng dịch; sang màn cùng ảnh input (12 run liền nhau) giữ nguyên zoom, ảnh khác về vừa khung
   Enter       THÀNH CÔNG + lưu box vàng   } đủ kết luận + box: màn XONG, sang màn sau; chưa có box vàng: vẫn lưu kết luận,
   f           THẤT BẠI + lưu box vàng     } ở lại màn, báo "chưa xong" (vẽ / bấm s rồi bấm lại)
   r / x       về box đã lưu của màn / bỏ box
@@ -85,6 +88,7 @@ PREFETCH = 8
 FILTER_KEYS = ("model", "setting", "task")
 BOX_SRC = ("drawn", "picked")        # tự vẽ / nhận box gợi ý số 1 (phím s)
 FILE_ROUTE = "/gradio_api/file="
+CHOOSE = "**Choose Data, User, Model, Setting and Task above to start.**"
 LANCZOS = getattr(Image, "Resampling", Image).LANCZOS
 
 
@@ -402,7 +406,7 @@ class Annotator:
         return bool(self.view)
 
     def filter_name(self):
-        return " · ".join(v for _, v in self.filt) or "all runs"
+        return " | ".join(v for _, v in self.filt) or "all runs"
 
     def cur(self):
         return self.items[self.view[self.pos]]
@@ -449,11 +453,10 @@ class Annotator:
 
     def header(self, warn=""):
         n, done = len(self.view), self.n_saved()
-        head = (f"**{self.name}** · filter **{self.filter_name()}** · screen {self.pos + 1} / {n} · done {done} "
-                f"({100 * done / n:.1f}%) · ETA {self.eta()}")
+        head = f"screen {self.pos + 1} / {n} | done {done} ({100 * done / n:.1f}%) | ETA {self.eta()}"
         if self.filt:
-            head += f" · all runs: done {self.n_saved(True)} / {len(self.items)}"
-        return head + (f"\n\n**⚠ {warn}**" if warn else "")
+            head += f" | all runs of {self.name}: done {self.n_saved(True)} / {len(self.items)}"
+        return head + (f"\n\n**Warning: {warn}**" if warn else "")
 
     def html(self, url, nonce=0):
         """`nonce`: số lần vẽ — trang luôn khác bản trước ⇒ Gradio luôn vẽ lại (trình duyệt bỏ cờ chờ `busy` kể cả khi màn không đổi)."""
@@ -468,8 +471,8 @@ class Annotator:
             state = "not saved"
         else:
             state = (f'saved: <b class="{"cg_ok" if rec["success"] else "cg_bad"}">{"SUCCESS" if rec["success"] else "FAIL"}</b>'
-                     + (" · box ✓ · <b>DONE</b>" if is_done(rec) else ' · <b class="cg_bad">NO BOX — not done</b>'))
-        meta = [f"<b>{html.escape(it['model'])}</b> · <b>{it['setting']}</b>", f"id {html.escape(it['id'])}"]
+                     + (" | box OK | <b>DONE</b>" if is_done(rec) else ' | <b class="cg_bad">NO BOX, not done</b>'))
+        meta = [f"<b>{html.escape(it['model'])}</b> | <b>{it['setting']}</b>", f"id {html.escape(it['id'])}"]
         if it["subset"]:
             meta.append(html.escape(it["subset"]))
         if it["status"] != "processed":
@@ -477,22 +480,24 @@ class Annotator:
         meta.append(state)
         nxt = [self.view[i] for i in range(max(self.pos - 1, 0), min(self.pos + 1 + PREFETCH, len(self.view))) if i != self.pos]
         pre = "|".join(url(self.items[p][k]) for p in nxt for k in ("in", "out", "hm") if self.items[p][k])
-        width = f"min(100%, calc(72vh * {W / H:.4f}))"
 
         def panel(cap, rel, cls):
+            """Khung nhìn (`cg_vp`, tỉ lệ ảnh, cao tối đa theo màn hình); ảnh + SVG ở cỡ gốc W × H px, JS phóng / dịch bằng CSS
+            transform — cả 3 khung chung một trạng thái zoom."""
             if not rel:
                 return f'<div class="cg_panel {cls}"><div class="cg_cap">{cap}: none</div></div>'
-            return (f'<div class="cg_panel {cls}"><div class="cg_cap">{cap}</div><div class="cg_wrap" style="width: {width}">'
-                    f'<img src="{url(rel)}" draggable="false" alt=""><svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" '
-                    f'xmlns="http://www.w3.org/2000/svg"></svg></div></div>')
+            return (f'<div class="cg_panel {cls}"><div class="cg_cap">{cap}</div><div class="cg_vp" style="aspect-ratio: {W} / {H}">'
+                    f'<div class="cg_wrap" style="width: {W}px; height: {H}px"><img src="{url(rel)}" draggable="false" alt="">'
+                    f'<svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg"></svg></div></div></div>')
         verb = "ADD" if it["task"] == "add" else "REMOVE"
         return (f'<div class="cg_root" data-n="{nonce}" data-key="{html.escape(it["key"])}" data-wh="{W},{H}" '
+                f'data-img="{html.escape(it["ds"] + "|" + it["id"])}" '
                 f'data-box="{",".join(str(v) for v in box) if box else ""}" data-src="{src}" '
                 f'data-cands="{html.escape(json.dumps(it["cands"]))}" data-pre="{html.escape(pre)}">'
                 f'<div><span class="cg_task cg_{it["task"]}">{verb} one {html.escape(it["cls"] or "?")}</span> '
-                f'<span class="cg_meta">{" · ".join(meta)}</span></div>'
+                f'<span class="cg_meta">{" | ".join(meta)}</span></div>'
                 f'<div class="cg_meta" id="cg_boxinfo"></div><div class="cg_row">'
-                + panel("INPUT", it["in"], "cg_draw") + panel("OUTPUT", it["out"], "cg_draw") + panel("DIFF HEATMAP", it["hm"], "cg_hm")
+                + panel("INPUT", it["in"], "cg_in") + panel("OUTPUT", it["out"], "cg_out") + panel("DIFF HEATMAP", it["hm"], "cg_hm")
                 + "</div></div>")
 
 
@@ -509,7 +514,7 @@ class Hub:
                 mine = split_items(items, k, len(users))
                 if mine:
                     self.sessions[(LABELS[ds], u)] = Annotator(mine, os.path.join(out_dir, f"annot_{ds}_{u}.jsonl"),
-                                                               f"{LABELS[ds]} · {u}", u)
+                                                               f"{LABELS[ds]} {u}", u)
         self.users = list(users)
         self.models = sorted({it["model"] for it in manifest["items"]})
         self.datasets = [LABELS[ds] for ds in DATASETS.values() if any(k[0] == LABELS[ds] for k in self.sessions)]
@@ -533,16 +538,16 @@ class Hub:
         rows = ["| run | " + " | ".join(self.users) + " | all |", "|---|" + "---:|" * (len(self.users) + 1)]
         for (m, st, t), c in sorted(cnt.items(), key=lambda kv: (kv[0][0], SETTINGS.index(kv[0][1]), TASKS.index(kv[0][2]))):
             done, n = sum(c[u] for u in self.users), sum(c[u + "_n"] for u in self.users)
-            rows.append(f"| {m} · {st} · {t} | " + " | ".join(f"{c[u]}/{c[u + '_n']}" for u in self.users)
+            rows.append(f"| {m} / {st} / {t} | " + " | ".join(f"{c[u]}/{c[u + '_n']}" for u in self.users)
                         + f" | {'**done**' if done == n else f'{100 * done / n:.0f}%'} |")
-        return "**Progress per run** (both users; done = verdict + your box)\n\n" + "\n".join(rows)
+        return f"**Progress per run: {data}** (both users; done = verdict + your box)\n\n" + "\n".join(rows)
 
     def act(self, data, user, payload, action, filt=None):
         """-> (header markdown, html). `payload` (JSON từ trình duyệt): key màn đang hiện + box đang chọn; `filt`: bộ lọc
         {model, setting, task} trình duyệt đang chọn (None = không lọc; giao diện luôn gửi đủ cả ba = một run)."""
         a = self.sessions.get((data, user))
         if a is None:
-            return "**Choose Data, User, Model, Setting and Task on the right to start.**", ""
+            return CHOOSE, ""
         try:
             p = json.loads(payload or "{}")
         except ValueError:
@@ -551,13 +556,13 @@ class Hub:
         warn = ""
         with a.lock:
             if not a.set_filter(filt or {}):
-                return a.name + f" · filter **{a.filter_name()}**: no screens — change Model / Setting / Task.", ""
+                return f"{a.name} | {a.filter_name()}: no screens, change Model / Setting / Task.", ""
             if action != "show" and p.get("key") in a.index:
                 v = a.vindex.get(a.index[p["key"]])  # thao tác áp lên ĐÚNG màn đang hiện ở trình duyệt
                 if v is not None:
                     a.go(v)
                 elif action in ("ok", "fail"):       # màn đang hiện không thuộc bộ lọc (vừa đổi lọc): không lưu nhầm màn
-                    return (a.header("Filter changed — not saved, check this screen and press again."),
+                    return (a.header("Filter changed, not saved: check this screen and press again."),
                             a.html(self.url, next(self.renders)))
             if action == "ok":
                 warn = a.save(True, p.get("box"), p.get("src"))
@@ -573,53 +578,110 @@ class Hub:
 
 
 KEYS_JS = """<script>
-window.__cg = window.__cg || {box: null, src: '', key: null, busy: 0, img: new Map()};
+window.__cg = window.__cg || {box: null, src: '', key: null, img_key: null, busy: 0, img: new Map(), space: false,
+                              view: {z: 1, cx: null, cy: null}};
 function cgRoot() { return document.querySelector('.cg_root'); }
 function cgWH() { const r = cgRoot(); return r ? r.dataset.wh.split(',').map(Number) : [1, 1]; }
 function cgCands() { const r = cgRoot(); try { return JSON.parse(r.dataset.cands || '[]'); } catch (e) { return []; } }
+function cgVps() { const r = cgRoot(); return r ? [...r.querySelectorAll('.cg_vp')].filter((v) => v.clientWidth > 0) : []; }
+function cgScale(vp) {
+  const [W, H] = cgWH();
+  return Math.min(vp.clientWidth / W, vp.clientHeight / H) * window.__cg.view.z;
+}
+// một trạng thái zoom (z = bội so với vừa khung, cx / cy = tâm nhìn theo pixel ảnh) áp cho cả 3 khung
+function cgApply() {
+  const vps = cgVps();
+  if (!vps.length) { cgDraw(); return; }
+  const mh = `${Math.max(300, Math.floor(window.innerHeight - vps[0].getBoundingClientRect().top - window.scrollY - 12))}px`;
+  vps.forEach((p) => { if (p.style.maxHeight !== mh) p.style.maxHeight = mh; });     // khung ảnh vừa phần màn hình còn lại
+  const [W, H] = cgWH(), v = window.__cg.view, s = cgScale(vps[0]), vw = vps[0].clientWidth, vh = vps[0].clientHeight;
+  if (v.cx === null) { v.cx = W / 2; v.cy = H / 2; }
+  const cl = (c, n, len) => (n * s <= len ? n / 2 : Math.min(Math.max(c, len / (2 * s)), n - len / (2 * s)));
+  v.cx = cl(v.cx, W, vw); v.cy = cl(v.cy, H, vh);
+  vps.forEach((p) => {
+    const sp = cgScale(p);
+    p.querySelector('.cg_wrap').style.transform =
+      `translate(${p.clientWidth / 2 - v.cx * sp}px, ${p.clientHeight / 2 - v.cy * sp}px) scale(${sp})`;
+  });
+  cgDraw();
+}
+function cgZoom(vp, f, mx, my) {        // mx, my: điểm giữ cố định, tính từ tâm khung (px màn hình)
+  const v = window.__cg.view, s = cgScale(vp), ix = v.cx + mx / s, iy = v.cy + my / s;
+  v.z = Math.min(Math.max(v.z * f, 1), 40);
+  const s2 = cgScale(vp);
+  v.cx = ix - mx / s2; v.cy = iy - my / s2;
+  cgApply();
+}
 function cgDraw() {
   const r = cgRoot(); if (!r) return;
-  const C = cgCands(), [W, H] = cgWH(), fs = Math.max(W, H) / 32, b = window.__cg.box;
+  const vps = cgVps(), sc = vps.length ? cgScale(vps[0]) : 1;
+  // nét / chữ tính theo pixel MÀN HÌNH (SVG bị CSS transform phóng to, vector-effect không tính transform đó)
+  const C = cgCands(), fs = 20 / sc, b = window.__cg.box, px = (v) => (v / sc).toFixed(3);
   let s = '';
   C.forEach((c, i) => {
-    s += `<rect class="${i ? 'cg_cand' : 'cg_top'}" x="${c[0]}" y="${c[1]}" width="${c[2] - c[0]}" height="${c[3] - c[1]}" vector-effect="non-scaling-stroke"/>`;
-    s += `<text class="cg_lab" x="${c[0]}" y="${Math.max(c[1] - fs * 0.15, fs)}" font-size="${fs}" stroke-width="${fs * 0.08}">${i + 1}</text>`;
+    s += `<rect class="${i ? 'cg_cand' : 'cg_top'}" x="${c[0]}" y="${c[1]}" width="${c[2] - c[0]}" height="${c[3] - c[1]}" `
+      + (i ? `stroke-width="${px(1.5)}" stroke-dasharray="${px(5)} ${px(3)}"/>` : `stroke-width="${px(2.5)}"/>`);
+    s += `<text class="cg_lab" x="${c[0]}" y="${c[1] - fs * 0.15}" font-size="${fs}" stroke-width="${fs * 0.08}">${i + 1}</text>`;
   });
-  if (b) s += `<rect class="cg_cur" x="${b[0]}" y="${b[1]}" width="${b[2] - b[0]}" height="${b[3] - b[1]}" vector-effect="non-scaling-stroke"/>`;
+  if (b) s += `<rect class="cg_cur" x="${b[0]}" y="${b[1]}" width="${b[2] - b[0]}" height="${b[3] - b[1]}" stroke-width="${px(3)}"/>`;
   r.querySelectorAll('svg').forEach((svg) => { svg.innerHTML = s; });
   const info = document.getElementById('cg_boxinfo');
-  if (info) info.textContent = b ? `your box (${window.__cg.src === 'picked' ? 'suggestion 1' : 'drawn'}): `
-      + b.map((v) => Math.round(v)).join(', ') : 'no box yet: press s to take suggestion 1 (solid red) or drag to draw one';
+  if (info) info.textContent = (b ? `your box (${window.__cg.src === 'picked' ? 'suggestion 1' : 'drawn'}): `
+      + b.map((v) => Math.round(v)).join(', ') : 'no box yet: press s for suggestion 1 or drag to draw')
+      + ` | zoom ${window.__cg.view.z.toFixed(1)}x (wheel, + / -, 0 = fit; right drag or space + drag = move)`;
 }
 function cgReset() {
   const r = cgRoot(); if (!r) return;
   window.__cg.box = r.dataset.box ? r.dataset.box.split(',').map(Number) : null;
   window.__cg.src = r.dataset.src || '';
-  cgDraw();
 }
 window.cgPayload = function () { return JSON.stringify({key: window.__cg.key, box: window.__cg.box, src: window.__cg.src}); };
 function cgPt(e, svg) {
-  const rc = svg.getBoundingClientRect(), vb = svg.viewBox.baseVal;
-  return [(e.clientX - rc.left) * vb.width / rc.width, (e.clientY - rc.top) * vb.height / rc.height, rc.width / vb.width];
+  const rc = svg.getBoundingClientRect(), vb = svg.viewBox.baseVal, [W, H] = cgWH();
+  const x = (e.clientX - rc.left) * vb.width / rc.width, y = (e.clientY - rc.top) * vb.height / rc.height;
+  return [Math.min(Math.max(x, 0), W), Math.min(Math.max(y, 0), H)];
 }
-let cgDrag = null;
+let cgDrag = null, cgPan = null;
 document.addEventListener('mousedown', (e) => {
-  const w = e.button === 0 && e.target.closest && e.target.closest('.cg_draw .cg_wrap');
-  if (!w) return;
-  const svg = w.querySelector('svg'), [x, y] = cgPt(e, svg);
-  cgDrag = {svg, x0: x, y0: y, cx: e.clientX, cy: e.clientY, moved: false, prev: [window.__cg.box, window.__cg.src]};
+  const vp = e.target.closest && e.target.closest('.cg_vp');
+  if (!vp) return;
   e.preventDefault();
+  if (e.button === 1 || e.button === 2 || (e.button === 0 && window.__cg.space)) {
+    cgPan = {x: e.clientX, y: e.clientY, s: cgScale(vp)};
+    document.body.classList.add('cg_panning');
+    return;
+  }
+  if (e.button !== 0) return;
+  const svg = vp.querySelector('svg'), [x, y] = cgPt(e, svg);
+  cgDrag = {svg, x0: x, y0: y, cx: e.clientX, cy: e.clientY, moved: false, prev: [window.__cg.box, window.__cg.src]};
 });
+document.addEventListener('contextmenu', (e) => { if (e.target.closest && e.target.closest('.cg_vp')) e.preventDefault(); });
+document.addEventListener('wheel', (e) => {
+  const vp = e.target.closest && e.target.closest('.cg_vp');
+  if (!vp) return;
+  e.preventDefault();
+  const rc = vp.getBoundingClientRect(), d = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+  cgZoom(vp, Math.exp(-Math.max(Math.min(d, 100), -100) * 0.002),
+         e.clientX - rc.left - vp.clientWidth / 2, e.clientY - rc.top - vp.clientHeight / 2);
+}, {passive: false});
 document.addEventListener('mousemove', (e) => {
+  if (cgPan) {
+    const v = window.__cg.view;
+    v.cx -= (e.clientX - cgPan.x) / cgPan.s; v.cy -= (e.clientY - cgPan.y) / cgPan.s;
+    cgPan.x = e.clientX; cgPan.y = e.clientY;
+    cgApply();
+    return;
+  }
   if (!cgDrag) return;
   if (!cgDrag.moved && Math.hypot(e.clientX - cgDrag.cx, e.clientY - cgDrag.cy) < 4) return;
   cgDrag.moved = true;
-  const [W, H] = cgWH(), [x, y] = cgPt(e, cgDrag.svg), cx = Math.min(Math.max(x, 0), W), cy = Math.min(Math.max(y, 0), H);
-  window.__cg.box = [Math.min(cgDrag.x0, cx), Math.min(cgDrag.y0, cy), Math.max(cgDrag.x0, cx), Math.max(cgDrag.y0, cy)];
+  const [x, y] = cgPt(e, cgDrag.svg);
+  window.__cg.box = [Math.min(cgDrag.x0, x), Math.min(cgDrag.y0, y), Math.max(cgDrag.x0, x), Math.max(cgDrag.y0, y)];
   window.__cg.src = 'drawn';
   cgDraw();
 });
 document.addEventListener('mouseup', () => {
+  if (cgPan) { cgPan = null; document.body.classList.remove('cg_panning'); return; }
   if (!cgDrag) return;
   const d = cgDrag; cgDrag = null;
   if (!d.moved) return;
@@ -637,10 +699,21 @@ function cgPrefetch(r) {
     while (m.size > 80) m.delete(m.keys().next().value);
   });
 }
+function cgTyping(t) {
+  return t && (t.tagName === 'TEXTAREA' || (t.tagName === 'INPUT' && t.type !== 'checkbox' && t.type !== 'radio'));
+}
+document.addEventListener('keyup', (e) => {
+  if (e.key === ' ') { window.__cg.space = false; document.body.classList.remove('cg_space'); }
+});
 document.addEventListener('keydown', (e) => {
-  const t = e.target;
-  if (t && (t.tagName === 'TEXTAREA' || (t.tagName === 'INPUT' && t.type !== 'checkbox' && t.type !== 'radio'))) return;
-  if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
+  if (cgTyping(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key === ' ') {            // giữ Space + kéo = dịch ảnh (không để Space bấm nút đang focus)
+    e.preventDefault();
+    if (document.activeElement && document.activeElement.tagName === 'BUTTON') document.activeElement.blur();
+    window.__cg.space = true; document.body.classList.add('cg_space');
+    return;
+  }
+  if (e.repeat) return;
   const id = ({Enter: 'cg_ok', f: 'cg_fail', F: 'cg_fail', ArrowLeft: 'cg_prev', ArrowRight: 'cg_next'})[e.key];
   if (id) {
     e.preventDefault();
@@ -649,76 +722,91 @@ document.addEventListener('keydown', (e) => {
     if (el) { window.__cg.busy = Date.now(); el.click(); }
     return;
   }
+  const vp = cgVps()[0];
   if (e.key === 's' || e.key === 'S') { const C = cgCands(); if (C.length) { window.__cg.box = C[0].slice(); window.__cg.src = 'picked'; cgDraw(); } }
-  else if (e.key === 'r') cgReset();
+  else if (e.key === 'r') { cgReset(); cgDraw(); }
   else if (e.key === 'x') { window.__cg.box = null; window.__cg.src = ''; cgDraw(); }
-  else if (e.key === 'h') document.body.classList.toggle('cg_nohm');
+  else if (e.key === 'h') { document.body.classList.toggle('cg_nohm'); cgApply(); }
+  else if ((e.key === '+' || e.key === '=') && vp) cgZoom(vp, 1.5, 0, 0);
+  else if (e.key === '-' && vp) cgZoom(vp, 1 / 1.5, 0, 0);
+  else if (e.key === '0') { window.__cg.view = {z: 1, cx: null, cy: null}; cgApply(); }
 });
+window.addEventListener('resize', () => cgApply());
 new MutationObserver(() => {
   const r = cgRoot();
   if (!r || r.dataset.seen) return;
   r.dataset.seen = '1';
   window.__cg.busy = 0;
-  if (r.dataset.key !== window.__cg.key) { window.__cg.key = r.dataset.key; cgReset(); } else cgDraw();
+  if (r.dataset.key !== window.__cg.key) {
+    window.__cg.key = r.dataset.key;
+    cgReset();
+    if (r.dataset.img !== window.__cg.img_key) {      // ảnh khác: về vừa khung; cùng ảnh (12 run liền nhau): giữ zoom
+      window.__cg.img_key = r.dataset.img;
+      window.__cg.view = {z: 1, cx: null, cy: null};
+    }
+  }
+  cgApply();
+  requestAnimationFrame(() => cgApply());
   cgPrefetch(r);
 }).observe(document.documentElement, {childList: true, subtree: true});
 </script>"""
 
-CSS = (".cg_hidden {display: none !important;} "
+CSS = (".gradio-container {max-width: 100% !important;} .cg_hidden {display: none !important;} "
        ".cg_task {font-size: 1.2em; font-weight: 700; padding: 3px 10px; border-radius: 6px; color: #fff; display: inline-block;} "
        ".cg_add {background: #1b7f3b;} .cg_remove {background: #b3261e;} .cg_ok {color: #1b7f3b;} .cg_bad {color: #b3261e;} "
        ".cg_meta {margin: 4px 0 4px 6px;} #cg_boxinfo {margin: 4px 0; font-family: monospace;} "
        ".cg_row {display: flex; gap: 8px; align-items: flex-start;} .cg_panel {flex: 1 1 0; min-width: 0;} "
        ".cg_cap {font-size: 0.8em; opacity: 0.7; margin-bottom: 2px;} "
-       ".cg_wrap {position: relative; line-height: 0; user-select: none;} "
-       ".cg_wrap img {display: block; width: 100%; height: auto; -webkit-user-drag: none;} "
+       ".cg_vp {position: relative; width: 100%; max-height: 80vh; overflow: hidden; "
+       "background: #000; cursor: crosshair; user-select: none; overscroll-behavior: contain;} "
+       "body.cg_space .cg_vp {cursor: grab;} body.cg_panning .cg_vp {cursor: grabbing;} "
+       ".cg_wrap {position: absolute; left: 0; top: 0; transform-origin: 0 0; line-height: 0;} "
+       ".cg_wrap img {display: block; width: 100%; height: 100%; -webkit-user-drag: none;} "
        ".cg_wrap svg {position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible;} "
-       ".cg_draw .cg_wrap {cursor: crosshair;} body.cg_nohm .cg_hm {display: none;} "
-       ".cg_cand {fill: none; stroke: #ff3b30; stroke-width: 1.5; stroke-dasharray: 5 3;} "
-       ".cg_top {fill: none; stroke: #ff3b30; stroke-width: 2.5;} "
-       ".cg_cur {fill: rgba(255, 230, 0, 0.10); stroke: #ffe600; stroke-width: 3;} "
+       "body.cg_nohm .cg_hm {display: none;} "
+       ".cg_cand {fill: none; stroke: #ff3b30;} "
+       ".cg_top {fill: none; stroke: #ff3b30;} "
+       ".cg_cur {fill: rgba(255, 230, 0, 0.10); stroke: #ffe600;} "
        ".cg_lab {fill: #ff3b30; font-weight: 700; font-family: sans-serif; paint-order: stroke; stroke: #000;}")
-
-HELP = ("A screen is **done** only with BOTH a verdict and **your box** (yellow). **s** take suggestion 1 (solid red) · "
-        "**drag** draw box · **Enter** success · **f** fail (both save the yellow box) · **r** reset box · **x** no box · **h** heatmap · "
-        "**← →** prev / next (re-saving overwrites)")
 
 
 def build_ui(hub, gr):
+    """Thanh trên: 5 menu chọn (Data, User, Model, Setting, Task = một run) + 5 nút; dưới: 3 ảnh chia đều cả trang; cuối: bảng
+    tiến độ mọi tập, hiện ngay từ đầu."""
     import inspect
-    kw = {"title": "CE-Gen review", "css": CSS, "head": KEYS_JS}
+    kw = {"title": "CE-Gen review", "css": CSS, "head": KEYS_JS, "fill_width": True}
     bparams = inspect.signature(gr.Blocks.__init__).parameters
-    launch_kw = {k: v for k, v in kw.items() if k not in bparams and k != "title"}       # gradio >= 6: css / head ở launch
+    launch_kw = {k: v for k, v in kw.items() if k not in bparams and k in ("css", "head")}     # gradio >= 6: css / head ở launch
     hidden = {"elem_classes": "cg_hidden"}
+    dd = {"value": None, "filterable": False, "min_width": 140}
     with gr.Blocks(**{k: v for k, v in kw.items() if k in bparams}) as demo:
-        head = gr.Markdown()
+        with gr.Row(equal_height=True):
+            data = gr.Dropdown(hub.datasets, label="Data", **dd)
+            user = gr.Dropdown(hub.users, label="User", **dd)
+            model = gr.Dropdown(hub.models, label="Model", **dd)
+            setting = gr.Dropdown(list(SETTINGS), label="Setting", **dd)
+            task = gr.Dropdown(list(TASKS), label="Task", **dd)
         with gr.Row():
-            with gr.Column(scale=6):
-                img = gr.HTML()
-            with gr.Column(scale=1, min_width=230):
-                data = gr.Radio(hub.datasets, value=None, label="Data")
-                user = gr.Radio(hub.users, value=None, label="User")
-                model = gr.Radio(hub.models, value=None, label="Model")
-                setting = gr.Radio(list(SETTINGS), value=None, label="Setting")
-                task = gr.Radio(list(TASKS), value=None, label="Task")
-                ok = gr.Button("Success (Enter)", variant="primary", elem_id="cg_ok")
-                fail = gr.Button("Fail (f)", variant="stop", elem_id="cg_fail")
-                with gr.Row():
-                    prev = gr.Button("← prev", elem_id="cg_prev", min_width=60)
-                    nxt = gr.Button("next →", elem_id="cg_next", min_width=60)
-                first = gr.Button("Go to first not done", size="sm")
-                gr.Markdown(HELP)
-                payload = gr.Textbox(**hidden)
-        prog = gr.Markdown()
-        outs = [head, img, prog]
+            ok = gr.Button("Success (Enter)", variant="primary", elem_id="cg_ok", min_width=100)
+            fail = gr.Button("Fail (f)", variant="stop", elem_id="cg_fail", min_width=100)
+            prev = gr.Button("<- Prev", elem_id="cg_prev", min_width=100)
+            nxt = gr.Button("Next ->", elem_id="cg_next", min_width=100)
+            first = gr.Button("Go to first not done", min_width=100)
+        head = gr.Markdown(CHOOSE)
+        img = gr.HTML()
+        payload = gr.Textbox(**hidden)
+        with gr.Row():
+            progs = [gr.Markdown(hub.progress(d)) for d in hub.datasets]
+        outs = [head, img, *progs]
         sel = [data, user, model, setting, task]
         q = {"queue": False, "show_progress": "hidden"}
         js = "(d, u, m, s, t, p) => [d, u, m, s, t, window.cgPayload ? window.cgPayload() : '']"
 
         def run(d, u, m, s, t, p, action):
-            if not (m and s and t):
-                return "**Choose Data, User, Model, Setting and Task on the right to start.**", "", hub.progress(d)
-            return (*hub.act(d, u, p, action, {"model": m, "setting": s, "task": t}), hub.progress(d))
+            if not (d and u and m and s and t):
+                return CHOOSE, "", *[hub.progress(x) for x in hub.datasets]
+            head_md, page = hub.act(d, u, p, action, {"model": m, "setting": s, "task": t})
+            return head_md, page, *[hub.progress(x) for x in hub.datasets]
 
         def mk(action):
             return lambda d, u, m, s, t, p: run(d, u, m, s, t, p, action)
@@ -726,7 +814,7 @@ def build_ui(hub, gr):
             b.click(mk(action), sel + [payload], outs, js=js, **q)
         for r in sel:
             r.input(lambda d, u, m, s, t: run(d, u, m, s, t, "", "show"), sel, outs, **q)
-        demo.load(lambda: (*hub.act(None, None, "", "show"), ""), None, outs, **q)
+        demo.load(lambda: (CHOOSE, "", *[hub.progress(x) for x in hub.datasets]), None, outs, **q)
     return demo, launch_kw
 
 

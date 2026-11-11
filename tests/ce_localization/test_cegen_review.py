@@ -213,7 +213,7 @@ def test_hub_filter_and_progress(tmp_path):
     f = {"model": "M1", "setting": "finetune", "task": None}
     head, page = hub.act("CoCount", "user1", "", "show", filt=f)
     want = [it["key"] for it in a.items if it["model"] == "M1" and it["setting"] == "finetune"]
-    assert [a.items[p]["key"] for p in a.view] == want and len(want) == 2 and "M1 · finetune" in head
+    assert [a.items[p]["key"] for p in a.view] == want and len(want) == 2 and "screen 1 / 2" in head
     assert a.cur()["key"] == want[0] and "M1" in page and "finetune" in page
     pre = page.split('data-pre="')[1].split('"')[0]
     assert all(it["out"] not in pre for it in a.items if it["model"] == "M0")              # tải trước chỉ màn trong bộ lọc
@@ -221,7 +221,7 @@ def test_hub_filter_and_progress(tmp_path):
     assert want[0] in a.store.latest and a.cur()["key"] == want[1]
     hub.act("CoCount", "user1", json.dumps({"key": want[1]}), "fail", filt=f)                # thiếu box: chưa xong
     assert set(a.store.latest) == set(want) and a.cur()["key"] == want[1]
-    assert "| M1 · finetune · remove | 0/1 |" in hub.progress("CoCount")
+    assert "| M1 / finetune / remove | 0/1 |" in hub.progress("CoCount")
     hub.act("CoCount", "user1", json.dumps({"key": want[1], "box": [1, 1, 8, 8], "src": "drawn"}), "fail", filt=f)
     other = next(it["key"] for it in a.items if it["model"] == "M0")                         # màn ngoài bộ lọc: không lưu
     head, _ = hub.act("CoCount", "user1", json.dumps({"key": other, "box": [2, 2, 9, 9], "src": "drawn"}), "ok", filt=f)
@@ -231,13 +231,13 @@ def test_hub_filter_and_progress(tmp_path):
     hub.act("CoCount", "user1", "", "show", filt={})                                      # bỏ lọc: màn chưa chấm đầu tiên
     assert len(a.view) == len(a.items) and a.cur()["key"] not in a.store.latest
     prog = hub.progress("CoCount")
-    assert "| M1 · finetune · add | 1/1 | 0/1 | 50% |" in prog and "| M1 · finetune · remove | 1/1 | 0/1 | 50% |" in prog
+    assert "| M1 / finetune / add | 1/1 | 0/1 | 50% |" in prog and "| M1 / finetune / remove | 1/1 | 0/1 | 50% |" in prog
     for (d, u), s in hub.sessions.items():                                                   # chấm hết user2 phần M1 · finetune
         if d == "CoCount" and u == "user2":
             for it in s.items:
                 if it["model"] == "M1" and it["setting"] == "finetune":
                     s.store.put({"key": it["key"], "success": False, "box": [1, 1, 5, 5], "box_src": "drawn"})
-    assert "| M1 · finetune · add | 1/1 | 1/1 | **done** |" in hub.progress("CoCount")
+    assert "| M1 / finetune / add | 1/1 | 1/1 | **done** |" in hub.progress("CoCount")
 
 
 def test_html_prefill_and_prefetch(man, tmp_path):
@@ -246,7 +246,8 @@ def test_html_prefill_and_prefetch(man, tmp_path):
     page = a.html(hub.url)
     it = a.cur()
     assert 'data-box=""' in page and json.dumps(it["cands"]) in page.replace("&quot;", '"')   # gợi ý chỉ để vẽ khung
-    assert "ADD one sunflower seed" in page and "data-pre=" in page
+    assert "ADD one sunflower seed" in page and "data-pre=" in page and page.count('class="cg_vp"') == 3      # cả 3 ảnh tương tác
+    assert all(ord(c) < 128 for c in page.replace(json.dumps(it["cands"]), ""))                # chữ giao diện chỉ ASCII
     pre = page.split('data-pre="')[1].split('"')[0]
     assert a.items[1]["out"] in pre
 
@@ -254,5 +255,7 @@ def test_html_prefill_and_prefetch(man, tmp_path):
 @pytest.mark.slow
 def test_cegen_build_ui(man, tmp_path):
     gr = pytest.importorskip("gradio")
-    demo, _ = cegen.build_ui(Hub(man, str(tmp_path / "res")), gr)
+    hub = Hub(man, str(tmp_path / "res"))
+    demo, _ = cegen.build_ui(hub, gr)
     assert demo is not None
+    assert all(ord(c) < 128 for c in cegen.CHOOSE + hub.progress("CE130") + hub.progress("CoCount"))
