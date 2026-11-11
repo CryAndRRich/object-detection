@@ -1,4 +1,4 @@
-# vlm — ZETA4 (RePlan) + ZETA5 (VLM thương mại) + ZETA6 (VLM open-source) cho bài ADD, chạy theo cách của tác giả
+# vlm — ZETA4 (RePlan) + ZETA5 (VLM thương mại) + ZETA6 (VLM open-source) + finetune SFT LoRA (ZETA4.1, 8.x) cho bài ADD
 
 Mỗi ảnh test gọi VLM **một lần**, xin **30 box** chỗ thêm một vật cùng lớp. Chấm bằng đúng code chấm của ZETA / CE-Loc
 (`baseline/score.py`). **Kết quả chính = C-NLL của box `score` (confidence model trả) cao nhất** (người dùng chốt 2026-11-04;
@@ -86,7 +86,7 @@ Chưa đủ câu trả lời (dừng giữa chừng / `--no-score`) ⇒ `<name>.
 `diagnose.json` (số box, finish, token, toạ độ trong ảnh theo pixel / 0–1000).
 
 Log `log/add/vlm/<model>/`: `pilot<K>_<MMDD_HHMM>.log`, `full_<MMDD_HHMM>.log` (sinh `--all`), `score_full_<MMDD_HHMM>.log`
-(`--score-only`); chuỗi nhiều model / bước: `log/add/eval_chain/`.
+(`--score-only`); chuỗi nhiều model / bước: `log/add/chain/`.
 
 ## So box các VLM — `plot_compare.py`
 
@@ -121,7 +121,7 @@ lệ ảnh. Ghi `output/add/viz/method_grid/<ce130 id>__<cocount id>.png`.
 - **Toạ độ** `coord`: `pixel` (mặc định, như prompt tác giả) | `norm1000` (Qwen3-VL, LLaVA-OV-2, InternVL3.5 trả thang 0–1000 dù prompt
   xin pixel — pilot 2026-11-04); chỉ đổi cách đọc, không vào hash.
 - **Kaggle** (`config/kaggle/`; T4 không bf16 / FP8 / FlashAttention 2 ⇒ `dtype: half`, `tensor_parallel_size: 2`, bộ nhớ tính MỖI
-  card). `vllm.data_parallel: 2` ⇒ 2 tiến trình con (`--shard i/2`, mỗi con một GPU), ghi `responses_shard<i>.jsonl` rồi gộp. Notebook
+  card). Notebook
   `notebooks/vlm_kaggle.ipynb` (local, gitignore): cài vLLM, nối `responses.jsonl` phiên trước, `--pilot K` / `--all` + `diagnose.json`,
   gói `zeta6_<tag>.zip` (giải nén vào gốc `multi_condition/` hay `/mnt/disk1/aiotlab/haitn/`, rồi `--score-only`).
 - **Server 2** RTX PRO 5000 48 GB (`config/server2/`; Qwen3-VL-4B / LLaVA-OV-2-8B = bản Kaggle một card, cùng hash; InternVL3.5-8B

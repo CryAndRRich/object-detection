@@ -27,7 +27,6 @@ box vật tự giữ fp32); bước NaN / inf bị bỏ (GradScaler dò thang �
 
 import argparse
 import copy
-import json
 import os
 import sys
 import time
@@ -47,8 +46,8 @@ from ce_localization.data.clip_cache import ClipCache  # noqa: E402
 from ce_localization.data.turns import (AddCache, CE130AddDataset, TurnIndex, collate_add, load_positives,  # noqa: E402
                                         to_device_add)
 from ce_localization.engine.add_eval import add_metrics, predict_add  # noqa: E402
-from ce_localization.engine.train_utils import (EpochBatches, PthCheckpoints, config_mismatch, fmt_gpu_peak, gpu_peak, lr_factor,  # noqa: E402
-                                               noise_seed, setup_dist)
+from ce_localization.engine.train_utils import (EpochBatches, PthCheckpoints, config_mismatch, fmt_gpu_peak, gpu_peak, grad_scaler,  # noqa: E402
+                                               lr_factor, noise_seed, setup_dist, write_json_atomic)
 from ce_localization.models.box_policy import boxes_to_unit, build_model  # noqa: E402
 from ce_localization.models.clip_refiner import refiner_config, text_model_name  # noqa: E402
 from ce_localization.models.text import TextTable, encode_class_names, encode_class_tokens  # noqa: E402
@@ -273,8 +272,7 @@ def main():
     log(f"[model] {n_learn / 1e6:.2f}M tham số train | box_coder {model.box_coder['type']} | "
         f"AMP {'fp16 + channels_last' if amp else 'tắt'} | {fmt_time(time.time() - t)}")
     opt = torch.optim.AdamW(model.parameters(), lr=float(tr["lr"]), weight_decay=float(tr["weight_decay"]), fused=dev.type == "cuda")
-    scaler = (torch.amp.GradScaler("cuda", enabled=amp) if hasattr(torch.amp, "GradScaler")
-              else torch.cuda.amp.GradScaler(enabled=amp))           # torch < 2.3 (venv test local)
+    scaler = grad_scaler(enabled=amp)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda it: lr_factor(it, tr))
 
     start, best, history = 0, None, []
@@ -318,9 +316,8 @@ def main():
         ckm.save({"model": model.state_dict(), "optimizer": opt.state_dict(), "scheduler": sched.state_dict(),
                   "scaler": scaler.state_dict(), "iter": it_next, "best": best, "history": history, "config": cfg, "env": env,
                   "rng": {"torch": torch.get_rng_state()}, **({"epoch_loss": ep_acc.tolist()} if train_select else {})}, is_best)
-        with open(os.path.join(a.save_dir, "history.json"), "w") as f:
-            json.dump({"config": cfg, "environment": env, "best": best, "history": history}, f, indent=1, ensure_ascii=False,
-                      default=float)
+        write_json_atomic(os.path.join(a.save_dir, "history.json"), {"config": cfg, "environment": env, "best": best, "history": history},
+                          ensure_ascii=False, default=float)
 
     def new_window():
         """Cửa sổ log: tổng loss / thống kê / số bước bỏ là tensor TRÊN GPU (cộng float64 như tổng float Python trước đây) — chỉ đọc về

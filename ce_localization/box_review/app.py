@@ -69,8 +69,6 @@ sys.path.insert(0, OD)
 from ce_localization.box_review.sources import SOURCES, dedup_boxes, preselect  # noqa: E402
 from ce_localization.data.turns import iter_jsonl  # noqa: E402
 
-__all__ = ["ReviewStore", "Session", "PredHub", "box_svg", "default_out", "split_screens", "pred_out", "build_ui"]
-
 ZOOMS = ("fit", "100%", "150%", "200%", "300%", "400%")
 PREFETCH = 8          # số màn kế tải trước (ảnh giải mã sẵn ở trình duyệt, `brPrefetch`)
 FILE_ROUTE = "/gradio_api/file="
@@ -633,7 +631,7 @@ def pred_out(dump):
 
 
 def main():
-    snap = os.path.join(os.path.dirname(OD), "output", "add", "delta8")
+    snap = os.path.join(os.path.dirname(OD), "output", "add", "celoc", "delta8")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("source", nargs="?", default="cocount", choices=["cocount", "ce130", "pred"], help="mặc định cocount")
     ap.add_argument("--root", default=None, help="mặc định object-detection/data/cocount | object-detection/data/all_phase2_V2")

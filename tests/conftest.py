@@ -1,6 +1,6 @@
 """Gốc `object-detection/` vào sys.path (import theo tên package đầy đủ `ce_localization.*`). Test NẶNG (trọn luồng train / eval trên CPU,
-DDP 2 tiến trình — danh sách `SLOW`) mặc định bỏ qua, chạy khi `--runslow` (hoặc env CE_RUN_SLOW=1): khi sửa lõi train / eval / model,
-và ở ô test của notebook Kaggle."""
+DDP 2 tiến trình, tool cục bộ Gradio / hình) gắn `@pytest.mark.slow`: mặc định bỏ qua, chạy khi `--runslow` (hoặc env CE_RUN_SLOW=1) —
+khi sửa lõi train / eval / model, và ở ô test của notebook Kaggle."""
 
 import os
 import shutil
@@ -12,10 +12,6 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-SLOW = {"test_flow_val_select_resume_eval", "test_flow_train_loss_select_resume", "test_ddp_two_processes",
-        "test_flow_positive_all_pair_resume", "test_latency_celoc_flow",
-        "test_build_ui", "test_build_ui_pred_hub", "test_cegen_build_ui", "test_plot_snapshot_compare_tool"}              # tool cục bộ (Gradio, hình) — hỏng thì lộ ngay lúc dùng
-
 
 def pytest_addoption(parser):
     parser.addoption("--runslow", action="store_true", help="chạy cả test nặng (trọn luồng train / eval, DDP)")
@@ -26,11 +22,12 @@ def pytest_collection_modifyitems(config, items):
         return
     skip = pytest.mark.skip(reason="test nặng — chạy với --runslow")
     for it in items:
-        if getattr(it, "originalname", it.name) in SLOW:
+        if "slow" in it.keywords:
             it.add_marker(skip)
 
 
 def pytest_configure(config):
+    config.addinivalue_line("markers", "slow: test nặng (trọn luồng train / eval, DDP, tool cục bộ) — chỉ chạy với --runslow")
     # matplotlib < 3.10 gọi API deprecated của pyparsing khi import mathtext / font — lỗi thư viện, bỏ đúng loại đó
     config.addinivalue_line("filterwarnings", r"ignore::DeprecationWarning:matplotlib\._mathtext")
     config.addinivalue_line("filterwarnings", r"ignore::DeprecationWarning:matplotlib\._fontconfig_pattern")

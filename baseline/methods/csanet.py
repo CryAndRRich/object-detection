@@ -26,8 +26,6 @@ from ce_localization.utils.log import Progress
 from baseline.data import int_box, pick_objects, sample_rng, to_u8
 from baseline.models.csanet import CSANetConfig, Discriminator, SysNet, gan_losses
 
-__all__ = ["trans_to_box", "get_trans_label", "fg_inputs", "CSANetTrain", "Trainer", "predict", "build"]
-
 
 def trans_to_box(trans, bg_wh, fg_wh):
     """trans -> box xyxy pixel nền (phần vật nằm trong ảnh)."""

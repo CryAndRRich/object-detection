@@ -15,9 +15,6 @@ from ce_localization.data.turns import iter_jsonl, letterbox_size
 from ce_localization.engine.add_eval import (SIZE_STATS, add_metrics, dump_rows, prior_records, prior_unit_boxes, resize_to_objects,
                                              trim_mean, write_json)
 
-__all__ = ["result_key", "records_from_boxes", "cnll_summary", "score_records", "read_boxes", "write_jsonl", "write_json",
-           "write_outputs"]
-
 
 _PRIOR = {}                                       # mốc prior lần chấm gần nhất (score_records)
 
@@ -70,9 +67,9 @@ def score_records(recs, dataset, K, *, index=None, obj_size=None, seed=0):
         key = result_key(dataset) + suffix
         rec = recs if st is None else resize_to_objects(recs, st)
         dump[key] = dump_rows(rec)
-        results[key] = {**add_metrics(rec, with_holes=True, latest=not cocount), **cnll_summary(dump[key])}
+        results[key] = {**add_metrics(rec, latest=not cocount), **cnll_summary(dump[key])}
         if pri_base is not None:
-            prior[key] = add_metrics(pri_base if st is None else resize_to_objects(pri_base, st), with_holes=True, latest=not cocount)
+            prior[key] = add_metrics(pri_base if st is None else resize_to_objects(pri_base, st), latest=not cocount)
     if pri_base is not None:
         _PRIOR.clear()
         _PRIOR[pkey] = prior

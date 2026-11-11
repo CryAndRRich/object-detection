@@ -14,8 +14,6 @@ import time
 import numpy as np
 import torch
 
-__all__ = ["ClipCache", "build_clip_cache"]
-
 
 class ClipCache:
     def __init__(self, cache_dir):

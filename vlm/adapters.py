@@ -18,8 +18,6 @@ import torch
 
 from vlm.parse import qwen_resized_wh
 
-__all__ = ["ADAPTERS", "make_adapter", "hf_messages", "QwenAdapter", "LlavaOV2Adapter", "InternVLAdapter", "internvl_tiles"]
-
 
 def hf_messages(messages):
     """Lượt nội bộ (`prompt.build_messages`) -> hội thoại cho `apply_chat_template`: user = [text, {"type": "image"}] (ảnh trước nếu

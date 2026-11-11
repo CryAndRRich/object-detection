@@ -28,8 +28,6 @@ from ce_localization.utils.log import Progress
 from ce_localization.data.turns import letterbox_size
 from ce_localization.engine.add_eval import CNLL_MIN_OBJ, cnll_fit, cnll_features, other_class, select_nms
 
-__all__ = ["CRITERIA", "BASES", "parse_spec", "grid_boxes", "scores", "search", "predict"]
-
 CRITERIA = ("euclid", "cnll")
 BASES = ("euclid", "cnll", "euclid_px")
 CHUNK = 4_000_000                 # số cặp (vị trí × vật tham chiếu) mỗi lượt tính đặc trưng (IoU + kNN ~ vài chục MB)

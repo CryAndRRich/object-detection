@@ -18,8 +18,6 @@ from vlm.backends import Fatal, chat_messages, result, stable_int
 from vlm.parse import REPLAN_SEP, sample_cfg
 from vlm.prompt import ask_k, box_schema
 
-__all__ = ["VLLMLocal", "gpu_free_total_mib", "memory_utilization"]
-
 
 def gpu_free_total_mib():
     """-> (trống, tổng) MiB, lấy GPU trống ÍT nhất trong CUDA_VISIBLE_DEVICES (hay GPU 0) — tensor parallel cần đủ chỗ trên MỌI card."""

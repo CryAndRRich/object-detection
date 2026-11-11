@@ -24,8 +24,6 @@ from vlm.backends import stable_int
 from vlm.parse import qwen_resized_wh
 from vlm.prompt import build_messages
 
-__all__ = ["THINK", "HINT", "target_text", "coord_box", "resized_box", "answer_text", "pick_hole", "SFTDataset", "collate"]
-
 THINK = ("The user's instruction is to add one more {cls} to the image. This can be achieved by inserting a new {cls} into the scene, "
          "ensuring it blends naturally with the existing {cls} and the environment.")
 HINT = "add a new {cls} to the image"

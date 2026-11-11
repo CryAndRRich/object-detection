@@ -26,8 +26,6 @@ from baseline.data import int_box, pick_objects, sample_rng, to_u8
 from baseline.models.bootplace import build_bootplace, build_criterion
 from baseline.models.detr import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh, nested
 
-__all__ = ["FRAME", "resize_size", "prep_images", "patch_canvas", "scene_boxes", "target_boxes", "BootPlaceTrain", "rank_queries", "sample_inputs", "predict", "Trainer"]
-
 MEAN, STD = (0.440, 0.440, 0.440, 0.0), (0.320, 0.319, 0.318, 0.5)
 PATCH, MAX_PATCHES, TOPK_CLIP = 64, 100, 10
 FRAME = (960, 540)               # khung ảnh (W, H) của BootPlace gốc: mọi ảnh resize méo về đây; box cảnh pixel trong khung này

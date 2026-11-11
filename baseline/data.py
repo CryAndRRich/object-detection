@@ -25,9 +25,6 @@ from PIL import Image
 from ce_localization.data.cocount import CoCountAddDataset, cocount_geometry, read_cocount
 from ce_localization.data.turns import TurnIndex, ce130_geometry, present_objects
 
-__all__ = ["DATASETS", "FG_SELECT", "IMAGENET_MEAN", "IMAGENET_STD", "load_samples", "geometry", "train_items", "sample_rng", "pick_objects",
-           "int_box", "to_u8"]
-
 IMAGENET_MEAN, IMAGENET_STD = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)     # chuẩn hoá ảnh ResNet ImageNet (CSANet, HiddenObjects)
 
 DATASETS = ("ce130", "cocount")

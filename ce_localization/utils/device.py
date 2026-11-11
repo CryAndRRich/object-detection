@@ -2,8 +2,6 @@
 
 import torch
 
-__all__ = ["to_device"]
-
 
 def to_device(t, dev):
     """Tensor CPU -> `dev` KHÔNG đồng bộ: CUDA chép từ bộ nhớ ghim (chép từ bộ nhớ thường bắt CPU chờ GPU xong mọi việc đang xếp hàng;

@@ -10,7 +10,7 @@ Mỗi model, mỗi mẫu: `sel` = C-NLL thấp nhất trong K box (như bài: ch
 Ghi `<out>/summary.json` + 3 hình: `sorted_sel.png` (đuôi phân bố), `trimmed_mean.png` (trung bình theo % bỏ), `outliers_heatmap.png`.
 
   cd object-detection/ce_localization
-  O=../../output/add
+  O=../../output/add/celoc
   python tools/cnll_outliers.py --dump DELTA6=$O/delta6/ce130_test_all/best_boxes.json \\
       DELTA6.2=$O/delta6_2/ce130_test_all/best_boxes.json … \\
       --key inpainted_mock \\
@@ -27,8 +27,6 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from ce_localization.engine.add_eval import trim_mean  # noqa: E402
-
-__all__ = ["per_sample", "summarize", "outlier_overlap"]
 
 TRIMS = (0.0, 0.5, 1.0, 2.0, 5.0)
 
@@ -129,7 +127,7 @@ def main():
             rows = json.load(f)["results"][a.key]
         per_model[name] = per_sample(rows)
         if not per_model[name]:
-            raise SystemExit(f"{path}: không có `cnll` trong dump (dump của branch `new` ghi `cnll_F1`)")
+            raise SystemExit(f"{path}: không có `cnll` trong dump")
     ids = set.intersection(*(set(d) for d in per_model.values()))
     if any(len(d) != len(ids) for d in per_model.values()):
         print(f"⚠️ tập mẫu khác nhau giữa các dump -> chỉ dùng {len(ids)} mẫu chung")

@@ -2,8 +2,6 @@
 
 import torch
 
-__all__ = ["linear_alphas_cumprod", "q_sample"]
-
 
 def linear_alphas_cumprod(num_timesteps=1000, beta_start=1e-4, beta_end=0.02, dtype=torch.float32):
     """Lịch β tuyến tính của DDPM / CE-Loc gốc (`torch.linspace(1e-4, 0.02, T)`, float32) -> ᾱ_t = Π (1 − β)."""

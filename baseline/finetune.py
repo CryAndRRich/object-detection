@@ -32,7 +32,7 @@ from baseline.dist import all_sum, sync_grads  # noqa: E402
 from baseline.methods import batch_len, load_model, make_trainer, split_batch  # noqa: E402
 from ce_localization.data.turns import TurnIndex  # noqa: E402
 from ce_localization.engine.train_utils import (EpochBatches, PthCheckpoints, config_mismatch, fmt_gpu_peak, gpu_peak,  # noqa: E402
-                                                setup_dist, write_json_atomic)
+                                                grad_scaler, setup_dist, write_json_atomic)
 from ce_localization.utils.config import load_config  # noqa: E402
 from ce_localization.utils.log import fmt_time  # noqa: E402
 
@@ -100,8 +100,7 @@ def main():
     tr = make_trainer(cfg, dev, model)
     torch.backends.cudnn.benchmark = dev.type == "cuda" and getattr(tr, "fixed_size", False)  # CSANet 256², HiddenObjects 512²
     # GradScaler bật cả khi fp32 (thang 1, không tăng): unscale_ kiểm grad NaN / inf ⇒ bỏ bước thay vì ghi NaN vào weight
-    sc = dict(init_scale=2.0 ** 16 if amp else 1.0, growth_interval=2000 if amp else 10 ** 9, enabled=dev.type == "cuda")
-    scaler = torch.amp.GradScaler("cuda", **sc) if hasattr(torch.amp, "GradScaler") else torch.cuda.amp.GradScaler(**sc)
+    scaler = grad_scaler(init_scale=2.0 ** 16 if amp else 1.0, growth_interval=2000 if amp else 10 ** 9, enabled=dev.type == "cuda")
     epochs = f["epochs"]
     epoch = step = it = 0
     ep_acc = torch.zeros(3, dtype=torch.float64, device=dev)          # [tổng chỉ số chọn best, số bước, tổng loss] epoch đang chạy

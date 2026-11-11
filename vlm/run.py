@@ -16,23 +16,18 @@ từng box + token / tiền + text), `<..>.json` (số tổng: `top_score` = CH�
 
 import argparse
 import os
-import signal
 import socket
-import subprocess
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ce_localization.utils.config import load_config  # noqa: E402
+from ce_localization.utils.log import log  # noqa: E402
 from vlm.backends import Fatal, make_backend  # noqa: E402
 from vlm.env import load_env  # noqa: E402
 from vlm.prompt import build_messages, encode_image, prompt_hash  # noqa: E402
-from vlm.runner import dataset_dir, merge_shards, run_dataset, select  # noqa: E402
-
-
-def log(*a):
-    print(*a, flush=True)
+from vlm.runner import dataset_dir, run_dataset, select  # noqa: E402
 
 
 def parse_args(argv=None):
@@ -47,7 +42,6 @@ def parse_args(argv=None):
     ap.add_argument("--score-only", action="store_true", help="chỉ chấm từ responses.jsonl, không gọi model")
     ap.add_argument("--coord", default=None, choices=["pixel", "norm1000", "qwen_resized"],
                     help="đọc toạ độ theo thang này thay `coord` của config (chỉ lúc parse / chấm; file ra thêm hậu tố _<coord>)")
-    ap.add_argument("--shard", default=None, help="i/n — nội bộ: bản thứ i trong n bản song song (`vllm.data_parallel`, tự đặt)")
     ap.add_argument("--out-root", default="../../output/add/vlm")
     ap.add_argument("--model", default=None, help="ghi đè `model` của config (vd thư mục HF đã merge LoRA của finetune.py; vào hash)")
     ap.add_argument("--name", default=None, help="ghi đè `name` (thư mục con trong --out-root; vd epNNN của một snapshot)")
@@ -85,60 +79,7 @@ def dry_run(cfg, a, datasets):
                 + ("" if i and msgs[0]["role"] != "system" else f"\n{msgs[-1]['text']}"))
 
 
-def data_parallel(cfg):
-    return int((cfg.get("vllm") or {}).get("data_parallel") or 1) if cfg["backend"] == "vllm" else 1
-
-
-def launch_shards(cfg, a, argv, datasets, dp, stop_wait=90.0, stagger=60.0):
-    """vLLM `data_parallel` n: n tiến trình con `--shard i/n`, mỗi con MỘT GPU (CUDA_VISIBLE_DEVICES thứ i), chia ảnh theo hash
-    (`runner.in_shard`), ghi `responses_shard<i>.jsonl`; xong (hay bị dừng: SIGTERM chuyển cho con, quá `stop_wait` giây thì kill) ⇒
-    gộp vào `responses.jsonl`. Weight HF tải trước một lần, các con khởi động cách nhau `stagger` giây (không tranh tải / ghi cache
-    compile của vLLM cùng lúc). -> mã thoát lớn nhất của các con."""
-    gpus = [g.strip() for g in (os.environ.get("CUDA_VISIBLE_DEVICES") or ",".join(map(str, range(dp)))).split(",") if g.strip()]
-    if len(gpus) < dp:
-        raise SystemExit(f"[vlm] data_parallel {dp} cần {dp} GPU, CUDA_VISIBLE_DEVICES chỉ có {gpus}")
-    log(f"[vlm] data_parallel {dp}: {dp} bản model, GPU {gpus[:dp]}, chia ảnh theo hash")
-    if cfg["backend"] == "vllm":
-        from huggingface_hub import snapshot_download
-        t0 = time.time()
-        snapshot_download(cfg["model"])
-        log(f"[vlm] tải weight {cfg['model']} {time.time() - t0:.0f} s")
-    procs, stop = [], {"at": None}
-
-    def on_signal(signum, frame):
-        if stop["at"] is None:
-            stop["at"] = time.time()
-            log(f"[vlm] nhận tín hiệu {signum} -> dừng {dp} bản (câu trả lời đã ghi giữ nguyên)")
-            for p in procs:
-                p.terminate()
-    old = {sg: signal.signal(sg, on_signal) for sg in (signal.SIGTERM, signal.SIGINT)}
-    try:
-        for i in range(dp):
-            if i and stagger:
-                time.sleep(stagger)
-            if stop["at"] is not None:
-                break
-            procs.append(subprocess.Popen([sys.executable, os.path.abspath(__file__), *argv, "--shard", f"{i}/{dp}"],
-                                          env=dict(os.environ, CUDA_VISIBLE_DEVICES=gpus[i])))
-        while any(p.poll() is None for p in procs):
-            if stop["at"] is not None and time.time() - stop["at"] > stop_wait:
-                for p in procs:
-                    p.kill()
-            time.sleep(0.5)
-    finally:
-        for sg, h in old.items():
-            signal.signal(sg, h)
-        for d in datasets:
-            out_dir = os.path.join(a.out_root, cfg["name"], dataset_dir(data_ns(a, d)))
-            if os.path.isdir(out_dir):
-                log(f"[vlm] {d}: gộp {merge_shards(out_dir)} câu trả lời của {dp} bản -> {out_dir}/responses.jsonl")
-    rcs = [p.returncode for p in procs]
-    log(f"[vlm] {dp} bản xong, mã thoát {rcs}")
-    return max(rcs, key=abs) if rcs else 1
-
-
 def main(argv=None):
-    argv = list(sys.argv[1:] if argv is None else argv)
     a = parse_args(argv)
     if a.no_score and a.score_only:
         raise SystemExit("--no-score và --score-only loại trừ nhau")
@@ -159,16 +100,6 @@ def main(argv=None):
     if a.dry_run:
         dry_run(cfg, a, datasets)
         return
-    dp = data_parallel(cfg)
-    shard = tuple(int(v) for v in a.shard.split("/")) if a.shard else None
-    if dp > 1 and shard is None and not a.score_only:
-        rc = launch_shards(cfg, a, argv, datasets, dp)
-        if rc:
-            raise SystemExit(rc)
-        return
-    if shard:
-        name += f"_shard{shard[0]}"
-        log(f"[vlm] bản {shard[0]} / {shard[1]} | CUDA_VISIBLE_DEVICES {os.environ.get('CUDA_VISIBLE_DEVICES')}")
     found = load_env()
     log(f"[vlm] .env: {len(found)} biến ({', '.join(found) or 'không có file'})")
     try:
@@ -180,7 +111,7 @@ def main(argv=None):
         ns = data_ns(a, d)
         out_dir = os.path.join(a.out_root, cfg["name"], dataset_dir(ns))
         info, s = run_dataset(cfg, ns, backend, out_dir, name, phash, pilot=a.pilot, max_cost=a.max_cost, score=not a.no_score,
-                              log=log, spent0=spent, shard=shard)
+                              log=log, spent0=spent)
         spent += s
         est.append(info["full_estimate"])
         stopped = info["this_run"]["stopped"] or ""

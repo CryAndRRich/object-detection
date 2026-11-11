@@ -26,9 +26,6 @@ from ce_localization.utils.box_coder import (box_coder_config, encode_rel, gener
 from ce_localization.utils.device import to_device
 from ce_localization.utils.diffusion_math import linear_alphas_cumprod, q_sample
 
-__all__ = ["BoxPolicy", "PaperVisionEncoder", "boxes_to_unit", "unit_to_boxes", "mock_sample", "ddim_sample", "paper_spatial_softmax",
-           "valid_cells_mask", "pad_objects", "build_model", "load_checkpoint", "SAMPLERS"]
-
 SAMPLERS = ("mock", "ddim")
 C5_STRIDE = 32
 
@@ -320,17 +317,10 @@ class BoxPolicy(nn.Module):
         return loss
 
     @torch.no_grad()
-    def sample(self, images, text_raw, valid_hw, n_samples, generator=None, sampler="mock", objects=None, text_tokens=None,
-               use_objects=True, use_refiner=True, ddim_steps=None, eta=1.0, clip_sample=True):
-        """n_samples mẫu độc lập mỗi ảnh -> [B, n_samples, 4] mã hoá. `use_objects` / `use_refiner` False = eval `_noobj` / `_norefine`."""
-        cond, obj, ctx = self.encode(images, text_raw, valid_hw, objects, text_tokens)
-        return self.sample_from_cond(cond, n_samples, generator, sampler, obj if use_objects else None, ctx if use_refiner else None,
-                                     ddim_steps=ddim_steps, eta=eta, clip_sample=clip_sample)
-
-    @torch.no_grad()
     def sample_from_cond(self, cond, n_samples, generator=None, sampler="mock", obj=None, ctx=None, ddim_steps=None, eta=1.0,
                          clip_sample=True):
-        """Như `sample` từ phần đã mã hoá (`encode`). Mọi hàng cùng t ở mỗi bước ⇒ refiner tính luồng ngữ cảnh một lần mỗi ảnh; K / V token
+        """n_samples mẫu độc lập mỗi ảnh từ phần đã mã hoá (`encode`) -> [B, n_samples, 4] mã hoá; `obj` / `ctx` None = eval `_noobj` /
+        `_norefine`. Mọi hàng cùng t ở mỗi bước ⇒ refiner tính luồng ngữ cảnh một lần mỗi ảnh; K / V token
         vật tính một lần mỗi ảnh cho mọi bước và mọi mẫu (`ObjKV`)."""
         if sampler not in SAMPLERS:
             raise ValueError(f"sampler {sampler!r} không thuộc {SAMPLERS}")

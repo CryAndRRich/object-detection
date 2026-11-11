@@ -11,7 +11,6 @@ Pilot = K mẫu đầu theo hash blake2b(`seed:image_id`) ⇒ ổn định, và 
 Lỗi API (sau khi backend đã thử lại) KHÔNG ghi ⇒ chạy lại sẽ hỏi lại ảnh đó; model trả lời mà 0 box hợp lệ sau `retries` lần ⇒ ghi
 (`n_valid` = 0, chấm bằng box cả ảnh)."""
 
-import glob
 import json
 import os
 import time
@@ -23,11 +22,6 @@ from ce_localization.utils.log import fmt_time
 from vlm.backends import Fatal, stable_int, token_cost
 from vlm.parse import fill, parse_candidates, parse_scored
 from vlm.prompt import author_turns, build_messages, encode_image
-
-__all__ = ["dataset_dir", "select",
-           "in_shard", "load_responses", "load_all_responses", "merge_shards", "record_cost", "summarize",
-           "run_dataset"]
-
 
 def dataset_dir(ns):
     return f"ce130_{ns.split}" if ns.dataset == "ce130" else f"cocount_review{ns.cocount_min_obj}"
@@ -45,45 +39,10 @@ def select(samples, seed, pilot=None):
     return [s for s in samples if s["image_id"] in keep]
 
 
-def in_shard(image_id, shard):
-    """`shard` (i, n) — vLLM chạy n bản song song (`vllm.data_parallel`): ảnh thuộc bản i theo hash riêng của tên ảnh (không phụ thuộc
-    thứ tự / ảnh nào đã xong ⇒ các bản khởi động lệch giờ vẫn không trùng, không sót)."""
-    if not shard:
-        return True
-    i, n = shard
-    return stable_int(f"shard:{image_id}", 8, "little") % n == i
-
-
 def load_responses(path, phash):
     if not os.path.exists(path):
         return {}
     return {r["image_id"]: r for r in iter_jsonl(path) if r.get("prompt_hash") == phash}
-
-
-def _resp_files(out_dir):
-    return [os.path.join(out_dir, "responses.jsonl")] + sorted(glob.glob(os.path.join(out_dir, "responses_shard*.jsonl")))
-
-
-def load_all_responses(out_dir, phash):
-    """`responses.jsonl` + `responses_shard*.jsonl` (bản song song chưa gộp, vd phiên bị kill) — dòng sau đè dòng trước cùng ảnh."""
-    done = {}
-    for f in _resp_files(out_dir):
-        done.update(load_responses(f, phash))
-    return done
-
-
-def merge_shards(out_dir):
-    """Nối `responses_shard*.jsonl` vào `responses.jsonl` rồi xoá chúng. -> số dòng đã nối."""
-    n = 0
-    with open(os.path.join(out_dir, "responses.jsonl"), "a") as fout:
-        for f in _resp_files(out_dir)[1:]:
-            with open(f) as fin:
-                for line in fin:
-                    if line.strip():
-                        fout.write(line if line.endswith("\n") else line + "\n")
-                        n += 1
-            os.remove(f)
-    return n
 
 
 def record_cost(res, cfg):
@@ -133,18 +92,17 @@ def summarize(recs, cfg, n_full, par):
     return out
 
 
-def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=None, score=True, log=print, spent0=0.0, shard=None):
+def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=None, score=True, log=print, spent0=0.0):
     """-> (summary, đã tiêu USD trong lần chạy này). `backend` None = chỉ chấm từ responses.jsonl (`--score-only`). Latency 1 ảnh
-    KHÔNG đo ở đây (`sec` = thông lượng) — dùng `tools/latency.py`. `shard` (i, n): chỉ phần ảnh của bản i (`in_shard`), ghi
-    `responses_shard<i>.jsonl` (`run.py` gộp lại khi các bản xong)."""
+    KHÔNG đo ở đây (`sec` = thông lượng) — dùng `tools/latency.py`."""
     from baseline.score import load_data
 
     tag = f"[{ns.dataset} {name}]"
     samples, index, geo = load_data(ns)
-    sel = [s for s in select(samples, cfg.get("seed", 0), pilot) if in_shard(s["image_id"], shard)]
+    sel = select(samples, cfg.get("seed", 0), pilot)
     os.makedirs(out_dir, exist_ok=True)
-    resp_path = os.path.join(out_dir, f"responses_shard{shard[0]}.jsonl" if shard else "responses.jsonl")
-    done = load_all_responses(out_dir, phash)
+    resp_path = os.path.join(out_dir, "responses.jsonl")
+    done = load_responses(resp_path, phash)
     pending = [s for s in sel if s["image_id"] not in done]
     retries = int(cfg.get("retries", 2))
     img_cfg = cfg.get("image") or {}
@@ -232,8 +190,7 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
     el = time.time() - t0
     recs = [done[s["image_id"]] for s in sel if s["image_id"] in done]
     sm = summarize(recs, cfg, len(sel), par)
-    n_par = shard[1] if shard else 1                                   # n bản song song cùng chạy ⇒ giờ cả tập chia n
-    sm_full = summarize(recs, cfg, len(samples), par * n_par)
+    sm_full = summarize(recs, cfg, len(samples), par)
     info = {"model": cfg["model"], "backend": cfg["backend"], "config": cfg.get("_path"), "prompt_hash": phash, "dataset": ns.dataset,
             "mode": name, "selected": sm,
             "full_estimate": {k: sm_full[k] for k in ("n_full", "est_full_cost", "est_full_cost_p90", "est_full_hours") if k in sm_full},
@@ -243,7 +200,7 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
         log(f"{tag} xong {len(recs)}/{len(sel)} ảnh, lần này {n_new} ảnh mới trong {fmt_time(el)}, ${spent:.4f} | TB "
             f"${sm['cost_per_image_mean']:.5f}/ảnh (p90 ${sm['cost_per_image_p90']:.5f}) | 0 box {sm['n_fail']}, thiếu {sm['n_short']}")
         log(f"{tag} ƯỚC cả tập {len(samples)} ảnh: ${sm_full['est_full_cost']:.2f} (p90 ${sm_full['est_full_cost_p90']:.2f}), "
-            f"~{sm_full['est_full_hours']:.1f} giờ ở song song {par}" + (f" × {n_par} bản" if n_par > 1 else ""))
+            f"~{sm_full['est_full_hours']:.1f} giờ ở song song {par}")
     if stopped:
         log(f"{tag} DỪNG: {stopped}")
     summary_path = os.path.join(out_dir, f"{name}.json")
@@ -258,7 +215,7 @@ def run_dataset(cfg, ns, backend, out_dir, name, phash, *, pilot=None, max_cost=
 
 def write_summary(path, info, scores=None):
     """`<name>.json` = tiền / token / thời gian / ước cả tập (+ kết quả chấm khi đủ câu trả lời)."""
-    from baseline.scoring import write_json
+    from ce_localization.engine.add_eval import write_json
     write_json(path, {**info, **(scores or {})})
 
 

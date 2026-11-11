@@ -28,11 +28,6 @@ from torch.utils.data import Dataset
 
 from ce_localization.utils.box_ops_np import box_iou, filter_degenerate
 
-__all__ = ["SPLITS", "letterbox_size", "letterbox", "scale_boxes", "present_objects", "ce130_geometry", "iter_jsonl",
-           "read_annotation", "pixel_hash", "assign_removed", "build_turn_index",
-           "TurnIndex", "AddCache", "build_add_cache", "convert_add_cache", "CE130AddDataset", "collate_add", "to_device_add",
-           "paper_to_float", "load_positives", "hand_positives", "POSITIVE_SAMPLING"]
-
 SPLITS = ("train", "val", "test")
 # đích train khi có box positive (`CE130AddDataset.set_positives`, `train.step_loss`): random = 1 box ngẫu nhiên / ảnh / bước (DELTA7);
 # all = mọi box của ảnh trong cùng bước, loss TB trong ảnh (DELTA7.0.1); pair = mỗi cặp (ảnh, box) là một phần tử (DELTA7.0.2)
@@ -401,7 +396,7 @@ def convert_add_cache(src_dir, out_dir, workers=4, log=print):
 
 class CE130AddDataset(Dataset):
     """Một phần tử = một (nhánh, lượt): ảnh inpaint uint8 [4,T,T] (RGB + density của chính mẫu, kiểu bài), box xyxy PIXEL CANVAS.
-    (Eval ảnh gốc của GAMMA đã bỏ 2026-11-08 — branch `new`.) Box positive (`set_positives`):
+    Box positive (`set_positives`):
     tập đích = mọi lỗ tới lượt t + box gán tay không trùng lỗ (`hand_positives`); `random` / `all`: thêm khoá `positives` (cả tập);
     `pair`: mỗi phần tử = một cặp (mẫu, box), `target` = box đó."""
 

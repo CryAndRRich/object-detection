@@ -176,6 +176,7 @@ def test_session_dedup_hides_and_migrates_saved(tmp_path):
     assert s.dedup and Session(sc2, str(tmp_path / "off.jsonl")).auto_cur == {sc2[0]["id"]: set()}
 
 
+@pytest.mark.slow
 def test_build_ui(tmp_path):
     gr = pytest.importorskip("gradio")
     sc = cocount_screens(fake_cocount(str(tmp_path / "cc")))
@@ -285,6 +286,7 @@ def test_pred_hub_choose_data_user(tmp_path):
     assert [sc["id"] for sc in pre.sess.screens] == ["9_b1_t2"]
 
 
+@pytest.mark.slow
 def test_build_ui_pred_hub(tmp_path):
     gr = pytest.importorskip("gradio")
     one = _fake_pred(tmp_path)

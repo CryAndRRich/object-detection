@@ -9,8 +9,6 @@ import hashlib
 import random
 import time
 
-__all__ = ["Fatal", "make_backend", "result", "backoff", "token_cost", "chat_messages", "stable_int", "RETRY_STATUS", "FATAL_STATUS"]
-
 RETRY_STATUS = {408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 524, 529}
 FATAL_STATUS = {401, 402, 403, 404}
 
@@ -25,7 +23,7 @@ def result(text="", n_in=0, n_out=0, reasoning=0, cost=None, sec=0.0, error=None
 
 
 def stable_int(s, nbytes=4, order="big"):
-    """Số nguyên tất định từ chuỗi (blake2b) — seed / chọn ảnh / chia shard / chọn lỗ không phụ thuộc tiến trình hay PYTHONHASHSEED."""
+    """Số nguyên tất định từ chuỗi (blake2b) — seed / chọn ảnh / chọn lỗ không phụ thuộc tiến trình hay PYTHONHASHSEED."""
     return int.from_bytes(hashlib.blake2b(str(s).encode(), digest_size=nbytes).digest(), order)
 
 

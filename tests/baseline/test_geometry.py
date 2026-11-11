@@ -42,24 +42,3 @@ def test_bootplace_rank_scene_patch_resize():
     assert resize_size((640, 480), 800, 960) == (720, 960) and resize_size((300, 900), 800, 1333) == (1332, 444)
     x, mask = prep_images([torch.zeros(3, 30, 40, dtype=torch.uint8), torch.zeros(3, 50, 20, dtype=torch.uint8)], [(60, 80), (70, 28)], "cpu")
     assert x.shape == (2, 3, 70, 80) and not mask[0, :60, :80].any() and mask[0, 60:].all() and mask[1, :, 28:].all()
-
-
-def test_probe_bootplace_reports_args_extra_keys_and_layers(tmp_path, capsys):
-    """Tool chẩn đoán ZETA1 chạy trọn (dữ liệu giả, model tí hon): in args checkpoint, khoá thừa (dấu hiệu pre-norm), mọi tầng."""
-    from argparse import Namespace
-
-    from baseline import probe_bootplace
-    from tests.baseline.helpers import fake_ce130, fake_ckpt, tiny_cfg
-    _, samples, ti = fake_ce130(str(tmp_path / "data"))
-    cfg_path, cfg = tiny_cfg(tmp_path, "zeta1")
-    p = fake_ckpt(cfg, str(tmp_path / "bp.pth"))
-    ck = torch.load(p, weights_only=False)
-    ck["model"]["transformer.encoder.norm.weight"] = torch.ones(cfg["model"]["hidden_dim"])
-    ck["args"] = Namespace(pre_norm=True, is_mask=False, dec_layers=cfg["model"]["dec_layers"], foo=1)
-    torch.save(ck, p)
-    probe_bootplace.main(["--config", cfg_path, "--ckpt", p, "--dataset", "ce130", "--turn-index", ti, "--samples-root", samples])
-    out = capsys.readouterr().out
-    assert "pre_norm=True" in out and "is_mask=False" in out and "'foo'" in out
-    assert "THỪA 2" in out and "transformer.encoder.norm" in out                     # + patch_decoder của fake_ckpt
-    assert out.count("encoder ") >= cfg["model"]["enc_layers"] and out.count("cross-attn entropy") == cfg["model"]["dec_layers"]
-    assert "nan" not in out.split("backbone→proj")[1].split("vô hướng")[0]        # ≥ 2 ảnh ⇒ std theo ảnh có nghĩa

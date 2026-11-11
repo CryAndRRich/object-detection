@@ -5,8 +5,6 @@ import os
 
 import yaml
 
-__all__ = ["load_config", "merge"]
-
 
 def merge(a, b):
     """Gộp sâu b vào bản sao của a."""

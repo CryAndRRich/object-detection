@@ -31,8 +31,6 @@ def test_add_metrics_hand_computed():
     assert r["box_hit50_any"] == 0.5 and r["box_hit50_latest"] == 0.25 and r["hole_cover"] == 1.0 and r["degenerate"] == 0.25
     assert r["in_image"] == 0.5 and r["on_object"] == 0.25                # box 3: giao 9×9 / 100 >= 0,5
     assert r["n_cnll"] == 0 and np.isnan(r["cnll"])                       # < 5 vật -> bỏ C-NLL
-    r2 = add_metrics([_rec(boxes, holes, objects)], with_holes=False)
-    assert "mean_iou_any" not in r2 and "cnll_gt" not in r2 and r2["on_object"] == 0.25
     assert not any("latest" in k for k in add_metrics([_rec(boxes, holes, objects)], latest=False))
 
 

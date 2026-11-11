@@ -10,9 +10,6 @@ import math
 
 import torch
 
-__all__ = ["BOX_CODERS", "LOG_DECODE_CLAMP", "box_coder_config", "is_log", "encode_rel", "to_linear_unit", "unit_fraction",
-           "generalized_box_iou_cxcywh"]
-
 BOX_CODERS = ("linear", "log")
 LOG_DECODE_CLAMP = 5.0                       # tác giả: `box[..., 2:].clamp(-5, 5)` trước exp
 

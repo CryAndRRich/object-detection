@@ -14,8 +14,8 @@ canvas, 2 số lẻ), `n_obj`, `cnll` [K] (C-NLL từng box), `cnll_gt` (từng 
 
   cd /mnt/disk1/aiotlab/haitn/object-detection/ce_localization
   nohup python ../tools/run_on_free_gpu.py -- eval.py --ckpt ../weights/add/delta6/best.pth --split test_all \\
-      --add-samplers mock ddim --out /mnt/disk1/aiotlab/haitn/output/add/delta6/ce130_test_all/best.json > $LOG 2>&1 &
-Bố cục kết quả: `output/add/<run>/<tập>/best.json` (best.pth) | `epNNN.json` (snapshot), <tập> = ce130_test_all | cocount_review5 | …
+      --add-samplers mock ddim --out /mnt/disk1/aiotlab/haitn/output/add/celoc/delta6/ce130_test_all/best.json > $LOG 2>&1 &
+Bố cục kết quả: `output/add/celoc/<run>/<tập>/best.json` (best.pth) | `epNNN.json` (snapshot), <tập> = ce130_test_all | cocount_review5 | …
 """
 
 import argparse
@@ -102,50 +102,48 @@ def main():
            "add_samplers": a.add_samplers, **({"ddim_steps": a.ddim_steps, "eta": a.eta} if "ddim" in a.add_samplers else {}),
            "amp": amp, "results": {}, "prior": {}}
     dump = {"ckpt": a.ckpt, "iter": it, "split": out["split"], "n_samples": K, "seed": a.seed, "results": {}}
-    text_table = None
-    for image in (["cocount"] if cocount else ["inpainted"]):
-        if cocount:
-            review = load_review(a.cocount_review) if a.cocount_review else None
-            ds = CoCountAddDataset(a.cocount_root, d["image_size"], review=review, min_obj=a.cocount_min_obj)
-            out.update(cocount_review=a.cocount_review, cocount_min_obj=a.cocount_min_obj,
-                       cocount_files=len(ds), cocount_files_all=ds.n_all)
-            print(f"[eval] CE-CoCount: giữ {len(ds)} / {ds.n_all} file", flush=True)
-        else:
-            ds = CE130AddDataset(index, d["root"], d["samples_root"], a.split, d["image_size"])
-        if a.limit:
-            ds.keys = ds.keys[: a.limit]
-        if text_table is None:
-            text_table = train_mod.build_text_table(ds.classes(), cfg, dev)
-            model.check_text_fingerprint(text_table.token_sha)      # CLIP text tải lại phải đúng bản lúc train
-        loader = DataLoader(ds, batch_size=a.batch_size, shuffle=False, num_workers=a.num_workers, collate_fn=collate_add,
-                            pin_memory=dev.type == "cuda")
-        print(f"[eval] {a.ckpt} ({it}) | ảnh {image} | {len(ds)} mẫu | {K} box/mẫu | {[s for _, s, _ in var]} | "
-              f"{fmt_time(time.time() - t0)}", flush=True)
-        t = time.time()
-        gpu_peak(dev)
-        recs = predict_add(model, loader, text_table, K, seed=a.seed, variants=[(s, kw) for s, _, kw in var], amp=amp,
-                           log_every=max(len(loader) // 10, 1))
-        peak, sec = gpu_peak(dev), time.time() - t
-        pri_base = prior_records(next(iter(recs.values())), prior_unit, K, seed=a.seed)
-        posts = [("", None)] + [(f"_objsize{'' if st == 'mean' else '_' + st}", st) for st in a.obj_size or []]
-        for suffix, st in posts:
-            pri = add_metrics(pri_base if st is None else resize_to_objects(pri_base, st), with_holes=True, latest=not cocount)
-            out["prior"][image + suffix] = pri
-            for s, desc, _ in var:
-                rec = recs[s] if st is None else resize_to_objects(recs[s], st)
-                key = image + s + suffix
-                res = add_metrics(rec, with_holes=True, latest=not cocount)
-                res["eval_sec"] = sec
-                if peak is not None:
-                    res["gpu_peak_gb"], res["gpu_reserved_gb"] = peak
-                out["results"][key] = res
-                dump["results"][key] = dump_rows(rec)
-                print(f"\n  === {key}: {desc}{'' if st is None else f', cỡ = {st}'} ({res['n']} mẫu; C-NLL trên {res['n_cnll']} mẫu "
-                      f">= 5 vật) — model | prior ({fmt_time(sec)}{fmt_gpu_peak(peak)})", flush=True)
-                for k in SHOW:
-                    k = k.format(K=K)
-                    if k in res:
-                        print(f"  {k:20s} {res[k]:10.4f} {pri[k]:10.4f}")
+    image = "cocount" if cocount else "inpainted"                # khoá kết quả
+    if cocount:
+        review = load_review(a.cocount_review) if a.cocount_review else None
+        ds = CoCountAddDataset(a.cocount_root, d["image_size"], review=review, min_obj=a.cocount_min_obj)
+        out.update(cocount_review=a.cocount_review, cocount_min_obj=a.cocount_min_obj,
+                   cocount_files=len(ds), cocount_files_all=ds.n_all)
+        print(f"[eval] CE-CoCount: giữ {len(ds)} / {ds.n_all} file", flush=True)
+    else:
+        ds = CE130AddDataset(index, d["root"], d["samples_root"], a.split, d["image_size"])
+    if a.limit:
+        ds.keys = ds.keys[: a.limit]
+    text_table = train_mod.build_text_table(ds.classes(), cfg, dev)
+    model.check_text_fingerprint(text_table.token_sha)          # CLIP text tải lại phải đúng bản lúc train
+    loader = DataLoader(ds, batch_size=a.batch_size, shuffle=False, num_workers=a.num_workers, collate_fn=collate_add,
+                        pin_memory=dev.type == "cuda")
+    print(f"[eval] {a.ckpt} ({it}) | ảnh {image} | {len(ds)} mẫu | {K} box/mẫu | {[s for _, s, _ in var]} | "
+          f"{fmt_time(time.time() - t0)}", flush=True)
+    t = time.time()
+    gpu_peak(dev)
+    recs = predict_add(model, loader, text_table, K, seed=a.seed, variants=[(s, kw) for s, _, kw in var], amp=amp,
+                       log_every=max(len(loader) // 10, 1))
+    peak, sec = gpu_peak(dev), time.time() - t
+    pri_base = prior_records(next(iter(recs.values())), prior_unit, K, seed=a.seed)
+    posts = [("", None)] + [(f"_objsize{'' if st == 'mean' else '_' + st}", st) for st in a.obj_size or []]
+    for suffix, st in posts:
+        pri = add_metrics(pri_base if st is None else resize_to_objects(pri_base, st), latest=not cocount)
+        out["prior"][image + suffix] = pri
+        for s, desc, _ in var:
+            rec = recs[s] if st is None else resize_to_objects(recs[s], st)
+            key = image + s + suffix
+            res = add_metrics(rec, latest=not cocount)
+            res["eval_sec"] = sec
+            if peak is not None:
+                res["gpu_peak_gb"], res["gpu_reserved_gb"] = peak
+            out["results"][key] = res
+            dump["results"][key] = dump_rows(rec)
+            print(f"\n  === {key}: {desc}{'' if st is None else f', cỡ = {st}'} ({res['n']} mẫu; C-NLL trên {res['n_cnll']} mẫu "
+                  f">= 5 vật) — model | prior ({fmt_time(sec)}{fmt_gpu_peak(peak)})", flush=True)
+            for k in SHOW:
+                k = k.format(K=K)
+                if k in res:
+                    print(f"  {k:20s} {res[k]:10.4f} {pri[k]:10.4f}")
     write_json(a.out, out)
     write_json(os.path.splitext(a.out)[0] + "_boxes.json", dump, compact=True, note="box + C-NLL từng box")
     print(f"[eval] xong {fmt_time(time.time() - t0)}", flush=True)

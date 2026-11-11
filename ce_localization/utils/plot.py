@@ -1,7 +1,5 @@
 """Vẽ dùng chung cho các tool hình (plot_cnll_worst, plot_review_filter, vlm/plot_compare)."""
 
-__all__ = ["draw_boxes"]
-
 
 def draw_boxes(ax, boxes, color, lw=1.5, ls="-", alpha=1.0):
     """Viền chữ nhật không tô cho từng box xyxy (toạ độ ảnh của `ax`)."""

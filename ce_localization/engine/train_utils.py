@@ -10,9 +10,6 @@ import shutil
 import torch
 import torch.distributed as dist
 
-__all__ = ["setup_dist", "PthCheckpoints", "lr_factor", "epoch_batches", "EpochBatches", "noise_seed", "gpu_peak", "fmt_gpu_peak",
-           "config_mismatch", "write_json_atomic"]
-
 
 def setup_dist(device=None):
     """-> (rank, world, dev). torchrun đặt WORLD_SIZE/RANK/LOCAL_RANK; không có thì 1 tiến trình.
@@ -160,9 +157,14 @@ def noise_seed(seed, it, rank):
     return (seed * 1000003 + it * 101 + rank) % (2 ** 63 - 1)
 
 
-def write_json_atomic(path, obj):
-    """Ghi file tạm rồi đổi tên: bị kill giữa chừng không để lại JSON hỏng (history.json …)."""
+def write_json_atomic(path, obj, **kw):
+    """Ghi file tạm rồi đổi tên: bị kill giữa chừng không để lại JSON hỏng (history.json …). `kw` -> `json.dump`."""
     tmp = path + ".tmp"
     with open(tmp, "w") as fh:
-        json.dump(obj, fh, indent=1)
+        json.dump(obj, fh, indent=1, **kw)
     os.replace(tmp, path)
+
+
+def grad_scaler(**kw):
+    """`torch.amp.GradScaler("cuda", …)`; torch < 2.3 (venv test local) chỉ có `torch.cuda.amp.GradScaler`."""
+    return torch.amp.GradScaler("cuda", **kw) if hasattr(torch.amp, "GradScaler") else torch.cuda.amp.GradScaler(**kw)

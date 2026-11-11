@@ -12,14 +12,17 @@ from datetime import datetime
 
 import torch
 
-__all__ = ["fmt_time", "run_env", "print_banner"]
-
 
 def fmt_time(seconds):
     """3661 -> '1h01m01s'."""
     seconds = int(max(seconds, 0))
     h, m, s = seconds // 3600, (seconds % 3600) // 60, seconds % 60
     return f"{h}h{m:02d}m{s:02d}s" if h else (f"{m}m{s:02d}s" if m else f"{s}s")
+
+
+def log(*a):
+    """print có flush — log job nền (nohup) hiện ngay."""
+    print(*a, flush=True)
 
 
 def run_env(cfg, dev):

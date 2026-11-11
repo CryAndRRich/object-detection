@@ -33,8 +33,6 @@ import subprocess
 import sys
 import time
 
-__all__ = ["hold", "grab", "keeper", "main"]
-
 GIB = 2 ** 30
 STEP = 0.25                 # GiB: không xin mẩu nhỏ hơn
 

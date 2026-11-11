@@ -13,11 +13,9 @@ model: Qwen/Qwen3-VL-4B-Instruct
 price: {in: 0.0, out: 0.0}
 coord: norm1000        # model trả thang 0–1000 (cách nó được huấn luyện), prompt tác giả giữ nguyên
 chunk: 64
-# Full CoCount 2026-11-04 bằng 2 bản song song (`vllm.data_parallel: 2`, mỗi T4 một bản, TP 1, KV 3,5 GiB ≈ 25k token / card):
-# 1.263 ảnh 5h17m = 15,0 s / ảnh (2 card) — KHÔNG nhanh hơn TP 2 (pilot 14,5 s / ảnh): KV đầy 98–99,9 % (mỗi ảnh ~2,2k vào + 1,8k ra
-# ⇒ 16 chuỗi tụt còn 11–12), đuôi mỗi khối 64 chỉ 1–9 chuỗi, sinh ~62 token/s / card; 1 request ~19 token/s (~95 s / ảnh).
-# ⇒ quay lại TP 2 (chốt 2026-11-04): KV 8 GiB / card (~116k token ≈ 29 chuỗi ~4k), 32 chuỗi. Khoá ngoài prompt_hash ⇒ câu trả
-# lời đã có vẫn dùng. OOM lúc nạp / chạy: hạ kv_cache_gib 6.0 (rồi max_num_seqs 24).
+# TP 2, KV 8 GiB / card (~116k token ≈ 29 chuỗi ~4k), 32 chuỗi (chốt 2026-11-04: chạy 2 bản model song song, mỗi T4 một bản, không
+# nhanh hơn — KV đầy; chế độ đó đã bỏ khỏi code). Khoá ngoài prompt_hash ⇒ câu trả lời đã có vẫn dùng. OOM lúc nạp / chạy: hạ
+# kv_cache_gib 6.0 (rồi max_num_seqs 24).
 vllm:
   gpu_mem_gib: 13.5      # GiB / card cấp cho vLLM (T4 15 GiB)
   kv_cache_gib: 8.0      # / card

@@ -16,8 +16,6 @@ from vlm.backends import FATAL_STATUS, RETRY_STATUS, Fatal, backoff, chat_messag
 from vlm.env import key_source, mask, require_key
 from vlm.prompt import ask_k, box_schema
 
-__all__ = ["OpenRouter", "API"]
-
 API = "https://openrouter.ai/api/v1"
 
 

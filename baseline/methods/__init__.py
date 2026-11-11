@@ -6,8 +6,6 @@ import torch
 from baseline.methods import bootplace, csanet, hiddenobjects, oracleloc
 from baseline.models.hiddenobjects import lstsq_text_proj
 
-__all__ = ["METHODS", "NO_WEIGHTS", "load_model", "predict", "make_trainer", "split_batch", "batch_len"]
-
 METHODS = {"bootplace": bootplace, "csanet": csanet, "hiddenobjects": hiddenobjects, "oracleloc": oracleloc}
 NO_WEIGHTS = ("oracleloc",)
 

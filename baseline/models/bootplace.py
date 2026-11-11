@@ -14,8 +14,6 @@ from torchvision.ops import generalized_box_iou
 
 from baseline.models.detr import HungarianMatcher, box_cxcywh_to_xyxy, build_backbone, build_transformer
 
-__all__ = ["NUM_CLASSES", "BOOTPLACE", "SetCriterion", "build_bootplace", "build_criterion"]
-
 NUM_CLASSES = 8                  # lớp Cityscapes của checkpoint công bố; CE-130 không phân lớp ⇒ mọi đích nhãn 0
 
 

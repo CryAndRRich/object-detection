@@ -31,9 +31,6 @@ from ce_localization.models.box_policy import unit_to_boxes
 from ce_localization.utils.box_ops_np import box_iou, ioa
 from ce_localization.utils.log import fmt_time
 
-__all__ = ["CNLL_MIN_OBJ", "SIZE_STATS", "predict_batch", "predict_add", "prior_unit_boxes", "prior_records", "resize_to_objects", "clip_boxes", "cnll",
-           "cnll_features", "cnll_fit", "select_nms", "other_class", "record_cnll", "add_metrics", "trim_mean", "dump_rows", "write_json"]
-
 HIT = 0.5
 CNLL_MIN_OBJ = 5                 # Gaussian 4-D cần >= 5 điểm để hiệp phương sai có hạng đủ
 CNLL_RIDGE = 1e-6
@@ -228,9 +225,8 @@ def record_cnll(r):
     return c, (cnll(holes, obj, r["wh"], others=oth) if len(holes) else None)
 
 
-def add_metrics(records, with_holes=True, latest=True):
-    """records (box thô) -> dict chỉ số (docstring module). `with_holes=False` (ảnh gốc không lỗ): bỏ chỉ số IoU; `latest=False`
-    (CE-CoCount): bỏ chỉ số `_latest`."""
+def add_metrics(records, latest=True):
+    """records (box thô) -> dict chỉ số (docstring module). `latest=False` (CE-CoCount): bỏ chỉ số `_latest`."""
     acc = {k: [] for k in ("best_any", "best_latest", "mean_any", "mean_latest", "boxhit_any", "boxhit_latest",
                            "on_object", "in_image", "degenerate", "cnll", "cnll_gt")}
     cover = []
@@ -242,31 +238,28 @@ def add_metrics(records, with_holes=True, latest=True):
         obj = r["objects"].reshape(-1, 4)
         obj_on = r["objects_all"].reshape(-1, 4) if "objects_all" in r else obj
         acc["on_object"].append((ioa(b, obj_on).max(1) >= HIT).mean() if len(obj_on) else 0.0)
-        if with_holes:
-            iou = box_iou(b, r["holes"])[0]                                  # [K, t]
-            any_, lat = iou.max(1), iou[:, -1]
-            for k, v in (("best_any", any_.max()), ("best_latest", lat.max()), ("mean_any", any_.mean()),
-                         ("mean_latest", lat.mean()), ("boxhit_any", (any_ >= HIT).mean()),
-                         ("boxhit_latest", (lat >= HIT).mean())):
-                acc[k].append(float(v))
-            if iou.shape[1] >= 2:
-                cover.append(float((iou.max(0) >= HIT).mean()))
-        rc = record_cnll(r if with_holes else {k: v for k, v in r.items() if k != "holes"})
+        iou = box_iou(b, r["holes"])[0]                                      # [K, t]
+        any_, lat = iou.max(1), iou[:, -1]
+        for k, v in (("best_any", any_.max()), ("best_latest", lat.max()), ("mean_any", any_.mean()),
+                     ("mean_latest", lat.mean()), ("boxhit_any", (any_ >= HIT).mean()),
+                     ("boxhit_latest", (lat >= HIT).mean())):
+            acc[k].append(float(v))
+        if iou.shape[1] >= 2:
+            cover.append(float((iou.max(0) >= HIT).mean()))
+        rc = record_cnll(r)
         if rc is not None:
             acc["cnll"].append(float(rc[0].min()))
             if rc[1] is not None:
                 acc["cnll_gt"].append(float(rc[1].min()))
     m = lambda v: float(np.mean(v)) if len(v) else float("nan")  # noqa: E731
+    K = len(records[0]["boxes"]) if records else 0
     res = {"n": len(records), "on_object": m(acc["on_object"]), "in_image": m(acc["in_image"]), "degenerate": m(acc["degenerate"]),
-           "n_cnll": len(acc["cnll"]), "cnll": m(acc["cnll"])}
-    if with_holes:
-        K = len(records[0]["boxes"]) if records else 0
-        res.update({"cnll_gt": m(acc["cnll_gt"]), f"best_iou@{K}_any": m(acc["best_any"]), f"hit50@{K}_any": m(np.asarray(acc["best_any"]) >= HIT),
-                    "mean_iou_any": m(acc["mean_any"]), "box_hit50_any": m(acc["boxhit_any"]), "hole_cover": m(cover),
-                    "n_multi_hole": len(cover)})
-        if latest:
-            res.update({f"best_iou@{K}_latest": m(acc["best_latest"]), f"hit50@{K}_latest": m(np.asarray(acc["best_latest"]) >= HIT),
-                        "mean_iou_latest": m(acc["mean_latest"]), "box_hit50_latest": m(acc["boxhit_latest"])})
+           "n_cnll": len(acc["cnll"]), "cnll": m(acc["cnll"]),
+           "cnll_gt": m(acc["cnll_gt"]), f"best_iou@{K}_any": m(acc["best_any"]), f"hit50@{K}_any": m(np.asarray(acc["best_any"]) >= HIT),
+           "mean_iou_any": m(acc["mean_any"]), "box_hit50_any": m(acc["boxhit_any"]), "hole_cover": m(cover), "n_multi_hole": len(cover)}
+    if latest:
+        res.update({f"best_iou@{K}_latest": m(acc["best_latest"]), f"hit50@{K}_latest": m(np.asarray(acc["best_latest"]) >= HIT),
+                    "mean_iou_latest": m(acc["mean_latest"]), "box_hit50_latest": m(acc["boxhit_latest"])})
     return res
 
 

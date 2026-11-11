@@ -18,6 +18,7 @@ Báo CHỈ số TB giây / ảnh (mỗi tập + chung) kèm tên GPU. Ra `<out-r
   cd /mnt/disk1/aiotlab/haitn/object-detection
   python tools/run_on_free_gpu.py -- tools/latency.py celoc --ckpt weights/add/delta8/snapshots/ep010.pth
   python tools/run_on_free_gpu.py -- tools/latency.py zeta --config baseline/config/zeta3.yaml --ckpt weights/add/zeta3/best.pth
+  python tools/latency.py zeta --config baseline/config/zeta7_1.yaml --criterion euclid_px-free-k1   # OracleLoc: CPU 1 tiến trình
   <venv vllm>/bin/python tools/run_on_free_gpu.py -- tools/latency.py vlm --config vlm/config/server2/qwen3-vl-4b.yaml   # server 2
   python tools/latency.py vlm --config vlm/config/openrouter/glm-5.3-flash.yaml               # API (key trong vlm/.env)
 """
@@ -35,15 +36,13 @@ sys.path.insert(0, ROOT)
 
 import numpy as np  # noqa: E402
 
+from ce_localization.utils.log import log  # noqa: E402
+
 PICK_SEED = 0                    # = seed chọn pilot của VLM ⇒ tập đo = pilot `--n`
 DATASETS = ("ce130", "cocount")
 DEFINITION = ("1 ảnh / lần (batch 1), sau warm-up trên ảnh khác; từ đọc + giải mã ảnh (file đã trong page cache) tới 30 box pixel "
               "ảnh gốc: gồm tiền xử lý, model, đọc box; không gồm nạp model, nhúng CLIP tên lớp (tính sẵn), chấm C-NLL; "
               "GPU đồng bộ trước khi bấm giờ; API gồm mạng")
-
-
-def log(*a):
-    print(*a, flush=True)
 
 
 # ----------------------------------------------------------------------------- khung đo chung
@@ -139,7 +138,7 @@ class CELoc:
         self.sync = torch_sync(self.dev)
         self.info = {"ckpt": a.ckpt, "iter": self.iter, "sampler": a.sampler, "amp": self.amp, "K": self.K, "device": str(self.dev)}
 
-    def setup(self, dataset, samples):
+    def setup(self, dataset, samples, geo=None):
         import torch
         import ce_localization.train as train_mod
         from ce_localization.data.cocount import CoCountAddDataset, load_review
@@ -165,20 +164,36 @@ class CELoc:
 
 
 class Zeta:
-    """ZETA1–3: đúng `baseline.methods.predict` với danh sách 1 ảnh (HiddenObjects: CLIP text tính sẵn, DataLoader không worker)."""
+    """ZETA1–3: đúng `baseline.methods.predict` với danh sách 1 ảnh (HiddenObjects: CLIP text tính sẵn, DataLoader không worker).
+    OracleLoc (ZETA7 / 7.1, không weight): CPU, 1 tiến trình, MỘT tiêu chí (`--criterion`, mặc định tiêu chí đầu của config); thời gian
+    gồm dựng hình học (đọc chú thích + cỡ ảnh) + dò lưới."""
 
     def __init__(self, a, log=log):
-        from baseline.methods import load_model
+        from baseline.methods import NO_WEIGHTS, load_model
         from ce_localization.utils.config import load_config
-        self.a, self.dev = a, torch_device(a)
         cfg = load_config(a.config)
-        self.cfg = {**cfg, "predict": {**cfg["predict"], "num_workers": 0}}
-        self.model = load_model(self.cfg, a.ckpt, self.dev)
-        self.sync = torch_sync(self.dev)
-        self.info = {"config": a.config, "ckpt": a.ckpt, "baseline": cfg["method"], "K": cfg["predict"]["k"], "device": str(self.dev)}
+        self.oracle = cfg["method"] in NO_WEIGHTS
+        if not self.oracle and not a.ckpt:
+            raise SystemExit(f"{cfg['method']}: cần --ckpt")
+        self.a, self.dev = a, (None if self.oracle else torch_device(a))
+        if self.oracle:
+            crit = a.criterion or cfg["predict"]["criteria"][0]
+            self.cfg = {**cfg, "predict": {**cfg["predict"], "criteria": [crit], "workers": 1}}
+            self.model, self.sync = None, None
+        else:
+            self.cfg = {**cfg, "predict": {**cfg["predict"], "num_workers": 0}}
+            self.model = load_model(self.cfg, a.ckpt, self.dev)
+            self.sync = torch_sync(self.dev)
+        self.info = {"config": a.config, "ckpt": a.ckpt, "baseline": cfg["method"], "K": cfg["predict"]["k"],
+                     "device": "cpu (1 tiến trình)" if self.oracle else str(self.dev),
+                     **({"criterion": self.cfg["predict"]["criteria"][0], "stride": cfg["predict"]["stride"]} if self.oracle else {})}
 
-    def setup(self, dataset, samples):
+    def setup(self, dataset, samples, geo=None):
         from baseline.methods import predict
+        if self.oracle:
+            crit = self.cfg["predict"]["criteria"][0]
+            quiet = lambda *x, **k: None  # noqa: E731
+            return (lambda s: {"boxes": predict(self.cfg, None, [s], log=quiet, geo_fn=geo, log_every=0)[crit][0]["boxes"]}, None)
         kw = {"log_every": 0}
         if self.cfg["method"] == "hiddenobjects":
             from baseline.methods.hiddenobjects import class_texts
@@ -202,10 +217,9 @@ class VLM:
         self.backend = make_backend(self.cfg, log)
         self.sync = None
         self.info = {"config": a.config, "model": self.cfg["model"], "backend": self.cfg["backend"], "K": self.cfg["k"],
-                     "prompt_hash": prompt_hash(self.cfg), "engine": self.cfg.get("engine"), "max_tokens": self.cfg.get("max_tokens"),
-                     "data_parallel": (self.cfg.get("vllm") or {}).get("data_parallel")}            # latency = MỘT bản (một GPU)
+                     "prompt_hash": prompt_hash(self.cfg), "engine": self.cfg.get("engine"), "max_tokens": self.cfg.get("max_tokens")}
 
-    def setup(self, dataset, samples):
+    def setup(self, dataset, samples, geo=None):
         from vlm.parse import fill, parse_scored
         from vlm.prompt import build_messages, encode_image
         from vlm.runner import _icl_turns, record_cost
@@ -233,7 +247,11 @@ def default_name(a):
         run = os.path.basename(os.path.dirname(d)) if os.path.basename(d) == "snapshots" else os.path.basename(d)
         return f"{run}_{stem}"
     if a.method == "zeta":
-        return f"{os.path.splitext(os.path.basename(a.config))[0]}_{os.path.splitext(os.path.basename(a.ckpt))[0]}"
+        cfg = os.path.splitext(os.path.basename(a.config))[0]
+        if not a.ckpt:                                                          # OracleLoc
+            from ce_localization.utils.config import load_config
+            return f"{cfg}_{a.criterion or load_config(a.config)['predict']['criteria'][0]}"
+        return f"{cfg}_{os.path.splitext(os.path.basename(a.ckpt))[0]}"
     from ce_localization.utils.config import load_config
     return load_config(a.config)["name"]
 
@@ -244,8 +262,10 @@ def parse_args(argv=None):
     for m in METHODS:
         p = sub.add_parser(m)
         if m in ("celoc", "zeta"):
-            p.add_argument("--ckpt", required=True)
+            p.add_argument("--ckpt", required=(m == "celoc"), default=None, help="zeta: bỏ trống với OracleLoc (không weight)")
             p.add_argument("--device", default=None)
+        if m == "zeta":
+            p.add_argument("--criterion", default=None, help="OracleLoc: tiêu chí đo (mặc định tiêu chí đầu của config)")
         if m in ("zeta", "vlm"):
             p.add_argument("--config", required=True)
         if m == "celoc":
@@ -278,9 +298,9 @@ def main(argv=None):
     log(f"[latency] nạp xong {time.time() - t0:.0f} s | {m.info}")
     rows = {}
     for d in a.datasets:
-        samples, _, _ = load_data(data_ns(a, d))
+        samples, _, geo = load_data(data_ns(a, d))
         measured, warm = pick(samples, a.n, a.warmup)
-        run, prefetch = m.setup(d, measured + warm)
+        run, prefetch = m.setup(d, measured + warm, geo)
         log(f"[latency] {d}: đo {len(measured)} / {len(samples)} ảnh, warm-up {len(warm)}")
         rows[d] = [{"dataset": d, **r} for r in measure(run, measured, warm, prefetch, m.sync, tag=d)]
     sm = summarize(rows)

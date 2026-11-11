@@ -20,8 +20,6 @@ from scipy.optimize import linear_sum_assignment
 from torch import nn
 from torchvision.models import ResNet50_Weights, resnet50
 
-__all__ = ["PlacementDETR", "xywh_to_xyxy", "pairwise_giou", "hungarian_loss", "lstsq_text_proj"]
-
 
 class MultiScaleBackbone(nn.Module):
     """ResNet-50 đóng băng -> {c4 (stride 16, 1024 kênh), c5 (stride 32, 2048 kênh)}."""

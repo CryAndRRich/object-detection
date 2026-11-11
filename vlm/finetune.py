@@ -39,7 +39,7 @@ from ce_localization.data.turns import TurnIndex  # noqa: E402
 from ce_localization.engine.train_utils import (PthCheckpoints, config_mismatch, fmt_gpu_peak, gpu_peak,  # noqa: E402
                                                 write_json_atomic)
 from ce_localization.utils.config import load_config  # noqa: E402
-from ce_localization.utils.log import fmt_time  # noqa: E402
+from ce_localization.utils.log import fmt_time, log  # noqa: E402
 from vlm.adapters import make_adapter  # noqa: E402
 from vlm.lora import add_lora, load_lora, lora_parameters, lora_state_dict, merge_lora  # noqa: E402
 from vlm.parse import qwen_resized_wh  # noqa: E402
@@ -48,10 +48,6 @@ from vlm.sft import SFTDataset, collate  # noqa: E402
 # Khoá config quyết định dữ liệu / câu đích / model ⇒ resume phải trùng; `finetune` trừ các khoá chỉ đổi tốc độ / bộ nhớ.
 RESUME_KEYS = ("model", "prompt", "instruction", "coord", "smart_resize", "k", "ask_k", "icl", "chat_template_kwargs", "finetune")
 RESUME_FREE = {"finetune": ("micro_batch", "num_workers", "log_every", "group_by_length", "epochs")}   # epochs: kéo dài (cảnh báo)
-
-
-def log(*a):
-    print(*a, flush=True)
 
 
 def load_hf(cfg, dev):

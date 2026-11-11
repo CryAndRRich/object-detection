@@ -7,8 +7,6 @@ import torch
 
 from ce_localization.utils.device import to_device
 
-__all__ = ["encode_class_names", "encode_class_tokens", "TextTable"]
-
 
 @torch.no_grad()
 def _run_clip_text(names, model_name, device, batch, take, fingerprint=False):

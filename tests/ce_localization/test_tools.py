@@ -1,4 +1,4 @@
-"""Tool đọc dump của eval (không model): `cnll_outliers.py`, `plot_snapshots.py`, `plot_snapshot_compare.py`, `plot_cnll_worst.py` (CE-CoCount + CE-130), `rescore_cnll.py`."""
+"""Tool đọc dump của eval (không model): `cnll_outliers.py`, `plot_snapshots.py`, `plot_snapshot_compare.py`, `plot_cnll_worst.py` (CE-CoCount + CE-130)."""
 
 import argparse
 import json
@@ -6,6 +6,7 @@ import os
 import sys
 
 import numpy as np
+import pytest
 
 
 def test_cnll_outliers_tool(tmp_path, monkeypatch):
@@ -59,6 +60,7 @@ def test_plot_snapshots_tool(tmp_path, monkeypatch):
     assert e10["mean"] > r["B"][1]["mean"] and sorted(os.listdir(out)) == ["snapshots.png", "summary.json"]
 
 
+@pytest.mark.slow
 def test_plot_snapshot_compare_tool(tmp_path, monkeypatch):
     """history.json có resume (elapsed đặt lại) -> thời lượng = tổng các phiên, iter trùng giữ bản sau; đọc cả khoá `<key>_mock` (DELTA6);
     run thiếu snapshot / dump vẫn vẽ; tập (CE-130 train) chỉ một run có vẫn thành ô / hàng, không run nào có thì bỏ; ghi đủ 2 hình."""
@@ -191,33 +193,3 @@ def test_plot_cnll_worst_cocount_and_ce130(tmp_path, monkeypatch):
         assert [x["image_id"] for x in tr] == sorted(ids, key=lambda i: -rise[i]) and all(np.isclose(x["rise"], rise[x["image_id"]]) for x in tr)
         assert all(np.isclose(x["min"]["ep020"], ref2[x["image_id"]]) and -1 <= x["rho"] <= 1 for x in tr)
         assert sorted(os.listdir(out3)) == sorted(["trend.json"] + [f"trend_{j:02d}_{x['image_id']}.png" for j, x in enumerate(tr[:2], 1)])
-
-
-def test_rescore_cnll_shift():
-    """C-NLL cũ (trừ min NLL trên vật) + `calib_shift` (½·min D² của vật) == C-NLL mới (trừ NLL tại μ); lượng ∈ [0, 2]; < 5 vật -> None."""
-    from scipy.stats import multivariate_normal
-    from ce_localization.engine.add_eval import CNLL_RIDGE, cnll_features, cnll
-    from ce_localization.tools.rescore_cnll import calib_shift
-    rng = np.random.default_rng(3)
-    wh = (200.0, 150.0)
-    for n in (5, 9, 30):
-        xy = rng.uniform(0, 160, (n, 2))
-        objs = np.concatenate([xy, xy + rng.uniform(8, 30, (n, 2))], 1)
-        boxes = np.concatenate([xy[:4] + 5, xy[:4] + 25], 1)
-        z = cnll_features(objs, objs, wh, is_objects=True)
-        mvn = multivariate_normal(z.mean(0), np.cov(z.T, bias=True) + CNLL_RIDGE * np.eye(4))
-        old = -mvn.logpdf(cnll_features(boxes, objs, wh)) - (-mvn.logpdf(z)).min()
-        s = calib_shift(objs, wh)
-        assert 0 <= s <= 2 and np.allclose(old + s, cnll(boxes, objs, wh), atol=1e-6)
-    assert calib_shift(objs[:4], wh) is None
-
-
-def test_rescore_cnll_shift_for_keys():
-    """Khoá file tổng -> lượng dời: khớp đúng khoá; `*_objsize*` / prior không hậu tố sampler dùng khoá cùng gốc; không có -> None."""
-    from ce_localization.tools.rescore_cnll import shift_for
-    one = {"cocount": (10, 0.3), "cocount_objsize": (10, 0.3)}
-    two = {"inpainted_mock": (6, 0.4), "inpainted_ddim": (6, 0.4), "cocount_mock": (5, 0.2), "cocount_ddim_objsize": (5, 0.2)}
-    assert shift_for("cocount_objsize_exemplar", one) == (10, 0.3)
-    assert shift_for("inpainted", two) == (6, 0.4) and shift_for("inpainted_ddim", two) == (6, 0.4)
-    assert shift_for("cocount_objsize", two) == (5, 0.2) and shift_for("cocount_mock_objsize_exemplar", two) == (5, 0.2)
-    assert shift_for("original", two) == (None, None)

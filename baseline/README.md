@@ -11,12 +11,11 @@ ZETA (người dùng chốt 2026-10-30), dùng lại (không sửa) dữ liệu 
 | `finetune.py` | finetune một baseline (1 GPU hoặc `torchrun`): batch toàn cục 64, cộng dồn micro-batch, AMP, `--max-hours` + `--resume` giữa epoch; `--cache-dir` (HiddenObjects: memmap ảnh letterbox) |
 | `predict.py` | K box / ảnh (mặc định 30) -> `<out>_raw.jsonl`, rồi chấm như `score.py` |
 | `score.py` | chấm jsonl box pixel ảnh gốc -> `<out>.json` + `<out>_boxes.json` (định dạng `eval.py`); `--first 1` = box chính |
-| `config/` | `zeta1.yaml` (ZETA1 = BootPlace), `zeta2.yaml` (ZETA2 = CSANet), `zeta3.yaml` (ZETA3 = HiddenObjects), `zeta7.yaml` (ZETA7 = OracleLoc — mốc oracle, không model: `predict.py` không `--ckpt`, CPU), `zeta1_1.yaml` (ZETA1.1 = BootPlace train lại từ DETR-R50 COCO — checkpoint Cityscapes suy biến) — một run một config |
-| `probe_bootplace.py` | chẩn đoán BootPlace trên CPU (args checkpoint, khoá thừa / thiếu, độ lệch theo vị trí / query / ảnh từng tầng encoder / decoder) — ZETA mục 11.4 |
+| `config/` | `zeta1.yaml` (ZETA1 = BootPlace), `zeta2.yaml` (ZETA2 = CSANet), `zeta3.yaml` (ZETA3 = HiddenObjects), `zeta7.yaml` (ZETA7 = OracleLoc — mốc oracle, không model: `predict.py` không `--ckpt`, CPU), `zeta7_1.yaml` (ZETA7.1 = biến thể dò OracleLoc), `zeta1_1.yaml` (ZETA1.1 = BootPlace train lại từ DETR-R50 COCO — checkpoint Cityscapes suy biến) — một run một config |
 | `data.py` | mẫu test (cùng tập / thứ tự với eval CE-Loc) + hình học canvas, mẫu train, chọn ảnh vật mẫu |
 | `scoring.py`, `dist.py` | box gốc -> record canvas -> `add_metrics` / prior / dump; tổng + TB grad qua GPU |
 | `models/` | `detr`, `bootplace`, `csanet`, `hiddenobjects` — tên tham số như bản gốc ⇒ nạp checkpoint công bố |
-| `methods/` | mỗi baseline: tiền xử lý, dataset finetune, `Trainer`, suy luận (`oracleloc`: chỉ dò lưới cỡ μ theo `euclid` / `cnll`); `__init__` nạp checkpoint (HiddenObjects: `class_embed` công bố -> `text_proj` trên CLIP text bằng lstsq) |
+| `methods/` | mỗi baseline: tiền xử lý, dataset finetune, `Trainer`, suy luận (`oracleloc`: chỉ dò lưới cỡ μ; tiêu chí `<euclid|cnll|euclid_px>[-free][-sNN][-k1]`); `__init__` nạp checkpoint (HiddenObjects: `class_embed` công bố -> `text_proj` trên CLIP text bằng lstsq) |
 
 Test: `python -m pytest tests/baseline -q` từ `object-detection/` (~80 s CPU; CLIP giả, không tải HF). Kaggle: `object-detection/notebooks/baseline_kaggle.ipynb`
 (gitignore; mỗi Save & Run All một baseline). Eval trên server:
@@ -24,10 +23,10 @@ Test: `python -m pytest tests/baseline -q` từ `object-detection/` (~80 s CPU; 
 ```bash
 cd /mnt/disk1/aiotlab/haitn/object-detection/baseline
 python ../tools/run_on_free_gpu.py -- predict.py --config config/zeta1.yaml --ckpt ../weights/add/zeta1/best.pth \
-    --dataset ce130 --out /mnt/disk1/aiotlab/haitn/output/add/zeta1/ce130_test_all/best.json
+    --dataset ce130 --out /mnt/disk1/aiotlab/haitn/output/add/baseline/zeta1/ce130_test_all/best.json
 ```
 
-Kết quả: `output/add/<run>/<tập>/best.json` (best.pth) | `epNNN.json` (snapshot), mỗi file kèm `*_boxes.json` + `*_raw.jsonl`;
+Kết quả: `output/add/baseline/<run>/<tập>/best.json` (best.pth) | `epNNN.json` (snapshot), mỗi file kèm `*_boxes.json` + `*_raw.jsonl`;
 `score.py` mặc định đọc bản rà box vật CE-CoCount `../data/cocount_review.jsonl`.
 
 Đọc số như `ce_localization/README.md` mục "Đọc số", thêm `cnll_median`, `cnll_mean_trim1` (TB bỏ 1 % ảnh tệ nhất), `cnll_gt_median`.

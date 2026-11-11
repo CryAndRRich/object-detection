@@ -3,8 +3,6 @@
 import torch
 import torch.distributed as dist
 
-__all__ = ["all_sum", "sync_grads"]
-
 
 def all_sum(x, world):
     """Tổng qua các GPU (bản sao)."""

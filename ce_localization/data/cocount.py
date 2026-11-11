@@ -7,7 +7,7 @@ Một phần tử = một tên (một lớp cần thêm), cùng khuôn `CE130Add
 CÙNG lớp, objects_all = vật CẢ HAI lớp [cùng lớp ; lớp kia], exemplars, t = 0, density TRỐNG (PNG jet trống `.convert("L")` = 14/255
 trên vùng thật), text = `class_name` bỏ phần trong ngoặc và dấu chấm.
 Lọc box vật (cả hai lớp): `review` = bản rà tay (`box_review/`, `load_review`: bỏ `bad` ∪ `auto`); `min_obj` n: chỉ giữ file còn
->= n box vật cùng lớp (review5 = review + n = 5). (Lọc tự động filt3 theo cỡ exemplar đã bỏ 2026-11-08 — git.)
+>= n box vật cùng lớp (review5 = review + n = 5).
 """
 
 import json
@@ -20,8 +20,6 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from ce_localization.data.turns import _letterbox_l_u8, iter_jsonl, letterbox, letterbox_size, scale_boxes
-
-__all__ = ["clean_class", "twin_name", "load_review", "read_cocount", "cocount_geometry", "CoCountAddDataset"]
 
 
 def clean_class(name):

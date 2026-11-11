@@ -251,6 +251,7 @@ def test_html_prefill_and_prefetch(man, tmp_path):
     assert a.items[1]["out"] in pre
 
 
+@pytest.mark.slow
 def test_cegen_build_ui(man, tmp_path):
     gr = pytest.importorskip("gradio")
     demo, _ = cegen.build_ui(Hub(man, str(tmp_path / "res")), gr)

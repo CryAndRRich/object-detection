@@ -2,8 +2,6 @@
 
 import numpy as np
 
-__all__ = ["box_iou", "ioa", "filter_degenerate"]
-
 
 def _area_xyxy(b):
     return np.clip(b[..., 2] - b[..., 0], 0, None) * np.clip(b[..., 3] - b[..., 1], 0, None)

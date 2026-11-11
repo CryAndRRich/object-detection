@@ -81,6 +81,18 @@ def test_zeta_flow(tmp_path, monkeypatch, data, run):
         assert len(calls) == 1 + 2                       # nạp checkpoint công bố (lstsq) + một lần / tập
 
 
+def test_oracleloc_flow(tmp_path, data):
+    """OracleLoc (không weight): `zeta` không --ckpt, CPU 1 tiến trình, MỘT tiêu chí, đủ K box; tên file = <config>_<tiêu chí>."""
+    import glob
+    cfg_path, cfg = tiny_cfg(tmp_path, "zeta7")
+    lat.main(["zeta", "--config", cfg_path, "--criterion", "euclid_px-free-k1", *data])
+    files = glob.glob(str(tmp_path / "lat" / "*_euclid_px-free-k1.json"))
+    assert len(files) == 1
+    r = json.load(open(files[0]))
+    assert r["criterion"] == "euclid_px-free-k1" and r["ckpt"] is None and r["device"].startswith("cpu") and len(r["images"]) == 4
+    assert all(x["n_boxes"] == cfg["predict"]["k"] and x["sec"] > 0 for x in r["images"])
+
+
 def test_vlm_flow(tmp_path, monkeypatch, data):
     """Trọn luồng `vlm` với backend giả: mỗi request 1 ảnh, box đã parse + fill đủ K, API ⇒ kind api."""
     from tests.vlm.test_runner import CFG, FakeBackend
@@ -103,6 +115,7 @@ def test_vlm_flow(tmp_path, monkeypatch, data):
     assert all(x["n_boxes"] == 5 and x["n_valid"] == 3 for x in r["images"])
 
 
+@pytest.mark.slow
 def test_latency_celoc_flow(tmp_path, monkeypatch):
     """SLOW: train DELTA8 tí hon 1 iter -> `celoc` trên CE-130 + CoCount giả: box 30 = eval.n_samples, về pixel ảnh gốc."""
     import ce_localization.train as ta

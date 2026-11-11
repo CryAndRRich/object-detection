@@ -3,8 +3,6 @@ dòng SAU ghi đè dòng trước. Không bao giờ in giá trị — log chỉ 
 
 import os
 
-__all__ = ["ENV_PATH", "load_env", "get_key", "require_key", "key_source", "mask"]
-
 ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 _from_file = {}                     # tên biến -> giá trị đã nạp từ .env (os.environ khác giá trị này = export sẵn)
 _shadowed = set()                   # biến export sẵn khác giá trị trong .env (giá trị .env bị bỏ qua)

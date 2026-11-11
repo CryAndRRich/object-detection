@@ -17,9 +17,9 @@ U-Net 1D nhận [x_t ; refined] -> ε̂ ;  loss = ε-MSE + aux_loss_weight · [M
 | `train.py` / `eval.py` | điểm vào duy nhất (1 GPU hoặc `torchrun`); docstring đầu file = cách dùng |
 | `config/delta/` | `delta4.yaml` đầy đủ; config khác kế thừa qua `base` (`utils/config.py`) — bảng dưới |
 | `models/` | `box_policy` (BoxPolicy, sampler mock / ddim, `build_model` / `load_checkpoint`), `unet1d`, `clip_refiner` (port `refs/CE-Loc-update/`), `text` |
-| `data/` | `turns` (CE-130 theo (nhánh, lượt), split như CE-Loc gốc, cache uint8), `cocount` (CE-CoCount, bản rà box tay) — eval ảnh gốc GAMMA (`density`) + lọc filt3 bỏ 2026-11-08 (git / branch `new`) |
+| `data/` | `turns` (CE-130 theo (nhánh, lượt), split như CE-Loc gốc, cache uint8), `cocount` (CE-CoCount, bản rà box tay) |
 | `engine/` | `add_eval` (suy luận K mẫu, IoU, on_object, C-NLL), `train_utils` (DDP, lịch lr, checkpoint nguyên tử) |
-| `tools/` | `build_turn_index`, `build_add_cache`, `build_clip_cache` (dữ liệu / cache, một lần); `cnll_outliers`, `plot_cnll_worst`, `plot_snapshots`, `plot_snapshot_compare`, `rescore_cnll`, `plot_review_filter` (đọc / đổi dump eval, `history.json`, hình trước / sau lọc tay) |
+| `tools/` | `build_turn_index`, `build_add_cache`, `build_clip_cache` (dữ liệu / cache, một lần); `cnll_outliers`, `plot_cnll_worst`, `plot_snapshots`, `plot_snapshot_compare`, `plot_review_filter` (đọc dump eval, `history.json`, hình trước / sau lọc tay) |
 | `utils/` | `config` (YAML + `base`), `log` (`fmt_time`, `Progress` — log tiến độ suy luận dùng chung), `plot` (`draw_boxes` dùng chung), box / diffusion |
 | `box_review/` | web Gradio rà box bằng tay (local): box vật CE-CoCount -> `data/cocount_review.jsonl`, chọn box model -> `output/add/review/` — docstring `box_review/app.py`; chấm CE-Gen (server 2, không torch, env `imgedit`) -> `output/cegen/annot/` — docstring `box_review/cegen.py` |
 | `../notebooks/add_kaggle.ipynb` | train một run trên Kaggle T4×2 (`object-detection/notebooks/`, gitignore, chỉ ở local; tự clone branch `delta`) |
@@ -43,18 +43,18 @@ nằm trong checkpoint — vân tay `clip_sha` kiểm khớp). Mọi job > 5 ph�
 ```bash
 # train (Kaggle: notebook; server 1 GPU): bị ngắt thì chạy lại đúng lệnh + --resume
 python ../tools/run_on_free_gpu.py -- train.py --config config/delta/delta6.yaml --save-dir ../weights/add/delta6
-# kết quả: output/add/<run>/<tập>/best.json (best.pth) | epNNN.json (snapshot), mỗi file kèm <out>_boxes.json
+# kết quả: output/add/celoc/<run>/<tập>/best.json (best.pth) | epNNN.json (snapshot), mỗi file kèm <out>_boxes.json
 # eval CE-130 (test_all = toàn bộ samples/test, 6.122 mẫu)
 python ../tools/run_on_free_gpu.py -- eval.py --ckpt ../weights/add/delta6/best.pth --split test_all --add-samplers mock ddim \
-    --out /mnt/disk1/aiotlab/haitn/output/add/delta6/ce130_test_all/best.json
+    --out /mnt/disk1/aiotlab/haitn/output/add/celoc/delta6/ce130_test_all/best.json
 # eval CE-CoCount review5 (box vật rà tay, file >= 5 vật) + đổi cỡ box
 python ../tools/run_on_free_gpu.py -- eval.py --ckpt ../weights/add/delta6/best.pth --dataset cocount --add-samplers mock ddim \
     --cocount-review ../data/cocount_review.jsonl --cocount-min-obj 5 --obj-size mean exemplar \
-    --out /mnt/disk1/aiotlab/haitn/output/add/delta6/cocount_review5/best.json
+    --out /mnt/disk1/aiotlab/haitn/output/add/celoc/delta6/cocount_review5/best.json
 # độ ổn định theo epoch: eval từng snapshot (weights/add/delta6/snapshots/epNNN.pth) rồi vẽ
 python ../tools/run_on_free_gpu.py -- eval.py --ckpt ../weights/add/delta6/snapshots/ep010.pth --split test_all \
-    --out /mnt/disk1/aiotlab/haitn/output/add/delta6/ce130_test_all/ep010.json
-python tools/plot_snapshots.py --run DELTA6=../../output/add/delta6/ce130_test_all --out ../../output/add/viz/snapshots/delta6
+    --out /mnt/disk1/aiotlab/haitn/output/add/celoc/delta6/ce130_test_all/ep010.json
+python tools/plot_snapshots.py --run DELTA6=../../output/add/celoc/delta6/ce130_test_all --out ../../output/add/viz/snapshots/delta6
 python tools/plot_snapshot_compare.py --out-prefix ../../output/add/viz/snapshots/<tên> --run "delta6=CE-Loc + Box Obj + Refiner" \
   --run "delta7_1=+ Positive targets + LogScale, GIoU weight 0.10"   # overview loss + C-NLL / snapshot, density C-NLL mọi box
 ```

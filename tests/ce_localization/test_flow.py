@@ -21,6 +21,7 @@ def _same_state(a, b):
     return ka, kb
 
 
+@pytest.mark.slow
 def test_flow_val_select_resume_eval(tmp_path, monkeypatch):
     """DELTA5.2 (box log + GIoU, val ddim): train 2 + resume tới 4 == train liền 4; history có thống kê refiner; best theo val. Eval
     CE-130 (inpaint + gốc, mock + ddim, `--ablation`, `--obj-size`) + CE-CoCount review5: đủ khoá, prior, dump C-NLL từng box khớp chỉ
@@ -60,6 +61,7 @@ def test_flow_val_select_resume_eval(tmp_path, monkeypatch):
         _run_eval(monkeypatch, ["--ckpt", ck, "--out", str(tmp_path / "x.json")], clip_seed=1)
 
 
+@pytest.mark.slow
 def test_flow_train_loss_select_resume(tmp_path, monkeypatch):
     """DELTA7 (= DELTA6, giao thức CE-Loc gốc, + đích train = box positive ngẫu nhiên): không dựng / chạy val; mỗi epoch TRỌN một dòng loss train TB = TB đúng các bước (log mỗi bước), phần
     lẻ cuối không chấm; best.pth = epoch thấp nhất; resume GIỮA epoch == train liền với cache token CLIP + snapshot mỗi epoch (b: cache /
@@ -112,6 +114,7 @@ def test_flow_train_loss_select_resume(tmp_path, monkeypatch):
         run(c_path, str(tmp_path / "c"), 1, "--positive-file", bad)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("run", ["delta7_0_1", "delta7_0_2"])
 def test_flow_positive_all_pair_resume(tmp_path, monkeypatch, run):
     """DELTA7.0.1 (mọi box / ảnh mỗi iter) / 7.0.2 (mỗi cặp (mẫu, box) một mẫu): train 2 + resume tới 4 == train liền 4; 7.0.2: dataset
@@ -153,6 +156,7 @@ def _ddp_worker(rank, world, port, argv):
     ta.main()
 
 
+@pytest.mark.slow
 def test_ddp_two_processes(tmp_path):
     """2 tiến trình gloo, DDP không find_unused + gradient_as_bucket_view (tham số thiếu grad / lệch stride -> lỗi); loss train TB của epoch
     cộng qua cả hai rank; chỉ rank 0 ghi. Config DELTA7.0.1 (mọi box đích / ảnh, `x0_index`)."""
