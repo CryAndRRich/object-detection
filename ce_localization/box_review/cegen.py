@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Web chấm kết quả CE-Gen (người dùng 2026-11-08): mỗi màn một (tập, model, zeroshot / finetune, add / remove, ảnh) — người chấm xem
 ảnh input + ảnh output của model (+ heatmap khác biệt) và làm HAI việc độc lập: (1) kết luận THÀNH CÔNG (thêm / xoá đúng MỘT vật cùng
-loại) hay THẤT BẠI, (2) box bao vật được thêm / bị xoá — TỰ VẼ, hoặc bấm `s` nhận box gợi ý số 1 khi nó đã khớp. Một màn XONG khi và
-chỉ khi có đủ cả hai (người dùng chốt 2026-11-08; box gợi ý chưa được nhận thì không tính). Thành công / thất bại -> metric user study; box -> C-NLL.
+loại) hay THẤT BẠI, (2) box bao vật được thêm / bị xoá — TỰ VẼ, hoặc bấm `s` nhận box gợi ý số 1 khi nó đã khớp. Một màn XONG khi có
+kết luận; box TUỲ CHỌN (người dùng 2026-11-13, trước đó bắt buộc cả hai — CE-130 đã chấm xong theo luật cũ nên đủ box). Box gợi ý
+chưa được nhận thì không phải box của người chấm. Thành công / thất bại -> metric user study; box -> C-NLL.
 
 Dữ liệu (server 2, thư mục `hachi/`): `<src>/FSC_final` (CE-130, lượt 1: 1.679 nhánh = 1.335 test + 344 val, chia 4 subset
 `FSC_{easy,difficult}_{overlap,no_overlap}`) và `<src>/processed_dataset` (CE-CoCount, 1.484 file lớp); mỗi tập 3 model × zeroshot /
@@ -35,8 +36,8 @@ Thao tác (box gợi ý: số 1 = khung đỏ liền, số 2.. = đỏ đứt n�
   + / -       phóng / thu quanh điểm chuột đang trỏ trên ảnh (lăn chuột cũng vậy; muốn xem chỗ khác: thu lại rồi phóng ở chỗ đó),
               0 về vừa khung — 3 ảnh cùng phóng, cùng vùng; sang màn cùng ảnh input (12 run liền nhau) giữ nguyên zoom, ảnh
               khác về vừa khung
-  Enter       THÀNH CÔNG + lưu box vàng   } đủ kết luận + box: màn XONG, sang màn sau; chưa có box vàng: vẫn lưu kết luận,
-  f           THẤT BẠI + lưu box vàng     } ở lại màn, báo "chưa xong" (vẽ / bấm s rồi bấm lại)
+  Enter       THÀNH CÔNG + lưu box vàng (nếu có)  } màn XONG, sang màn sau
+  f           THẤT BẠI + lưu box vàng (nếu có)    }
   r / x       về box đã lưu của màn / bỏ box
   h           ẩn / hiện heatmap
   ← / →       màn trước / sau (không lưu; lưu lại màn đã chấm = ghi đè)
@@ -45,13 +46,13 @@ Kết quả: `<out-dir>/annot_<ce130|cocount>_<user>.jsonl` — chỉ GHI NỐI,
 từ màn chưa chấm đầu tiên). Mỗi dòng: {"key", "dataset", "model", "setting", "task", "subset", "image_id", "class", "success",
 "box": [x1, y1, x2, y2] | null (pixel ẢNH INPUT, toạ độ liên tục 0..W / 0..H — cùng hệ với box vật CE-130 / CE-CoCount),
 "box_src": "drawn" (tự vẽ) | "picked" (nhận box gợi ý số 1 bằng `s`) | null, "wh": [W, H], "user", "time", "sec"}. Bản chấm dùng
-được = dòng sau cùng của key thoả `is_done` (có `success` và box drawn / picked); dòng cũ "box_src": "cand<k>" (box gợi ý tự chọn
-sẵn, logic trước 2026-11-08 tối) KHÔNG tính là xong.
+được = dòng sau cùng của key thoả `is_done` (có `success`); box của người chấm = `user_box` (chỉ box_src drawn / picked — dòng cũ
+"box_src": "cand<k>" là box gợi ý tự chọn sẵn trước 2026-11-08 tối, không tính).
 
   merge     gộp bản chấm các user: run (tập, model, setting, task) nào XONG HẾT (mọi ảnh của tập đều có bản chấm `is_done`)
             -> `<out-dir>/merged/<tập>_<model>_<setting>_<task>.jsonl`, mỗi dòng (theo thứ tự ảnh) = trường gốc của màn (dataset,
             model, setting, task, subset, image_id, class, wh) + "success" + "drawn_box" (box người chấm: tự vẽ hoặc nhận gợi ý
-            số 1); bỏ key / user / thời gian / box_src. Danh sách ảnh của tập: `manifest.json` nếu có, không thì mọi image_id
+            số 1; null khi không vẽ); bỏ key / user / thời gian / box_src. Danh sách ảnh của tập: `manifest.json` nếu có, không thì mọi image_id
             trong các file annot của tập. Chạy lại khi thêm run xong (ghi đè).
 
   python box_review/cegen.py prepare --workers 8
@@ -375,7 +376,7 @@ def merge(out_dir, dest=None, log=print):
             with open(tmp, "w") as f:
                 for i in sorted(recs, key=_nat):
                     r = recs[i]
-                    f.write(json.dumps({**{k: r[k] for k in MERGE_KEEP}, "success": r["success"], "drawn_box": r["box"]},
+                    f.write(json.dumps({**{k: r[k] for k in MERGE_KEEP}, "success": r["success"], "drawn_box": user_box(r)},
                                        ensure_ascii=False) + "\n")
             os.replace(tmp, os.path.join(dest, name))
             written[name] = len(recs)
@@ -430,8 +431,13 @@ def clean_box(box, wh, min_side=2.0):
 
 
 def is_done(rec):
-    """Màn XONG khi và chỉ khi có kết luận success / fail VÀ box người chấm vẽ / chủ động nhận (người dùng chốt 2026-11-08)."""
-    return bool(rec) and rec.get("success") in (True, False) and rec.get("box_src") in BOX_SRC and bool(rec.get("box"))
+    """Màn XONG khi có kết luận success / fail; box tuỳ chọn (người dùng 2026-11-13)."""
+    return bool(rec) and rec.get("success") in (True, False)
+
+
+def user_box(rec):
+    """Box của người chấm (tự vẽ / chủ động nhận gợi ý số 1) | None."""
+    return rec["box"] if rec and rec.get("box") and rec.get("box_src") in BOX_SRC else None
 
 
 class Annotator:
@@ -482,7 +488,7 @@ class Annotator:
         return self.rec_done(self.store.latest.get(it["key"]))
 
     def first_unsaved(self):
-        """Màn CHƯA XONG đầu tiên (chưa chấm, hoặc thiếu kết luận / box tự vẽ)."""
+        """Màn CHƯA XONG (chưa có kết luận) đầu tiên."""
         self.go(next((i for i, p in enumerate(self.view) if not self.done(self.items[p])), len(self.view) - 1))
 
     def n_saved(self, all_items=False):
@@ -491,8 +497,7 @@ class Annotator:
         return sum(self.done(self.items[p]) for p in ps)
 
     def save(self, success, box=None, src=None):
-        """Lưu kết luận + box tự vẽ (nếu có) của màn hiện tại. Đủ cả hai -> XONG, sang màn sau, trả ""; thiếu box -> vẫn lưu kết
-        luận, ở lại màn, trả câu báo."""
+        """Lưu kết luận + box người chấm (nếu có) của màn hiện tại -> XONG, sang màn sau. -> "" (không cảnh báo)."""
         it = self.cur()
         if src == "picked":                       # box gợi ý số 1 lấy từ manifest, không tin toạ độ trình duyệt gửi
             box = it["cands"][0] if it["cands"] else None
@@ -502,11 +507,8 @@ class Annotator:
                "box_src": src if box else None, "wh": it["wh"], "user": self.user,
                "time": datetime.now().isoformat(timespec="milliseconds"), "sec": round(time.time() - self.t_show, 1)}
         self.store.put(rec)
-        if is_done(rec):
-            self.go(self.pos + 1)
-            return ""
-        return (f"{'SUCCESS' if success else 'FAIL'} saved, but this screen is NOT done: draw a box around the added / removed "
-                "object (drag on the image) or press s to take suggestion 1, then press Enter / f again.")
+        self.go(self.pos + 1)
+        return ""
 
     def eta(self):
         secs = [r["sec"] for r in list(self.store.latest.values())[-200:] if self.rec_done(r) and 0 < r.get("sec", 0) <= 300]
@@ -525,15 +527,13 @@ class Annotator:
         it = self.cur()
         rec = self.store.latest.get(it["key"])
         W, H = it["wh"]
-        if rec and rec.get("box") and rec.get("box_src") in BOX_SRC:
-            box, src = rec["box"], rec["box_src"]
-        else:
-            box, src = None, ""
+        box = user_box(rec)
+        src = rec["box_src"] if box else ""
         if rec is None:
             state = "not saved"
         else:
             state = (f'saved: <b class="{"cg_ok" if rec["success"] else "cg_bad"}">{"SUCCESS" if rec["success"] else "FAIL"}</b>'
-                     + (" | box OK | <b>DONE</b>" if is_done(rec) else ' | <b class="cg_bad">NO BOX, not done</b>'))
+                     + (" | box saved" if box else " | no box") + " | <b>DONE</b>")
         meta = [f"<b>{html.escape(it['model'])}</b> | <b>{it['setting']}</b>", f"id {html.escape(it['id'])}"]
         if it["subset"]:
             meta.append(html.escape(it["subset"]))
@@ -602,7 +602,7 @@ class Hub:
             done, n = sum(c[u] for u in self.users), sum(c[u + "_n"] for u in self.users)
             rows.append(f"| {m} / {st} / {t} | " + " | ".join(f"{c[u]}/{c[u + '_n']}" for u in self.users)
                         + f" | {'**done**' if done == n else f'{100 * done / n:.0f}%'} |")
-        return f"**Progress per run: {data}** (both users; done = verdict + your box)\n\n" + "\n".join(rows)
+        return f"**Progress per run: {data}** (both users; done = verdict, box optional)\n\n" + "\n".join(rows)
 
     def act(self, data, user, payload, action, filt=None):
         """-> (header markdown, html). `payload` (JSON từ trình duyệt): key màn đang hiện + box đang chọn; `filt`: bộ lọc
@@ -759,7 +759,7 @@ function cgDraw() {
   r.querySelectorAll('svg').forEach((svg) => { svg.innerHTML = s; });
   const info = document.getElementById('cg_boxinfo');
   if (info) info.textContent = (b ? `your box (${window.__cg.src === 'picked' ? 'suggestion 1' : 'drawn'}): `
-      + b.map((v) => Math.round(v)).join(', ') : 'no box yet: press s for suggestion 1 or drag to draw') + ' | ' + cgZoomText();
+      + b.map((v) => Math.round(v)).join(', ') : 'no box (optional): press s for suggestion 1 or drag to draw') + ' | ' + cgZoomText();
 }
 function cgReset() {
   const r = cgRoot(); if (!r) return;

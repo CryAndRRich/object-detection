@@ -11,7 +11,7 @@ from PIL import Image
 
 from ce_localization.box_review import cegen
 from ce_localization.box_review.cegen import (Annotator, Hub, Store, clean_box, find_runs, is_done, merge, prepare, run_task,
-                                              split_items)
+                                              split_items, user_box)
 
 CE_IDS = ["2_b1", "10_b1", "10_b2"]
 CC_IDS = ["F_1_positive", "F_1_negative"]
@@ -151,36 +151,34 @@ def test_clean_box():
 
 
 def test_annotator_save_resume(man, tmp_path):
-    """Màn XONG <=> có kết luận VÀ box tự vẽ; thiếu box: vẫn lưu kết luận, ở lại màn; box gợi ý không tính."""
+    """Màn XONG <=> có kết luận (box tuỳ chọn, người dùng 2026-11-13); box gợi ý chưa nhận / box_src lạ không phải box người chấm."""
     items = [it for it in man["items"] if it["ds"] == "ce130"]
     path = str(tmp_path / "a.jsonl")
     a = Annotator(items, path, "x", "user1")
     assert a.pos == 0
-    assert a.save(True, None) and a.pos == 0 and a.n_saved() == 0                          # kết luận, chưa box: chưa xong
-    assert a.store.latest[items[0]["key"]]["success"] is True and "NO BOX" in a.html(lambda r: r)
-    assert a.save(True, [5, 5, 20, 20], "cand0") and a.pos == 0 and a.n_saved() == 0        # box gợi ý: không tính
-    assert a.save(True, [5, 5, 20, 20], "drawn") == "" and a.pos == 1                      # đủ cả hai: xong, sang màn sau
-    assert a.save(False, [1, 1, 9, 9], "drawn") == "" and a.pos == 2                        # thất bại cũng cần box
-    a.save(False, None)
-    assert a.pos == 2 and a.n_saved() == 2
-    recs = Store(path).latest
-    assert recs[items[0]["key"]]["box"] == [5.0, 5.0, 20.0, 20.0] and recs[items[0]["key"]]["box_src"] == "drawn"
-    assert recs[items[1]["key"]]["success"] is False and recs[items[1]["key"]]["box"] == [1.0, 1.0, 9.0, 9.0]
-    assert not is_done(recs[items[2]["key"]]) and not is_done({"success": None, "box": [1, 1, 5, 5], "box_src": "drawn"})
+    assert a.save(True, None) == "" and a.pos == 1 and a.n_saved() == 1                    # kết luận, không box: xong
+    r0 = a.store.latest[items[0]["key"]]
+    assert r0["success"] is True and r0["box"] is None and is_done(r0) and user_box(r0) is None
+    assert a.save(False, [1, 1, 9, 9], "drawn") == "" and a.pos == 2                        # có box: lưu kèm box
+    assert user_box(a.store.latest[items[1]["key"]]) == [1.0, 1.0, 9.0, 9.0]
+    assert a.save(True, [5, 5, 20, 20], "cand0") == "" and a.pos == 3                       # box_src lạ: bỏ box, vẫn xong
+    assert a.store.latest[items[2]["key"]]["box"] is None and a.n_saved() == 3
+    assert not is_done({"success": None, "box": [1, 1, 5, 5], "box_src": "drawn"})
+    assert user_box({"success": True, "box": [1, 1, 5, 5], "box_src": "cand1"}) is None    # dòng cũ: box gợi ý tự chọn sẵn
     a.go(0)
+    assert "no box" in a.html(lambda r: r) and "DONE" in a.html(lambda r: r)
     a.save(True, [0, 0, 10, 10], "evil<script>")
     r0 = Store(path).latest[items[0]["key"]]                                                # ghi đè: dòng sau thắng
-    assert r0["box"] is None and r0["box_src"] is None and not is_done(r0)
+    assert r0["box"] is None and r0["box_src"] is None and is_done(r0)
     b = Annotator(items, path, "x", "user1")
-    assert b.pos == 0 and b.n_saved() == 1                                                  # mở lại: màn CHƯA XONG đầu tiên
+    assert b.pos == 3 and b.n_saved() == 3                                                  # mở lại: màn CHƯA XONG đầu tiên
     page = b.html(lambda r: r)
     assert 'data-box=""' in page and 'data-src=""' in page                                  # không chọn sẵn box gợi ý
-    b.go(2)                                                                                 # s = nhận box gợi ý số 1
-    assert b.save(True, [0, 0, 1, 1], "picked") == "" and b.pos == 3                        # toạ độ lấy từ manifest
-    r2 = b.store.latest[items[2]["key"]]
-    assert r2["box"] == clean_box(items[2]["cands"][0], items[2]["wh"]) and r2["box_src"] == "picked" and is_done(r2)
-    b.go(2)
-    assert 'data-src="picked"' in b.html(lambda r: r) and "DONE" in b.html(lambda r: r)
+    assert b.save(True, [0, 0, 1, 1], "picked") == "" and b.pos == 4                        # s: toạ độ lấy từ manifest
+    r3 = b.store.latest[items[3]["key"]]
+    assert r3["box"] == clean_box(items[3]["cands"][0], items[3]["wh"]) and r3["box_src"] == "picked"
+    b.go(3)
+    assert 'data-src="picked"' in b.html(lambda r: r) and "box saved" in b.html(lambda r: r)
 
 
 def test_hub_acts_on_shown_screen(man, tmp_path):
@@ -195,7 +193,7 @@ def test_hub_acts_on_shown_screen(man, tmp_path):
     assert 'class="cg_root"' in page and cegen.FILE_ROUTE in page and "REMOVE one apple" not in page
     head, page = hub.act("CE130", "user1", "not json", "fail")
     assert a.items[4]["key"] in a.store.latest and a.store.latest[a.items[4]["key"]]["success"] is False
-    assert a.pos == 4 and "NOT done" in head                                                # thất bại chưa box: ở lại màn
+    assert a.pos == 5 and "Warning" not in head                                             # thất bại không box: vẫn xong
     hub.act("CE130", "user1", "", "first")
     assert a.pos == 0
     a.go(3)
@@ -220,9 +218,9 @@ def test_hub_filter_and_progress(tmp_path):
     assert all(it["out"] not in pre for it in a.items if it["model"] == "M0")              # tải trước chỉ màn trong bộ lọc
     hub.act("CoCount", "user1", json.dumps({"key": want[0], "box": [2, 2, 9, 9], "src": "drawn"}), "ok", filt=f)
     assert want[0] in a.store.latest and a.cur()["key"] == want[1]
-    hub.act("CoCount", "user1", json.dumps({"key": want[1]}), "fail", filt=f)                # thiếu box: chưa xong
-    assert set(a.store.latest) == set(want) and a.cur()["key"] == want[1]
-    assert "| M1 / finetune / remove | 0/1 |" in hub.progress("CoCount")
+    hub.act("CoCount", "user1", json.dumps({"key": want[1]}), "fail", filt=f)                # không box: vẫn xong
+    assert set(a.store.latest) == set(want) and a.cur()["key"] == want[1]                     # màn cuối của bộ lọc: đứng yên
+    assert "| M1 / finetune / remove | 1/1 |" in hub.progress("CoCount")
     hub.act("CoCount", "user1", json.dumps({"key": want[1], "box": [1, 1, 8, 8], "src": "drawn"}), "fail", filt=f)
     other = next(it["key"] for it in a.items if it["model"] == "M0")                         # màn ngoài bộ lọc: không lưu
     head, _ = hub.act("CoCount", "user1", json.dumps({"key": other, "box": [2, 2, 9, 9], "src": "drawn"}), "ok", filt=f)
@@ -265,14 +263,18 @@ def test_merge_finished_runs(man, tmp_path):
             rec = {"key": it["key"], "dataset": "ce130", "model": it["model"], "setting": it["setting"], "task": it["task"],
                    "subset": it["subset"], "image_id": it["id"], "class": it["cls"], "success": it["task"] == "add",
                    "box": [1.0, 2.0, 9.0, 9.0], "box_src": "drawn", "wh": it["wh"], "user": u, "time": "t", "sec": 1.0}
+            if (it["setting"], it["task"], it["id"]) == ("zeroshot", "remove", CE_IDS[0]):
+                rec.update(box=None, box_src=None)                                          # có kết luận, không box: vẫn xong
             st.put(rec)
             if u == "user1" and (it["setting"], it["task"]) == ("zeroshot", "add"):
-                st.put({**rec, "box": None, "box_src": None})                               # bản sau cùng chưa xong
+                st.put({**rec, "success": None})                                            # bản sau cùng chưa có kết luận
     got = merge(out, log=lambda m: None)
     assert got == {"ce130_M0_zeroshot_remove.jsonl": 3, "ce130_M0_finetune_add.jsonl": 3}
     for fn in got:
         rows = [json.loads(line) for line in open(os.path.join(out, "merged", fn))]
-        assert [r["image_id"] for r in rows] == CE_IDS and all(r["drawn_box"] == [1.0, 2.0, 9.0, 9.0] for r in rows)
+        boxes = [r["drawn_box"] for r in rows]
+        assert [r["image_id"] for r in rows] == CE_IDS
+        assert boxes == ([None] + [[1.0, 2.0, 9.0, 9.0]] * 2 if "remove" in fn else [[1.0, 2.0, 9.0, 9.0]] * 3)
         assert all(list(r) == list(cegen.MERGE_KEEP) + ["success", "drawn_box"] for r in rows)
         assert all(r["success"] == (r["task"] == "add") for r in rows)
 
