@@ -48,8 +48,15 @@ từ màn chưa chấm đầu tiên). Mỗi dòng: {"key", "dataset", "model", "
 được = dòng sau cùng của key thoả `is_done` (có `success` và box drawn / picked); dòng cũ "box_src": "cand<k>" (box gợi ý tự chọn
 sẵn, logic trước 2026-11-08 tối) KHÔNG tính là xong.
 
+  merge     gộp bản chấm các user: run (tập, model, setting, task) nào XONG HẾT (mọi ảnh của tập đều có bản chấm `is_done`)
+            -> `<out-dir>/merged/<tập>_<model>_<setting>_<task>.jsonl`, mỗi dòng (theo thứ tự ảnh) = trường gốc của màn (dataset,
+            model, setting, task, subset, image_id, class, wh) + "success" + "drawn_box" (box người chấm: tự vẽ hoặc nhận gợi ý
+            số 1); bỏ key / user / thời gian / box_src. Danh sách ảnh của tập: `manifest.json` nếu có, không thì mọi image_id
+            trong các file annot của tập. Chạy lại khi thêm run xong (ghi đè).
+
   python box_review/cegen.py prepare --workers 8
   python box_review/cegen.py serve --share
+  python box_review/cegen.py merge
 """
 
 import argparse
@@ -326,6 +333,56 @@ def prepare(src, out_dir, turn_index, cocount_root, workers=8, top_k=5, force=Fa
     return man
 
 
+# ---------------------------------------------------------------- merge
+
+MERGE_KEEP = ("dataset", "model", "setting", "task", "subset", "image_id", "class", "wh")
+
+
+def merge(out_dir, dest=None, log=print):
+    """Gộp `annot_<tập>_<user>.jsonl` -> một file mỗi run xong hết (xem docstring đầu file). -> {tên file: số dòng}."""
+    dest = dest or os.path.join(out_dir, "merged")
+    man_path = os.path.join(out_dir, "manifest.json")
+    man_ids = None
+    if os.path.exists(man_path):
+        with open(man_path) as f:
+            man_ids = collections.defaultdict(set)
+            for it in json.load(f)["items"]:
+                man_ids[it["ds"]].add(it["id"])
+    written = {}
+    for ds in DATASETS.values():
+        files = sorted(f for f in os.listdir(out_dir) if f.startswith(f"annot_{ds}_") and f.endswith(".jsonl"))
+        if not files:
+            continue
+        runs, seen, owner = collections.defaultdict(dict), set(), {}
+        for fn in files:
+            for k, rec in Store(os.path.join(out_dir, fn)).latest.items():
+                seen.add(rec["image_id"])
+                if not is_done(rec):
+                    continue
+                if owner.setdefault(k, fn) != fn:
+                    raise ValueError(f"màn {k} được chấm ở cả {owner[k]} và {fn}")
+                runs[(rec["model"], rec["setting"], rec["task"])][rec["image_id"]] = rec
+        ids = man_ids[ds] if man_ids is not None else seen
+        log(f"[merge] {LABELS[ds]}: {len(files)} file, {len(ids)} ảnh"
+            + ("" if man_ids is not None else " (không có manifest: lấy mọi image_id trong file annot)"))
+        for (m, st, t), recs in sorted(runs.items(), key=lambda kv: (kv[0][0], SETTINGS.index(kv[0][1]), TASKS.index(kv[0][2]))):
+            name = f"{ds}_{m}_{st}_{t}.jsonl"
+            if set(recs) != ids:
+                log(f"  {name}: chưa xong ({len(set(recs) & ids)} / {len(ids)}), bỏ qua")
+                continue
+            os.makedirs(dest, exist_ok=True)
+            tmp = os.path.join(dest, name + ".tmp")
+            with open(tmp, "w") as f:
+                for i in sorted(recs, key=_nat):
+                    r = recs[i]
+                    f.write(json.dumps({**{k: r[k] for k in MERGE_KEEP}, "success": r["success"], "drawn_box": r["box"]},
+                                       ensure_ascii=False) + "\n")
+            os.replace(tmp, os.path.join(dest, name))
+            written[name] = len(recs)
+            log(f"  {name}: {len(recs)} dòng")
+    return written
+
+
 # ---------------------------------------------------------------- serve
 
 def split_items(items, user_idx, n_users=len(USERS)):
@@ -378,7 +435,11 @@ def is_done(rec):
 
 
 class Annotator:
-    """Phiên chấm của một (tập, user): danh sách màn, vị trí, file kết quả. Thao tác gọi trong `lock` (Hub)."""
+    """Phiên chấm của một (tập, user): danh sách màn, vị trí, file kết quả. Thao tác gọi trong `lock` (Hub). App khác kế thừa: đổi
+    `filter_keys`, `rec_done`, `save`, `html`."""
+
+    filter_keys = FILTER_KEYS
+    rec_done = staticmethod(is_done)
 
     def __init__(self, items, path, name, user):
         if not items:
@@ -394,7 +455,7 @@ class Annotator:
     def set_filter(self, filt):
         """`filt`: {model / setting / task: giá trị | None} -> chỉ đi qua các màn khớp (`view` = vị trí trong `items`).
         Đổi bộ lọc: sang màn chưa chấm đầu tiên của bộ lọc mới. -> False khi bộ lọc không có màn nào."""
-        f = tuple((k, filt[k]) for k in FILTER_KEYS if filt.get(k) not in (None, ""))
+        f = tuple((k, filt[k]) for k in self.filter_keys if filt.get(k) not in (None, ""))
         if f != self.filt:
             if f not in self.views:
                 view = [p for p, it in enumerate(self.items) if all(it[k] == v for k, v in f)]
@@ -418,7 +479,7 @@ class Annotator:
             self.pos, self.t_show = pos, time.time()
 
     def done(self, it):
-        return is_done(self.store.latest.get(it["key"]))
+        return self.rec_done(self.store.latest.get(it["key"]))
 
     def first_unsaved(self):
         """Màn CHƯA XONG đầu tiên (chưa chấm, hoặc thiếu kết luận / box tự vẽ)."""
@@ -448,7 +509,7 @@ class Annotator:
                 "object (drag on the image) or press s to take suggestion 1, then press Enter / f again.")
 
     def eta(self):
-        secs = [r["sec"] for r in list(self.store.latest.values())[-200:] if is_done(r) and 0 < r.get("sec", 0) <= 300]
+        secs = [r["sec"] for r in list(self.store.latest.values())[-200:] if self.rec_done(r) and 0 < r.get("sec", 0) <= 300]
         left = len(self.view) - self.n_saved()
         return _fmt(statistics.median(secs) * left) if secs and left else "-"
 
@@ -578,21 +639,25 @@ class Hub:
             return a.header(warn), a.html(self.url, next(self.renders))
 
 
-KEYS_JS = """<script>
-window.__cg = window.__cg || {box: null, src: '', key: null, img_key: null, busy: 0, img: new Map(),
-                              view: {z: 1, cx: null, cy: null}};
+# JS / CSS dùng chung cho các app chấm (`cegen.py`, `loc_judge.py`): HTML màn có `.cg_root` (data-key, data-wh, data-img, data-pre)
+# chứa một hay nhiều khung `.cg_vp` > `.cg_wrap` (ảnh + SVG cỡ gốc W × H px). Chung: zoom đồng bộ mọi khung (+ / - / lăn chuột quanh
+# điểm chuột, 0 = vừa khung), khung vừa phần màn hình còn lại, phím Enter / f / mũi tên bấm nút `cg_ok` / `cg_fail` / `cg_prev` /
+# `cg_next`, tải trước ảnh. Mỗi app thêm: `cgDraw()` (vẽ SVG, gọi sau mỗi lần đổi zoom), `window.cgKey(e)` (phím riêng),
+# `window.cgOnKey(root)` (sang màn mới), `window.cgPayload()` (gửi kèm thao tác).
+VIEW_JS = """
+window.__cg = window.__cg || {key: null, img_key: null, busy: 0, img: new Map(), view: {z: 1, cx: null, cy: null}, mouse: null};
 function cgRoot() { return document.querySelector('.cg_root'); }
 function cgWH() { const r = cgRoot(); return r ? r.dataset.wh.split(',').map(Number) : [1, 1]; }
-function cgCands() { const r = cgRoot(); try { return JSON.parse(r.dataset.cands || '[]'); } catch (e) { return []; } }
 function cgVps() { const r = cgRoot(); return r ? [...r.querySelectorAll('.cg_vp')].filter((v) => v.clientWidth > 0) : []; }
 function cgScale(vp) {
   const [W, H] = cgWH();
   return Math.min(vp.clientWidth / W, vp.clientHeight / H) * window.__cg.view.z;
 }
-// một trạng thái zoom (z = bội so với vừa khung, cx / cy = tâm nhìn theo pixel ảnh) áp cho cả 3 khung
+function cgRedraw() { if (typeof cgDraw === 'function') cgDraw(); }
+// một trạng thái zoom (z = bội so với vừa khung, cx / cy = tâm nhìn theo pixel ảnh) áp cho mọi khung
 function cgApply() {
   const vps = cgVps();
-  if (!vps.length) { cgDraw(); return; }
+  if (!vps.length) { cgRedraw(); return; }
   const mh = `${Math.max(300, Math.floor(window.innerHeight - vps[0].getBoundingClientRect().top - window.scrollY - 12))}px`;
   vps.forEach((p) => { if (p.style.maxHeight !== mh) p.style.maxHeight = mh; });     // khung ảnh vừa phần màn hình còn lại
   const [W, H] = cgWH(), v = window.__cg.view, s = cgScale(vps[0]), vw = vps[0].clientWidth, vh = vps[0].clientHeight;
@@ -604,9 +669,9 @@ function cgApply() {
     p.querySelector('.cg_wrap').style.transform =
       `translate(${p.clientWidth / 2 - v.cx * sp}px, ${p.clientHeight / 2 - v.cy * sp}px) scale(${sp})`;
   });
-  cgDraw();
+  cgRedraw();
 }
-// phóng / thu f lần, giữ nguyên điểm ảnh dưới con trỏ (con trỏ ngoài ảnh: quanh tâm khung) — cả 3 khung cùng đổi
+// phóng / thu f lần, giữ nguyên điểm ảnh dưới con trỏ (con trỏ ngoài ảnh: quanh tâm khung) — mọi khung cùng đổi
 function cgZoom(f) {
   const vps = cgVps(); if (!vps.length) return;
   const m = window.__cg.mouse, el = m && document.elementFromPoint(m.x, m.y), hit = el && vps.find((p) => p.contains(el));
@@ -618,43 +683,7 @@ function cgZoom(f) {
   v.cx = ix - mx / s2; v.cy = iy - my / s2;
   cgApply();
 }
-function cgDraw() {
-  const r = cgRoot(); if (!r) return;
-  const vps = cgVps(), sc = vps.length ? cgScale(vps[0]) : 1;
-  // nét / chữ tính theo pixel MÀN HÌNH (SVG bị CSS transform phóng to, vector-effect không tính transform đó)
-  const C = cgCands(), fs = 20 / sc, b = window.__cg.box, px = (v) => (v / sc).toFixed(3);
-  let s = '';
-  C.forEach((c, i) => {
-    s += `<rect class="${i ? 'cg_cand' : 'cg_top'}" x="${c[0]}" y="${c[1]}" width="${c[2] - c[0]}" height="${c[3] - c[1]}" `
-      + (i ? `stroke-width="${px(1.5)}" stroke-dasharray="${px(5)} ${px(3)}"/>` : `stroke-width="${px(2.5)}"/>`);
-    s += `<text class="cg_lab" x="${c[0]}" y="${c[1] - fs * 0.15}" font-size="${fs}" stroke-width="${fs * 0.08}">${i + 1}</text>`;
-  });
-  if (b) s += `<rect class="cg_cur" x="${b[0]}" y="${b[1]}" width="${b[2] - b[0]}" height="${b[3] - b[1]}" stroke-width="${px(3)}"/>`;
-  r.querySelectorAll('svg').forEach((svg) => { svg.innerHTML = s; });
-  const info = document.getElementById('cg_boxinfo');
-  if (info) info.textContent = (b ? `your box (${window.__cg.src === 'picked' ? 'suggestion 1' : 'drawn'}): `
-      + b.map((v) => Math.round(v)).join(', ') : 'no box yet: press s for suggestion 1 or drag to draw')
-      + ` | zoom ${window.__cg.view.z.toFixed(1)}x (+ / - or wheel at the mouse, 0 = fit)`;
-}
-function cgReset() {
-  const r = cgRoot(); if (!r) return;
-  window.__cg.box = r.dataset.box ? r.dataset.box.split(',').map(Number) : null;
-  window.__cg.src = r.dataset.src || '';
-}
-window.cgPayload = function () { return JSON.stringify({key: window.__cg.key, box: window.__cg.box, src: window.__cg.src}); };
-function cgPt(e, svg) {
-  const rc = svg.getBoundingClientRect(), vb = svg.viewBox.baseVal, [W, H] = cgWH();
-  const x = (e.clientX - rc.left) * vb.width / rc.width, y = (e.clientY - rc.top) * vb.height / rc.height;
-  return [Math.min(Math.max(x, 0), W), Math.min(Math.max(y, 0), H)];
-}
-let cgDrag = null;
-document.addEventListener('mousedown', (e) => {
-  const vp = e.target.closest && e.target.closest('.cg_vp');
-  if (!vp || e.button !== 0) return;
-  e.preventDefault();
-  const svg = vp.querySelector('svg'), [x, y] = cgPt(e, svg);
-  cgDrag = {svg, x0: x, y0: y, cx: e.clientX, cy: e.clientY, moved: false, prev: [window.__cg.box, window.__cg.src]};
-});
+function cgZoomText() { return `zoom ${window.__cg.view.z.toFixed(1)}x (+ / - or wheel at the mouse, 0 = fit)`; }
 document.addEventListener('wheel', (e) => {
   const vp = e.target.closest && e.target.closest('.cg_vp');
   if (!vp) return;
@@ -663,25 +692,7 @@ document.addEventListener('wheel', (e) => {
   window.__cg.mouse = {x: e.clientX, y: e.clientY};
   cgZoom(Math.exp(-Math.max(Math.min(d, 100), -100) * 0.002));
 }, {passive: false});
-document.addEventListener('mousemove', (e) => {
-  window.__cg.mouse = {x: e.clientX, y: e.clientY};      // vị trí chuột cho + / -
-  if (!cgDrag) return;
-  if (!cgDrag.moved && Math.hypot(e.clientX - cgDrag.cx, e.clientY - cgDrag.cy) < 4) return;
-  cgDrag.moved = true;
-  const [x, y] = cgPt(e, cgDrag.svg);
-  window.__cg.box = [Math.min(cgDrag.x0, x), Math.min(cgDrag.y0, y), Math.max(cgDrag.x0, x), Math.max(cgDrag.y0, y)];
-  window.__cg.src = 'drawn';
-  cgDraw();
-});
-document.addEventListener('mouseup', () => {
-  if (!cgDrag) return;
-  const d = cgDrag; cgDrag = null;
-  if (!d.moved) return;
-  const b = window.__cg.box;
-  if (!b || b[2] - b[0] < 2 || b[3] - b[1] < 2) { [window.__cg.box, window.__cg.src] = d.prev; }
-  else window.__cg.box = b.map((v) => Math.round(v));
-  cgDraw();
-});
+document.addEventListener('mousemove', (e) => { window.__cg.mouse = {x: e.clientX, y: e.clientY}; });   // vị trí chuột cho + / -
 function cgPrefetch(r) {
   (r.dataset.pre || '').split('|').filter(Boolean).forEach((u) => {
     const m = window.__cg.img;
@@ -705,13 +716,10 @@ document.addEventListener('keydown', (e) => {
     if (el) { window.__cg.busy = Date.now(); el.click(); }
     return;
   }
-  if (e.key === 's' || e.key === 'S') { const C = cgCands(); if (C.length) { window.__cg.box = C[0].slice(); window.__cg.src = 'picked'; cgDraw(); } }
-  else if (e.key === 'r') { cgReset(); cgDraw(); }
-  else if (e.key === 'x') { window.__cg.box = null; window.__cg.src = ''; cgDraw(); }
-  else if (e.key === 'h') { document.body.classList.toggle('cg_nohm'); cgApply(); }
-  else if (e.key === '+' || e.key === '=') cgZoom(1.5);
+  if (e.key === '+' || e.key === '=') cgZoom(1.5);
   else if (e.key === '-') cgZoom(1 / 1.5);
   else if (e.key === '0') { window.__cg.view = {z: 1, cx: null, cy: null}; cgApply(); }
+  else if (window.cgKey) window.cgKey(e);
 });
 window.addEventListener('resize', () => cgApply());
 new MutationObserver(() => {
@@ -721,8 +729,8 @@ new MutationObserver(() => {
   window.__cg.busy = 0;
   if (r.dataset.key !== window.__cg.key) {
     window.__cg.key = r.dataset.key;
-    cgReset();
-    if (r.dataset.img !== window.__cg.img_key) {      // ảnh khác: về vừa khung; cùng ảnh (12 run liền nhau): giữ zoom
+    if (window.cgOnKey) window.cgOnKey(r);
+    if (r.dataset.img !== window.__cg.img_key) {      // ảnh khác: về vừa khung; cùng ảnh (vd. 12 run liền nhau): giữ zoom
       window.__cg.img_key = r.dataset.img;
       window.__cg.view = {z: 1, cx: null, cy: null};
     }
@@ -731,25 +739,93 @@ new MutationObserver(() => {
   requestAnimationFrame(() => cgApply());
   cgPrefetch(r);
 }).observe(document.documentElement, {childList: true, subtree: true});
-</script>"""
+"""
 
-CSS = (".gradio-container {max-width: 100% !important;} .cg_hidden {display: none !important;} "
-       ".cg_task {font-size: 1.2em; font-weight: 700; padding: 3px 10px; border-radius: 6px; color: #fff; display: inline-block;} "
-       ".cg_add {background: #1b7f3b;} .cg_remove {background: #b3261e;} .cg_ok {color: #1b7f3b;} .cg_bad {color: #b3261e;} "
-       ".cg_meta {margin: 4px 0 4px 6px;} #cg_boxinfo {margin: 4px 0; font-family: monospace;} "
-       ".cg_row {display: flex; gap: 8px; align-items: flex-start;} .cg_panel {flex: 1 1 0; min-width: 0;} "
-       ".cg_cap {font-size: 0.8em; opacity: 0.7; margin-bottom: 2px;} "
-       ".cg_vp {position: relative; width: 100%; max-height: 80vh; overflow: hidden; "
-       "background: #000; cursor: crosshair; user-select: none; overscroll-behavior: contain;} "
-       ".cg_wrap {position: absolute; left: 0; top: 0; transform-origin: 0 0; line-height: 0;} "
-       ".cg_wrap img {display: block; width: 100%; height: 100%; -webkit-user-drag: none;} "
-       ".cg_wrap svg {position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible;} "
-       "body.cg_nohm .cg_hm {display: none;} "
-       ".cg_cand {fill: none; stroke: #ff3b30;} "
-       ".cg_top {fill: none; stroke: #ff3b30;} "
-       ".cg_cur {fill: rgba(255, 230, 0, 0.10); stroke: #ffe600;} "
-       ".cg_lab {fill: #ff3b30; font-weight: 700; font-family: sans-serif; paint-order: stroke; stroke: #000;}")
+# riêng app CE-Gen: box gợi ý (đỏ, số), box của người chấm (vàng, kéo chuột vẽ trên mọi ảnh), phím s / r / x / h
+CEGEN_JS = """
+function cgCands() { const r = cgRoot(); try { return JSON.parse(r.dataset.cands || '[]'); } catch (e) { return []; } }
+function cgDraw() {
+  const r = cgRoot(); if (!r) return;
+  const vps = cgVps(), sc = vps.length ? cgScale(vps[0]) : 1;
+  // nét / chữ tính theo pixel MÀN HÌNH (SVG bị CSS transform phóng to, vector-effect không tính transform đó)
+  const C = cgCands(), fs = 20 / sc, b = window.__cg.box, px = (v) => (v / sc).toFixed(3);
+  let s = '';
+  C.forEach((c, i) => {
+    s += `<rect class="${i ? 'cg_cand' : 'cg_top'}" x="${c[0]}" y="${c[1]}" width="${c[2] - c[0]}" height="${c[3] - c[1]}" `
+      + (i ? `stroke-width="${px(1.5)}" stroke-dasharray="${px(5)} ${px(3)}"/>` : `stroke-width="${px(2.5)}"/>`);
+    s += `<text class="cg_lab" x="${c[0]}" y="${c[1] - fs * 0.15}" font-size="${fs}" stroke-width="${fs * 0.08}">${i + 1}</text>`;
+  });
+  if (b) s += `<rect class="cg_cur" x="${b[0]}" y="${b[1]}" width="${b[2] - b[0]}" height="${b[3] - b[1]}" stroke-width="${px(3)}"/>`;
+  r.querySelectorAll('svg').forEach((svg) => { svg.innerHTML = s; });
+  const info = document.getElementById('cg_boxinfo');
+  if (info) info.textContent = (b ? `your box (${window.__cg.src === 'picked' ? 'suggestion 1' : 'drawn'}): `
+      + b.map((v) => Math.round(v)).join(', ') : 'no box yet: press s for suggestion 1 or drag to draw') + ' | ' + cgZoomText();
+}
+function cgReset() {
+  const r = cgRoot(); if (!r) return;
+  window.__cg.box = r.dataset.box ? r.dataset.box.split(',').map(Number) : null;
+  window.__cg.src = r.dataset.src || '';
+}
+window.cgOnKey = cgReset;
+window.cgPayload = function () { return JSON.stringify({key: window.__cg.key, box: window.__cg.box, src: window.__cg.src}); };
+function cgPt(e, svg) {
+  const rc = svg.getBoundingClientRect(), vb = svg.viewBox.baseVal, [W, H] = cgWH();
+  const x = (e.clientX - rc.left) * vb.width / rc.width, y = (e.clientY - rc.top) * vb.height / rc.height;
+  return [Math.min(Math.max(x, 0), W), Math.min(Math.max(y, 0), H)];
+}
+let cgDrag = null;
+document.addEventListener('mousedown', (e) => {
+  const vp = e.target.closest && e.target.closest('.cg_vp');
+  if (!vp || e.button !== 0) return;
+  e.preventDefault();
+  const svg = vp.querySelector('svg'), [x, y] = cgPt(e, svg);
+  cgDrag = {svg, x0: x, y0: y, cx: e.clientX, cy: e.clientY, moved: false, prev: [window.__cg.box, window.__cg.src]};
+});
+document.addEventListener('mousemove', (e) => {
+  if (!cgDrag) return;
+  if (!cgDrag.moved && Math.hypot(e.clientX - cgDrag.cx, e.clientY - cgDrag.cy) < 4) return;
+  cgDrag.moved = true;
+  const [x, y] = cgPt(e, cgDrag.svg);
+  window.__cg.box = [Math.min(cgDrag.x0, x), Math.min(cgDrag.y0, y), Math.max(cgDrag.x0, x), Math.max(cgDrag.y0, y)];
+  window.__cg.src = 'drawn';
+  cgDraw();
+});
+document.addEventListener('mouseup', () => {
+  if (!cgDrag) return;
+  const d = cgDrag; cgDrag = null;
+  if (!d.moved) return;
+  const b = window.__cg.box;
+  if (!b || b[2] - b[0] < 2 || b[3] - b[1] < 2) { [window.__cg.box, window.__cg.src] = d.prev; }
+  else window.__cg.box = b.map((v) => Math.round(v));
+  cgDraw();
+});
+window.cgKey = function (e) {
+  if (e.key === 's' || e.key === 'S') { const C = cgCands(); if (C.length) { window.__cg.box = C[0].slice(); window.__cg.src = 'picked'; cgDraw(); } }
+  else if (e.key === 'r') { cgReset(); cgDraw(); }
+  else if (e.key === 'x') { window.__cg.box = null; window.__cg.src = ''; cgDraw(); }
+  else if (e.key === 'h') { document.body.classList.toggle('cg_nohm'); cgApply(); }
+};
+"""
+KEYS_JS = "<script>" + VIEW_JS + CEGEN_JS + "</script>"
 
+BASE_CSS = (".gradio-container {max-width: 100% !important;} .cg_hidden {display: none !important;} "
+            ".cg_task {font-size: 1.2em; font-weight: 700; padding: 3px 10px; border-radius: 6px; color: #fff; display: inline-block;} "
+            ".cg_ok {color: #1b7f3b;} .cg_bad {color: #b3261e;} .cg_meta {margin: 4px 0 4px 6px;} "
+            ".cg_row {display: flex; gap: 8px; align-items: flex-start;} .cg_panel {flex: 1 1 0; min-width: 0;} "
+            ".cg_cap {font-size: 0.8em; opacity: 0.7; margin-bottom: 2px;} "
+            ".cg_vp {position: relative; width: 100%; max-height: 80vh; overflow: hidden; "
+            "background: #000; user-select: none; overscroll-behavior: contain;} "
+            ".cg_wrap {position: absolute; left: 0; top: 0; transform-origin: 0 0; line-height: 0;} "
+            ".cg_wrap img {display: block; width: 100%; height: 100%; -webkit-user-drag: none;} "
+            ".cg_wrap svg {position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible;} ")
+
+CSS = BASE_CSS + (".cg_add {background: #1b7f3b;} .cg_remove {background: #b3261e;} "
+                  "#cg_boxinfo {margin: 4px 0; font-family: monospace;} .cg_vp {cursor: crosshair;} "
+                  "body.cg_nohm .cg_hm {display: none;} "
+                  ".cg_cand {fill: none; stroke: #ff3b30;} "
+                  ".cg_top {fill: none; stroke: #ff3b30;} "
+                  ".cg_cur {fill: rgba(255, 230, 0, 0.10); stroke: #ffe600;} "
+                  ".cg_lab {fill: #ff3b30; font-weight: 700; font-family: sans-serif; paint-order: stroke; stroke: #000;}")
 
 def build_ui(hub, gr):
     """Thanh trên: 5 menu chọn (Data, User, Model, Setting, Task = một run) + 5 nút; dưới: 3 ảnh chia đều cả trang; cuối: bảng
@@ -833,8 +909,13 @@ def main():
     s.add_argument("--host", default="0.0.0.0")
     s.add_argument("--port", type=int, default=7860)
     s.add_argument("--share", action="store_true", help="tạo link công khai *.gradio.live (hết hạn sau 72 giờ)")
+    g = sub.add_parser("merge", help="gộp bản chấm các user, mỗi run xong hết một file")
+    g.add_argument("--out-dir", default=OUT_DIR, help="thư mục chứa annot_*.jsonl (+ manifest.json nếu có)")
+    g.add_argument("--dest", default=None, help="mặc định <out-dir>/merged")
     a = ap.parse_args()
-    if a.cmd == "prepare":
+    if a.cmd == "merge":
+        merge(a.out_dir, a.dest, log=lambda m: print(m, flush=True))
+    elif a.cmd == "prepare":
         prepare(a.src, a.out_dir, a.turn_index, a.cocount_root, a.workers, a.top_k, a.force, a.allow_missing_v2, a.expect_runs,
                 log=lambda m: print(m, flush=True))
     else:

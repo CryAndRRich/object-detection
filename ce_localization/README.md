@@ -21,7 +21,7 @@ U-Net 1D nhận [x_t ; refined] -> ε̂ ;  loss = ε-MSE + aux_loss_weight · [M
 | `engine/` | `add_eval` (suy luận K mẫu, IoU, on_object, C-NLL), `train_utils` (DDP, lịch lr, checkpoint nguyên tử) |
 | `tools/` | `build_turn_index`, `build_add_cache`, `build_clip_cache` (dữ liệu / cache, một lần); `cnll_outliers`, `plot_cnll_worst`, `plot_snapshots`, `plot_snapshot_compare`, `plot_review_filter` (đọc dump eval, `history.json`, hình trước / sau lọc tay) |
 | `utils/` | `config` (YAML + `base`), `log` (`fmt_time`, `Progress` — log tiến độ suy luận dùng chung), `plot` (`draw_boxes` dùng chung), box / diffusion |
-| `box_review/` | web Gradio rà box bằng tay (local): box vật CE-CoCount -> `data/cocount_review.jsonl`, chọn box model -> `output/add/review/` — docstring `box_review/app.py`; chấm CE-Gen (server 2, không torch, env `imgedit`) -> `output/cegen/annot/` — docstring `box_review/cegen.py` |
+| `box_review/` | web Gradio rà box bằng tay (local): box vật CE-CoCount -> `data/cocount_review.jsonl`, chọn box model -> `output/add/review/` — docstring `box_review/app.py`; chấm CE-Gen (server 2, không torch, env `imgedit`) -> `output/cegen/annot/` — docstring `box_review/cegen.py`; chấm box định vị CE-Loc / baseline (Enter ổn / f không ổn, cùng khuôn giao diện) -> `output/add/review/loc_judge/` — docstring `box_review/loc_judge.py` |
 | `../notebooks/add_kaggle.ipynb` | train một run trên Kaggle T4×2 (`object-detection/notebooks/`, gitignore, chỉ ở local; tự clone branch `delta`) |
 
 | config | khác | |

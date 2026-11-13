@@ -10,7 +10,8 @@ import pytest
 from PIL import Image
 
 from ce_localization.box_review import cegen
-from ce_localization.box_review.cegen import Annotator, Hub, Store, clean_box, find_runs, is_done, prepare, run_task, split_items
+from ce_localization.box_review.cegen import (Annotator, Hub, Store, clean_box, find_runs, is_done, merge, prepare, run_task,
+                                              split_items)
 
 CE_IDS = ["2_b1", "10_b1", "10_b2"]
 CC_IDS = ["F_1_positive", "F_1_negative"]
@@ -250,6 +251,30 @@ def test_html_prefill_and_prefetch(man, tmp_path):
     assert all(ord(c) < 128 for c in page.replace(json.dumps(it["cands"]), ""))                # chữ giao diện chỉ ASCII
     pre = page.split('data-pre="')[1].split('"')[0]
     assert a.items[1]["out"] in pre
+
+
+def test_merge_finished_runs(man, tmp_path):
+    """Chỉ run xong hết (mọi ảnh, gộp cả hai user) mới ra file; mỗi dòng = trường gốc + success + drawn_box; dòng sau thắng."""
+    out = str(tmp_path / "out")
+    items = [it for it in man["items"] if it["ds"] == "ce130"]
+    for k, u in enumerate(cegen.USERS):
+        st = Store(os.path.join(out, f"annot_ce130_{u}.jsonl"))
+        for it in split_items(items, k):
+            if u == "user2" and (it["setting"], it["task"]) == ("finetune", "remove"):
+                continue                                                                    # user2 chưa chấm run này
+            rec = {"key": it["key"], "dataset": "ce130", "model": it["model"], "setting": it["setting"], "task": it["task"],
+                   "subset": it["subset"], "image_id": it["id"], "class": it["cls"], "success": it["task"] == "add",
+                   "box": [1.0, 2.0, 9.0, 9.0], "box_src": "drawn", "wh": it["wh"], "user": u, "time": "t", "sec": 1.0}
+            st.put(rec)
+            if u == "user1" and (it["setting"], it["task"]) == ("zeroshot", "add"):
+                st.put({**rec, "box": None, "box_src": None})                               # bản sau cùng chưa xong
+    got = merge(out, log=lambda m: None)
+    assert got == {"ce130_M0_zeroshot_remove.jsonl": 3, "ce130_M0_finetune_add.jsonl": 3}
+    for fn in got:
+        rows = [json.loads(line) for line in open(os.path.join(out, "merged", fn))]
+        assert [r["image_id"] for r in rows] == CE_IDS and all(r["drawn_box"] == [1.0, 2.0, 9.0, 9.0] for r in rows)
+        assert all(list(r) == list(cegen.MERGE_KEEP) + ["success", "drawn_box"] for r in rows)
+        assert all(r["success"] == (r["task"] == "add") for r in rows)
 
 
 @pytest.mark.slow
