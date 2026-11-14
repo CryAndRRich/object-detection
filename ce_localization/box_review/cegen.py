@@ -178,7 +178,7 @@ def _load_records(path):
 
 def _save_jpeg(im, path, quality):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = f"{path}.tmp{os.getpid()}"
+    tmp = f"{path}.tmp{os.getpid()}_{threading.get_ident()}"     # luồng dựng nền + luồng trả lời cùng một tiến trình
     im.save(tmp, format="JPEG", quality=quality, optimize=True)
     os.replace(tmp, path)              # nhiều worker cùng ghi một ảnh input: bản nào thay sau cũng nguyên vẹn
 

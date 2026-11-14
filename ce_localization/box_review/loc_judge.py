@@ -1,24 +1,27 @@
 #!/usr/bin/env python3
 """Web chấm box định vị (người dùng 2026-11-12): mỗi màn = (tập, model, zeroshot / finetune, ảnh) — ảnh model nhận + MỘT box viền đỏ
 đậm = box C-NLL THẤP NHẤT trong các box model trả (mọi model cùng luật, kể cả VLM; model không trả box hợp lệ: box cả ảnh như lúc
-chấm điểm). Người chấm chỉ bấm Enter = ổn / f = không ổn. Chấm TRỌN tập test: CE-130 `test_all` (ảnh có C-NLL: 6.090 / 6.122 — 32 ảnh
-< 5 vật không có C-NLL nên không có màn) và CE-CoCount `review5` (1.263) × 18 run (`RUNS`; không OracleLoc, không DELTA7.1).
+chấm điểm), kèm box vật cùng lớp viền xanh mảnh (đúng bộ vật C-NLL fit Gaussian; phím h ẩn / hiện) để áng chừng. Người chấm chỉ
+bấm Enter = ổn / f = không ổn. Chấm TRỌN tập test: CE-130 `test_all` (ảnh có C-NLL: 6.090 / 6.122 — 32 ảnh < 5 vật không có C-NLL
+nên không có màn) và CE-CoCount `review5` (1.263) × 11 run (`RUNS` = `pick_runs(ALL_RUNS)`: mỗi model MỘT run, có finetune thì lấy
+finetune — người dùng 2026-11-14; không OracleLoc, không DELTA7.1). RePlan hiện "RePlan (Qwen2.5-VL-7B planner)": chỉ planner được
+finetune (LoRA SFT).
 
 Ba lệnh (khuôn + giao diện chung với `cegen.py`: Store ghi nối, Annotator / Hub, JS zoom `VIEW_JS`):
 
-  prepare   đọc dump box của 18 run (`--output-root` = `output/add`, chỉ đọc JSON, chạy ở LOCAL được — cần torch cho `letterbox_size`)
+  prepare   đọc dump box của 11 run (`--output-root` = `output/add`, chỉ đọc JSON, chạy ở LOCAL được — cần torch cho `letterbox_size`)
             -> `<out-dir>/manifest.json`: mỗi màn ảnh nguồn (tương đối `--data-dir`), box (pixel ẢNH GỐC, xyxy), C-NLL, `invalid`
-            (model không trả box hợp lệ). Box dump CE-Loc / baseline là pixel canvas 512 (letterbox góc trên trái) -> chia tỉ lệ;
+            (model không trả box hợp lệ); `objects` = box vật mỗi ảnh (CoCount theo `cocount_review.jsonl`). Box dump CE-Loc / baseline là pixel canvas 512 (letterbox góc trên trái) -> chia tỉ lệ;
             box VLM `test.jsonl` đã là pixel ảnh gốc. Mọi run phải phủ đúng một tập ảnh. `--cache` dựng sẵn mọi ảnh JPEG.
-  serve     app Gradio (`--share`; không torch — env `imgedit` được): menu Data / User / Model / Setting (model chỉ có zero-shot:
-            Setting tự chọn Zeroshot, không có Finetune) + 5 nút; ảnh JPEG cache tự dựng lần đầu cần tới từ ảnh trong `--data-dir`
-            (`samples/`, `cocount/Image/`); bảng "Progress per run" hai tập hiện ngay. Chia việc theo ẢNH xen kẽ user1 / user2
+  serve     app Gradio (`--share`; không torch — env `imgedit` được): menu Data / User / Model (tên kèm setting) + 5 nút; ảnh
+            JPEG cache dựng từ ảnh trong `--data-dir` (`samples/`, `cocount/Image/`) ở luồng nền ngay lúc mở (ảnh đang hiện chưa có
+            thì dựng ngay; chỉ tải trước ảnh đã có cache); bảng "Progress per run" hai tập hiện ngay. Chia việc theo ẢNH xen kẽ user1 / user2
             (mọi run của một ảnh về cùng một người, hai người không trùng màn). Hiện tên model (người dùng 2026-11-12: không chấm mù).
   merge     run nào xong hết (gộp 2 user phủ mọi ảnh của tập) -> `<out-dir>/merged/<tập>_<model>_<setting>.jsonl` (model viết
             thường, khoảng trắng -> `-`), mỗi dòng: dataset, model, setting, image_id, class, wh, box, cnll, invalid + "ok".
 
 Phím: Enter ổn · f không ổn (cả hai lưu rồi sang màn sau; chấm lại = ghi đè) · ← / → màn trước / sau · + / - / lăn chuột phóng thu
-quanh điểm chuột, 0 vừa khung.
+quanh điểm chuột, 0 vừa khung · h ẩn / hiện box vật.
 
 Kết quả: `<out-dir>/judge_<ce130|cocount>_<user>.jsonl` (chỉ GHI NỐI, dòng sau cùng của `key` thắng): {"key", "dataset", "model",
 "setting", "image_id", "class", "box", "cnll", "invalid", "wh", "ok": true | false, "user", "time", "sec"}.
@@ -54,9 +57,11 @@ OUT_DIR = os.path.join(OUTPUT_ROOT, "review", "loc_judge")
 DATA_DIR = os.path.join(OD, "data")
 DSETS = {"ce130": ("ce130_test_all", "inpainted"), "cocount": ("cocount_review5", "cocount")}   # thư mục tập, khoá dump CE-Loc / baseline
 SETTING_LABEL = {"zeroshot": "Zeroshot", "finetune": "Finetune"}
-CHOOSE = "**Choose Data, User, Model and Setting above to start.**"
+# tên hiện trên giao diện: RePlan chỉ có planner Qwen2.5-VL-7B được finetune (LoRA SFT), không phải cả RePlan
+DISPLAY = {"RePlan": "RePlan (Qwen2.5-VL-7B planner)"}
+CHOOSE = "**Choose Data, User and Model above to start.**"
 # (model, setting, dump tương đối --output-root; {d} = thư mục tập) — dump box của đúng hàng SCORE / snapshot báo cáo
-RUNS = (
+ALL_RUNS = (
     ("CE-Loc", "zeroshot", "celoc/delta8/{d}/ep010_boxes.json"),
     ("BootPlace", "zeroshot", "baseline/zeta1/{d}/pretrained_boxes.json"),
     ("BootPlace", "finetune", "baseline/zeta1_1/{d}/ep006_boxes.json"),
@@ -76,6 +81,21 @@ RUNS = (
     ("LLaVA-OV-2-8B", "zeroshot", "vlm/llava-ov2-8b/{d}/test.jsonl"),
     ("LLaVA-OV-2-8B", "finetune", "vlm/llava-ov2-8b-sft/ep002/{d}/test.jsonl"),
 )
+
+
+def pick_runs(runs):
+    """Mỗi model MỘT run (người dùng 2026-11-14): có finetune thì lấy finetune, không có mới lấy zero-shot."""
+    ft = {r[0] for r in runs if r[1] == "finetune"}
+    return tuple(r for r in runs if r[1] == "finetune" or r[0] not in ft)
+
+
+RUNS = pick_runs(ALL_RUNS)          # 11 run: CE-Loc, GPT-6 Luna, gpt-4.1-mini, GLM-5.3-Flash zero-shot; 7 model còn lại finetune
+
+
+def run_label(model, setting):
+    """Nhãn run trên giao diện: CE-Loc chỉ một bản (không zero-shot / finetune), còn lại kèm setting."""
+    name = DISPLAY.get(model, model)
+    return name if model == "CE-Loc" else f"{name} | {SETTING_LABEL[setting]}"
 
 
 # ---------------------------------------------------------------- prepare
@@ -135,9 +155,16 @@ def read_run(path, key, wh_of, image_size=512):
     return out
 
 
-def _images(ds, data_dir):
-    """-> hàm image_id -> (ảnh nguồn tương đối `data_dir`, ảnh cache tương đối, lớp, [W, H] ảnh gốc)."""
+def _boxes(a):
+    return [[round(float(v), 1) for v in b] for b in a]
+
+
+def _images(ds, data_dir, review=None):
+    """-> hàm image_id -> (ảnh nguồn tương đối `data_dir`, ảnh cache tương đối, lớp, [W, H] ảnh gốc, box vật cùng lớp). Box vật =
+    đúng bộ vật C-NLL dùng để fit Gaussian (pixel ảnh gốc, xyxy): CE-130 vật còn trong ảnh ở lượt t (`present_objects`), CoCount
+    `exam_bbox` sau rà tay (`review` = `load_review(cocount_review.jsonl)`)."""
     if ds == "ce130":
+        from ce_localization.data.turns import present_objects
         with open(os.path.join(data_dir, "turn_index.json")) as f:
             ti = json.load(f)
 
@@ -145,25 +172,34 @@ def _images(ds, data_dir):
             e = ti["turns"][i]
             b = ti["branches"][e["branch"]]
             src = "samples/" + e["sample"]
-            return src, "ce130/" + os.path.splitext(e["sample"])[0].replace("/", "_") + ".jpg", b["class"], [int(v) for v in b["wh"]]
+            return (src, "ce130/" + os.path.splitext(e["sample"])[0].replace("/", "_") + ".jpg", b["class"],
+                    [int(v) for v in b["wh"]], _boxes(present_objects(b, e["t"])) if "objects" in b else [])
         return info
 
     def info(i):
-        with open(os.path.join(data_dir, "cocount", "Anno", i + ".json")) as f:
+        from ce_localization.data.cocount import read_cocount
+        root = os.path.join(data_dir, "cocount")
+        objs = (_boxes(read_cocount(root, i, review)["objects"])
+                if os.path.exists(os.path.join(root, "Anno_with_exam_bbox", i + ".json")) else [])
+        with open(os.path.join(root, "Anno", i + ".json")) as f:
             cls = clean_class(json.load(f)["class_name"])
         src = f"cocount/Image/{i}.jpg"
         with Image.open(os.path.join(data_dir, src)) as im:
             wh = list(im.size)
-        return src, f"cocount/{i}.jpg", cls, wh
+        return src, f"cocount/{i}.jpg", cls, wh, objs
     return info
 
 
-def prepare(output_root, out_dir, data_dir, runs=RUNS, cache=False, log=print):
-    """Đọc dump mọi run -> `<out_dir>/manifest.json` (+ cache JPEG nếu `cache`). -> manifest."""
+def prepare(output_root, out_dir, data_dir, runs=RUNS, cache=False, review=None, log=print):
+    """Đọc dump mọi run -> `<out_dir>/manifest.json` (+ cache JPEG nếu `cache`). `review`: file rà tay CoCount (mặc định
+    `<data_dir>/cocount_review.jsonl`, không có thì box vật chưa rà). -> manifest."""
+    from ce_localization.data.cocount import load_review
     t0 = time.time()
-    items, stats = [], collections.OrderedDict()
+    review = review or os.path.join(data_dir, "cocount_review.jsonl")
+    rv = load_review(review) if os.path.exists(review) else None
+    items, objects, stats = [], {}, collections.OrderedDict()
     for ds, (sub, key) in DSETS.items():
-        info = functools.lru_cache(maxsize=None)(_images(ds, data_dir))
+        info = functools.lru_cache(maxsize=None)(_images(ds, data_dir, rv))
         order = None
         for model, setting, pat in runs:
             path = os.path.join(output_root, pat.format(d=sub))
@@ -175,15 +211,16 @@ def prepare(output_root, out_dir, data_dir, runs=RUNS, cache=False, log=print):
                                  f"{sorted(set(got) ^ set(order))[:5]}")
             for i in order:
                 box, c, bad = got[i]
-                src, img, cls, wh = info(i)
+                src, img, cls, wh, objs = info(i)
+                objects[f"{ds}|{i}"] = objs
                 items.append({"ds": ds, "model": model, "setting": setting, "id": i, "key": f"{ds}|{model}|{setting}|{i}",
                               "cls": cls, "wh": wh, "src": src, "img": img, "box": box, "cnll": round(c, 4), "invalid": bad})
             stats[f"{LABELS[ds]} {model} {setting}"] = {"n": len(order), "invalid": sum(got[i][2] for i in order)}
         log(f"[prepare] {LABELS[ds]}: {len(order)} ảnh × {len(runs)} run ({time.time() - t0:.0f}s)")
     for k, v in stats.items():
         log(f"  {k}: {v['n']} màn" + (f", {v['invalid']} box cả ảnh (model không trả box hợp lệ)" if v["invalid"] else ""))
-    man = {"version": 1, "time": datetime.now().isoformat(timespec="seconds"), "runs": [[m, s] for m, s, _ in runs],
-           "sources": {f"{m}|{s}": p for m, s, p in runs}, "items": items}
+    man = {"version": 2, "time": datetime.now().isoformat(timespec="seconds"), "runs": [[m, s] for m, s, _ in runs],
+           "sources": {f"{m}|{s}": p for m, s, p in runs}, "items": items, "objects": objects}
     os.makedirs(out_dir, exist_ok=True)
     tmp = os.path.join(out_dir, "manifest.json.tmp")
     with open(tmp, "w") as f:
@@ -215,13 +252,22 @@ def judged(rec):
 
 
 class JudgeAnnotator(Annotator):
-    """Phiên chấm một (tập, user); bộ lọc = một run (model, setting); xong = đã bấm ổn / không ổn."""
+    """Phiên chấm một (tập, user); bộ lọc = model (mỗi model một run); xong = đã bấm ổn / không ổn. `ndone` = số màn đã chấm mỗi
+    run, đếm một lần lúc mở rồi cộng dồn khi lưu (bảng tiến độ không duyệt lại cả file mỗi lần bấm)."""
 
-    filter_keys = ("model", "setting")
+    filter_keys = ("model",)
     rec_done = staticmethod(judged)
+
+    def __init__(self, items, path, name, user, objects=None):
+        super().__init__(items, path, name, user)
+        self.objects = objects or {}
+        self.ndone = collections.Counter((r["model"], r["setting"]) for k, r in self.store.latest.items()
+                                         if k in self.index and judged(r))
 
     def save(self, ok, box=None, src=None):
         it = self.cur()
+        if not judged(self.store.latest.get(it["key"])):
+            self.ndone[(it["model"], it["setting"])] += 1
         self.store.put({"key": it["key"], "dataset": it["ds"], "model": it["model"], "setting": it["setting"], "image_id": it["id"],
                         "class": it["cls"], "box": it["box"], "cnll": it["cnll"], "invalid": it["invalid"], "wh": it["wh"],
                         "ok": bool(ok), "user": self.user, "time": datetime.now().isoformat(timespec="milliseconds"),
@@ -240,13 +286,15 @@ class JudgeAnnotator(Annotator):
         meta = [f"class <b>{html.escape(it['cls'] or '?')}</b>", f"id {html.escape(it['id'])}"]
         if it["invalid"]:
             meta.append('<span class="cg_bad">no valid box from the model: box = whole image</span>')
+        objs = self.objects.get(f"{it['ds']}|{it['id']}", [])
+        meta.append(f"{len(objs)} object boxes (blue)")
         meta.append(state)
         nxt = [self.view[i] for i in range(max(self.pos - 1, 0), min(self.pos + 1 + PREFETCH, len(self.view))) if i != self.pos]
-        pre = "|".join(url(self.items[p]["img"]) for p in nxt)
+        pre = "|".join(u for u in (url(self.items[p]["img"], False) for p in nxt) if u)     # chỉ ảnh đã có cache
         return (f'<div class="cg_root" data-n="{nonce}" data-key="{html.escape(it["key"])}" data-wh="{W},{H}" '
                 f'data-img="{html.escape(it["ds"] + "|" + it["id"])}" data-box="{",".join(str(v) for v in it["box"])}" '
-                f'data-pre="{html.escape(pre)}">'
-                f'<div><span class="cg_task cg_model">{html.escape(it["model"])} | {SETTING_LABEL[it["setting"]]}</span> '
+                f'data-objs="{",".join(str(v) for b in objs for v in b)}" data-pre="{html.escape(pre)}">'
+                f'<div><span class="cg_task cg_model">{html.escape(run_label(it["model"], it["setting"]))}</span> '
                 f'<span class="cg_meta">{" | ".join(meta)}</span></div><div class="cg_meta" id="cg_zoominfo"></div>'
                 f'<div class="cg_row"><div class="cg_panel"><div class="cg_vp" style="aspect-ratio: {W} / {H}">'
                 f'<div class="cg_wrap" style="width: {W}px; height: {H}px"><img src="{url(it["img"])}" draggable="false" alt="">'
@@ -255,29 +303,53 @@ class JudgeAnnotator(Annotator):
 
 
 class JudgeHub(Hub):
-    """Mọi phiên (tập × user) dựng sẵn từ manifest; `act` dùng chung với `cegen.Hub`."""
+    """Mọi phiên (tập × user) dựng sẵn từ manifest; `act` dùng chung với `cegen.Hub`. Manifest cũ (cả zero-shot lẫn finetune một
+    model) cũng chạy: chỉ giữ run `pick_runs`. Chia việc theo thứ tự ảnh của mọi run trong manifest (không đổi khi bớt run)."""
 
     def __init__(self, manifest, out_dir, data_dir, users=USERS):
         self.cache, self.data_dir = os.path.join(out_dir, "cache"), data_dir
         self.src = {it["img"]: it["src"] for it in manifest["items"]}
-        self.runs = [tuple(r) for r in manifest["runs"]]
-        self.models = list(dict.fromkeys(m for m, _ in self.runs))
-        self.settings = {m: [s for mm, s in self.runs if mm == m] for m in self.models}
+        self.runs = list(pick_runs([tuple(r) for r in manifest["runs"]]))
+        keep = set(self.runs)
+        self.models = [m for m, _ in self.runs]
+        self.labels = {m: run_label(m, s) for m, s in self.runs}
+        objects = manifest.get("objects", {})
         self.sessions = {}
         for ds in DSETS:
             items = [it for it in manifest["items"] if it["ds"] == ds]
             for k, u in enumerate(users):
-                mine = split_items(items, k, len(users))
+                mine = [it for it in split_items(items, k, len(users)) if (it["model"], it["setting"]) in keep]
                 if mine:
                     self.sessions[(LABELS[ds], u)] = JudgeAnnotator(mine, os.path.join(out_dir, f"judge_{ds}_{u}.jsonl"),
-                                                                    f"{LABELS[ds]} {u}", u)
+                                                                    f"{LABELS[ds]} {u}", u, objects)
         self.users = list(users)
         self.datasets = [LABELS[ds] for ds in DSETS if any(k[0] == LABELS[ds] for k in self.sessions)]
         self.renders = itertools.count(1)
         self.totals = {k: collections.Counter((it["model"], it["setting"]) for it in a.items) for k, a in self.sessions.items()}
 
-    def url(self, rel):
-        return FILE_ROUTE + quote(ensure_jpeg(self.cache, self.data_dir, rel, self.src[rel]))
+    def url(self, rel, build=True):
+        """URL ảnh cache; chưa có: `build` thì dựng ngay (ảnh đang hiện), không thì None (ảnh tải trước — luồng nền `warm` dựng)."""
+        path = os.path.abspath(os.path.join(self.cache, rel))
+        if not os.path.exists(path):
+            if not build:
+                return None
+            path = ensure_jpeg(self.cache, self.data_dir, rel, self.src[rel])
+        return FILE_ROUTE + quote(path)
+
+    def warm(self, log=print):
+        """Dựng sẵn mọi ảnh cache còn thiếu (chạy ở luồng nền lúc mở app), xen kẽ các phiên theo thứ tự chấm."""
+        t0, order = time.time(), []
+        for a in self.sessions.values():
+            order.append(list(dict.fromkeys(it["img"] for it in a.items)))
+        todo = [r for r in dict.fromkeys(itertools.chain.from_iterable(itertools.zip_longest(*order)))
+                if r and not os.path.exists(os.path.join(self.cache, r))]
+        for k, rel in enumerate(todo, 1):
+            try:
+                ensure_jpeg(self.cache, self.data_dir, rel, self.src[rel])
+            except OSError as e:
+                log(f"[warm] lỗi {rel}: {e}")
+            if k % 500 == 0 or k == len(todo):
+                log(f"[warm] cache {k}/{len(todo)} ảnh ({time.time() - t0:.0f}s)")
 
     def progress(self, data):
         """Bảng markdown: mỗi run của tập `data` — số màn đã chấm của từng user / tổng (tổng tính sẵn, chỉ đếm bản đã chấm)."""
@@ -287,9 +359,8 @@ class JudgeHub(Hub):
                 continue
             for run, n in self.totals[(d, u)].items():
                 cnt[run][u + "_n"] += n
-            for k, rec in a.store.latest.items():
-                if judged(rec) and k in a.index:
-                    cnt[(rec["model"], rec["setting"])][u] += 1
+            for run, n in a.ndone.items():
+                cnt[run][u] += n
         if not cnt:
             return ""
         rows = ["| run | " + " | ".join(self.users) + " | all |", "|---|" + "---:|" * (len(self.users) + 1)]
@@ -298,7 +369,7 @@ class JudgeHub(Hub):
             if not c:
                 continue
             done, n = sum(c[u] for u in self.users), sum(c[u + "_n"] for u in self.users)
-            rows.append(f"| {m} / {SETTING_LABEL[st]} | " + " | ".join(f"{c[u]}/{c[u + '_n']}" for u in self.users)
+            rows.append(f"| {run_label(m, st).replace('|', chr(92) + '|')} | " + " | ".join(f"{c[u]}/{c[u + '_n']}" for u in self.users)
                         + f" | {'**done**' if done == n else f'{100 * done / n:.0f}%'} |")
         return f"**Progress per run: {data}** (both users; done = OK or Not OK)\n\n" + "\n".join(rows)
 
@@ -307,21 +378,33 @@ JUDGE_JS = """
 function cgDraw() {
   const r = cgRoot(); if (!r) return;
   const vps = cgVps(), sc = vps.length ? cgScale(vps[0]) : 1, b = (r.dataset.box || '').split(',').map(Number);
-  const s = b.length === 4 ? `<rect class="cg_pred" x="${b[0]}" y="${b[1]}" width="${b[2] - b[0]}" height="${b[3] - b[1]}" `
-    + `stroke-width="${(4 / sc).toFixed(3)}"/>` : '';     // viền 4 px màn hình ở mọi mức zoom
+  const o = (r.dataset.objs || '').split(',').filter((v) => v !== '').map(Number);
+  let s = '';
+  if (!window.__cg.hideObjs) {                         // box vật cùng lớp: viền xanh mảnh 1,5 px màn hình
+    const w = (1.5 / sc).toFixed(3);
+    for (let i = 0; i + 3 < o.length; i += 4) {
+      s += `<rect class="cg_obj" x="${o[i]}" y="${o[i + 1]}" width="${o[i + 2] - o[i]}" height="${o[i + 3] - o[i + 1]}" stroke-width="${w}"/>`;
+    }
+  }
+  if (b.length === 4) {                                // box model (C-NLL thấp nhất): viền đỏ 4 px màn hình, vẽ sau cùng (nằm trên)
+    s += `<rect class="cg_pred" x="${b[0]}" y="${b[1]}" width="${b[2] - b[0]}" height="${b[3] - b[1]}" stroke-width="${(4 / sc).toFixed(3)}"/>`;
+  }
   r.querySelectorAll('svg').forEach((svg) => { svg.innerHTML = s; });
   const info = document.getElementById('cg_zoominfo');
-  if (info) info.textContent = cgZoomText();
+  if (info) info.textContent = cgZoomText() + ' | h = hide / show object boxes';
 }
+window.cgKey = function (e) {
+  if (e.key === 'h' || e.key === 'H') { window.__cg.hideObjs = !window.__cg.hideObjs; cgDraw(); }
+};
 window.cgPayload = function () { return JSON.stringify({key: window.__cg.key}); };
 """
 KEYS_JS = "<script>" + VIEW_JS + JUDGE_JS + "</script>"
-CSS = BASE_CSS + (".cg_model {background: #2b3a55;} .cg_pred {fill: none; stroke: #ff1a1a;} "
+CSS = BASE_CSS + (".cg_model {background: #2b3a55;} .cg_pred {fill: none; stroke: #ff1a1a;} .cg_obj {fill: none; stroke: #1e90ff;} "
                   "#cg_zoominfo {margin: 4px 0; font-family: monospace;}")
 
 
 def build_ui(hub, gr):
-    """Thanh trên: menu Data / User / Model / Setting (= một run) + 5 nút; dưới: ảnh + box; cuối: bảng tiến độ hai tập."""
+    """Thanh trên: menu Data / User / Model (= một run) + 5 nút; dưới: ảnh + box; cuối: bảng tiến độ hai tập."""
     import inspect
     kw = {"title": "Box review", "css": CSS, "head": KEYS_JS, "fill_width": True}
     bparams = inspect.signature(gr.Blocks.__init__).parameters
@@ -331,8 +414,7 @@ def build_ui(hub, gr):
         with gr.Row(equal_height=True):
             data = gr.Dropdown(hub.datasets, label="Data", **dd)
             user = gr.Dropdown(hub.users, label="User", **dd)
-            model = gr.Dropdown(hub.models, label="Model", **dd)
-            setting = gr.Dropdown([], label="Setting", **dd)
+            model = gr.Dropdown([(hub.labels[m], m) for m in hub.models], label="Model", **dd)
         with gr.Row():
             ok = gr.Button("OK (Enter)", variant="primary", elem_id="cg_ok", min_width=100)
             fail = gr.Button("Not OK (f)", variant="stop", elem_id="cg_fail", min_width=100)
@@ -345,30 +427,22 @@ def build_ui(hub, gr):
         with gr.Row():
             progs = [gr.Markdown(hub.progress(d)) for d in hub.datasets]
         outs = [head, img, *progs]
-        sel = [data, user, model, setting]
+        sel = [data, user, model]
         q = {"queue": False, "show_progress": "hidden"}
-        js = "(d, u, m, s, p) => [d, u, m, s, window.cgPayload ? window.cgPayload() : '']"
+        js = "(d, u, m, p) => [d, u, m, window.cgPayload ? window.cgPayload() : '']"
 
-        def run(d, u, m, s, p, action):
-            if not (d and u and m and s):
+        def run(d, u, m, p, action):
+            if not (d and u and m):
                 return CHOOSE, "", *[hub.progress(x) for x in hub.datasets]
-            head_md, page = hub.act(d, u, p, action, {"model": m, "setting": s})
+            head_md, page = hub.act(d, u, p, action, {"model": m})
             return head_md, page, *[hub.progress(x) for x in hub.datasets]
 
-        def on_model(d, u, m, s):
-            """Đổi model: Setting chỉ còn các setting model có; chỉ một (model không finetune) thì tự chọn."""
-            opts = hub.settings.get(m, [])
-            s = s if s in opts else (opts[0] if len(opts) == 1 else None)
-            upd = gr.update(choices=[(SETTING_LABEL[o], o) for o in opts], value=s)
-            return upd, *run(d, u, m, s, "", "show")
-
         def mk(action):
-            return lambda d, u, m, s, p: run(d, u, m, s, p, action)
+            return lambda d, u, m, p: run(d, u, m, p, action)
         for b, action in ((ok, "ok"), (fail, "fail"), (prev, "prev"), (nxt, "next"), (first, "first")):
             b.click(mk(action), sel + [payload], outs, js=js, **q)
-        model.input(on_model, sel, [setting] + outs, **q)
-        for r in (data, user, setting):
-            r.input(lambda d, u, m, s: run(d, u, m, s, "", "show"), sel, outs, **q)
+        for r in sel:
+            r.input(lambda d, u, m: run(d, u, m, "", "show"), sel, outs, **q)
         demo.load(lambda: (CHOOSE, "", *[hub.progress(x) for x in hub.datasets]), None, outs, **q)
     return demo, launch_kw
 
@@ -388,6 +462,7 @@ def serve(out_dir, data_dir, host="0.0.0.0", port=7860, share=False):
           flush=True)
     demo, launch_kw = build_ui(hub, gr)
     os.makedirs(hub.cache, exist_ok=True)
+    threading.Thread(target=hub.warm, kwargs={"log": lambda m: print(m, flush=True)}, daemon=True).start()
     demo.launch(server_name=host, server_port=port, share=share, allowed_paths=[os.path.abspath(hub.cache)], **launch_kw)
 
 
@@ -414,7 +489,7 @@ def merge(out_dir, dest=None, log=print):
                     raise ValueError(f"màn {k} được chấm ở cả {owner[k]} và {fn}")
                 runs[(rec["model"], rec["setting"])][rec["image_id"]] = rec
         log(f"[merge] {LABELS[ds]}: {len(files)} file, {len(order)} ảnh")
-        for m, st in (tuple(r) for r in man["runs"]):
+        for m, st in pick_runs([tuple(r) for r in man["runs"]]):
             recs = runs.get((m, st), {})
             name = f"{ds}_{m.lower().replace(' ', '-')}_{st}.jsonl"
             if set(recs) != set(order):
