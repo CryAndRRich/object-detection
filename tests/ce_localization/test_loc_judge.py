@@ -120,7 +120,8 @@ def test_hub_judge_flow(setup):
     head, page = hub.act("CE130", "user1", "", "show", f)
     first = a.cur()
     assert first["model"] == "Qwen" and first["setting"] == "finetune" and "screen 1 /" in head and "Qwen | Finetune" in page
-    assert all(ord(ch) < 128 for ch in page) and 'data-box="' in page
+    assert all(ord(ch) < 128 for ch in page) and 'data-box="' in page and 'data-auto="0"' in page             # CE-130: không tự zoom
+    assert 'data-auto="1"' in hub.act("CoCount", "user1", "", "show", f)[1]                                   # CoCount: tự zoom
     objs = ",".join(str(v) for o in man["objects"][f"ce130|{first['id']}"] for v in o)
     assert objs and f'data-objs="{objs}"' in page
     assert os.path.exists(os.path.join(out, "cache", first["img"]))                               # ảnh đang hiện: dựng ngay

@@ -21,7 +21,8 @@ Ba lệnh (khuôn + giao diện chung với `cegen.py`: Store ghi nối, Annotat
             thường, khoảng trắng -> `-`), mỗi dòng: dataset, model, setting, image_id, class, wh, box, cnll, invalid + "ok".
 
 Phím: Enter ổn · f không ổn (cả hai lưu rồi sang màn sau; chấm lại = ghi đè) · ← / → màn trước / sau · + / - / lăn chuột phóng thu
-quanh điểm chuột, 0 vừa khung · h ẩn / hiện box vật.
+quanh điểm chuột, 0 vừa khung (cả ảnh) · h ẩn / hiện box vật · a zoom tới box đỏ. CoCount (vật nhỏ, `AUTO_ZOOM`): mỗi màn mới
+tự zoom tới vùng box đỏ + 6 vật gần nhất (tối thiểu 4 lần cỡ box, thêm lề 30 %).
 
 Kết quả: `<out-dir>/judge_<ce130|cocount>_<user>.jsonl` (chỉ GHI NỐI, dòng sau cùng của `key` thắng): {"key", "dataset", "model",
 "setting", "image_id", "class", "box", "cnll", "invalid", "wh", "ok": true | false, "user", "time", "sec"}.
@@ -58,6 +59,7 @@ DATA_DIR = os.path.join(OD, "data")
 DSETS = {"ce130": ("ce130_test_all", "inpainted"), "cocount": ("cocount_review5", "cocount")}   # thư mục tập, khoá dump CE-Loc / baseline
 SETTING_LABEL = {"zeroshot": "Zeroshot", "finetune": "Finetune"}
 # tên hiện trên giao diện: RePlan chỉ có planner Qwen2.5-VL-7B được finetune (LoRA SFT), không phải cả RePlan
+AUTO_ZOOM = {"cocount"}             # tập vật nhỏ: mỗi màn mới tự zoom tới box đỏ + vật quanh nó (người dùng 2026-11-16)
 DISPLAY = {"RePlan": "RePlan (Qwen2.5-VL-7B planner)"}
 CHOOSE = "**Choose Data, User and Model above to start.**"
 # (model, setting, dump tương đối --output-root; {d} = thư mục tập) — dump box của đúng hàng SCORE / snapshot báo cáo
@@ -292,6 +294,7 @@ class JudgeAnnotator(Annotator):
         nxt = [self.view[i] for i in range(max(self.pos - 1, 0), min(self.pos + 1 + PREFETCH, len(self.view))) if i != self.pos]
         pre = "|".join(u for u in (url(self.items[p]["img"], False) for p in nxt) if u)     # chỉ ảnh đã có cache
         return (f'<div class="cg_root" data-n="{nonce}" data-key="{html.escape(it["key"])}" data-wh="{W},{H}" '
+                f'data-auto="{int(it["ds"] in AUTO_ZOOM)}" '
                 f'data-img="{html.escape(it["ds"] + "|" + it["id"])}" data-box="{",".join(str(v) for v in it["box"])}" '
                 f'data-objs="{",".join(str(v) for b in objs for v in b)}" data-pre="{html.escape(pre)}">'
                 f'<div><span class="cg_task cg_model">{html.escape(run_label(it["model"], it["setting"]))}</span> '
@@ -391,10 +394,33 @@ function cgDraw() {
   }
   r.querySelectorAll('svg').forEach((svg) => { svg.innerHTML = s; });
   const info = document.getElementById('cg_zoominfo');
-  if (info) info.textContent = cgZoomText() + ' | h = hide / show object boxes';
+  if (info) info.textContent = cgZoomText() + ' | a = zoom to the red box | h = hide / show object boxes';
 }
 window.cgKey = function (e) {
   if (e.key === 'h' || e.key === 'H') { window.__cg.hideObjs = !window.__cg.hideObjs; cgDraw(); }
+  else if ((e.key === 'a' || e.key === 'A') && cgRoot()) { window.cgAutoView(cgRoot(), true); cgApply(); }
+};
+// tập vật nhỏ (data-auto = 1, CoCount): mỗi màn mới zoom tới vùng box đỏ + AUTO_NEAR vật gần nhất (tâm gần tâm box), vùng tối thiểu
+// AUTO_MIN lần cỡ box, thêm lề AUTO_PAD — đủ thấy vật tham chiếu quanh box; 0 = cả ảnh, a = về lại vùng này
+const AUTO_NEAR = 6, AUTO_MIN = 4, AUTO_PAD = 1.3;
+window.cgAutoView = function (r, force) {
+  if (r.dataset.auto !== '1' && !force) return;
+  const vps = cgVps(), b = (r.dataset.box || '').split(',').map(Number);
+  if (!vps.length || b.length !== 4) return;
+  const [W, H] = cgWH(), o = (r.dataset.objs || '').split(',').filter((v) => v !== '').map(Number);
+  const bx = (b[0] + b[2]) / 2, by = (b[1] + b[3]) / 2, near = [];
+  for (let i = 0; i + 3 < o.length; i += 4) {
+    near.push([Math.hypot((o[i] + o[i + 2]) / 2 - bx, (o[i + 1] + o[i + 3]) / 2 - by), i]);
+  }
+  near.sort((p, q) => p[0] - q[0]);
+  let [x1, y1, x2, y2] = b;
+  near.slice(0, AUTO_NEAR).forEach(([, i]) => {
+    x1 = Math.min(x1, o[i]); y1 = Math.min(y1, o[i + 1]); x2 = Math.max(x2, o[i + 2]); y2 = Math.max(y2, o[i + 3]);
+  });
+  const rw = Math.max(x2 - x1, AUTO_MIN * (b[2] - b[0]), 1) * AUTO_PAD, rh = Math.max(y2 - y1, AUTO_MIN * (b[3] - b[1]), 1) * AUTO_PAD;
+  const vp = vps[0], s1 = Math.min(vp.clientWidth / W, vp.clientHeight / H);
+  const z = Math.min(vp.clientWidth / (rw * s1), vp.clientHeight / (rh * s1));
+  window.__cg.view = {z: Math.min(Math.max(z, 1), 40), cx: (x1 + x2) / 2, cy: (y1 + y2) / 2};
 };
 window.cgPayload = function () { return JSON.stringify({key: window.__cg.key}); };
 """

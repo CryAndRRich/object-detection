@@ -643,7 +643,8 @@ class Hub:
 # chứa một hay nhiều khung `.cg_vp` > `.cg_wrap` (ảnh + SVG cỡ gốc W × H px). Chung: zoom đồng bộ mọi khung (+ / - / lăn chuột quanh
 # điểm chuột, 0 = vừa khung), khung vừa phần màn hình còn lại, phím Enter / f / mũi tên bấm nút `cg_ok` / `cg_fail` / `cg_prev` /
 # `cg_next`, tải trước ảnh. Mỗi app thêm: `cgDraw()` (vẽ SVG, gọi sau mỗi lần đổi zoom), `window.cgKey(e)` (phím riêng),
-# `window.cgOnKey(root)` (sang màn mới), `window.cgPayload()` (gửi kèm thao tác).
+# `window.cgOnKey(root)` (sang màn mới), `window.cgPayload()` (gửi kèm thao tác), `window.cgAutoView(root)` (tuỳ chọn: đặt
+# `__cg.view` ban đầu của màn mới, gọi sau khi khung đã có cỡ).
 VIEW_JS = """
 window.__cg = window.__cg || {key: null, img_key: null, busy: 0, img: new Map(), view: {z: 1, cx: null, cy: null}, mouse: null};
 function cgRoot() { return document.querySelector('.cg_root'); }
@@ -727,8 +728,10 @@ new MutationObserver(() => {
   if (!r || r.dataset.seen) return;
   r.dataset.seen = '1';
   window.__cg.busy = 0;
+  let auto = false;
   if (r.dataset.key !== window.__cg.key) {
     window.__cg.key = r.dataset.key;
+    auto = !!window.cgAutoView;
     if (window.cgOnKey) window.cgOnKey(r);
     if (r.dataset.img !== window.__cg.img_key) {      // ảnh khác: về vừa khung; cùng ảnh (vd. 12 run liền nhau): giữ zoom
       window.__cg.img_key = r.dataset.img;
@@ -736,7 +739,7 @@ new MutationObserver(() => {
     }
   }
   cgApply();
-  requestAnimationFrame(() => cgApply());
+  requestAnimationFrame(() => { if (auto) window.cgAutoView(r); cgApply(); });   // app có `cgAutoView`: zoom đầu mỗi màn mới
   cgPrefetch(r);
 }).observe(document.documentElement, {childList: true, subtree: true});
 """
