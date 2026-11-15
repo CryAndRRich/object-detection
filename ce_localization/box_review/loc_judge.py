@@ -346,6 +346,7 @@ class JudgeHub(Hub):
             order.append(list(dict.fromkeys(it["img"] for it in a.items)))
         todo = [r for r in dict.fromkeys(itertools.chain.from_iterable(itertools.zip_longest(*order)))
                 if r and not os.path.exists(os.path.join(self.cache, r))]
+        log(f"[warm] cache: {len(todo)} ảnh cần dựng" + ("" if todo else " (đủ cả)"))
         for k, rel in enumerate(todo, 1):
             try:
                 ensure_jpeg(self.cache, self.data_dir, rel, self.src[rel])
@@ -488,6 +489,7 @@ def serve(out_dir, data_dir, host="0.0.0.0", port=7860, share=False):
           flush=True)
     demo, launch_kw = build_ui(hub, gr)
     os.makedirs(hub.cache, exist_ok=True)
+    sys.stdout.reconfigure(line_buffering=True)     # log nohup: dòng Gradio in (URL, link share) ghi ngay, không nằm trong bộ đệm
     threading.Thread(target=hub.warm, kwargs={"log": lambda m: print(m, flush=True)}, daemon=True).start()
     demo.launch(server_name=host, server_port=port, share=share, allowed_paths=[os.path.abspath(hub.cache)], **launch_kw)
 
