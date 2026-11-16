@@ -104,6 +104,7 @@ bash chuỗi ─┬─ gpu_hold.py --keeper K --grab 1 --need N KEEP      (nền
 **Một vòng bàn giao:**
 1. Chuỗi chờ `ready`.
 2. Bước GPU khởi tạo CUDA (vài giây, làm **trước** khi xin để thu hẹp khe hở), rồi ghi `want` = `"PID g + margin + đệm"`. Đệm 0,5 GiB cho bước torch, 2 GiB cho `--release` (tiến trình vLLM chính và EngineCore mỗi cái ~0,5 GiB context).
+   GPU kín tới mức không mở nổi context (OOM ở `mem_get_info` — nhiều người giữ chỗ cùng chuỗi, mỗi cái chỉ chừa 1 GiB; 3 làn DELTA9 2026-11-16) thì bước ghi `want` **trước**, chờ nhả rồi mới mở context (thử lại mỗi giây, tối đa 60 s).
 3. Người giữ nhả **đúng phần đó**, giữ lại phần dư (KEEP − phần xin), rồi ghi `freed`. Khe hở ~1 s.
 4. Bước gom đủ g (chừa 0,3 GiB) rồi chạy.
 5. Bước thoát, xoá `want`.

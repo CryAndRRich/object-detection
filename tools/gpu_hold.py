@@ -119,6 +119,18 @@ def _take_over(handoff, poll, log, sleep, ask=None):
         flush=True)
 
 
+def _cuda_init(torch):
+    """Mở CUDA context (`mem_get_info`) -> True; OOM (GPU kín: người giữ chỗ của chính chuỗi giữ gần hết, chừa < 1 context —
+    server 2 2026-11-16, 3 làn DELTA9 chết hết ở đây) -> False. Lỗi khác ném tiếp."""
+    try:
+        torch.cuda.mem_get_info()
+        return True
+    except RuntimeError as e:
+        if "out of memory" not in str(e):
+            raise
+        return False
+
+
 def _asked(path):
     """Nội dung `want` -> (PID, GiB bước cần | None = nhả hết)."""
     try:
@@ -144,10 +156,18 @@ def grab(gib, margin, poll=10.0, release=False, log=print, sleep=time.sleep, clo
         return 0.0
     log(f"[gom GPU] cần {gib:g} GiB, chừa {margin:g} GiB cho người khác, đọc lại mỗi {poll:g} s", flush=True)
     if handoff:
-        torch.cuda.mem_get_info()                  # khởi tạo CUDA trước (vài giây) rồi mới xin nhả
+        ctx = _cuda_init(torch)                    # khởi tạo CUDA trước (vài giây) rồi mới xin nhả — khe hở ngắn nhất
+        if not ctx:
+            log("[gom GPU] GPU kín, chưa mở được CUDA context -> xin người giữ chỗ nhả TRƯỚC", flush=True)
         # xin đủ gom `gib` (chừa `margin`) + khoảng cho CUDA context: vLLM (`release`) còn tiến trình chính + EngineCore, mỗi cái ~0,5
         _take_over(handoff, min(poll, 1.0), log, sleep, ask=gib + margin + (2.0 if release else 0.5))
         poll = min(poll, 1.0)
+        for _ in range(60):                        # người giữ đã nhả: mở context (người khác có thể vừa chen -> thử lại mỗi giây)
+            if ctx or _cuda_init(torch):
+                break
+            sleep(1.0)
+        else:
+            raise SystemExit("[gom GPU] người giữ chỗ đã nhả mà 60 s vẫn không mở được CUDA context (OOM)")
     t0 = clock()
     blocks, held = _gather(torch, gib, margin, poll, log, sleep, clock, heartbeat)
     del blocks

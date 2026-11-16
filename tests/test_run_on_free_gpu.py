@@ -358,6 +358,31 @@ def test_take_over_waits_for_keeper_then_cleans_want(tmp_path):
     mod._take_over(str(d), 1.0, lambda *a, **k: None, lambda _: None)
 
 
+def test_grab_handoff_full_gpu_asks_keeper_before_cuda_context(monkeypatch, tmp_path):
+    """GPU kín (3 người giữ chỗ của chính chuỗi chừa < 1 context — DELTA9 server 2 2026-11-16): mở context OOM -> xin nhả TRƯỚC
+    (want), người giữ nhả -> mở lại context được -> gom như thường. Lỗi CUDA khác không nuốt."""
+    t, st = _grab_torch([20.0])
+    real, calls = t.cuda.mem_get_info, {"n": 0}
+
+    def mem_get_info():
+        calls["n"] += 1
+        if calls["n"] <= 2:                                 # lần đầu (trước khi xin) + lần đầu sau khi nhả: người khác vừa chen
+            assert calls["n"] == 1 or (tmp_path / "want").exists()
+            raise RuntimeError("CUDA error: out of memory")
+        return real()
+    t.cuda.mem_get_info = mem_get_info
+    monkeypatch.setitem(sys.modules, "torch", t)
+    (tmp_path / "keeper.pid").write_text(str(os.getpid()))
+    (tmp_path / "freed").write_text("")
+    sleeps = []
+    got = _hold_mod().grab(7, 0.3, log=lambda *a, **k: None, sleep=sleeps.append, clock=lambda: 0.0, handoff=str(tmp_path))
+    assert got == 7 and st["allocs"] == [7.0] and calls["n"] == 4 and sleeps == [1.0]
+    assert (tmp_path / "want").read_text() == f"{os.getpid()} 7.8"
+    t.cuda.mem_get_info = lambda: (_ for _ in ()).throw(RuntimeError("CUDA error: no kernel image"))
+    with pytest.raises(RuntimeError, match="no kernel"):
+        _hold_mod().grab(7, 0.3, log=lambda *a, **k: None, sleep=lambda s: None, clock=lambda: 0.0, handoff=str(tmp_path))
+
+
 def test_build_cmd_handoff():
     cmd = _load().build_cmd(["finetune.py"], 37, 1, handoff="/x/k")
     assert cmd[2:] == ["--grab", "1", "--handoff", "/x/k", "37", "finetune.py"]
