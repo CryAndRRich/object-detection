@@ -383,6 +383,104 @@ def test_grab_handoff_full_gpu_asks_keeper_before_cuda_context(monkeypatch, tmp_
         _hold_mod().grab(7, 0.3, log=lambda *a, **k: None, sleep=lambda s: None, clock=lambda: 0.0, handoff=str(tmp_path))
 
 
+def test_rearm_regrabs_block_after_cudnn_empty_cache(monkeypatch):
+    """`cudnn.benchmark` gọi emptyCache ở C++ -> khối giữ về driver (server 2 2026-11-16: 9.12 OOM). Luồng nền xin lại phần thiếu
+    (chừa lề), đủ rồi thì thôi, ít chỗ thì xin phần có."""
+    import threading
+    t, st = _grab_torch([48.0])
+    monkeypatch.setitem(sys.modules, "torch", t)
+    mod = _hold_mod()
+    assert mod.grab(9, 1, log=lambda *a, **k: None, sleep=lambda s: None, clock=lambda: 0.0) == 9
+    assert "gpu_hold_rearm" in [th.name for th in threading.enumerate()]
+    st["cached"] = 0                                         # emptyCache (C++)
+    assert mod._rearm_once(t, 9, 1) == 9 and st["cached"] == 9 * 2 ** 30
+    assert mod._rearm_once(t, 9, 1) == 0                     # đủ rồi
+    st["cached"] = 0
+    t.cuda.mem_get_info = lambda: (3 * 2 ** 30, 48 * 2 ** 30)
+    assert mod._rearm_once(t, 9, 1) == 2                     # chỉ có 3 trống, chừa 1
+
+
 def test_build_cmd_handoff():
     cmd = _load().build_cmd(["finetune.py"], 37, 1, handoff="/x/k")
     assert cmd[2:] == ["--grab", "1", "--handoff", "/x/k", "37", "finetune.py"]
+
+
+# ============================================================================
+# tools/gpu_pool.py — bể nhiều tầng: gốc -> làn -> bước (người dùng 2026-11-16, ablation DELTA9 server 2)
+# ============================================================================
+
+def _pool_torch(free_gib):
+    """GPU giả dùng chung giữa các luồng: `empty` lấy từ phần trống (thiếu -> OOM), tensor bị xoá -> trả ngay."""
+    import threading
+    t = types.ModuleType("torch")
+    t.uint8 = "u8"
+    oom_t = type("OutOfMemoryError", (RuntimeError,), {})
+    st = {"free": free_gib * 2 ** 30}
+    lock = threading.Lock()
+
+    class Block:
+        def __init__(self, n):
+            self.n = n
+
+        def __del__(self):
+            with lock:
+                st["free"] += self.n
+
+    def empty(n, dtype=None, device=None):
+        with lock:
+            if n > st["free"]:
+                raise oom_t("fake oom")
+            st["free"] -= n
+        return Block(n)
+    t.empty = empty
+    t.cuda = types.SimpleNamespace(mem_get_info=lambda: (st["free"], 48 * 2 ** 30), empty_cache=lambda: None,
+                                   OutOfMemoryError=oom_t)
+    return t, st
+
+
+def test_pool_root_lanes_step_topup(monkeypatch, tmp_path):
+    """Gốc 16 GiB (GPU trống 20, chừa 1): làn A (5) rồi làn B (6) xin LẦN LƯỢT; bước của A xin 7 > 5 -> A xin thêm 2 từ gốc;
+    bước xong -> A gom lại 5, trả 2 cho gốc; dừng làn -> gốc gom lại; dừng gốc -> trả hết. Bộ nhớ trống đúng ở từng mốc."""
+    import threading
+    import time as _t
+    spec = importlib.util.spec_from_file_location("gpu_pool", os.path.join(_HERE, "tools", "gpu_pool.py"))
+    pool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pool)
+    monkeypatch.setattr(pool, "HOLD_OFF", 0.05)
+    t, st = _pool_torch(20)
+    free = lambda: st["free"] / 2 ** 30
+    root_d, a_d, b_d = tmp_path / "pool", tmp_path / "pool" / "a", tmp_path / "pool" / "b"
+    q = lambda *a, **k: None
+
+    def until(c, sec=10, msg=""):
+        end = _t.time() + sec
+        while not c():
+            assert _t.time() < end, f"quá giờ {msg}: trống {free():.2f}"
+            _t.sleep(0.01)
+    th = [threading.Thread(target=pool.root, args=(str(root_d), 16), kwargs=dict(margin=1, poll=0.01, log=q, torch=t), daemon=True)]
+    th[0].start()
+    until(lambda: abs(free() - 4) < 1e-6, msg="gốc gom 16")
+    th.append(threading.Thread(target=pool.lane, args=(str(a_d), 5), kwargs=dict(poll=0.01, log=q, torch=t), daemon=True))
+    th[1].start()
+    until(lambda: (a_d / "ready").exists(), msg="làn A")
+    th.append(threading.Thread(target=pool.lane, args=(str(b_d), 6), kwargs=dict(poll=0.01, log=q, torch=t), daemon=True))
+    th[2].start()
+    until(lambda: (b_d / "ready").exists(), msg="làn B")
+    assert abs(free() - 4) < 1e-6                                   # 5 + 6 sang làn, gốc giữ 5, tổng vẫn 16
+    (a_d / "want").write_text(f"{os.getpid()} 7")                   # bước của A cần 7 > 5
+    until(lambda: (a_d / "freed").exists(), msg="A nhả cho bước")
+    assert (root_d / "want.a-top").exists()
+    step = t.empty(7 * 2 ** 30)                                     # bước gom 7
+    _t.sleep(0.2)
+    assert abs(free() - 4) < 1e-6                                   # gốc không lấy chỗ của bước
+    del step
+    (a_d / "want").unlink()                                         # bước xong
+    until(lambda: (a_d / "ready").exists() and not (root_d / "want.a-top").exists() and abs(free() - 4) < 1e-6, msg="trả top")
+    for d in (a_d, b_d):
+        (d / "stop").write_text("")
+    th[1].join(5)
+    th[2].join(5)
+    until(lambda: abs(free() - 4) < 1e-6 and not list(root_d.glob("want.*")), msg="gốc gom lại sau khi làn dừng")
+    (root_d / "stop").write_text("")
+    th[0].join(5)
+    assert not any(x.is_alive() for x in th) and abs(free() - 20) < 1e-6

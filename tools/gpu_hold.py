@@ -52,10 +52,41 @@ def _torch_or_none(gib, log):
     return torch
 
 
-def _keep(torch, log, how):
+def _rearm_once(torch, gib, margin):
+    """Allocator giữ < `gib` (khối giữ đã bị trả về driver) -> xin lại phần thiếu (chừa `margin` GiB trống) rồi trả vào CACHE. -> GiB
+    vừa xin lại (0: đủ / không có chỗ / người khác vừa lấy)."""
+    short = gib - torch.cuda.memory_reserved() / GIB
+    if short < STEP:
+        return 0.0
+    take = min(short, torch.cuda.mem_get_info()[0] / GIB - margin)
+    if take < STEP:
+        return 0.0
+    try:
+        x = torch.empty(int(take * GIB), dtype=torch.uint8, device="cuda")
+    except torch.cuda.OutOfMemoryError:
+        return 0.0
+    del x
+    return take
+
+
+def _keep(torch, log, how, gib, margin=1.0, poll=1.0):
+    """Vô hiệu `torch.cuda.empty_cache` + luồng nền GIỮ LẠI khối: `cudnn.benchmark` gọi `emptyCache` ở C++ (sau mỗi lần dò thuật toán
+    conv — iter đầu, cỡ batch mới) ⇒ khối giữ về driver, vá Python không chặn được (server 2 2026-11-16: bước 9.12 mất khối 9 GiB ở
+    iter đầu, người giữ chỗ làn bên lấy ngay, OOM). Mỗi `poll` s xin lại phần thiếu (chừa `margin`)."""
+    import threading
     torch.cuda.empty_cache = _keep_cache
     got = torch.cuda.memory_reserved() / GIB
-    log(f"[giữ GPU] giữ {got:.1f} GiB cho cả job ({how}; empty_cache vô hiệu)", flush=True)
+
+    def loop():
+        while True:
+            time.sleep(poll)
+            try:
+                _rearm_once(torch, gib, margin)
+            except Exception:                        # luồng nền không được làm chết job
+                pass
+    threading.Thread(target=loop, daemon=True, name="gpu_hold_rearm").start()
+    log(f"[giữ GPU] giữ {got:.1f} GiB cho cả job ({how}; empty_cache vô hiệu; mất khối thì xin lại mỗi {poll:g} s, chừa "
+        f"{margin:g} GiB)", flush=True)
     return got
 
 
@@ -72,7 +103,7 @@ def hold(gib, log=print):
             flush=True)
         raise SystemExit(1)
     del x
-    return _keep(torch, log, "một lần")
+    return _keep(torch, log, "một lần", gib)
 
 
 def _gather(torch, gib, margin, poll, log, sleep, clock, heartbeat, stop=lambda: False, tag="gom GPU"):
@@ -176,7 +207,7 @@ def grab(gib, margin, poll=10.0, release=False, log=print, sleep=time.sleep, clo
         torch.cuda.empty_cache()
         log("[gom GPU] nhả hết cho job (vLLM tự giữ)", flush=True)
         return 0.0
-    return _keep(torch, log, "gom dần")
+    return _keep(torch, log, "gom dần", gib, margin)
 
 
 def keeper(d, gib, margin, poll=10.0, log=print, sleep=time.sleep, clock=time.time, heartbeat=600.0, reclaim_margin=1.0,

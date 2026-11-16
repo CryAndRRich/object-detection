@@ -72,6 +72,10 @@ Cách giải: **chiếm trước và giữ chỗ có chủ đích**, kể cả l
 | Job vLLM | thêm `--release` (đi cùng `--grab-margin-gib`) | Gom đủ G rồi **nhả hết** về driver, sau đó chạy script ở tiến trình con. vLLM đo bộ nhớ trống lúc khởi động và tự giữ `vllm.gpu_mem_gib`, nên giữ trong cache của tiến trình cha vô ích. Khe hở giữa lúc nhả và lúc vLLM giữ chỉ vài giây. |
 | **Chuỗi nhiều bước / nhiều run** | `gpu_hold.py --keeper DIR` chạy nền + mỗi bước GPU `--handoff DIR` | **Người giữ chỗ** giữ G GiB suốt chuỗi. Mỗi bước GPU xin đúng phần mình cần, chạy xong trả lại. Xem mục dưới. |
 
+`cudnn.benchmark` (train / eval CE-Loc) gọi `emptyCache` ở C++ mỗi lần dò thuật toán conv (iter đầu, cỡ batch mới) ⇒ khối giữ về
+driver, vá Python không chặn được. Vì vậy job có một luồng nền: mỗi 1 s, cache giữ < G thì xin lại phần thiếu (chừa lề). Ngày
+2026-11-16, 9.12 trên server 2 mất khối 9 GiB ở iter đầu, người giữ chỗ làn bên lấy ngay ⇒ OOM.
+
 **Chọn G:** G = đỉnh đo được + 2–4 GiB.
 - Lấy đỉnh từ dòng "GPU đỉnh … GB" trong log pilot của đúng config / batch.
 - G phải nhỏ hơn bộ nhớ đang trống; nếu không thì dùng `--grab-margin-gib` để gom dần.
@@ -124,6 +128,16 @@ Bước CPU chạy trong lúc người giữ đang giữ lại chỗ.
 - **g của bước vLLM `--release`** ≥ `vllm.gpu_mem_gib` của config + vài GiB. vLLM tự giữ sau khi nhả nên phần dư người giữ giữ lại là KEEP − (g + 2,3).
 
 Lần chạy ZETA8 (KEEP 32): người giữ giữ lại 10,7 / 5,7 / 3,7 GiB suốt bước vLLM của 8.1 / 8.3 / 8.2.
+
+### Nhiều làn song song trên một GPU: `tools/gpu_pool.py`
+
+Nhiều keeper riêng cùng gom trên một GPU sẽ lấy chỗ của nhau (DELTA9 2026-11-16). Dùng một cây (docstring đầu file):
+- **gốc** `gpu_pool.py root DIR TOTAL --margin M`: gom dần tới TOTAL = tổng (đỉnh lớn nhất mỗi làn) + 1–2 GiB dư;
+- **làn** `gpu_pool.py lane DIR/<làn> NEED`: xin gốc NEED (gốc phục vụ **lần lượt**, xong khách này mới xét khách sau), giữ suốt làn;
+- **bước** `run_on_free_gpu.py --handoff DIR/<làn> …` như với `--keeper`; bước xin nhiều hơn làn đang giữ thì làn xin thêm từ gốc, xong trả lại.
+
+Gốc không gom trong lúc khách đang nhận chỗ hay ngay sau khi làn bàn giao cho bước. Bước chạy `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False`.
+Khuôn đầy đủ: lệnh ablation DELTA9 (`log/add/ablation/orchestra_*.log`).
 
 ### Khuôn lệnh chuỗi
 
