@@ -38,7 +38,7 @@ DEFAULT_ATTENTION_FLOW = {
 REFINER_DEFAULTS = {
     'clip_model_name': 'openai/clip-vit-base-patch16', 'text_model_name': None, 'vision_layer': -2, 'd_model': 256,
     'num_layers': 4, 'num_heads': 8, 'mlp_ratio': 4.0, 'dropout': 0.0, 'rope_theta': 100.0, 'roi_size': 3, 'num_stages': 1,
-    'use_density': True, 'unet_input': 'concat', 'aux_loss_weight': 0.0, 'aux_giou_weight': 0.0,
+    'use_density': True, 'unet_input': 'concat', 'aux_loss_weight': 0.0, 'aux_giou_weight': 0.0, 'mid_aux_weight': 0.0,
     'attention_flow': DEFAULT_ATTENTION_FLOW,
 }
 

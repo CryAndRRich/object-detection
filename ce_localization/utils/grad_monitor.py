@@ -9,7 +9,7 @@ import torch
 def group_of(name):
     """Tên tham số của `BoxPolicy` -> nhóm."""
     if name.startswith("vision.backbone."):
-        return "resnet18"
+        return "resnet"
     if name.startswith("noise_net."):
         return "unet1d"
     if name.startswith("refiner.stages."):
@@ -18,6 +18,8 @@ def group_of(name):
         return "refiner.head"
     if name.startswith("refiner."):
         return "refiner.embed"
+    if name.startswith(("mid_in.", "mid_out.")):
+        return "refiner.mid"
     if name.startswith("text_proj."):
         return "text_proj"
     return "khác"

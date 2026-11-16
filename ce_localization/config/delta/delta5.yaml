@@ -1,4 +1,4 @@
-# DELTA5 (docs/EXPERIMENT_DELTA.md mục 11) = DELTA4 + bản log-scale của tác giả (refs/CE-Loc-logScale/): box w, h trên thang log (box đích,
+# DELTA5 (docs/EXPERIMENT_DELTA.md mục 3) = DELTA4 + bản log-scale của tác giả (refs/CE-Loc-logScale/): box w, h trên thang log (box đích,
 # box vật, RoIAlign của refiner, giải mã khi eval), loss phụ thêm GIoU, val bằng sampler DDIM/DDPM của tác giả (eta 1, 100 bước, x̂0 kẹp).
 # delta5 / 5_1 / 5_3 / 5_2 / 5_4 / 5_5 chỉ khác `aux_giou_weight` 0 / 0,1 / 0,25 / 0,5 / 0,75 / 1,0.
 base: delta4.yaml

@@ -1,0 +1,7 @@
+# DELTA9.1 (docs/EXPERIMENT_DELTA.md mục 8) — ablation MỘT biến của DELTA8 ep 10 (`delta9.yaml`): bỏ BoxRefiner: U-Net 4 kênh nhận x_t, token vật [o], loss = ε-MSE (kiến trúc GAMMA4).
+base: [delta9.yaml]
+experiment: "delta9_1"
+description: "DELTA9 bỏ BoxRefiner (U-Net 4 kênh trên x_t)"
+model:
+  refiner:
+    enabled: false

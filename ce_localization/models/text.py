@@ -65,9 +65,10 @@ class TextTable:
         return to_device(torch.stack([self.table[n] for n in names]), device)
 
     def tokens(self, names, device):
-        """-> (token [B, L_max, H] float32 đệm 0 bên phải, mask [B, L_max] bool True = token thật) trên `device`."""
+        """-> (token [B, L_max, H] float32 đệm 0 bên phải, mask [B, L_max] bool True = token thật) trên `device`; None khi bảng không
+        có token chữ (model không refiner — `BoxPolicy.refiner_context` không đọc)."""
         if self.token_table is None:
-            raise ValueError("TextTable không có token chữ (model.refiner cần — train.build_text_table)")
+            return None
         missing = [n for n in names if n not in self.token_table]
         if missing:
             raise KeyError(f"thiếu token chữ cho {missing[:5]}")

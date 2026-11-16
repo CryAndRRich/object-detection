@@ -146,7 +146,7 @@ class CELoc:
         from ce_localization.engine.add_eval import predict_batch
         a = self.a
         if dataset == "ce130":
-            ds = CE130AddDataset(TurnIndex(a.turn_index), a.ce130_root, a.samples_root, "test_all", self.S)
+            ds = CE130AddDataset(TurnIndex(a.turn_index), a.samples_root, "test_all", self.S)
         else:
             ds = CoCountAddDataset(a.cocount_root, self.S, review=load_review(a.cocount_review), min_obj=a.cocount_min_obj)
         pos = {k: i for i, k in enumerate(ds.keys)}
@@ -270,7 +270,6 @@ def parse_args(argv=None):
             p.add_argument("--config", required=True)
         if m == "celoc":
             p.add_argument("--sampler", default="mock", choices=["mock", "ddim"])
-            p.add_argument("--ce130-root", default=os.path.join(ROOT, "data", "all_phase2_V2"))
         p.add_argument("--name", default=None, help="tên file ra (mặc định: celoc <run>_<ckpt>, zeta <config>_<ckpt>, vlm cfg name)")
         p.add_argument("--datasets", nargs="+", default=list(DATASETS), choices=DATASETS)
         p.add_argument("--n", type=int, default=100, help="số ảnh đo / tập (= pilot 100 của VLM, chốt 2026-11-06)")

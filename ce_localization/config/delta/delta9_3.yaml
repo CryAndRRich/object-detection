@@ -1,0 +1,7 @@
+# DELTA9.3 (docs/EXPERIMENT_DELTA.md mục 8) — ablation MỘT biến của DELTA8 ep 10 (`delta9.yaml`): bỏ loss phụ MSE(refined, x0) — refiner chỉ học qua ε-MSE của U-Net.
+base: [delta9.yaml]
+experiment: "delta9_3"
+description: "DELTA9 bỏ loss phụ refiner (aux_loss_weight 0)"
+model:
+  refiner:
+    aux_loss_weight: 0.0

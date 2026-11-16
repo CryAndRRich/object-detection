@@ -12,19 +12,14 @@ Lọc box vật (cả hai lớp): `review` = bản rà tay (`box_review/`, `load
 
 import json
 import os
-import re
 
 import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
+from ce_localization.data.names import clean_class  # noqa: F401  (gọi lại từ module này ở nhiều nơi)
 from ce_localization.data.turns import _letterbox_l_u8, iter_jsonl, letterbox, letterbox_size, scale_boxes
-
-
-def clean_class(name):
-    """'normal tomato(Big round tomato).' -> 'normal tomato' (bỏ phần trong ngoặc, dấu chấm cuối, khoảng trắng thừa)."""
-    return re.sub(r"\s+", " ", re.sub(r"\(.*?\)", "", name)).strip().rstrip(".").strip()
 
 
 def twin_name(name):

@@ -72,7 +72,7 @@ def test_add_dataset_item_paper_inputs(ce130):
     """Mẫu (nhánh, lượt): t lỗ đầu, đích = lỗ mới nhất, vật còn lại; đầu vào = `resize_and_pad` + `to_tensor` của bài, density
     `.convert("L")` của mẫu. /255 sau `to_device_add` trùng từng bit; NHWC liền."""
     base, root, samples, _, index, _ = ce130
-    ds = CE130AddDataset(index, root, samples, "train", 128)
+    ds = CE130AddDataset(index, samples, "train", 128)
     s = ds[ds.keys.index("1001_b1_t2")]
     b, e = index.branches["train/1001_b1"], index.turns["1001_b1_t2"]
     assert s["image"].shape == (4, 128, 128) and s["image"].dtype == torch.uint8 and s["valid_hw"] == (96, 128) and s["t"] == 2
@@ -98,12 +98,13 @@ def test_positive_targets(ce130, tmp_path):
     raw = _fake_positives(base, str(tmp_path / "pos.jsonl"))
     pos = load_positives(str(tmp_path / "pos.jsonl"))
     assert set(pos) == set(raw) and all(np.array_equal(pos[k], np.asarray(raw[k])) for k in raw)
-    plain = CE130AddDataset(index, root, samples, "train", 128)
-    ds = CE130AddDataset(index, root, samples, "train", 128, positives=pos, positive_hole_iou=0.3)
+    plain = CE130AddDataset(index, samples, "train", 128)
+    ds = CE130AddDataset(index, samples, "train", 128)
+    ds.set_positives(pos, 0.3)
     with pytest.raises(ValueError, match="positive_hole_iou"):
-        CE130AddDataset(index, root, samples, "train", 128, positives=pos)
+        CE130AddDataset(index, samples, "train", 128).set_positives(pos, None)
     with pytest.raises(ValueError, match="positive_sampling"):
-        CE130AddDataset(index, root, samples, "train", 128, positives=pos, positive_hole_iou=0.3, positive_sampling="every")
+        CE130AddDataset(index, samples, "train", 128).set_positives(pos, 0.3, "every")
     stem = lambda k: os.path.splitext(os.path.basename(index.turns[k]["sample"]))[0]  # noqa: E731
     k_in = "1001_b1_t2"
     k_out = next(k for k in ds.keys if stem(k) not in pos)
@@ -135,7 +136,8 @@ def test_positive_targets(ce130, tmp_path):
     x0, ix = seen[0]
     assert torch.equal(x0, torch.cat(bt["positives"])) and ix.tolist() == [0] * 3 + [1] * b["t"]
 
-    pr = CE130AddDataset(index, root, samples, "train", 128, positives=pos, positive_hole_iou=0.3, positive_sampling="pair")
+    pr = CE130AddDataset(index, samples, "train", 128)
+    pr.set_positives(pos, 0.3, "pair")
     assert len(pr) == sum(len(ds[i]["positives"]) for i in range(len(ds.keys))) and len(pr) > len(ds.keys)
     got = [pr[i] for i in range(len(pr)) if pr[i]["image_id"] == k_in]
     assert all("positives" not in g for g in got)
@@ -146,13 +148,13 @@ def test_uint8_cache_bitwise(ce130, tmp_path):
     """Cache zlib / raw (+ bung zlib -> raw) cho đúng từng bit mẫu đọc từ PNG; ảnh gốc không dùng cache."""
     _, root, samples, _, index, _ = ce130
     tr = index.keys("train")
-    plain = CE130AddDataset(index, root, samples, "train", 128)
+    plain = CE130AddDataset(index, samples, "train", 128)
     zdir, rdir = str(tmp_path / "z"), str(tmp_path / "r")
     assert build_add_cache(index, samples, tr, zdir, 128, workers=0, log=lambda *a: None, fmt="zlib") == len(tr)
     assert convert_add_cache(zdir, rdir, workers=0, log=lambda *a: None) == len(tr)
     for cdir, fmt in ((zdir, "zlib"), (rdir, "raw")):
         cache = AddCache(cdir)
-        cached = CE130AddDataset(index, root, samples, "train", 128, cache=cache)
+        cached = CE130AddDataset(index, samples, "train", 128, cache=cache)
         assert cache.format == fmt and cached.cache is not None
         for i in range(len(plain)):
             a, b = plain[i], cached[i]

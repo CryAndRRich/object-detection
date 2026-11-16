@@ -56,12 +56,14 @@ from ce_localization.utils.grad_monitor import GradMonitor  # noqa: E402
 from ce_localization.utils.log import fmt_time, print_banner, run_env  # noqa: E402
 
 # nhánh config quyết định kiến trúc: khác checkpoint thì KHÔNG resume (`training` / `eval` chỉ cảnh báo); khoá đường dẫn / số worker
-# của `data` không ảnh hưởng phép toán (Kaggle gắn dataset ở đường dẫn khác nhau giữa các phiên)
+# của `data` không ảnh hưởng phép toán (Kaggle gắn dataset ở đường dẫn khác nhau giữa các phiên). `root`, `density_*`: khoá cũ không
+# còn dùng nhưng còn trong config của checkpoint cũ — giữ trong danh sách để resume checkpoint đó không báo lệch
 MUST_MATCH = ("model", "diffusion", "data")
 DATA_FREE = ("num_workers", "root", "density_root", "density_index", "samples_root", "turn_index", "cache_dir", "clip_cache",
              "positive_file")
 # thống kê refiner trên dòng log (TB cửa sổ) và trong history — `BoxPolicy.pop_stats`
-EXTRA_LOG = {"loss_eps": "ε", "loss_aux": "aux", "delta_abs": "|Δ|", "aux_ratio": "aux/x_t", "loss_giou": "1−GIoU"}
+EXTRA_LOG = {"loss_eps": "ε", "loss_aux": "aux", "delta_abs": "|Δ|", "aux_ratio": "aux/x_t", "loss_giou": "1−GIoU",
+             "loss_eps1": "ε₁", "eps_ratio": "ε/ε₁", "loss_mid": "mid", "mid_ratio": "aux/mid"}   # + refiner post / mid (DELTA9)
 
 
 def config_diff(saved, cfg):
@@ -72,9 +74,11 @@ def config_diff(saved, cfg):
 
 
 def build_text_table(names, cfg, dev):
-    """Embedding CLIP pooler (cond) + token chữ CLIP text của refiner (+ vân tay) cho `names`. Tách hàm để test thay bằng bản giả."""
+    """Embedding CLIP pooler (cond) + token chữ CLIP text của refiner (+ vân tay) cho `names`. Tách hàm để test thay bằng bản giả.
+    Không refiner: chỉ pooler (token = None)."""
     m = cfg["model"]
-    tokens, sha = encode_class_tokens(names, text_model_name(refiner_config(m["refiner"])), device=str(dev))
+    rcfg = refiner_config(m["refiner"])
+    tokens, sha = encode_class_tokens(names, text_model_name(rcfg), device=str(dev)) if rcfg else (None, None)
     return TextTable(encode_class_names(names, m["clip_text"], device=str(dev)), tokens, sha)
 
 
@@ -89,7 +93,7 @@ def add_datasets(cfg, limit=None):
     cache = AddCache(d["cache_dir"]) if d.get("cache_dir") else None          # Kaggle: ảnh train đã letterbox
 
     def mk(split, n=None):
-        ds = CE130AddDataset(index, d["root"], d["samples_root"], split, d["image_size"], cache=cache)
+        ds = CE130AddDataset(index, d["samples_root"], split, d["image_size"], cache=cache)
         if n:
             perm = np.random.default_rng(12345).permutation(len(ds.keys))[:n]
             ds.keys = [ds.keys[i] for i in sorted(perm.tolist())]
@@ -173,7 +177,7 @@ def main():
     ap.add_argument("--eval-every", type=int, default=None)
     ap.add_argument("--limit", type=int, default=None, help="chỉ lấy N mẫu train đầu")
     ap.add_argument("--num-workers", type=int, default=None)
-    for k in ("data-root", "samples-root", "turn-index", "cache-dir", "clip-cache", "positive-file"):
+    for k in ("samples-root", "turn-index", "cache-dir", "clip-cache", "positive-file"):
         ap.add_argument(f"--{k}", default=None, help=f"ghi đè data.{k.replace('-', '_')}")
     ap.add_argument("--max-hours", type=float, default=0.0, help="dừng sạch (ghi last.pth) nếu đoạn kế tiếp có thể vượt N giờ; 0 = tắt")
     ap.add_argument("--device", default=None)
@@ -184,7 +188,7 @@ def main():
     for k, v in (("max_iter", a.max_iter), ("lr", a.lr), ("batch_size", a.batch_size), ("eval_every", a.eval_every)):
         if v:
             tr[k] = v
-    for k, v in (("limit", a.limit), ("root", a.data_root), ("samples_root", a.samples_root), ("turn_index", a.turn_index),
+    for k, v in (("limit", a.limit), ("samples_root", a.samples_root), ("turn_index", a.turn_index),
                  ("cache_dir", a.cache_dir), ("clip_cache", a.clip_cache), ("positive_file", a.positive_file)):
         if v:
             d[k] = v
@@ -253,6 +257,9 @@ def main():
     model = build_model(cfg).to(dev)
     model.set_text_fingerprint(text_table.token_sha)           # vân tay CLIP text vào clip_sha TRƯỚC khi resume (nạp tự kiểm)
     amp = bool(tr.get("amp")) and dev.type == "cuda"            # Kaggle T4: tensor core chỉ chạy fp16
+    if ds_tr.clip_cache is not None and model.refiner is None:
+        log("[data] model không refiner -> bỏ cache CLIP")
+        ds_tr.clip_cache = None
     if ds_tr.clip_cache is not None:
         ds_tr.clip_cache.check(model, cfg, ds_tr.keys)
     if amp:
@@ -392,10 +399,11 @@ def main():
                 if gsum:
                     share = GradMonitor.share(gsum)
                     log("          grad theo nhóm: " + ", ".join(f"{g} {v:.2f} ({share[g] * 100:.0f}%)" for g, v in list(gsum.items())[:5]))
-                gates = model.refiner.gate_stats()      # refiner có rời identity không (0 lúc khởi tạo)
-                log("          refiner |gate| attn/mlp theo block: " + " ".join(
-                    f"{k_} {v[0]:.3f}/{v[1]:.3f}" for k_, v in gates.items() if not k_.startswith("head"))
-                    + " | ‖head cuối‖ " + " ".join(f"{gates[k_]:.3f}" for k_ in gates if k_.startswith("head")))
+                gates = model.refiner.gate_stats() if model.refiner is not None else {}   # refiner có rời identity không
+                if gates:
+                    log("          refiner |gate| attn/mlp theo block: " + " ".join(
+                        f"{k_} {v[0]:.3f}/{v[1]:.3f}" for k_, v in gates.items() if not k_.startswith("head"))
+                        + " | ‖head cuối‖ " + " ".join(f"{gates[k_]:.3f}" for k_ in gates if k_.startswith("head")))
                 history.append({"iter": it, "loss": win["loss"] / win["n"], "lr": sched.get_last_lr()[0],
                                 "grad_norm_p50": float(np.median(win["gn"])), "s_per_iter": spi, "skipped": win["skip"],
                                 "elapsed_sec": el, **({} if peak is None else {"gpu_peak_gb": peak[0], "gpu_reserved_gb": peak[1]}),

@@ -141,7 +141,7 @@ def test_plot_cnll_worst_cocount_and_ce130(tmp_path, monkeypatch):
     base = str(tmp_path / "d")
     os.makedirs(base)
     root, samples, tidx, index, _ = _fake_turn_index(base)
-    ce = CE130AddDataset(index, root, samples, "train", 128)
+    ce = CE130AddDataset(index, samples, "train", 128)
     items_ce = []
     for i in range(len(ce)):
         s = ce[i]

@@ -160,6 +160,17 @@ def test_configs_inherit_only_intended_keys(tmp_path):
     assert L("delta8")["training"]["cosine_t_max"] == 120 * ipe and L("delta7_0_2")["training"]["snapshot_initial"] is False
     assert L("delta8_1") == merge(L("delta8"), {"experiment": "delta8_1", "description": L("delta8_1")["description"],   # = 2 khoá model 7 -> 7.1
                                                 "model": {k: L("delta7_1")["model"][k] for k in ("box_coder", "refiner")}})
+    assert L("delta9") == merge(L("delta8"), {"experiment": "delta9", "description": L("delta9")["description"], "training": {
+        "max_iter": 10 * ipe, "snapshot_every_epochs": 10, "snapshot_initial": False}})
+    clip = lambda n: {"clip_text": n, "refiner": {"clip_model_name": n, "text_model_name": n}}  # noqa: E731
+    one_var = {1: {"refiner": {"enabled": False}}, 2: {"obj_attn": False}, 3: {"refiner": {"aux_loss_weight": 0.0}},  # DELTA9: MỘT biến / run
+               4: {"refiner": {"unet_input": "post", "aux_loss_weight": 1.0}}, 5: {"refiner": {"unet_input": "mid", "mid_aux_weight": 0.1}},
+               6: {"obj_attn": False, "refiner": {"unet_input": "none", "aux_loss_weight": 1.0}}, 7: {"down_dims": [128, 256, 512]},
+               8: {"vision": "r50_paper"}, 9: {"vision": "r101_paper"}, 10: clip("openai/clip-vit-base-patch32"),
+               11: clip("openai/clip-vit-base-patch16"), 12: {**clip("openai/clip-vit-large-patch14"), "text_dim": 768}}
+    for k, diff in one_var.items():
+        run = f"delta9_{k}"
+        assert L(run) == merge(L("delta9"), {"experiment": run, "description": L(run)["description"], "model": diff}), run
     (tmp_path / "a.yaml").write_text("x: {y: 1, z: [1]}\nk: 1\n")
     (tmp_path / "b.yaml").write_text("base: a.yaml\nx: {z: [2]}\n")
     assert load_config(str(tmp_path / "b.yaml")) == {"x": {"y": 1, "z": [2]}, "k": 1}

@@ -1,4 +1,4 @@
-# DELTA7.0.2 (docs/EXPERIMENT_DELTA.md mục 13.2) = DELTA7 nhưng KHÔNG rút ngẫu nhiên: mỗi cặp (mẫu, box đích) là một phần tử dataset
+# DELTA7.0.2 (docs/EXPERIMENT_DELTA.md mục 5) = DELTA7 nhưng KHÔNG rút ngẫu nhiên: mỗi cặp (mẫu, box đích) là một phần tử dataset
 # (70.567 cặp = 3,53 × 19.998 mẫu) — epoch đi qua mọi cặp đúng một lần; mỗi cặp cùng trọng số (ảnh nhiều box nặng hơn). 120 epoch như
 # DELTA6 / 7 nhưng epoch dài 3,53× (người dùng chốt 2026-10-26): 1.102 iter / epoch -> 132.240 iter (~14,3 giờ T4×2, 2 phiên Kaggle nối
 # `last.pth`), warmup 1 epoch, cosine về 0; snapshot mỗi 10 epoch (= 11.020 iter).

@@ -1,0 +1,8 @@
+# DELTA9.4 (docs/EXPERIMENT_DELTA.md mục 8) — ablation MỘT biến của DELTA8 ep 10 (`delta9.yaml`): refiner SAU U-Net: ε̂₁ = U-Net(x_t) -> x̂0 -> refiner sửa Δε; loss = MSE(ε̂) + 1·MSE(ε̂₁) (như DELTA3.2).
+base: [delta9.yaml]
+experiment: "delta9_4"
+description: "DELTA9 refiner sau U-Net (sửa ε)"
+model:
+  refiner:
+    unet_input: post
+    aux_loss_weight: 1.0

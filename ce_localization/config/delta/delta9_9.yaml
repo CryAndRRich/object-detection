@@ -1,0 +1,6 @@
+# DELTA9.9 (docs/EXPERIMENT_DELTA.md mục 8) — ablation MỘT biến của DELTA8 ep 10 (`delta9.yaml`): ảnh U-Net ResNet101 (ImageNet V1, SpatialSoftmax C5 2048 kênh).
+base: [delta9.yaml]
+experiment: "delta9_9"
+description: "DELTA9 ảnh U-Net ResNet101"
+model:
+  vision: "r101_paper"

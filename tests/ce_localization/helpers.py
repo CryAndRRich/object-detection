@@ -22,10 +22,16 @@ JET = (np.stack([np.interp(_X, [p[0] for p in s], [p[1] for p in s]) for s in _J
 
 CFG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "ce_localization", "config", "delta")
 RUNS = ("delta4", "delta5", "delta5_1", "delta5_2", "delta5_3", "delta5_4", "delta5_5", "delta6", "delta6_1", "delta6_2", "delta7",
-        "delta7_0_1", "delta7_0_2", "delta7_1", "delta8", "delta8_1")
+        "delta7_0_1", "delta7_0_2", "delta7_1", "delta8", "delta8_1", "delta9", *(f"delta9_{k}" for k in range(1, 13)))
 FAKE_TEXT_SHA = hashlib.sha256(b"fake CLIP text").digest()
 # ViT thật -> (ảnh, patch, hidden giả): cùng lưới g = ảnh / patch như bản thật
-FAKE_VIT = {"openai/clip-vit-base-patch16": (224, 16, 32), "openai/clip-vit-base-patch32": (224, 32, 32)}
+FAKE_VIT = {"openai/clip-vit-base-patch16": (224, 16, 32), "openai/clip-vit-base-patch32": (224, 32, 32),
+            "openai/clip-vit-large-patch14": (224, 14, 48)}
+
+
+def _text_hidden(name):
+    """Chiều CLIP text thật: L/14 768, B 512."""
+    return 768 if name and "large" in name else 512
 SMALL_REFINER = {"enabled": True, "clip_model_name": "openai/clip-vit-base-patch32", "text_model_name": "openai/clip-vit-base-patch16",
                  "d_model": 32, "num_heads": 2, "num_layers": 2, "aux_loss_weight": 0.1}
 
@@ -34,14 +40,14 @@ SMALL_REFINER = {"enabled": True, "clip_model_name": "openai/clip-vit-base-patch
 
 def _fake_load_clip(name, text_name=None, *, seed=0):
     """Thay `models.clip_refiner.load_clip`: CLIPVisionModel tí hon (2 tầng), lưới như ViT `name`; weight tất định theo `seed`, KHÔNG
-    đụng RNG toàn cục. -> (model frozen eval, hidden CLIP text 512)."""
+    đụng RNG toàn cục. -> (model frozen eval, hidden CLIP text như bản thật: 512 / 768)."""
     from transformers import CLIPVisionConfig, CLIPVisionModel
     size, patch, hid = FAKE_VIT[name]
     with torch.random.fork_rng():
         torch.manual_seed(seed)
         m = CLIPVisionModel(CLIPVisionConfig(hidden_size=hid, intermediate_size=2 * hid, num_hidden_layers=2,
                                              num_attention_heads=2, image_size=size, patch_size=patch))
-    return m.eval().requires_grad_(False), 512
+    return m.eval().requires_grad_(False), _text_hidden(text_name or name)
 
 
 def _patch_clip(monkeypatch, seed=0):
@@ -50,12 +56,17 @@ def _patch_clip(monkeypatch, seed=0):
 
 
 def _fake_text_table(names, cfg=None, dev=None):
-    """Embedding pooler + token chữ giả, tất định theo tên (token dài 2 + len(tên) % 4)."""
+    """Embedding pooler + token chữ giả, tất định theo tên (token dài 2 + len(tên) % 4); chiều theo `cfg` (pooler `model.text_dim`,
+    token theo CLIP text của refiner); refiner tắt -> không token (như `train.build_text_table`)."""
+    from ce_localization.models.clip_refiner import refiner_config, text_model_name
+    m = (cfg or {}).get("model", {})
+    rcfg = refiner_config(m.get("refiner", {"enabled": True}))
+    dp, dt = m.get("text_dim", 512), _text_hidden(text_model_name(rcfg)) if rcfg and m else 512
     table, tok = {}, {}
     for n in names:
-        table[n] = torch.randn(512, generator=torch.Generator().manual_seed(sum(map(ord, n))))
-        tok[n] = torch.randn(2 + len(n) % 4, 512, generator=torch.Generator().manual_seed(7 + sum(map(ord, n))))
-    return TextTable(table, tok, FAKE_TEXT_SHA)
+        table[n] = torch.randn(dp, generator=torch.Generator().manual_seed(sum(map(ord, n))))
+        tok[n] = torch.randn(2 + len(n) % 4, dt, generator=torch.Generator().manual_seed(7 + sum(map(ord, n))))
+    return TextTable(table, tok if rcfg else None, FAKE_TEXT_SHA if rcfg else None)
 
 
 def small_policy(seed=0, refiner=None, num_timesteps=100, **kw):
@@ -162,7 +173,7 @@ def run_cfg(tmp_path, base, run, name="", **training):
     4 iter, log mỗi iter; refiner / U-Net giữ kích thước thật, CLIP giả; `training` ghi đè thêm. -> (đường dẫn yaml, cfg)."""
     from ce_localization.utils.config import load_config
     cfg = load_config(os.path.join(CFG_DIR, f"{run}.yaml"))
-    cfg["data"].update(root=os.path.join(base, "all_phase2_V2"), samples_root=os.path.join(base, "samples"),
+    cfg["data"].update(samples_root=os.path.join(base, "samples"),
                        turn_index=os.path.join(base, "turn_index.json"), image_size=128, num_workers=0)
     if cfg["data"].get("train_target") == "positive":
         cfg["data"]["positive_file"] = os.path.join(base, "ce130_train.jsonl")

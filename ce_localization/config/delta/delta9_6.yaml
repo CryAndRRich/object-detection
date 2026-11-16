@@ -1,0 +1,9 @@
+# DELTA9.6 (docs/EXPERIMENT_DELTA.md mục 8) — ablation MỘT biến của DELTA8 ep 10 (`delta9.yaml`): chỉ refiner, không U-Net (ε̂ suy từ refined = x̂0; loss = MSE(refined, x0)) — kéo theo bỏ attention box vật + cond ResNet / text.
+base: [delta9.yaml]
+experiment: "delta9_6"
+description: "DELTA9 chỉ refiner, không U-Net"
+model:
+  obj_attn: false
+  refiner:
+    unet_input: none
+    aux_loss_weight: 1.0

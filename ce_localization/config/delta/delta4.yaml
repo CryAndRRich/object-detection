@@ -1,4 +1,4 @@
-# DELTA4 (docs/EXPERIMENT_DELTA.md mục 10) = GAMMA4 (CE-Loc gốc ResNet18 + cross-attn box nhiễu -> MỌI box vật ở 6 vị trí U-Net) + BoxRefiner
+# DELTA4 (docs/EXPERIMENT_DELTA.md mục 3) = GAMMA4 (CE-Loc gốc ResNet18 + cross-attn box nhiễu -> MỌI box vật ở 6 vị trí U-Net) + BoxRefiner
 # của tác giả trước U-Net (CLIP ViT-B/32, token chữ CLIP text B/16); U-Net nhận [x_t ; refined], box vật vào dạng gương [o ; o].
 # Mọi config sau kế thừa file này qua `base` (utils/config.py).
 
@@ -6,7 +6,6 @@ experiment: "delta4"
 description: "GAMMA4 (box attention tới mọi vật) + BoxRefiner của tác giả (CLIP ViT-B/32, text B/16) trước U-Net"
 
 data:
-  root: "../data/all_phase2_V2"
   samples_root: "../data/samples"
   turn_index: "../data/turn_index.json"
   cache_dir: null                   # Kaggle: --cache-dir (tools/build_add_cache.py)

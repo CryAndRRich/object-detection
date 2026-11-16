@@ -19,3 +19,15 @@ def q_sample(x_start, t, noise, alphas_cumprod):
     """x_t = sqrt(ab_t) x_0 + sqrt(1-ab_t) eps."""
     ab = _ab(alphas_cumprod, t, x_start)
     return ab.sqrt() * x_start + (1 - ab).sqrt() * noise
+
+
+def predict_noise_from_start(x_t, t, x_start, alphas_cumprod):
+    """ε từ (x_t, x_0) — nghịch đảo giải tích của `q_sample` (refiner là cả mạng khử nhiễu, `unet_input: none`)."""
+    ab = _ab(alphas_cumprod, t, x_t)
+    return ((1.0 / ab).sqrt() * x_t - x_start) / (1.0 / ab - 1).sqrt()
+
+
+def predict_start_from_noise(x_t, t, eps, alphas_cumprod):
+    """x̂0 từ (x_t, ε̂) — nghịch đảo của `q_sample` theo x_0 (refiner sau U-Net, `unet_input: post`)."""
+    ab = _ab(alphas_cumprod, t, x_t)
+    return (x_t - (1 - ab).sqrt() * eps) / ab.sqrt()

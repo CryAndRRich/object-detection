@@ -16,6 +16,7 @@ số token vLLM báo (`in` của responses).
 
 import torch
 
+from baseline.data import IMAGENET_MEAN, IMAGENET_STD
 from vlm.parse import qwen_resized_wh
 
 
@@ -155,7 +156,6 @@ class LlavaOV2Adapter(QwenAdapter):
 
 # ----------------------------------------------------------------------------- InternVL3.5
 
-IMAGENET_MEAN, IMAGENET_STD = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
 IMG_START, IMG_END, IMG_CONTEXT = "<img>", "</img>", "<IMG_CONTEXT>"
 
 

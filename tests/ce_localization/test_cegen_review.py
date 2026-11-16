@@ -97,10 +97,11 @@ def test_find_runs_layout(tmp_path):
     assert {(r["setting"], r["task"]) for r in cc} == {(s, t) for s in cegen.SETTINGS for t in cegen.TASKS}
 
 
-def test_clean_class_matches_reader():
+def test_clean_class_shared():
+    """cegen (không torch) và reader CE-CoCount dùng CHUNG một hàm (`data/names.py`)."""
     from ce_localization.data.cocount import clean_class
-    for n in ("normal tomato(Big round tomato).", "sunflower seed.", "  a   b (x) .", "plain"):
-        assert cegen.clean_class(n) == clean_class(n)
+    assert cegen.clean_class is clean_class
+    assert [clean_class(n) for n in ("normal tomato(Big round tomato).", "  a   b (x) .")] == ["normal tomato", "a b"]
 
 
 def test_prepare_cache_manifest(man, tmp_path):

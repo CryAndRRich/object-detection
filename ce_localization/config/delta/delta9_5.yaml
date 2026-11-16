@@ -1,0 +1,8 @@
+# DELTA9.5 (docs/EXPERIMENT_DELTA.md mục 8) — ablation MỘT biến của DELTA8 ep 10 (`delta9.yaml`): refiner CHÈN GIỮA U-Net (vị trí mid, sau cross-attn): b = x_t + mid_in(h), h += mid_out(refiner(b)) (như DELTA4.1).
+base: [delta9.yaml]
+experiment: "delta9_5"
+description: "DELTA9 refiner chèn giữa U-Net"
+model:
+  refiner:
+    unet_input: mid
+    mid_aux_weight: 0.1

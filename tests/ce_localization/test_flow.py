@@ -80,7 +80,7 @@ def test_flow_train_loss_select_resume(tmp_path, monkeypatch):
     clip_dir = str(tmp_path / "clip")
     _patch_clip(monkeypatch)
     monkeypatch.setattr(sys, "argv", ["build_clip_cache.py", "--config", c_path, "--turn-index", os.path.join(base, "turn_index.json"),
-                                      "--samples", os.path.join(base, "samples"), "--data-root", os.path.join(base, "all_phase2_V2"),
+                                      "--samples", os.path.join(base, "samples"),
                                       "--batch-size", "4", "--workers", "0", "--device", "cpu", "--out", clip_dir])
     bc.main()
     ipe = len(ta.TurnIndex(os.path.join(base, "turn_index.json")).keys("train")) // 6
@@ -115,10 +115,11 @@ def test_flow_train_loss_select_resume(tmp_path, monkeypatch):
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("run", ["delta7_0_1", "delta7_0_2"])
+@pytest.mark.parametrize("run", ["delta7_0_1", "delta7_0_2", "delta9_5"])
 def test_flow_positive_all_pair_resume(tmp_path, monkeypatch, run):
     """DELTA7.0.1 (mọi box / ảnh mỗi iter) / 7.0.2 (mỗi cặp (mẫu, box) một mẫu): train 2 + resume tới 4 == train liền 4; 7.0.2: dataset
-    = mọi cặp (epoch theo cặp); checkpoint nạp + eval được."""
+    = mọi cặp (epoch theo cặp); checkpoint nạp + eval được. DELTA9.5 (refiner chèn giữa U-Net — đường ablation mới nhiều tham số / nhánh
+    nhất): trọn luồng train / resume / eval."""
     import ce_localization.train as ta
     from tests.ce_localization.helpers import _fake_positives
     base = str(tmp_path / "d")
@@ -133,7 +134,7 @@ def test_flow_positive_all_pair_resume(tmp_path, monkeypatch, run):
     logs = [h for h in kb["history"] if "loss" in h]
     assert len(logs) == 4 and all(np.isfinite(h["loss"]) for h in logs)
     n = len(ta.TurnIndex(os.path.join(base, "turn_index.json")).keys("train"))
-    if run == "delta7_0_2":                        # 1001_b1: mỗi lượt t lỗ + 1 chỗ trống; mẫu khác: t lỗ
+    if cfg["data"]["positive_sampling"] == "pair":     # 1001_b1: mỗi lượt t lỗ + 1 chỗ trống; mẫu khác: t lỗ
         idx = ta.TurnIndex(os.path.join(base, "turn_index.json"))
         pos = _fake_positives(base, cfg["data"]["positive_file"])
         n = sum(v["t"] + (os.path.splitext(os.path.basename(v["sample"]))[0] in pos) for k, v in idx.turns.items()

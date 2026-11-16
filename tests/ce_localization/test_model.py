@@ -11,8 +11,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.ops import roi_align
 
-from tests.ce_localization.helpers import (FAKE_TEXT_SHA, SMALL_REFINER, _fake_load_clip, _fake_text_table, _patch_clip, small_batch,
-                                           small_policy)
+from tests.ce_localization.helpers import (FAKE_TEXT_SHA, FAKE_VIT, SMALL_REFINER, _fake_load_clip, _fake_text_table, _patch_clip,
+                                           small_batch, small_policy)
 
 LOG = {"type": "log", "min_size_ratio": 1 / 128}
 
@@ -468,16 +468,108 @@ def test_predict_add_shared_encoding_equals_separate_runs():
 
 
 def test_build_model_only_delta4_plus():
-    from ce_localization.models.box_policy import _check_supported
+    """Mọi config DELTA4+ qua `_check_supported`; config DELTA9 dựng được thật (CLIP giả, không weight ImageNet); kiến trúc cũ /
+    tổ hợp sai bị chặn."""
+    from ce_localization.models.box_policy import BoxPolicy, _check_supported, build_model
     from ce_localization.utils.config import load_config
     from tests.ce_localization.helpers import CFG_DIR, RUNS
     for run in RUNS:
-        _check_supported(load_config(os.path.join(CFG_DIR, f"{run}.yaml"))["model"])
+        cfg = load_config(os.path.join(CFG_DIR, f"{run}.yaml"))
+        _check_supported(cfg["model"])
+        if run.startswith("delta9"):
+            build_model(cfg, pretrained_backbone=False)
     m = load_config(os.path.join(CFG_DIR, "delta4.yaml"))["model"]
-    for bad in ({"vision": "r50_fpn"}, {"obj_attn": False}, {"refiner": {**m["refiner"], "unet_input": "post"}}, {"use_condition": False},
-                {"obj_k": 3}):
+    for bad in ({"vision": "r50_fpn"}, {"refiner": {**m["refiner"], "unet_input": "replace"}}, {"use_condition": False}, {"obj_k": 3}):
         with pytest.raises(ValueError, match="DELTA4"):
             _check_supported({**m, **bad})
+    for kw, msg in (({"refiner": {**SMALL_REFINER, "unet_input": "none"}}, "obj_attn"),
+                    ({"refiner": {**SMALL_REFINER, "unet_input": "post", "num_stages": 2}}, "num_stages"),
+                    ({"refiner": {**SMALL_REFINER, "mid_aux_weight": 0.1}}, "mid_aux_weight"),
+                    ({"refiner": {**SMALL_REFINER, "unet_input": "post", "aux_giou_weight": 0.1}}, "aux_giou"),
+                    ({"refiner": SMALL_REFINER, "vision": "r34_paper"}, "vision")):
+        with pytest.raises(ValueError, match=msg):
+            BoxPolicy(pretrained_backbone=False, vis_dim=16, text_dim=16, step_embed_dim=32, down_dims=(16, 32, 64), n_groups=4,
+                      num_timesteps=100, **kw)
+
+
+ABLATIONS = {                                                       # DELTA9: chế độ -> (kw small_policy, khoá pop_stats)
+    "norefine": ({"refiner": {"enabled": False}}, {"loss_eps"}),
+    "noobj": ({"obj_attn": False}, {"loss_eps", "loss_aux", "delta_abs", "aux_ratio"}),
+    "aux0": ({"refiner": {"aux_loss_weight": 0.0}}, {"loss_eps", "loss_aux", "delta_abs", "aux_ratio"}),
+    "post": ({"refiner": {"unet_input": "post", "aux_loss_weight": 1.0}}, {"loss_eps", "loss_eps1", "delta_abs", "eps_ratio"}),
+    "mid": ({"refiner": {"unet_input": "mid", "mid_aux_weight": 0.1}},
+            {"loss_eps", "loss_aux", "delta_abs", "aux_ratio", "loss_mid", "mid_ratio"}),
+    "none": ({"refiner": {"unet_input": "none", "aux_loss_weight": 1.0}, "obj_attn": False}, {"loss_aux", "delta_abs", "aux_ratio"}),
+}
+
+
+@pytest.mark.parametrize("mode", list(ABLATIONS))
+def test_ablation_modes_loss_grads_identity(mode):
+    """DELTA9.1–9.6: khoá thống kê; loss = công thức (ε + w·aux, post: ε + 1·ε₁, mid: + 0,1·mid, none: 1·aux); MỌI tham số có grad
+    (DDP không find_unused); lúc khởi tạo post == U-Net trần (Δε = 0) và mid == U-Net không chèn (mid_in / mid_out = 0); lấy mẫu chạy được
+    (none không có `_norefine`)."""
+    kw, keys = ABLATIONS[mode]
+    m = small_policy(**kw).train()
+    x, text, vhw, x0, tok, objs = small_batch()
+    with torch.no_grad():
+        cond, obj, ctx = m.encode(x, text, vhw, objs, tok)
+        assert (obj is None) == (not m.obj_attn) and (ctx is None) == (m.refiner is None)
+        xt, t = torch.randn(6, 4), torch.full((6,), 7)
+        c3, ci = cond.repeat_interleave(3, 0), torch.arange(2).repeat_interleave(3)
+        o3 = m._repeat_obj(obj, 3)
+        if mode in ("post", "mid"):
+            bare = m.noise_net(xt.unsqueeze(1), t, c3, *(o3 or (None, None))).squeeze(1)
+            assert torch.allclose(m.predict_noise(xt, t, c3, ctx, ci, o3)[0].float(), bare, atol=1e-6)
+            assert torch.equal(m.predict_noise(xt, t, c3, None, None, o3)[0], bare)          # `_norefine` = U-Net trần
+    if m.refiner is not None:                                       # rời khởi tạo identity để mọi tham số refiner có grad
+        for blk in m.refiner.stages[0]:
+            nn.init.normal_(blk.ada[-1].weight, std=0.02)
+        nn.init.normal_(m.refiner.heads[0][-1].weight, std=0.02)
+    for lin in ((m.mid_in, m.mid_out) if mode == "mid" else ()):
+        nn.init.normal_(lin.weight, std=0.02)
+    for xa in (m.noise_net.obj_xattn or []) if m.noise_net is not None else []:
+        nn.init.normal_(xa.attn.out_proj.weight, std=0.02)
+    loss = m(x, text, vhw, x0, k=2, generator=torch.Generator().manual_seed(4), objects=objs, text_tokens=tok)
+    st = m.pop_stats()
+    assert set(st) == keys
+    want = {"norefine": lambda: st["loss_eps"], "noobj": lambda: st["loss_eps"] + 0.1 * st["loss_aux"], "aux0": lambda: st["loss_eps"],
+            "post": lambda: st["loss_eps"] + st["loss_eps1"], "none": lambda: st["loss_aux"],
+            "mid": lambda: st["loss_eps"] + 0.1 * st["loss_aux"] + 0.1 * st["loss_mid"]}[mode]()
+    assert torch.allclose(loss, want, atol=1e-6)
+    loss.backward()
+    assert [n for n, p in m.named_parameters() if p.requires_grad and p.grad is None] == []
+    m.eval()
+    with torch.no_grad():
+        cond, obj, ctx = m.encode(x, text, vhw, objs, tok)
+        u = m.sample_from_cond(cond, 3, torch.Generator().manual_seed(0), obj=obj, ctx=ctx)
+        assert u.shape == (2, 3, 4) and torch.isfinite(u).all()
+    if mode == "none":
+        with pytest.raises(ValueError, match="none"):
+            m.sample_from_cond(cond, 3, obj=obj, ctx=None)
+    from ce_localization.eval import variants                      # eval --ablation chỉ thêm biến thể có nghĩa với model
+    sfx = [s for s, _, _ in variants(["mock"], True, model=m)]
+    assert sfx == [""] + (["_noobj"] if m.obj_attn else []) + (["_norefine"] if mode not in ("norefine", "none") else [])
+
+
+@pytest.mark.parametrize("vision, clip", [("r50_paper", None), ("r18_paper", "openai/clip-vit-base-patch32"),
+                                          ("r18_paper", "openai/clip-vit-base-patch16"), ("r18_paper", "openai/clip-vit-large-patch14")])
+def test_ablation_backbones(vision, clip, monkeypatch):
+    """DELTA9.8–9.12: ResNet50 (101 cùng đường code, dựng thật ở `test_build_model_only_delta4_plus`) -> SpatialSoftmax C5 2048 kênh (4096 -> vis_dim); MỘT CLIP cho ảnh + chữ refiner (lưới 7 / 14 /
+    16 = ảnh / patch, chiều token chữ 512 / 768) — forward + backward chạy."""
+    import ce_localization.models.clip_refiner as cr
+    seen, orig = [], cr.load_clip
+    monkeypatch.setattr(cr, "load_clip", lambda name, text_name: (seen.append((name, text_name)), orig(name, text_name))[1])
+    cr_kw = {} if clip is None else {"clip_model_name": clip, "text_model_name": clip}
+    text_dim = 768 if clip and "large" in clip else 512
+    m = small_policy(refiner=cr_kw, vision=vision, text_in=text_dim).train()
+    assert m.vision.projection.in_features == (4096 if vision != "r18_paper" else 1024)
+    if clip:
+        size, patch, _ = FAKE_VIT[clip]
+        assert seen == [(clip, clip)] and m.refiner.grid == size // patch
+    x, _, vhw, x0, tok, objs = small_batch()
+    g = torch.Generator().manual_seed(1)
+    text, tok = torch.randn(2, text_dim, generator=g), (torch.randn(2, 5, text_dim, generator=g), tok[1])
+    m(x, text, vhw, x0, generator=torch.Generator().manual_seed(4), objects=objs, text_tokens=tok).backward()
 
 
 def test_text_tokens_causal_padding_equivalence():

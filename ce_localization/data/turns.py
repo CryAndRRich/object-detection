@@ -400,9 +400,8 @@ class CE130AddDataset(Dataset):
     tập đích = mọi lỗ tới lượt t + box gán tay không trùng lỗ (`hand_positives`); `random` / `all`: thêm khoá `positives` (cả tập);
     `pair`: mỗi phần tử = một cặp (mẫu, box), `target` = box đó."""
 
-    def __init__(self, index, ce130_root, samples_root, split, image_size=512, cache=None, positives=None, positive_hole_iou=None,
-                 positive_sampling="random"):
-        self.index, self.ce130_root, self.samples_root = index, ce130_root, samples_root
+    def __init__(self, index, samples_root, split, image_size=512, cache=None):
+        self.index, self.samples_root = index, samples_root
         self.keys = index.keys(split)
         self.image_size = image_size
         if cache is not None and cache.size != image_size:
@@ -410,8 +409,6 @@ class CE130AddDataset(Dataset):
         self.cache = cache                                             # cache = ảnh inpaint + density của mẫu
         self.clip_cache = None                                         # token CLIP tính sẵn (`data/clip_cache.py`, train gán sau)
         self.positives = self.positive_hole_iou = self.positive_sampling = self.pairs = None
-        if positives is not None:
-            self.set_positives(positives, positive_hole_iou, positive_sampling)
 
     def set_positives(self, positives, hole_iou, sampling="random"):
         """Bật đích = box positive ({tên file samples: box}, `load_positives`). `pair`: dựng danh sách (chỉ số mẫu, chỉ số box) trên

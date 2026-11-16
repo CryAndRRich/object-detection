@@ -44,15 +44,18 @@ SHOW = ("best_iou@{K}_any", "hit50@{K}_any", "best_iou@{K}_latest", "hit50@{K}_l
         "hole_cover", "on_object", "in_image", "degenerate", "cnll", "cnll_gt")
 
 
-def variants(samplers, ablation=False, ddim_steps=100, eta=1.0):
-    """-> list (hậu tố khoá, mô tả, kw của `sample_from_cond`). Một sampler: không hậu tố; nhiều: `_mock` / `_ddim`."""
+def variants(samplers, ablation=False, ddim_steps=100, eta=1.0, model=None):
+    """-> list (hậu tố khoá, mô tả, kw của `sample_from_cond`). Một sampler: không hậu tố; nhiều: `_mock` / `_ddim`. `ablation`:
+    `_noobj` / `_norefine` chỉ khi `model` (nếu truyền) có thành phần đó (`_norefine` cần U-Net — refiner `none` thì không)."""
     kinds = {"mock": ("mock 100 bước (vòng của bài)", {"sampler": "mock"}),
              "ddim": (f"DDIM tác giả {ddim_steps} bước, eta {eta}, kẹp x̂0", {"sampler": "ddim", "ddim_steps": ddim_steps, "eta": eta})}
     base = [("" if len(samplers) == 1 else f"_{s}", *kinds[s]) for s in samplers]
     out = list(base)
     if ablation:
-        out += [(s + "_noobj", d + ", TẮT box vật", {**kw, "use_objects": False}) for s, d, kw in base]
-        out += [(s + "_norefine", d + ", BỎ refiner", {**kw, "use_refiner": False}) for s, d, kw in base]
+        if model is None or model.obj_attn:
+            out += [(s + "_noobj", d + ", TẮT box vật", {**kw, "use_objects": False}) for s, d, kw in base]
+        if model is None or (model.refiner is not None and model.noise_net is not None):
+            out += [(s + "_norefine", d + ", BỎ refiner", {**kw, "use_refiner": False}) for s, d, kw in base]
     return out
 
 
@@ -76,7 +79,7 @@ def main():
     ap.add_argument("--cocount-root", default="../data/cocount")
     ap.add_argument("--cocount-review", default=None, help="review5: ../data/cocount_review.jsonl (+ --cocount-min-obj 5)")
     ap.add_argument("--cocount-min-obj", type=int, default=None)
-    for k in ("data-root", "samples-root", "turn-index"):
+    for k in ("samples-root", "turn-index"):
         ap.add_argument(f"--{k}", default=None, help=f"ghi đè data.{k.replace('-', '_')} (mặc định: config trong checkpoint)")
     a = ap.parse_args()
 
@@ -84,8 +87,8 @@ def main():
     dev = torch.device(a.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     model, cfg, it = load_checkpoint(a.ckpt)
     d = cfg["data"]
-    for k in ("root", "samples_root", "turn_index"):
-        v = getattr(a, "data_root" if k == "root" else k)
+    for k in ("samples_root", "turn_index"):
+        v = getattr(a, k)
         if v:
             d[k] = v
     try:
@@ -96,7 +99,7 @@ def main():
     model = model.to(dev).eval()
     amp = bool(cfg["training"].get("amp")) and dev.type == "cuda"
     prior_unit = prior_unit_boxes(index, "train")
-    var = variants(a.add_samplers, a.ablation, a.ddim_steps, a.eta)
+    var = variants(a.add_samplers, a.ablation, a.ddim_steps, a.eta, model)
     cocount = a.dataset == "cocount"
     out = {"ckpt": a.ckpt, "iter": it, "dataset": a.dataset, "split": None if cocount else a.split, "n_samples": K, "seed": a.seed,
            "add_samplers": a.add_samplers, **({"ddim_steps": a.ddim_steps, "eta": a.eta} if "ddim" in a.add_samplers else {}),
@@ -110,7 +113,7 @@ def main():
                    cocount_files=len(ds), cocount_files_all=ds.n_all)
         print(f"[eval] CE-CoCount: giữ {len(ds)} / {ds.n_all} file", flush=True)
     else:
-        ds = CE130AddDataset(index, d["root"], d["samples_root"], a.split, d["image_size"])
+        ds = CE130AddDataset(index, d["samples_root"], a.split, d["image_size"])
     if a.limit:
         ds.keys = ds.keys[: a.limit]
     text_table = train_mod.build_text_table(ds.classes(), cfg, dev)

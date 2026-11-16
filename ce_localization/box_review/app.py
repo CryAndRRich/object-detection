@@ -28,7 +28,7 @@ Ba cách dùng (chung code):
        python box_review/app.py pred          # dump mặc định DELTA8 ep 10; khác: --ce130-dump / --cocount-dump <out>_boxes.json
      - Data: CE-130 (mỗi màn một mẫu (nhánh, lượt): ảnh model nhận `samples/`) | CE-CoCount review5 (mỗi màn một file lớp: ẢNH GỐC,
        box vật sau bản rà `--review`, box model khoá `cocount` = box thô, không đổi cỡ).
-     - User: user_1 | user_2 (`--n-users`) — chia việc theo ẢNH (`split_screens`; CE-130: mọi nhánh / lượt của một ảnh, CE-CoCount:
+     - User: user_1 | user_2 (`--n-users`) — chia việc theo ẢNH (`cegen.split_items`; CE-130: mọi nhánh / lượt của một ảnh, CE-CoCount:
        hai lớp của một frame), xen kẽ theo thứ tự dump ⇒ hai người không trùng màn; mỗi người một file `…_user_k.jsonl`.
      Màn: ảnh + box vật (xanh, không bấm) + K box model (đỏ mảnh; lọc trùng IoU > 0,9, `--no-dedup` để tắt). Màn chưa lưu mở ra đã
      CHỌN SẴN 5 box (`sources.preselect`: top 5 C-NLL thấp nhất sau NMS IoU 0,5, trong box còn hiện) — ổn thì Enter luôn. Bấm box =
@@ -66,6 +66,7 @@ from PIL import Image
 OD = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))      # object-detection/
 sys.path.insert(0, OD)
 
+from ce_localization.box_review.cegen import split_items  # noqa: E402
 from ce_localization.box_review.sources import SOURCES, dedup_boxes, preselect  # noqa: E402
 from ce_localization.data.turns import iter_jsonl  # noqa: E402
 
@@ -175,17 +176,6 @@ def default_out(source, split=None, objects_only=False):
     if source == "cocount":
         return os.path.join(DATA_DIR, "cocount_review.jsonl")
     return os.path.join(REVIEW_DIR, f"ce130_{split}" + ("_objects" if objects_only else "") + ".jsonl")
-
-
-def split_screens(screens, user, n_users=2):
-    """Phần việc của người `user` (1..n_users): nhóm màn theo `group` (mặc định `id`), đánh số nhóm theo thứ tự xuất hiện, người k
-    nhận nhóm thứ k−1, k−1+n, k−1+2n… (xen kẽ ⇒ hai người cùng tiến độ phủ cùng một đoạn đầu danh sách, lớp trộn đều)."""
-    if not 1 <= user <= n_users:
-        raise ValueError(f"user {user} ngoài 1..{n_users}")
-    order = {}
-    for sc in screens:
-        order.setdefault(sc.get("group", sc["id"]), len(order))
-    return [sc for sc in screens if order[sc.get("group", sc["id"])] % n_users == user - 1]
 
 
 class ReviewStore:
@@ -491,7 +481,7 @@ class Session:
 
 class PredHub:
     """Chế độ chọn box model (người dùng 2026-10-30): MỘT app, Data + User chọn trên giao diện. `datasets` {nhãn: (hàm -> list màn,
-    file kết quả gốc .jsonl)}; mỗi (Data, User) một `Session` chế độ chọn trên phần việc `split_screens` của User, file
+    file kết quả gốc .jsonl)}; mỗi (Data, User) một `Session` chế độ chọn trên phần việc `cegen.split_items` của User, file
     `<gốc>_<user>.jsonl` — dựng khi chọn lần đầu (màn của Data đọc một lần), giữ lại khi đổi qua lại. Chưa chọn đủ cả hai: `sess` None.
     `preload`: đọc màn mọi Data ở luồng nền ngay khi mở app (CE-130 ~2 s, CE-CoCount ~6 s) ⇒ bấm chọn Data không phải chờ."""
 
@@ -526,7 +516,7 @@ class PredHub:
         key = (self.data, self.user)
         if key not in self._sessions:
             base = self.datasets[self.data][1]
-            screens = split_screens(self.screens(self.data), self.users.index(self.user) + 1, len(self.users))
+            screens = split_items(self.screens(self.data), self.users.index(self.user), len(self.users))
             out = base[:-len(".jsonl")] + f"_{self.user}.jsonl"
             self._sessions[key] = Session(screens, out, f"{self.data} · {self.user}", dedup=self.dedup, mode="select")
             print(f"[{self.data} · {self.user}] {len(screens)} màn / {len(self._screens[self.data])}, "

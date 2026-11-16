@@ -1,0 +1,6 @@
+# DELTA9.2 (docs/EXPERIMENT_DELTA.md mục 8) — ablation MỘT biến của DELTA8 ep 10 (`delta9.yaml`): bỏ cross-attn tới box vật đang có.
+base: [delta9.yaml]
+experiment: "delta9_2"
+description: "DELTA9 bỏ attention box vật"
+model:
+  obj_attn: false

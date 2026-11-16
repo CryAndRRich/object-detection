@@ -1,0 +1,9 @@
+# DELTA9.10 (docs/EXPERIMENT_DELTA.md mục 8) — ablation MỘT biến của DELTA8 ep 10 (`delta9.yaml`): MỘT CLIP B/32 cho ảnh refiner + chữ refiner + chữ U-Net (DELTA8: chữ refiner B/16).
+base: [delta9.yaml]
+experiment: "delta9_10"
+description: "DELTA9 CLIP thống nhất B/32"
+model:
+  clip_text: "openai/clip-vit-base-patch32"
+  refiner:
+    clip_model_name: "openai/clip-vit-base-patch32"
+    text_model_name: "openai/clip-vit-base-patch32"

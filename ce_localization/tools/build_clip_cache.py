@@ -2,7 +2,7 @@
 """Cache token CLIP ViT frozen của ảnh train (`data/clip_cache.py`) cho config `--config`: ~75 KB / mẫu fp16 (B/32) ⇒ train 19.998 mẫu
 ≈ 1,5 GB. Ảnh đọc như train (cache `build_add_cache` nếu có). Chạy MỘT GPU, trước train; train nhận `--clip-cache <out>`.
   python tools/build_clip_cache.py --config config/delta/delta6.yaml --turn-index ../data/turn_index.json --samples ../data/samples \
-      --data-root ../data/all_phase2_V2 --add-cache /kaggle/temp/add_cache_raw --out /kaggle/temp/clip_cache
+      --add-cache /kaggle/temp/add_cache_raw --out /kaggle/temp/clip_cache
 """
 
 import argparse
@@ -26,7 +26,6 @@ def main():
     ap.add_argument("--config", required=True)
     ap.add_argument("--turn-index", default="../data/turn_index.json")
     ap.add_argument("--samples", default="../data/samples")
-    ap.add_argument("--data-root", default="../data/all_phase2_V2")
     ap.add_argument("--add-cache", default=None, help="cache ảnh của build_add_cache (raw đọc nhanh nhất)")
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--workers", type=int, default=4)
@@ -38,7 +37,7 @@ def main():
     cfg = load_config(a.config)
     dev = torch.device(a.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     cache = AddCache(a.add_cache) if a.add_cache else None
-    ds = CE130AddDataset(TurnIndex(a.turn_index), a.data_root, a.samples, "train", cfg["data"]["image_size"], cache=cache)
+    ds = CE130AddDataset(TurnIndex(a.turn_index), a.samples, "train", cfg["data"]["image_size"], cache=cache)
     if a.limit:
         ds.keys = ds.keys[:a.limit]
     model = build_model(cfg, pretrained_backbone=False).to(dev).eval()

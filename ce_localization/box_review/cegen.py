@@ -81,6 +81,8 @@ import numpy as np
 from PIL import Image
 
 OD = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))      # object-detection/
+sys.path.insert(0, OD)
+from ce_localization.data.names import clean_class  # noqa: E402  (không import torch)
 SRC = "/mnt/disk1/aiotlab/hachi/Image_Editing/output"
 OUT_DIR = os.path.join(os.path.dirname(OD), "output", "cegen", "annot")
 DATASETS = {"FSC_final": "ce130", "processed_dataset": "cocount"}
@@ -102,11 +104,6 @@ LANCZOS = getattr(Image, "Resampling", Image).LANCZOS
 
 
 # ---------------------------------------------------------------- prepare
-
-def clean_class(name):
-    """Như `ce_localization.data.cocount.clean_class` (module đó import torch): bỏ phần trong ngoặc, dấu chấm cuối, khoảng trắng thừa."""
-    return re.sub(r"\s+", " ", re.sub(r"\(.*?\)", "", name)).strip().rstrip(".").strip()
-
 
 def _turbo_lut():
     """Bảng màu turbo 256 × 3 uint8 (xấp xỉ đa thức của Google, cùng bảng `cv2.COLORMAP_TURBO` của preview.jpg)."""
@@ -387,12 +384,15 @@ def merge(out_dir, dest=None, log=print):
 # ---------------------------------------------------------------- serve
 
 def split_items(items, user_idx, n_users=len(USERS)):
-    """Phần việc của người thứ `user_idx` (0..n−1): đánh số ảnh (`id`) theo thứ tự xuất hiện, người k nhận ảnh k, k+n, k+2n…
-    (mọi run của một ảnh về cùng một người)."""
+    """Phần việc của người thứ `user_idx` (0..n−1): nhóm màn theo `group` (mặc định `id` = ảnh), đánh số nhóm theo thứ tự xuất hiện,
+    người k nhận nhóm k, k+n, k+2n… (mọi màn của một nhóm về cùng một người; xen kẽ ⇒ hai người cùng tiến độ phủ cùng một đoạn đầu
+    danh sách). Dùng chung cho `cegen`, `loc_judge`, `app`."""
+    if not 0 <= user_idx < n_users:
+        raise ValueError(f"user_idx {user_idx} ngoài 0..{n_users - 1}")
     order = {}
     for it in items:
-        order.setdefault(it["id"], len(order))
-    return [it for it in items if order[it["id"]] % n_users == user_idx]
+        order.setdefault(it.get("group", it["id"]), len(order))
+    return [it for it in items if order[it.get("group", it["id"])] % n_users == user_idx]
 
 
 class Store:

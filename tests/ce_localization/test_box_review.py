@@ -1,7 +1,7 @@
 """Web rà box tay (`ce_localization/box_review/`): nguồn CE-CoCount theo file + CE-130 theo nhánh trên dữ liệu giả, SVG (box đã loại
 biến mất), phiên rà (loại box, lưu một dòng mỗi màn, nháp, hoàn tác cả lần lưu, điền sẵn box vật giữa các nhánh cùng ảnh), dựng giao diện;
 chế độ CHỌN box model sinh (`ce130_pred` / `cocount_pred`: dump eval -> pixel ảnh gốc, bấm bật / tắt, ghi `good` + `positive`), chia
-việc giữa người rà theo ảnh (`split_screens`), một app chọn Data + User trên giao diện (`PredHub`)."""
+việc giữa người rà theo ảnh (`cegen.split_items`), một app chọn Data + User trên giao diện (`PredHub`)."""
 
 import json
 import os
@@ -9,7 +9,8 @@ import os
 import pytest
 from PIL import Image
 
-from ce_localization.box_review.app import PredHub, ReviewStore, Session, box_svg, build_ui, split_screens
+from ce_localization.box_review.app import PredHub, ReviewStore, Session, box_svg, build_ui
+from ce_localization.box_review.cegen import split_items
 from ce_localization.box_review.sources import (ce130_pred_screens, ce130_screens, cocount_pred_screens, cocount_screens,
                                                dedup_boxes, preselect)
 
@@ -252,11 +253,11 @@ def test_cocount_pred_screens(tmp_path):
 
 def test_split_screens_by_group():
     sc = [{"id": i, "group": g} for i, g in (("1a", "1"), ("1b", "1"), ("2a", "2"), ("3a", "3"), ("1c", "1"), ("4a", "4"))]
-    u1, u2 = split_screens(sc, 1), split_screens(sc, 2)
+    u1, u2 = split_items(sc, 0), split_items(sc, 1)
     assert [s["id"] for s in u1] == ["1a", "1b", "3a", "1c"] and [s["id"] for s in u2] == ["2a", "4a"]
-    assert [s["id"] for s in split_screens([{"id": "x"}, {"id": "y"}, {"id": "z"}], 3, 3)] == ["z"]  # không group: theo id
+    assert [s["id"] for s in split_items([{"id": "x"}, {"id": "y"}, {"id": "z"}], 2, 3)] == ["z"]  # không group: theo id
     with pytest.raises(ValueError):
-        split_screens(sc, 3)
+        split_items(sc, 2)
 
 
 def test_pred_hub_choose_data_user(tmp_path):

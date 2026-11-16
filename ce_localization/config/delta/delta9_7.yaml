@@ -1,0 +1,6 @@
+# DELTA9.7 (docs/EXPERIMENT_DELTA.md mục 8) — ablation MỘT biến của DELTA8 ep 10 (`delta9.yaml`): U-Net to gấp đôi kênh: down_dims [128, 256, 512].
+base: [delta9.yaml]
+experiment: "delta9_7"
+description: "DELTA9 U-Net down_dims [128, 256, 512]"
+model:
+  down_dims: [128, 256, 512]

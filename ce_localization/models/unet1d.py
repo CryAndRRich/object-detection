@@ -2,7 +2,8 @@
 `down_dims (64, 128, 256)`, kernel 3, GroupNorm 8, embedding t 256-d, FiLM chỉ cộng bias, horizon 1 (một box). cond = `[emb(t) ;
 global_cond]` vào mọi khối residual. `output_dim` (bản cập nhật của tác giả): vào [x_t ; refined] 8 kênh, ra ε 4 kênh.
 
-Box attention (GAMMA4): box nhiễu cross-attend tới box CÁC VẬT ĐANG CÓ ở 6 vị trí (sau cặp ResBlock mỗi tầng: down × 3, mid, up × 2).
+Box attention (GAMMA4; tắt bằng `obj_attn=False` — DELTA9.2): box nhiễu cross-attend tới box CÁC VẬT ĐANG CÓ ở 6 vị trí (sau cặp
+ResBlock mỗi tầng: down × 3, mid, up × 2). `inject` (DELTA9.5): hàm gọi ở vị trí mid (`mid_site`, sau cross-attn) để chèn refiner.
 Token vật mã hoá GƯƠNG (`encode_objects`): box vật đi qua CHÍNH các ResBlock đó với t = 0, lấy feature ở 6 vị trí. `ObjCrossAttn`:
 `h + out_proj(MHA(LN(h) -> LN(token)))`, out_proj khởi tạo 0, tính fp32. Lấy mẫu (`ObjKV`): K / V của token vật tính MỘT lần mỗi ảnh
 cho mọi bước và mọi mẫu (cùng phép toán, không nhân token theo số mẫu).
@@ -143,7 +144,7 @@ class ObjKV(NamedTuple):
 
 class ConditionalUnet1D(nn.Module):
     def __init__(self, input_dim, global_cond_dim, diffusion_step_embed_dim=256, down_dims=(64, 128, 256), kernel_size=3, n_groups=8,
-                 obj_heads=4, obj_bucket=512, output_dim=None):
+                 obj_heads=4, obj_bucket=512, output_dim=None, obj_attn=True):
         super().__init__()
         all_dims = [input_dim] + list(down_dims)
         start_dim = down_dims[0]
@@ -176,7 +177,8 @@ class ConditionalUnet1D(nn.Module):
             SinusoidalPosEmb(dsed), nn.Linear(dsed, dsed * 4), nn.Mish(), nn.Linear(dsed * 4, dsed))
         self.obj_bucket = obj_bucket                         # luồng vật: số hàng làm tròn lên bội số này (xem `encode_objects`)
         site_dims = list(down_dims) + [mid_dim] + [d_in for d_in, _ in reversed(in_out[1:])]
-        self.obj_xattn = nn.ModuleList([ObjCrossAttn(d, obj_heads) for d in site_dims])
+        self.mid_site, self.mid_dim = len(in_out), mid_dim   # vị trí sau khối mid (`inject`)
+        self.obj_xattn = nn.ModuleList([ObjCrossAttn(d, obj_heads) for d in site_dims]) if obj_attn else None
 
     def _trunk(self, x, g, site):
         """Thân U-Net (down / mid / up, chưa final conv); `site(i, x) -> x` gọi ở 6 vị trí (sau cặp ResBlock mỗi tầng)."""
@@ -225,18 +227,20 @@ class ConditionalUnet1D(nn.Module):
         """Token vật của N ảnh (`encode_objects`) -> `ObjKV` cho N·n hàng (n mẫu / ảnh): K / V chiếu một lần."""
         return ObjKV([x.kv(t) for x, t in zip(self.obj_xattn, obj_tokens)], obj_mask, n)
 
-    def forward(self, sample, timestep, global_cond, obj_tokens=None, obj_mask=None):
+    def forward(self, sample, timestep, global_cond, obj_tokens=None, obj_mask=None, inject=None):
         """sample [B, 1, C] (horizon 1), timestep [B] long, global_cond [B, G] -> [B, 1, out]. obj_tokens (list 6 của `encode_objects`)
-        + obj_mask [B, M]: cross-attend box vật; `ObjKV` (lấy mẫu, obj_mask bỏ qua); None = tắt (eval `_noobj`)."""
+        + obj_mask [B, M]: cross-attend box vật; `ObjKV` (lấy mẫu, obj_mask bỏ qua); None = tắt (eval `_noobj`). `inject(h) -> h`:
+        gọi ở `mid_site` sau cross-attn (refiner chèn giữa U-Net)."""
         x = sample.permute(0, 2, 1)                          # b h t -> b t h
         timesteps = timestep.expand(sample.shape[0])
         g = torch.cat([self.diffusion_step_encoder(timesteps), global_cond], dim=-1)
 
         def site(i, x_):
-            if obj_tokens is None:
-                return x_
-            if isinstance(obj_tokens, ObjKV):
-                return self.obj_xattn[i].forward_kv(x_, obj_tokens.kv[i], obj_tokens.mask, obj_tokens.n)
-            return self.obj_xattn[i](x_, obj_tokens[i], obj_mask)
+            if obj_tokens is not None:
+                if isinstance(obj_tokens, ObjKV):
+                    x_ = self.obj_xattn[i].forward_kv(x_, obj_tokens.kv[i], obj_tokens.mask, obj_tokens.n)
+                else:
+                    x_ = self.obj_xattn[i](x_, obj_tokens[i], obj_mask)
+            return inject(x_) if inject is not None and i == self.mid_site else x_
         x = self._trunk(x, g, site)
         return self.final_conv(x).permute(0, 2, 1)

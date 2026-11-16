@@ -9,7 +9,7 @@
               scores (C-NLL từng box: chế độ chọn CHỌN SẴN `preselect` trên màn chưa lưu)}]
             chỉ số i = vị trí trong danh sách box GỐC của file chú thích (kết quả ghi theo chỉ số này)
   meta      (tuỳ chọn) dict ghi kèm vào dòng kết quả (chế độ chọn)
-  group     (tuỳ chọn) khoá chia việc giữa người rà (`app.split_screens`): mọi màn cùng group về MỘT người (mặc định = id)
+  group     (tuỳ chọn) khoá chia việc giữa người rà (`cegen.split_items`): mọi màn cùng group về MỘT người (mặc định = id)
 """
 
 import glob

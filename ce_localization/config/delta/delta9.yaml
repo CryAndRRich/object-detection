@@ -1,0 +1,9 @@
+# DELTA9 (docs/EXPERIMENT_DELTA.md mục 8) = DELTA8 chỉ tới ep 10 (11.020 iter, giữ lịch lr 7.0.2 ⇒ đúng đoạn đầu DELTA8), chỉ ghi
+# snapshot ep 10 — nền của 12 ablation một biến `delta9_<k>.yaml` (server 2, 1 GPU batch 64; chốt 2026-11-16) và mốc DELTA8 chạy lại.
+base: [delta8.yaml]
+experiment: "delta9"
+description: "DELTA8 tới ep 10 (11.020 iter, lịch lr 7.0.2), chỉ snapshot ep 10"
+training:
+  max_iter: 11020                   # 10 epoch × 1.102 iter
+  snapshot_every_epochs: 10
+  snapshot_initial: false

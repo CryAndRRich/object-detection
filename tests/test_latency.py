@@ -132,7 +132,7 @@ def test_latency_celoc_flow(tmp_path, monkeypatch):
     cc = fake_cocount(str(tmp_path / "cc"))
     rv = fake_review(cc, str(tmp_path / "rv.jsonl"))
     lat.main(["celoc", "--ckpt", os.path.join(w, "last.pth"), "--device", "cpu", "--turn-index", os.path.join(base, "turn_index.json"),
-              "--samples-root", os.path.join(base, "samples"), "--ce130-root", os.path.join(base, "all_phase2_V2"),
+              "--samples-root", os.path.join(base, "samples"),
               "--cocount-root", cc, "--cocount-review", rv, "--n", "1", "--warmup", "1", "--out-root", str(tmp_path / "lat")])
     r = _read(tmp_path, "w_last")
     assert r["K"] == 3 and len(r["images"]) == 2 and all(x["n_boxes"] == 3 for x in r["images"]) and r["sampler"] == "mock"

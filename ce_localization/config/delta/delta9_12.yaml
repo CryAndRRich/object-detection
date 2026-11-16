@@ -1,0 +1,10 @@
+# DELTA9.12 (docs/EXPERIMENT_DELTA.md mục 8) — ablation MỘT biến của DELTA8 ep 10 (`delta9.yaml`): MỘT CLIP L/14 (lưới ảnh 16×16, chữ 768-d) cho ảnh refiner + chữ refiner + chữ U-Net.
+base: [delta9.yaml]
+experiment: "delta9_12"
+description: "DELTA9 CLIP thống nhất L/14"
+model:
+  clip_text: "openai/clip-vit-large-patch14"
+  text_dim: 768
+  refiner:
+    clip_model_name: "openai/clip-vit-large-patch14"
+    text_model_name: "openai/clip-vit-large-patch14"

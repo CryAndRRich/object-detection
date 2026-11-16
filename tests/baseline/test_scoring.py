@@ -29,7 +29,7 @@ def _eval_geo(ds):
 def test_ce130_geometry_scale_prior_match_eval(tmp_path):
     root, samples_root, ti = fake_ce130(str(tmp_path))
     samples, index = load_samples("ce130", turn_index=ti, samples_root=samples_root)
-    ev = _eval_geo(CE130AddDataset(index, root, samples_root, "test_all"))
+    ev = _eval_geo(CE130AddDataset(index, samples_root, "test_all"))
     assert [s["image_id"] for s in samples] == [r["image_id"] for r in ev]
     geo = lambda s: geometry(s, index=index, samples_root=samples_root)  # noqa: E731
     K = 3
