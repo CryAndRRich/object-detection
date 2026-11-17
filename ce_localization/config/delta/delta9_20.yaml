@@ -1,0 +1,8 @@
+# DELTA9.20 (docs/EXPERIMENT_DELTA.md mục 8) — ablation MỘT biến của DELTA8 ep 10 (`delta9.yaml`): CLIP CHỮ của U-Net L/14 (pooler 768-d
+# ⇒ `text_dim: 768`; DELTA8 B/32). Ảnh refiner B/32 + chữ refiner B/16 giữ nguyên.
+base: [delta9.yaml]
+experiment: "delta9_20"
+description: "DELTA9 CLIP chữ U-Net L/14"
+model:
+  clip_text: "openai/clip-vit-large-patch14"
+  text_dim: 768

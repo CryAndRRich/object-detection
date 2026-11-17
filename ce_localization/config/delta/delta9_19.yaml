@@ -1,0 +1,7 @@
+# DELTA9.19 (docs/EXPERIMENT_DELTA.md mục 8) — ablation MỘT biến của DELTA8 ep 10 (`delta9.yaml`): CLIP CHỮ của U-Net B/16 (pooler 512-d;
+# DELTA8 B/32). Ảnh refiner B/32 + chữ refiner B/16 giữ nguyên.
+base: [delta9.yaml]
+experiment: "delta9_19"
+description: "DELTA9 CLIP chữ U-Net B/16"
+model:
+  clip_text: "openai/clip-vit-base-patch16"

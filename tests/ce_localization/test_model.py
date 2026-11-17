@@ -551,24 +551,29 @@ def test_ablation_modes_loss_grads_identity(mode):
     assert sfx == [""] + (["_noobj"] if m.obj_attn else []) + (["_norefine"] if mode not in ("norefine", "none") else [])
 
 
-@pytest.mark.parametrize("vision, clip", [("r50_paper", None), ("r18_paper", "openai/clip-vit-base-patch32"),
-                                          ("r18_paper", "openai/clip-vit-base-patch16"), ("r18_paper", "openai/clip-vit-large-patch14")])
-def test_ablation_backbones(vision, clip, monkeypatch):
-    """DELTA9.8–9.12: ResNet50 (101 cùng đường code, dựng thật ở `test_build_model_only_delta4_plus`) -> SpatialSoftmax C5 2048 kênh (4096 -> vis_dim); MỘT CLIP cho ảnh + chữ refiner (lưới 7 / 14 /
-    16 = ảnh / patch, chiều token chữ 512 / 768) — forward + backward chạy."""
+B32, B16, L14 = "openai/clip-vit-base-patch32", "openai/clip-vit-base-patch16", "openai/clip-vit-large-patch14"
+
+
+@pytest.mark.parametrize("vision, img, txt, text_in", [("r50_paper", B32, B16, 512), ("r18_paper", B32, B32, 512),
+                                                        ("r18_paper", B16, B16, 512), ("r18_paper", L14, L14, 768),
+                                                        ("r18_paper", L14, B16, 512), ("r18_paper", B32, L14, 512),
+                                                        ("r18_paper", B32, B16, 768)])
+def test_ablation_backbones(vision, img, txt, text_in, monkeypatch):
+    """DELTA9.8–9.12, 9.16–9.20: ResNet50 (101 cùng đường code, dựng thật ở `test_build_model_only_delta4_plus`) -> SpatialSoftmax C5
+    2048 kênh (4096 -> vis_dim); CLIP ảnh / chữ refiner / chữ U-Net đổi ĐỘC LẬP: lưới 7 / 14 / 16 theo CLIP ảnh, chiều token chữ
+    refiner 512 / 768 theo CLIP chữ refiner (không theo CLIP ảnh), pooler U-Net `text_in` 512 / 768 — forward + backward chạy."""
     import ce_localization.models.clip_refiner as cr
     seen, orig = [], cr.load_clip
     monkeypatch.setattr(cr, "load_clip", lambda name, text_name: (seen.append((name, text_name)), orig(name, text_name))[1])
-    cr_kw = {} if clip is None else {"clip_model_name": clip, "text_model_name": clip}
-    text_dim = 768 if clip and "large" in clip else 512
-    m = small_policy(refiner=cr_kw, vision=vision, text_in=text_dim).train()
+    m = small_policy(refiner={"clip_model_name": img, "text_model_name": txt}, vision=vision, text_in=text_in).train()
     assert m.vision.projection.in_features == (4096 if vision != "r18_paper" else 1024)
-    if clip:
-        size, patch, _ = FAKE_VIT[clip]
-        assert seen == [(clip, clip)] and m.refiner.grid == size // patch
+    size, patch, _ = FAKE_VIT[img]
+    tok_dim = 768 if "large" in txt else 512
+    assert seen == [(img, txt)] and m.refiner.grid == size // patch
+    assert m.refiner.text_proj[1].in_features == tok_dim and m.text_proj[0].in_features == text_in
     x, _, vhw, x0, tok, objs = small_batch()
     g = torch.Generator().manual_seed(1)
-    text, tok = torch.randn(2, text_dim, generator=g), (torch.randn(2, 5, text_dim, generator=g), tok[1])
+    text, tok = torch.randn(2, text_in, generator=g), (torch.randn(2, 5, tok_dim, generator=g), tok[1])
     m(x, text, vhw, x0, generator=torch.Generator().manual_seed(4), objects=objs, text_tokens=tok).backward()
 
 

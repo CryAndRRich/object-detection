@@ -169,7 +169,12 @@ def test_configs_inherit_only_intended_keys(tmp_path):
                8: {"vision": "r50_paper"}, 9: {"vision": "r101_paper"}, 10: clip("openai/clip-vit-base-patch32"),
                11: clip("openai/clip-vit-base-patch16"), 12: {**clip("openai/clip-vit-large-patch14"), "text_dim": 768},
                13: {"refiner": {"aux_loss_weight": 0.05}}, 14: {"refiner": {"aux_loss_weight": 0.2}},
-               15: {"refiner": {"aux_loss_weight": 0.5}}}
+               15: {"refiner": {"aux_loss_weight": 0.5}},
+               16: {"refiner": {"clip_model_name": "openai/clip-vit-base-patch16"}},    # 9.16–9.20: đổi MỘT trong 3 CLIP
+               17: {"refiner": {"clip_model_name": "openai/clip-vit-large-patch14"}},
+               18: {"refiner": {"text_model_name": "openai/clip-vit-large-patch14"}},
+               19: {"clip_text": "openai/clip-vit-base-patch16"},
+               20: {"clip_text": "openai/clip-vit-large-patch14", "text_dim": 768}}
     for k, diff in one_var.items():
         run = f"delta9_{k}"
         assert L(run) == merge(L("delta9"), {"experiment": run, "description": L(run)["description"], "model": diff}), run

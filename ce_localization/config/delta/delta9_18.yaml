@@ -1,0 +1,8 @@
+# DELTA9.18 (docs/EXPERIMENT_DELTA.md mục 8) — ablation MỘT biến của DELTA8 ep 10 (`delta9.yaml`): CLIP CHỮ của refiner L/14 (token 768-d,
+# refiner tự đọc cỡ; DELTA8 B/16). Ảnh refiner B/32 + chữ U-Net B/32 giữ nguyên. Chữ refiner B/32 = 9.10.
+base: [delta9.yaml]
+experiment: "delta9_18"
+description: "DELTA9 CLIP chữ refiner L/14"
+model:
+  refiner:
+    text_model_name: "openai/clip-vit-large-patch14"
