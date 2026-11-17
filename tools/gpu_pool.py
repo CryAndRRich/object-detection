@@ -29,7 +29,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gpu_hold import GIB, _asked, _pid_alive  # noqa: E402
 
 CHUNK = 0.25                # GiB / khúc giữ
-HOLD_OFF = 3.0              # s: gốc không gom sau khi làn bàn giao / nhận lại chỗ từ bước
+HOLD_OFF = 3.0              # s: gốc / làn không gom sau khi một làn bàn giao / nhận lại chỗ từ bước
+ROOT_WAIT = 120.0           # s: khách chờ gốc khởi động (pool.pid) trước khi tự gom
+REGATHER_WAIT = 120.0       # s: làn gom lại chưa đủ sau ngần này -> vẫn ready
 
 
 class Holder:
@@ -140,12 +142,20 @@ def root(d, total, margin=1.0, poll=1.0, log=print, sleep=time.sleep, clock=time
 
 def _ask_parent(pd, cid, gib, h, stop, log, sleep, poll):
     """Xin `gib` từ gốc `pd` dưới tên `cid`, gom phần gốc vừa nhả -> True (False: dừng giữa chừng)."""
+    def alive():
+        try:
+            return _pid_alive(int(open(os.path.join(pd, "pool.pid")).read() or 0))
+        except (OSError, ValueError):
+            return False
+    for _ in range(int(ROOT_WAIT / poll)):                               # gốc vừa khởi động chưa ghi pool.pid: CHỜ, đừng tự gom
+        if alive() or stop():                                           # (server 2 2026-11-16: làn 1 tự gom -> gốc không tính
+            break                                                       # phần làn 1, giữ thừa 10,5 GiB -> các làn kẹt cả đêm)
+        sleep(poll)
     tmp = os.path.join(pd, f".tmp_want_{cid}")
     with open(tmp, "w") as fh:
         fh.write(f"{os.getpid()} {gib:g}")
     os.replace(tmp, os.path.join(pd, f"want.{cid}"))                    # ghi nguyên tử: gốc không đọc nửa file
     log(f"[làn] xin gốc {gib:g} GiB ({cid})", flush=True)
-    alive = lambda: os.path.exists(os.path.join(pd, "pool.pid")) and _pid_alive(int(open(os.path.join(pd, "pool.pid")).read() or 0))
     while not os.path.exists(os.path.join(pd, f"freed.{cid}")):
         if stop():
             return False
@@ -183,6 +193,8 @@ def lane(d, need, poll=1.0, log=print, sleep=time.sleep, clock=time.time, torch=
         log(f"[làn {me}] ready, giữ {h.gib:.2f} GiB", flush=True)
     while not stop():
         if not os.path.exists(f("want")):
+            if h.gib < need - CHUNK / 2 and not _fresh(os.path.join(pd, "hold_off"), clock, HOLD_OFF):
+                h.take(need - h.gib, 0.3)                               # đã ready khi còn thiếu -> gom tiếp lúc rảnh
             sleep(poll)
             continue
         pid, ask = _asked(f("want"))
@@ -202,10 +214,11 @@ def lane(d, need, poll=1.0, log=print, sleep=time.sleep, clock=time.time, torch=
         _touch(os.path.join(pd, "hold_off"))
         t0 = clock()
         while h.gib < need - CHUNK / 2 and not stop():                   # gom lại phần của làn (bước vừa trả)
-            if not h.take(need - h.gib, 0.3):
-                if clock() - t0 > 600:
-                    log(f"[làn {me}] vẫn gom lại: {h.gib:.2f} / {need:g} GiB", flush=True)
-                    t0 = clock()
+            if _fresh(os.path.join(pd, "hold_off"), clock, HOLD_OFF) or not h.take(need - h.gib, 0.3):
+                if clock() - t0 > REGATHER_WAIT:                         # không chờ đủ mãi (server 2 2026-11-16: 3 làn cùng
+                    log(f"[làn {me}] gom lại mới {h.gib:.2f} / {need:g} GiB sau {REGATHER_WAIT:g} s -> vẫn ready "
+                        "(bước tự gom phần thiếu; làn gom tiếp lúc rảnh)", flush=True)  # chờ đủ -> kẹt chéo 8 giờ)
+                    break
                 sleep(0.2)
         if top:                                                          # trả phần xin thêm cho gốc
             _rm(os.path.join(pd, f"want.{me}-top"))
@@ -224,10 +237,11 @@ def main(argv=None):
     role, d, gib, rest = a[0], a[1], float(a[2]), a[3:]
     opt = {k.lstrip("-"): float(v) for k, v in zip(rest[::2], rest[1::2])}
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:False")
+    log = lambda *x, **k: print(time.strftime("%m-%d %H:%M:%S"), *x, **k)
     if role == "root":
-        root(d, gib, margin=opt.get("margin", 1.0), poll=opt.get("poll", 1.0))
+        root(d, gib, margin=opt.get("margin", 1.0), poll=opt.get("poll", 1.0), log=log)
     else:
-        lane(d, gib, poll=opt.get("poll", 1.0))
+        lane(d, gib, poll=opt.get("poll", 1.0), log=log)
 
 
 if __name__ == "__main__":

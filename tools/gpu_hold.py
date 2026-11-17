@@ -201,6 +201,16 @@ def grab(gib, margin, poll=10.0, release=False, log=print, sleep=time.sleep, clo
             raise SystemExit("[gom GPU] người giữ chỗ đã nhả mà 60 s vẫn không mở được CUDA context (OOM)")
     t0 = clock()
     blocks, held = _gather(torch, gib, margin, poll, log, sleep, clock, heartbeat)
+    while len(blocks) > 1 and not release:
+        # gộp thành MỘT segment: model nằm trong nó ⇒ `emptyCache` C++ của cudnn.benchmark không trả được. Nhiều khúc thì khúc
+        # model chưa chạm bị trả về driver (server 2 2026-11-16: 9.5 gom 3,4 + 4,6, mất khúc trống ở iter đầu, OOM)
+        del blocks[:]
+        torch.cuda.empty_cache()
+        try:
+            blocks = [torch.empty(int(held * GIB), dtype=torch.uint8, device="cuda")]
+        except torch.cuda.OutOfMemoryError:        # người khác chen đúng khe hở -> gom lại
+            log("[gom GPU] gộp khối hụt (người khác vừa chen) -> gom lại", flush=True)
+            blocks, held = _gather(torch, gib, margin, poll, log, sleep, clock, heartbeat)
     del blocks
     log(f"[gom GPU] đủ {held:.1f} GiB sau {(clock() - t0) / 60:.0f} phút", flush=True)
     if release:

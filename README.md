@@ -137,6 +137,10 @@ Nhiều keeper riêng cùng gom trên một GPU sẽ lấy chỗ của nhau (DEL
 - **bước** `run_on_free_gpu.py --handoff DIR/<làn> …` như với `--keeper`; bước xin nhiều hơn làn đang giữ thì làn xin thêm từ gốc, xong trả lại.
 
 Gốc không gom trong lúc khách đang nhận chỗ hay ngay sau khi làn bàn giao cho bước. Bước chạy `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False`.
+Bài học lần chạy 2026-11-16 (kẹt chéo 8 giờ):
+- khởi động gốc xong (`pool.pid`) mới mở làn; làn tự chờ gốc tới 120 s. Làn tự gom khi gốc chưa lên thì gốc không tính phần đó và giữ thừa;
+- bước gom nhiều khúc thì gộp lại MỘT segment: khúc model chưa chạm vẫn bị `emptyCache` của cuDNN trả về driver;
+- làn gom lại sau bước quá 120 s chưa đủ thì vẫn ready, gom tiếp lúc rảnh. Chờ đủ mới ready thì các làn chờ nhau mãi.
 Khuôn đầy đủ: lệnh ablation DELTA9 (`log/add/ablation/orchestra_*.log`).
 
 ### Khuôn lệnh chuỗi

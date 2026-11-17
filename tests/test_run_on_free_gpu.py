@@ -196,11 +196,11 @@ def test_grab_waits_and_keeps_margin(monkeypatch):
     monkeypatch.setitem(sys.modules, "torch", t)
     sleeps = []
     got = _hold_mod().grab(40, 3.5, poll=10, log=lambda *a, **k: None, sleep=sleeps.append, clock=lambda: 0.0)
-    assert st["allocs"] == [20.0, 10.5, 9.5] and got == 40
+    assert st["allocs"] == [20.0, 10.5, 9.5, 40.0] and got == 40  # 3 khúc rồi gộp MỘT segment (emptyCache cudnn không trả được)
     assert len(sleeps) == 3                                # đọc 4 lần, ngủ giữa các lần
     assert st["live"] == 0 and st["cached"] == 40 * 2 ** 30  # nhả vào cache, không về driver
     t.cuda.empty_cache()
-    assert st["cached"] == 40 * 2 ** 30 and st["emptied"] == 0
+    assert st["cached"] == 40 * 2 ** 30 and st["emptied"] == 1  # 1 lần lúc gộp; sau đó empty_cache vô hiệu
 
 
 def test_grab_release_returns_memory(monkeypatch):
@@ -483,4 +483,52 @@ def test_pool_root_lanes_step_topup(monkeypatch, tmp_path):
     until(lambda: abs(free() - 4) < 1e-6 and not list(root_d.glob("want.*")), msg="gốc gom lại sau khi làn dừng")
     (root_d / "stop").write_text("")
     th[0].join(5)
+    assert not any(x.is_alive() for x in th) and abs(free() - 20) < 1e-6
+
+
+def _pool_mod(monkeypatch, **consts):
+    spec = importlib.util.spec_from_file_location("gpu_pool", os.path.join(_HERE, "tools", "gpu_pool.py"))
+    pool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pool)
+    for k, v in consts.items():
+        monkeypatch.setattr(pool, k, v)
+    return pool
+
+
+def _until(c, free, sec=10, msg=""):
+    import time as _t
+    end = _t.time() + sec
+    while not c():
+        assert _t.time() < end, f"quá giờ {msg}: trống {free():.2f}"
+        _t.sleep(0.01)
+
+
+def test_pool_lane_waits_root_startup_and_never_hangs_regathering(monkeypatch, tmp_path):
+    """(1) Làn khởi động TRƯỚC gốc -> chờ gốc, gốc tính phần làn (server 2 2026-11-16: làn tự gom, gốc giữ thừa 10,5 GiB).
+    (2) Bước xong mà người khác giữ mất chỗ -> làn vẫn ready sau REGATHER_WAIT (không kẹt chéo), rảnh thì gom tiếp đủ NEED."""
+    import threading
+    import time as _t
+    pool = _pool_mod(monkeypatch, HOLD_OFF=0.05, REGATHER_WAIT=0.3)
+    t, st = _pool_torch(20)
+    free = lambda: st["free"] / 2 ** 30
+    root_d, a_d = tmp_path / "pool", tmp_path / "pool" / "a"
+    q = lambda *a, **k: None
+    th = [threading.Thread(target=pool.lane, args=(str(a_d), 5), kwargs=dict(poll=0.01, log=q, torch=t), daemon=True)]
+    th[0].start()
+    _t.sleep(0.2)
+    th.append(threading.Thread(target=pool.root, args=(str(root_d), 16), kwargs=dict(margin=1, poll=0.01, log=q, torch=t),
+                               daemon=True))
+    th[1].start()
+    _until(lambda: (a_d / "ready").exists() and abs(free() - 4) < 1e-6, free, msg="gốc 11 + làn 5")
+    (a_d / "want").write_text(f"{os.getpid()} 5")
+    _until(lambda: (a_d / "freed").exists(), free, msg="nhả cho bước")
+    other = t.empty(int(7 * 2 ** 30))                               # người khác chiếm 7 trong 9 trống
+    (a_d / "want").unlink()
+    _until(lambda: (a_d / "ready").exists(), free, msg="ready dù thiếu")
+    del other
+    _until(lambda: abs(free() - 4) < 1e-6, free, msg="gom tiếp đủ 5 lúc rảnh")
+    (a_d / "stop").write_text("")
+    th[0].join(5)
+    (root_d / "stop").write_text("")
+    th[1].join(5)
     assert not any(x.is_alive() for x in th) and abs(free() - 20) < 1e-6

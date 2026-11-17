@@ -22,7 +22,7 @@ JET = (np.stack([np.interp(_X, [p[0] for p in s], [p[1] for p in s]) for s in _J
 
 CFG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "ce_localization", "config", "delta")
 RUNS = ("delta4", "delta5", "delta5_1", "delta5_2", "delta5_3", "delta5_4", "delta5_5", "delta6", "delta6_1", "delta6_2", "delta7",
-        "delta7_0_1", "delta7_0_2", "delta7_1", "delta8", "delta8_1", "delta9", *(f"delta9_{k}" for k in range(1, 13)))
+        "delta7_0_1", "delta7_0_2", "delta7_1", "delta8", "delta8_1", "delta9", *(f"delta9_{k}" for k in range(1, 16)))
 FAKE_TEXT_SHA = hashlib.sha256(b"fake CLIP text").digest()
 # ViT thật -> (ảnh, patch, hidden giả): cùng lưới g = ảnh / patch như bản thật
 FAKE_VIT = {"openai/clip-vit-base-patch16": (224, 16, 32), "openai/clip-vit-base-patch32": (224, 32, 32),

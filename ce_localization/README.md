@@ -35,7 +35,7 @@ U-Net 1D nhận [x_t ; refined] -> ε̂ ;  loss = ε-MSE + aux_loss_weight · [M
 | `delta8` | `delta7_0_2` chỉ 15 epoch đầu (16.530 iter, giữ lịch lr 7.0.2), snapshot mọi epoch + `ep000` (`training.snapshot_initial`) | mục 6 |
 | `delta8_1` | `delta8` + box log + GIoU 0,1 (2 khoá model của `delta7_1`) | mục 6 |
 | `delta9` | `delta8` tới ep 10 (11.020 iter), chỉ snapshot ep 10 — nền ablation | mục 8 |
-| `delta9_1` … `9_12` | `delta9` đổi MỘT biến: bỏ refiner / bỏ attention box vật / aux 0 / refiner post / mid / none (chỉ refiner) / U-Net [128,256,512] / ResNet50 / ResNet101 / CLIP thống nhất B/32 / B/16 / L/14 (`text_dim: 768`) | mục 8 |
+| `delta9_1` … `9_15` | `delta9` đổi MỘT biến: bỏ refiner / bỏ attention box vật / aux 0 / refiner post / mid / none (chỉ refiner) / U-Net [128,256,512] / ResNet50 / ResNet101 / CLIP thống nhất B/32 / B/16 / L/14 (`text_dim: 768`) / `aux_loss_weight` 0,05 / 0,2 / 0,5 | mục 8 |
 
 ## Chạy (server, trong `object-detection/ce_localization/`)
 

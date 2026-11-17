@@ -1,0 +1,7 @@
+# DELTA9.13 (docs/EXPERIMENT_DELTA.md mục 8) — ablation MỘT biến của DELTA8 ep 10 (`delta9.yaml`): trọng số loss phụ MSE(refined, x0) 0,05 (DELTA8 0,1; 9.3 = 0).
+base: [delta9.yaml]
+experiment: "delta9_13"
+description: "DELTA9 trọng số loss phụ refiner 0.05 (aux_loss_weight)"
+model:
+  refiner:
+    aux_loss_weight: 0.05
