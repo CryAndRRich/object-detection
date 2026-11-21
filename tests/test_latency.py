@@ -136,3 +136,109 @@ def test_latency_celoc_flow(tmp_path, monkeypatch):
               "--cocount-root", cc, "--cocount-review", rv, "--n", "1", "--warmup", "1", "--out-root", str(tmp_path / "lat")])
     r = _read(tmp_path, "w_last")
     assert r["K"] == 3 and len(r["images"]) == 2 and all(x["n_boxes"] == 3 for x in r["images"]) and r["sampler"] == "mock"
+
+
+# ----------------------------------------------------------------------------- bộ nhớ GPU (`--mem`)
+
+def test_proc_tree_and_query_apps(monkeypatch):
+    ps = "  1     0\n 10     1\n 11    10\n 12    11\n 20     1\n 13    10\n"
+    assert lat.proc_tree(10, ps) == {10, 11, 12, 13} and lat.proc_tree(99, ps) == {99}
+
+    class R:
+        stdout = "11, 1024\n12, [N/A]\n30, 512\n11, 256\nNo running processes found\n"
+    monkeypatch.setattr(lat.subprocess, "run", lambda *a, **k: R())
+    assert lat.query_apps() == {11: 1280.0, 30: 512.0}                 # cùng PID trên 2 GPU cộng lại; [N/A] bỏ
+
+
+def test_gpumem_window_counts_only_own_tree():
+    """Đỉnh cửa sổ = max các mẫu giữa begin / end của cây tiến trình mình (job khác không tính); cây dựng lại định kỳ (tiến trình con
+    sinh sau, như vLLM EngineCore)."""
+    seq = iter([{1: 1024.0, 99: 9000.0}, {1: 1024.0, 2: 3072.0}, {1: 1024.0, 2: 1024.0}, {1: 1024.0}, {1: 512.0}])
+    trees = iter([{1}, {1, 2}])
+    m = lat.GpuMem(query=lambda: next(seq), tree=lambda r: next(trees), root=1, tree_every=1)
+    assert m.load() == 1.0 and m.seen                                     # 1024 MiB = 1 GiB; PID 99 (người khác) không tính
+    m.begin()                                                             # mẫu 2: 4096 (cây mới có PID 2)
+    m.tree = lambda r: {1, 2}
+    m.sample()                                                            # 2048
+    out = m.end()                                                         # 1024
+    assert out == {"proc_gib": 4.0}
+
+
+def test_gpumem_window_resets():
+    vals = iter([{1: 4096.0}, {1: 2048.0}, {1: 1024.0}, {1: 1024.0}])
+    m = lat.GpuMem(query=lambda: next(vals), tree=lambda r: {1}, root=1)
+    m.begin(); r1 = m.end()
+    m.begin(); r2 = m.end()
+    assert r1 == {"proc_gib": 4.0} and r2 == {"proc_gib": 1.0}
+
+
+def test_gpumem_thread_samples_in_background():
+    import time as _t
+    n = []
+    m = lat.GpuMem(poll=0.01, query=lambda: n.append(1) or {1: 100.0}, tree=lambda r: {1}, root=1).start()
+    _t.sleep(0.1)
+    m.stop()
+    assert len(n) >= 3 and not m.th.is_alive()
+
+
+def test_summarize_mem_and_set_dotted():
+    rows = {"ce130": [{"image_id": "a", "proc_gib": 2.0, "alloc_gib": 1.0, "reserved_gib": 1.5},
+                      {"image_id": "b", "proc_gib": 3.0, "alloc_gib": 0.5, "reserved_gib": 1.5}],
+            "cocount": [{"image_id": "c", "proc_gib": 2.5, "alloc_gib": 1.2, "reserved_gib": 2.0}]}
+    s = lat.summarize_mem(rows, 1.7)
+    assert (s["load_gib"], s["peak_proc_gib"], s["peak_proc_image"], s["peak_alloc_gib"], s["peak_alloc_image"]) == (1.7, 3.0, "b", 1.2, "c")
+    assert s["per_dataset"]["ce130"]["peak_alloc_image"] == "a" and s["peak_reserved_image"] == "c"
+    assert "peak_alloc_gib" not in lat.summarize_mem({"x": [{"image_id": "v", "proc_gib": 9.0}]}, 8.0)   # vLLM: chỉ proc
+    shared = {"kv_cache_gib": 14.0, "gpu_mem_gib": 34.0}
+    cfg = {"vllm": shared, "engine": {"max_num_seqs": 64}}
+    done = lat.set_dotted(cfg, ["vllm.kv_cache_gib=2", "engine.max_num_seqs=1", "engine.enforce_eager=true"])
+    assert cfg["vllm"] == {"kv_cache_gib": 2, "gpu_mem_gib": 34.0} and shared["kv_cache_gib"] == 14.0      # không sửa dict gốc
+    assert cfg["engine"] == {"max_num_seqs": 1, "enforce_eager": True} and done["engine.max_num_seqs"] == 1
+    with pytest.raises(SystemExit):
+        lat.set_dotted(cfg, ["vllm.kv_cache_gib"])
+
+
+def test_zeta_mem_flow(tmp_path, monkeypatch, data):
+    """Trọn luồng `zeta --mem` (CPU, nvidia-smi giả): JSON ở <out-root>/mem/, mỗi ảnh đo có proc_gib, đỉnh + ảnh gây đỉnh; không đè
+    JSON latency; API / OracleLoc bị từ chối."""
+    import itertools
+    mib = itertools.count(1024, 256)
+    monkeypatch.setattr(lat, "query_apps", lambda: {os.getpid(): float(next(mib))})
+    cfg_path, cfg = tiny_cfg(tmp_path, "zeta1")
+    ck = fake_ckpt(cfg, tmp_path / "init.pth")
+    lat.main(["zeta", "--config", cfg_path, "--ckpt", str(ck), "--device", "cpu", "--mem", "--mem-poll", "0.01", *data])
+    assert not (tmp_path / "lat" / "zeta1_tiny_init.json").exists()
+    with open(tmp_path / "lat" / "mem" / "zeta1_tiny_init.json") as f:
+        r = json.load(f)
+    m = r["mem"]
+    assert m["load_gib"] >= 1.0 and m["pid_seen"] and m["poll_s"] == 0.01 and "peak_alloc_gib" not in m     # CPU: không torch.cuda
+    assert len(r["images"]) == 4 and all(x["proc_gib"] > m["load_gib"] for x in r["images"])
+    assert m["peak_proc_gib"] == max(x["proc_gib"] for x in r["images"]) and m["peak_proc_image"] in {x["image_id"] for x in r["images"]}
+    assert set(m["per_dataset"]) == {"ce130", "cocount"}
+    cfg7, _ = tiny_cfg(tmp_path, "zeta7")
+    with pytest.raises(SystemExit, match="--mem"):
+        lat.main(["zeta", "--config", cfg7, "--criterion", "euclid_px-free-k1", "--mem", *data])
+
+
+def test_vlm_mem_overrides_reach_backend(tmp_path, monkeypatch, data):
+    """`vlm --vllm-set` đổi config TRƯỚC khi dựng backend (KV / số chuỗi batch 1), ghi vào info; prompt_hash không đổi."""
+    from tests.vlm.test_runner import CFG, FakeBackend
+    import yaml
+    seen = []
+    monkeypatch.setattr("vlm.backends.make_backend", lambda cfg, log=print: seen.append(cfg) or FakeBackend())
+    monkeypatch.setattr("vlm.env.load_env", lambda *a, **k: [])
+    p = tmp_path / "vlm.yaml"
+    with open(p, "w") as f:
+        yaml.safe_dump({"base": os.path.abspath(CFG), "k": 5, "icl": 0, "engine": {"max_num_seqs": 64}}, f)
+    lat.main(["vlm", "--config", str(p), *data])
+    h0 = _read(tmp_path, "gpt-6-luna")["prompt_hash"]
+    lat.main(["vlm", "--config", str(p), "--vllm-set", "vllm.kv_cache_gib=2", "engine.max_num_seqs=1", "--name", "ov", *data])
+    r = _read(tmp_path, "ov")
+    assert seen[-1]["vllm"]["kv_cache_gib"] == 2 and seen[-1]["engine"]["max_num_seqs"] == 1
+    lat.main(["vlm", "--config", str(p), "--model", "w/merged", "--vllm-set", "engine.max_num_seqs=1", "--name", "m", *data])
+    assert seen[-1]["model"] == "w/merged" and _read(tmp_path, "m")["model"] == "w/merged"
+    assert r["overrides"] == {"vllm.kv_cache_gib": 2, "engine.max_num_seqs": 1} and r["prompt_hash"] == h0
+    with pytest.raises(SystemExit, match="prompt_hash"):                              # khoá trong hash ⇒ dừng
+        lat.main(["vlm", "--config", str(p), "--vllm-set", "max_tokens=7", *data])
+    with pytest.raises(SystemExit, match="--mem"):                                    # backend openrouter = API
+        lat.main(["vlm", "--config", str(p), "--mem", *data])

@@ -21,6 +21,19 @@ Báo CHỈ số TB giây / ảnh (mỗi tập + chung) kèm tên GPU. Ra `<out-r
   python tools/latency.py zeta --config baseline/config/zeta7_1.yaml --criterion euclid_px-free-k1   # OracleLoc: CPU 1 tiến trình
   <venv vllm>/bin/python tools/run_on_free_gpu.py -- tools/latency.py vlm --config vlm/config/server2/qwen3-vl-4b.yaml   # server 2
   python tools/latency.py vlm --config vlm/config/openrouter/glm-5.3-flash.yaml               # API (key trong vlm/.env)
+
+Bộ nhớ GPU lúc suy luận (`--mem`, chốt 2026-11-21; ra `<out-root>/mem/<name>.json`, KHÔNG đè JSON latency — luồng lấy mẫu làm giờ lệch
+nhẹ ⇒ số giây của lần `--mem` không báo). Cùng tập ảnh, batch 1:
+  - `peak_proc_gib` (SỐ CHÍNH, chung cho torch + vLLM): đỉnh bộ nhớ GPU của CẢ cây tiến trình (vLLM: EngineCore là tiến trình con) theo
+    `nvidia-smi --query-compute-apps`, lấy mẫu nền mỗi `--mem-poll` s + một lần sau mỗi ảnh; gồm CUDA context + cache allocator;
+    không gồm job người khác trên cùng GPU;
+  - `load_gib`: như trên, ngay sau nạp model, trước warm-up (≈ trọng số + context; vLLM đã giữ sẵn KV + CUDA graph);
+  - `peak_alloc_gib` / `peak_reserved_gib` (chỉ method torch): `torch.cuda.max_memory_{allocated,reserved}` trên các ảnh đo
+    (reset trước mỗi ảnh ⇒ biết ảnh nào gây đỉnh: `peak_*_image`).
+  VLM vLLM giữ trước KV ⇒ số đo = mức config: đo với KV / số chuỗi vừa đủ batch 1, đổi khoá ngoài `prompt_hash` bằng
+  `--vllm-set vllm.kv_cache_gib=2 engine.max_num_seqs=1` (KV thiếu cho MỘT chuỗi `max_model_len` thì vLLM tự báo lỗi lúc khởi động).
+  <venv vllm>/bin/python tools/run_on_free_gpu.py -- tools/latency.py vlm --config vlm/config/server2/qwen3-vl-4b-sft.yaml --mem \
+      --vllm-set vllm.kv_cache_gib=2 engine.max_num_seqs=1
 """
 
 import argparse
@@ -29,6 +42,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))           # object-detection/
@@ -56,9 +70,10 @@ def pick(samples, n, warmup, seed=PICK_SEED):
     return select(samples, seed, n), order[n:n + warmup]
 
 
-def measure(run, measured, warm, prefetch=None, sync=None, tag="", clock=time.perf_counter):
+def measure(run, measured, warm, prefetch=None, sync=None, tag="", clock=time.perf_counter, mem=None):
     """`run(sample)` -> dict có "boxes" (K box) [+ trường phụ]. -> list hàng {image_id, sec, n_boxes, ...} của tập đo. `prefetch(s)`:
-    đọc trước mọi file của ảnh (page cache, không tính giờ); `sync()`: chờ GPU xong. Hàng có "error" (API lỗi) vẫn giữ, không vào TB."""
+    đọc trước mọi file của ảnh (page cache, không tính giờ); `sync()`: chờ GPU xong. Hàng có "error" (API lỗi) vẫn giữ, không vào TB.
+    `mem` (GpuMem): `begin()` trước / `end()` sau mỗi ảnh đo (ngoài khoảng bấm giờ) -> trường bộ nhớ của hàng."""
     sync = sync or (lambda: None)
     for s in list(warm) + list(measured):
         (prefetch or read_bytes)(s)
@@ -68,6 +83,8 @@ def measure(run, measured, warm, prefetch=None, sync=None, tag="", clock=time.pe
     rows, t0 = [], time.time()
     for i, s in enumerate(measured, 1):
         sync()
+        if mem:
+            mem.begin()
         t = clock()
         try:
             out = run(s)
@@ -76,7 +93,7 @@ def measure(run, measured, warm, prefetch=None, sync=None, tag="", clock=time.pe
         except RuntimeError as e:                 # API lỗi sau khi backend đã thử lại: ghi, không vào TB
             out, sec, err = {"boxes": []}, clock() - t, str(e)
         rows.append({"image_id": s["image_id"], "sec": sec, "n_boxes": len(out["boxes"]), **{k: v for k, v in out.items() if k != "boxes"},
-                     **({"error": err} if err else {})})
+                     **({"error": err} if err else {}), **(mem.end() if mem else {})})
         el = time.time() - t0
         log(f"  [{tag} {i:3d}/{len(measured)}] {sec:8.3f} s{'  LỖI ' + err if err else ''} | {el:.0f} s | ETA "
             f"{el / i * (len(measured) - i):.0f} s")
@@ -106,6 +123,145 @@ def gpu_info():
         return [line.strip() for line in subprocess.run(cmd, capture_output=True, text=True, check=True).stdout.splitlines() if line.strip()]
     except (OSError, subprocess.CalledProcessError):
         return []
+
+
+# ----------------------------------------------------------------------------- bộ nhớ GPU (`--mem`)
+
+GIB = 2 ** 30
+MEM_DEFINITION = ("batch 1, cùng tập ảnh latency; peak_proc = đỉnh bộ nhớ GPU của cả cây tiến trình (nvidia-smi compute-apps, lấy mẫu "
+                  "nền + sau mỗi ảnh; gồm CUDA context + cache allocator, không gồm job khác); load = ngay sau nạp model; "
+                  "peak_alloc / peak_reserved = torch.cuda.max_memory_* (chỉ method torch); vLLM: KV theo config đo")
+
+
+def query_apps():
+    """-> {pid: MiB} mọi tiến trình compute trên mọi GPU (nvidia-smi); lỗi -> {}."""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, check=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    apps = {}
+    for line in out.splitlines():
+        parts = [x.strip() for x in line.split(",")]
+        if len(parts) == 2 and parts[0].isdigit():
+            try:
+                apps[int(parts[0])] = apps.get(int(parts[0]), 0.0) + float(parts[1])
+            except ValueError:                                # "[N/A]"
+                pass
+    return apps
+
+
+def proc_tree(root, ps_out=None):
+    """-> {root} ∪ mọi tiến trình con cháu (theo `ps -A -o pid=,ppid=`)."""
+    if ps_out is None:
+        try:
+            ps_out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, check=True, timeout=30).stdout
+        except (OSError, subprocess.SubprocessError):
+            return {root}
+    kids = {}
+    for line in ps_out.splitlines():
+        p = line.split()
+        if len(p) == 2 and p[0].isdigit() and p[1].isdigit():
+            kids.setdefault(int(p[1]), []).append(int(p[0]))
+    tree, stack = {root}, [root]
+    while stack:
+        for c in kids.get(stack.pop(), []):
+            if c not in tree:
+                tree.add(c)
+                stack.append(c)
+    return tree
+
+
+class GpuMem:
+    """Đỉnh bộ nhớ GPU của cây tiến trình này (+ torch max_memory_* nếu `dev` là cuda). `start()` mở luồng lấy mẫu nền mỗi `poll` s;
+    `begin()` / `end()` bao một ảnh -> {proc_gib, [alloc_gib, reserved_gib]}; `load()` = mẫu ngay (sau nạp model)."""
+
+    def __init__(self, dev=None, poll=0.2, query=None, tree=None, root=None, tree_every=10):
+        self.dev = dev if dev is not None and getattr(dev, "type", None) == "cuda" else None
+        self.query, self.tree = query or query_apps, tree or proc_tree
+        self.poll, self.root, self.tree_every = poll, root or os.getpid(), tree_every
+        self.pids, self.n, self.win, self.seen = None, 0, 0.0, False
+        self.lock, self.stop_ev, self.th = threading.Lock(), threading.Event(), None
+
+    def sample(self):
+        """Một mẫu: MiB của cây tiến trình; cập nhật đỉnh cửa sổ hiện tại."""
+        if self.pids is None or self.n % self.tree_every == 0:          # tiến trình con (vLLM EngineCore) có thể sinh sau
+            self.pids = self.tree(self.root)
+        self.n += 1
+        apps = self.query()
+        mib = sum(v for p, v in apps.items() if p in self.pids)
+        with self.lock:
+            self.seen |= any(p in self.pids for p in apps)
+            self.win = max(self.win, mib)
+        return mib
+
+    def _loop(self):
+        while not self.stop_ev.wait(self.poll):
+            self.sample()
+
+    def start(self):
+        self.th = threading.Thread(target=self._loop, daemon=True)
+        self.th.start()
+        return self
+
+    def stop(self):
+        self.stop_ev.set()
+        if self.th:
+            self.th.join(timeout=60)
+
+    def load(self):
+        self.pids = None                                                 # dựng lại cây (tiến trình con mới)
+        return round(self.sample() * 2 ** 20 / GIB, 3)
+
+    def begin(self):
+        if self.dev is not None:
+            import torch
+            torch.cuda.reset_peak_memory_stats(self.dev)
+        with self.lock:
+            self.win = 0.0
+        self.sample()
+
+    def end(self):
+        self.sample()
+        with self.lock:
+            out = {"proc_gib": round(self.win * 2 ** 20 / GIB, 3)}
+        if self.dev is not None:
+            import torch
+            out["alloc_gib"] = round(torch.cuda.max_memory_allocated(self.dev) / GIB, 3)
+            out["reserved_gib"] = round(torch.cuda.max_memory_reserved(self.dev) / GIB, 3)
+        return out
+
+
+def summarize_mem(rows_by_ds, load_gib, seen=True):
+    """{tập: hàng có proc_gib [alloc_gib, reserved_gib]} -> đỉnh chung + từng tập + ảnh gây đỉnh."""
+    def peaks(rs):
+        out = {}
+        for k in ("proc", "alloc", "reserved"):
+            v = [r for r in rs if f"{k}_gib" in r]
+            if v:
+                top = max(v, key=lambda r: r[f"{k}_gib"])
+                out[f"peak_{k}_gib"], out[f"peak_{k}_image"] = top[f"{k}_gib"], top["image_id"]
+        return out
+    allr = [r for rs in rows_by_ds.values() for r in rs]
+    return {"definition": MEM_DEFINITION, "load_gib": load_gib, "pid_seen": seen, **peaks(allr),
+            "per_dataset": {d: peaks(rs) for d, rs in rows_by_ds.items()}}
+
+
+def set_dotted(cfg, items):
+    """`["vllm.kv_cache_gib=2", "engine.max_num_seqs=1"]` -> ghi vào cfg (giá trị đọc kiểu YAML). -> {khoá: giá trị}."""
+    import yaml
+    done = {}
+    for it in items or []:
+        if "=" not in it:
+            raise SystemExit(f"--vllm-set cần dạng khoá.con=giá_trị, nhận '{it}'")
+        key, val = it.split("=", 1)
+        *path, last = key.split(".")
+        d = cfg
+        for p in path:
+            d[p] = dict(d[p]) if isinstance(d.get(p), dict) else {}     # bản sao: không sửa dict dùng chung của config gốc
+            d = d[p]
+        d[last] = done[key] = yaml.safe_load(val)
+    return done
 
 
 def data_ns(a, dataset):
@@ -213,11 +369,18 @@ class VLM:
         self.a = a
         self.cfg = load_config(a.config)
         self.cfg["_path"] = a.config
+        if a.model:
+            self.cfg["model"] = a.model                        # thư mục HF đã merge LoRA (bản SFT), như `vlm/run.py --model`
+        h0 = prompt_hash(self.cfg)
+        overrides = set_dotted(self.cfg, a.vllm_set)
+        if prompt_hash(self.cfg) != h0:
+            raise SystemExit(f"--vllm-set {a.vllm_set} đổi prompt_hash (đổi câu trả lời model) — chỉ đổi khoá bộ nhớ / số chuỗi")
         load_env()
         self.backend = make_backend(self.cfg, log)
         self.sync = None
         self.info = {"config": a.config, "model": self.cfg["model"], "backend": self.cfg["backend"], "K": self.cfg["k"],
-                     "prompt_hash": prompt_hash(self.cfg), "engine": self.cfg.get("engine"), "max_tokens": self.cfg.get("max_tokens")}
+                     "prompt_hash": prompt_hash(self.cfg), "engine": self.cfg.get("engine"), "max_tokens": self.cfg.get("max_tokens"),
+                     "vllm": self.cfg.get("vllm"), **({"overrides": overrides} if overrides else {})}
 
     def setup(self, dataset, samples, geo=None):
         from vlm.parse import fill, parse_scored
@@ -268,6 +431,12 @@ def parse_args(argv=None):
             p.add_argument("--criterion", default=None, help="OracleLoc: tiêu chí đo (mặc định tiêu chí đầu của config)")
         if m in ("zeta", "vlm"):
             p.add_argument("--config", required=True)
+        if m == "vlm":
+            p.add_argument("--model", default=None, help="ghi đè `model` của config (thư mục merge LoRA của finetune.py), như run.py")
+            p.add_argument("--vllm-set", nargs="+", default=None, metavar="KHOÁ=GIÁ_TRỊ",
+                           help="đổi khoá config ngoài prompt_hash, vd vllm.kv_cache_gib=2 engine.max_num_seqs=1 (đo bộ nhớ batch 1)")
+        p.add_argument("--mem", action="store_true", help="đo bộ nhớ GPU lúc suy luận -> <out-root>/mem/<name>.json (docstring)")
+        p.add_argument("--mem-poll", type=float, default=0.2, help="chu kỳ lấy mẫu nền nvidia-smi (s)")
         if m == "celoc":
             p.add_argument("--sampler", default="mock", choices=["mock", "ddim"])
         p.add_argument("--name", default=None, help="tên file ra (mặc định: celoc <run>_<ckpt>, zeta <config>_<ckpt>, vlm cfg name)")
@@ -288,32 +457,52 @@ def main(argv=None):
     from baseline.score import load_data
     a = parse_args(argv)
     name = a.name or default_name(a) + ("" if len(a.datasets) == len(DATASETS) else "_" + "_".join(a.datasets))
-    out = os.path.join(a.out_root, f"{name}.json")
+    out_dir = os.path.join(a.out_root, "mem") if a.mem else a.out_root
+    out = os.path.join(out_dir, f"{name}.json")
     t0 = time.time()
     gpus = gpu_info()
     log(f"[latency] {time.strftime('%Y-%m-%d %H:%M:%S')} | {socket.gethostname()} | {a.method} {name} | {a.n} ảnh đo + {a.warmup} "
-        f"warm-up / tập {a.datasets} | GPU {gpus or '-'}")
+        f"warm-up / tập {a.datasets} | GPU {gpus or '-'}" + (" | ĐO BỘ NHỚ (--mem)" if a.mem else ""))
     m = METHODS[a.method](a)
+    kind = "api" if a.method == "vlm" and m.cfg["backend"] == "openrouter" else "local"
+    mem, load_gib = None, None
+    if a.mem:
+        if kind == "api" or (a.method == "zeta" and m.oracle):
+            raise SystemExit("--mem chỉ cho method chạy GPU ở máy này (không API / OracleLoc CPU)")
+        mem = GpuMem(dev=getattr(m, "dev", None), poll=a.mem_poll).start()
+        load_gib = mem.load()
+        log(f"[mem] sau nạp model: {load_gib:.2f} GiB (cây tiến trình {sorted(mem.pids)})")
     log(f"[latency] nạp xong {time.time() - t0:.0f} s | {m.info}")
     rows = {}
-    for d in a.datasets:
-        samples, _, geo = load_data(data_ns(a, d))
-        measured, warm = pick(samples, a.n, a.warmup)
-        run, prefetch = m.setup(d, measured + warm, geo)
-        log(f"[latency] {d}: đo {len(measured)} / {len(samples)} ảnh, warm-up {len(warm)}")
-        rows[d] = [{"dataset": d, **r} for r in measure(run, measured, warm, prefetch, m.sync, tag=d)]
+    try:
+        for d in a.datasets:
+            samples, _, geo = load_data(data_ns(a, d))
+            measured, warm = pick(samples, a.n, a.warmup)
+            run, prefetch = m.setup(d, measured + warm, geo)
+            log(f"[latency] {d}: đo {len(measured)} / {len(samples)} ảnh, warm-up {len(warm)}")
+            rows[d] = [{"dataset": d, **r} for r in measure(run, measured, warm, prefetch, m.sync, tag=d, mem=mem)]
+    finally:
+        if mem:
+            mem.stop()
     sm = summarize(rows)
-    kind = "api" if a.method == "vlm" and m.cfg["backend"] == "openrouter" else "local"
     res = {"name": name, "method": a.method, "kind": kind, "definition": DEFINITION, **sm, "gpu": gpus if kind == "local" else None,
            "host": socket.gethostname(), "date": time.strftime("%Y-%m-%d %H:%M"), "n_per_dataset": a.n, "warmup": a.warmup,
-           "pick_seed": PICK_SEED, **m.info, "images": [r for d in a.datasets for r in rows[d]]}
-    os.makedirs(a.out_root, exist_ok=True)
+           "pick_seed": PICK_SEED, **m.info}
+    if mem:
+        res["mem"] = {**summarize_mem(rows, load_gib, mem.seen), "poll_s": a.mem_poll}
+    res["images"] = [r for d in a.datasets for r in rows[d]]
+    os.makedirs(out_dir, exist_ok=True)
     with open(out, "w") as f:
         json.dump(res, f, indent=2, ensure_ascii=False, default=str)
     f4 = lambda v: "-" if v is None else f"{v:.4f}"  # noqa: E731
     for d, v in sm["per_dataset"].items():
         log(f"[latency] {d:8s} {v['n']:3d} ảnh | TB {f4(v['latency_s'])} s / ảnh" + (f" | lỗi {v['n_error']}" if v["n_error"] else ""))
     log(f"[latency] CHUNG TB {f4(sm['latency_s'])} s / ảnh ({kind}) -> {out} | {time.time() - t0:.0f} s")
+    if mem:
+        r = res["mem"]
+        f2 = lambda k: f"{r[k]:.2f} GiB ({r[k.replace('_gib', '_image')]})" if k in r else "-"  # noqa: E731
+        log(f"[mem] nạp {load_gib:.2f} GiB | ĐỈNH tiến trình {f2('peak_proc_gib')} | torch allocated {f2('peak_alloc_gib')} | "
+            f"reserved {f2('peak_reserved_gib')}" + ("" if mem.seen else " | ⚠️ nvidia-smi KHÔNG thấy PID nào của job (container?)"))
 
 
 if __name__ == "__main__":

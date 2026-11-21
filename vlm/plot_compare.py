@@ -13,12 +13,12 @@ là pixel canvas 512 (letterbox góc trên trái) -> chia tỉ lệ về pixel �
   python plot_compare.py --dataset ce130 --pilot 20 --n 1      # thử 1 ảnh
   python plot_compare.py --dataset all --pilot 20              # 20 ảnh pilot (hash seed 0, như run.py --pilot 20) cả hai tập
 
-`--grid`: hình bài báo 2 hàng (1 ảnh CE-130 | 1 ảnh CoCount) × 8 cột — CE-Loc | 7 baseline (`GRID`),
-mỗi ô 5 box C-NLL thấp nhất, viền đỏ đậm, tiêu đề = tên phương pháp. Ra `output/add/viz/method_grid/<ce130 id>__<cocount id>.png`.
+`--grid`: hình bài báo, MỘT hàng = một ảnh × 9 cột — Groundtruth (box GT viền xanh lá) | 7 baseline | CE-Loc (`GRID`, CE-Loc
+cuối), mỗi ô model 5 box C-NLL thấp nhất, viền đỏ đậm, tiêu đề = tên phương pháp. Ra `output/add/viz/method_grid/<image_id>.png`.
 
-  python plot_compare.py --grid --seed 0                        # ảnh ngẫu nhiên mỗi tập
-  python plot_compare.py --grid --ids 1050_b1_t1 <cocount_id>   # chọn ảnh
-  python plot_compare.py --grid --rank 50 --dataset all         # 50 ứng viên / tập CE-Loc vượt trội -> method_grid/candidates/
+  python plot_compare.py --grid --dataset all --seed 0                    # một ảnh ngẫu nhiên mỗi tập
+  python plot_compare.py --grid --dataset ce130 --ids 2028_b2_t4 …        # chọn ảnh (mỗi id một hình)
+  python plot_compare.py --grid --rank 50 --dataset all         # 50 ảnh / tập CE-Loc vượt trội -> method_grid/<tập>/NN_<id>.png
 """
 
 import argparse
@@ -51,11 +51,13 @@ BLUE, GREEN, RED = "#1e6fff", "#00b050", "#e8000b"
 # --grid: cột (tên trong hình, nguồn) — nguồn ("vlm", model) | ("run", run, snapshot) = output/add/baseline/<run>/<tập>/<snapshot>_boxes.json.
 # CE-Loc bắt buộc (cột đầu); còn lại: closed-source, open-source (chọn theo C-NLL min / 30 tốt), finetune. Không cột Groundtruth.
 # CE-Loc = bản qua lọc tay (box `selected` của output/add/review/delta8_ep010/pred_<ce130|cocount>_celoc.jsonl, pixel ảnh gốc).
-GRID = [("CE-Loc", ("celoc", "delta8_ep010")),                       # thứ tự cột: closed -> open-source -> finetune, trong nhóm cũ -> mới
-        ("gpt-4.1-mini", ("vlm", "gpt-4.1-mini")), ("GPT-6 Luna", ("vlm", "gpt-6-luna")),
+# Cột đầu luôn là Groundtruth (box GT, không thuộc GRID); CE-Loc cột cuối (người dùng 2026-11-21).
+GRID = [("gpt-4.1-mini", ("vlm", "gpt-4.1-mini")), ("GPT-6 Luna", ("vlm", "gpt-6-luna")),   # closed -> open-source -> finetune
         ("Qwen3-VL-4B", ("vlm", "qwen3-vl-4b")), ("GLM-5.3-Flash", ("vlm", "glm-5.3-flash")),
         ("CSANet", ("run", "zeta2", "ep010")), ("RePlan", ("vlm", "replan-7b-sft/ep003")),
-        ("HiddenObjects", ("run", "zeta3", "ep009"))]
+        ("HiddenObjects", ("run", "zeta3", "ep009")),
+        ("CE-Loc", ("celoc", "delta8_ep010"))]
+GT_TITLE = "Groundtruth"
 
 
 def load_vlm(root, model, dset_dir, name):
@@ -185,8 +187,11 @@ def pick(r, top=5, nms_iou=0.3):
 
 
 def rank_ids(preds, max_obj, top=5):
-    """Ảnh CE-Loc vượt trội: điểm = (TB C-NLL 5 box `pick` của phương pháp khác TỐT NHẤT) / (của CE-Loc), chỉ giữ ảnh CE-Loc còn đủ 5
-    box `selected` (lọc tay) sau `pick`, TB 5 box CE-Loc <= TB C-NLL box GT, n vật <= max_obj. -> [(điểm, image_id)] giảm dần."""
+    """Ảnh CE-Loc vượt trội (người dùng 2026-11-21): xếp theo SỐ baseline CE-Loc thắng (TB C-NLL 5 box `pick` thấp hơn hẳn; baseline
+    không đủ 5 box hợp lệ = thua) giảm dần, cùng số thì theo tỉ lệ (TB của baseline tốt nhất) / (của CE-Loc) giảm dần. Chỉ giữ ảnh CE-Loc
+    còn đủ 5 box `selected` (lọc tay) sau `pick`, TB 5 box CE-Loc <= TB C-NLL box GT, n vật <= max_obj.
+    Mỗi ẢNH GỐC chỉ giữ mục xếp cao nhất (`source_id`; người dùng 2026-11-21).
+    -> [(số thắng, tỉ lệ, image_id)] theo thứ tự trên."""
     def m(r):
         k = pick(r, top)
         return np.mean(np.asarray(r["cnll"], dtype=float)[k]) if len(k) == top else np.inf
@@ -198,17 +203,29 @@ def rank_ids(preds, max_obj, top=5):
         ce = m(r)
         if not np.isfinite(ce) or ce > np.mean(r.get("cnll_gt") or [np.inf]):
             continue
-        others = min(m(v[k]) for name, v in preds.items() if name != "CE-Loc")
-        out.append((others / max(ce, 1e-3), k))
-    return sorted(out, reverse=True)
+        others = [m(v[k]) for name, v in preds.items() if name != "CE-Loc"]
+        out.append((sum(ce < o for o in others), min(others) / max(ce, 1e-3), k))
+    seen, uniq = set(), []
+    for x in sorted(out, key=lambda x: (-x[0], -x[1], x[2])):
+        if source_id(x[2]) not in seen:
+            seen.add(source_id(x[2]))
+            uniq.append(x)
+    return uniq
+
+
+def source_id(image_id):
+    """Ảnh gốc: CE-130 `<ảnh>_b<nhánh>_t<lượt>` -> `<ảnh>`; CoCount `<…>_positive|negative` -> `<…>` (cặp dùng chung một file ảnh)."""
+    if "_b" in image_id and image_id.split("_b")[0].isdigit():
+        return image_id.split("_b")[0]
+    return image_id.rsplit("_", 1)[0] if image_id.endswith(("_positive", "_negative")) else image_id
 
 
 def grid_figure(rows, a, out_path, top=5):
-    """rows = [(dataset, image_id, preds)] — mỗi hàng một ảnh (CE-130, CoCount); cột = GRID; tiêu đề chỉ ở hàng đầu."""
+    """rows = [(dataset, image_id, preds)] — mỗi hàng một ảnh; cột = Groundtruth + GRID; tiêu đề chỉ ở hàng đầu."""
     cw, gap, head, pad = 2.6, 0.06, 0.28, 0.03                 # inch: rộng ô | khe hàng | tiêu đề | khe cột; ô = đúng tỉ lệ ảnh
     scenes = [scene(dataset, image_id, a) for dataset, image_id, _ in rows]
     hs = [cw * sc[1][1] / sc[1][0] for sc in scenes]
-    ncol = len(GRID)
+    ncol = len(GRID) + 1
     W, H = ncol * cw + (ncol - 1) * pad, head + sum(hs) + gap * (len(rows) - 1)
     fig = plt.figure(figsize=(W, H))
     axes, y = np.empty((len(rows), ncol), dtype=object), H - head
@@ -217,9 +234,11 @@ def grid_figure(rows, a, out_path, top=5):
         for ci in range(ncol):
             axes[ri, ci] = fig.add_axes([ci * (cw + pad) / W, y / H, cw / W, h / H])
         y -= gap
-    for ri, ((dataset, image_id, preds), (path, wh, *_)) in enumerate(zip(rows, scenes)):
+    for ri, ((dataset, image_id, preds), (path, wh, _, holes, _)) in enumerate(zip(rows, scenes)):
         img = Image.open(path).convert("RGB")
-        for ci, name in enumerate(g[0] for g in GRID):
+        panel(axes[ri, 0], img, GT_TITLE if ri == 0 else "")
+        draw_boxes(axes[ri, 0], holes, GREEN, 2.0)
+        for ci, name in enumerate((g[0] for g in GRID), 1):
             ax = axes[ri, ci]
             panel(ax, img, name if ri == 0 else "")
             r = preds[name].get(image_id)
@@ -241,7 +260,7 @@ def main(argv=None):
     ap.add_argument("--models", nargs="+", default=None, choices=list(NAMES), help="tối đa 5 model (mặc định: 5 model ZETA5 / 6 đã chạy)")
     ap.add_argument("--n", type=int, default=None, help="chỉ vẽ n ảnh đầu (theo thứ tự trong dump VLM)")
     ap.add_argument("--ids", nargs="*", default=None, help="chỉ vẽ các image_id này")
-    ap.add_argument("--grid", action="store_true", help="hình 2 hàng (CE-130 | CoCount) × GRID (8 cột), 5 box C-NLL thấp nhất")
+    ap.add_argument("--grid", action="store_true", help="hình 1 hàng / ảnh: Groundtruth + GRID (9 cột), 5 box C-NLL thấp nhất")
     ap.add_argument("--rank", type=int, default=None, help="--grid: vẽ N ảnh ứng viên / tập CE-Loc vượt trội (1 hàng / hình)")
     ap.add_argument("--max-obj", type=int, nargs=2, default=[40, 80], help="--rank: số vật tối đa CE-130, CoCount")
     ap.add_argument("--seed", type=int, default=None, help="--grid: seed chọn ảnh ngẫu nhiên (không --ids)")
@@ -252,27 +271,28 @@ def main(argv=None):
     ap.add_argument("--cocount-root", default=os.path.join(ROOT, "data", "cocount"))
     ap.add_argument("--cocount-review", default=os.path.join(ROOT, "data", "cocount_review.jsonl"))
     a = ap.parse_args(argv)
-    if a.grid:                                                   # hàng 1 CE-130, hàng 2 CoCount; ảnh ngẫu nhiên (--seed) nếu không --ids
+    if a.grid:                                                   # mỗi ảnh một hình 1 hàng; ảnh ngẫu nhiên (--seed) nếu không --ids
         if a.rank:                                               # ứng viên: a.rank ảnh / tập CE-Loc vượt trội, mỗi hình 1 hàng
             for dataset in (["ce130", "cocount"] if a.dataset == "all" else [a.dataset]):
                 dset_dir, key = DSET[dataset]
                 preds = load_grid(a, dset_dir, key)
                 ranked = rank_ids(preds, a.max_obj[dataset == "cocount"])
                 print(f"[{dataset}] {len(ranked)} ảnh qua lọc -> vẽ {min(a.rank, len(ranked))}")
-                for i, (sc, image_id) in enumerate(ranked[:a.rank], 1):
+                for i, (win, ratio, image_id) in enumerate(ranked[:a.rank], 1):
+                    print(f"  {i:02d} {image_id}: thắng {win} / {len(GRID) - 1} baseline, tỉ lệ {ratio:.2f}")
                     grid_figure([(dataset, image_id, preds)], a,
-                                os.path.join(OUT, "viz", "method_grid", "candidates", dset_dir, f"{i:02d}_{image_id}.png"))
+                                os.path.join(OUT, "viz", "method_grid", dset_dir, f"{i:02d}_{image_id}.png"))
             return
         import random
-        rng, rows = random.Random(a.seed), []
-        for i, dataset in enumerate(("ce130", "cocount")):
+        rng = random.Random(a.seed)
+        for dataset in (["ce130", "cocount"] if a.dataset == "all" else [a.dataset]):
             dset_dir, key = DSET[dataset]
             preds = load_grid(a, dset_dir, key)
             ids = [k for k in preds["CE-Loc"] if all(k in v for v in preds.values())]
-            rows.append((dataset, a.ids[i] if a.ids else rng.choice(sorted(ids)), preds))
-        out = os.path.join(OUT, "viz", "method_grid", "__".join(r[1] for r in rows) + ".png")
-        grid_figure(rows, a, out)
-        print(out)
+            for image_id in [i for i in a.ids if i in ids] if a.ids else [rng.choice(sorted(ids))]:
+                out = os.path.join(OUT, "viz", "method_grid", f"{image_id}.png")
+                grid_figure([(dataset, image_id, preds)], a, out)
+                print(out)
         return
     for dataset in (["ce130", "cocount"] if a.dataset == "all" else [a.dataset]):
         dset_dir, key = DSET[dataset]
